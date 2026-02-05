@@ -33,7 +33,9 @@ from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.nodes import check_result_node, diagnose_and_retry_node
 from apps.agents.graph.state import AgentState
+from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
+from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.describe_table import create_describe_table_tool
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.sql_tool import create_sql_tool
@@ -247,6 +249,8 @@ def _build_tools(project: "Project", user: "User | None") -> list:
     Always includes:
     - execute_sql: For running queries against the project database
     - save_learning: For persisting discovered corrections
+    - create_artifact: For creating interactive visualizations
+    - update_artifact: For updating existing artifacts
 
     Conditionally includes:
     - describe_table: For large schemas (>15 tables) where full details
@@ -269,6 +273,10 @@ def _build_tools(project: "Project", user: "User | None") -> list:
     # Create a placeholder user if none provided
     learning_tool = create_save_learning_tool(project, user)
     tools.append(learning_tool)
+
+    # Artifact tools (always included)
+    artifact_tools = create_artifact_tools(project, user)
+    tools.extend(artifact_tools)
 
     # Describe table tool (for large schemas)
     dd = project.data_dictionary or {}
@@ -306,6 +314,9 @@ def _build_system_prompt(project: "Project") -> str:
         Complete system prompt string.
     """
     sections = [BASE_SYSTEM_PROMPT]
+
+    # Artifact creation instructions
+    sections.append(ARTIFACT_PROMPT_ADDITION)
 
     # Project-specific system prompt
     if project.system_prompt:

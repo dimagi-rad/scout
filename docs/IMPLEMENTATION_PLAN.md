@@ -206,59 +206,59 @@ Write comprehensive tests FIRST, then implement:
 
 ### 3.1 Chainlit App — `chainlit_app/app.py`
 From base spec Section 7:
-- Basic password auth for development (`@cl.password_auth_callback`)
-- `@cl.on_chat_start`: load user's projects, show project selector via `cl.ChatSettings`
-- `setup_agent()`: build LangGraph agent for selected project, store in session
-- `@cl.on_message`: route to agent, stream response
-- In-memory checkpointer for MVP (MemorySaver)
-- `.chainlit/config.toml` configuration
+- [x] Basic password auth for development (`@cl.password_auth_callback`)
+- [x] `@cl.on_chat_start`: load user's projects, show project selector via `cl.ChatSettings`
+- [x] `setup_agent()`: build LangGraph agent for selected project, store in session
+- [x] `@cl.on_message`: route to agent, stream response
+- [x] In-memory checkpointer for MVP (MemorySaver)
+- [x] `.chainlit/config.toml` configuration
 
 ### 3.2 Artifact Models — `apps/artifacts/`
 From addendum 1 Section A1:
-- `Artifact` — stores code (JSX/HTML/MD/Plotly/SVG), data (JSON), versioning, source queries
-- `ArtifactType` — TextChoices: react, html, markdown, plotly, svg
-- `SharedArtifact` — share links with access levels (public, project, specific users), expiry, view tracking
+- [x] `Artifact` — stores code (JSX/HTML/MD/Plotly/SVG), data (JSON), versioning, source queries
+- [x] `ArtifactType` — TextChoices: react, html, markdown, plotly, svg
+- [x] `SharedArtifact` — share links with access levels (public, project, specific users), expiry, view tracking
 
 ### 3.3 Artifact Sandbox
 From addendum 1 Section A1:
-- `ArtifactSandboxView` — serves the sandbox HTML template
-- Sandbox HTML loads: React 18, Babel standalone, Recharts, Plotly, D3, Lodash, Tailwind CSS (all from CDN)
-- Receives artifact code + data via `postMessage` from parent
-- Transpiles JSX on the fly, renders React component
-- CSP headers: allow CDN scripts, block all network access from artifact code
-- iframe sandbox: `allow-scripts` only (no `allow-same-origin`)
-- `ArtifactDataView` — API to fetch artifact code/data (with access control)
+- [x] `ArtifactSandboxView` — serves the sandbox HTML template
+- [x] Sandbox HTML loads: React 18, Babel standalone, Recharts, Plotly, D3, Lodash, Tailwind CSS (all from CDN)
+- [x] Receives artifact code + data via `postMessage` from parent
+- [x] Transpiles JSX on the fly, renders React component
+- [x] CSP headers: allow CDN scripts, block all network access from artifact code
+- [x] iframe sandbox: `allow-scripts` only (no `allow-same-origin`)
+- [x] `ArtifactDataView` — API to fetch artifact code/data (with access control)
 
 ### 3.4 Artifact Tools — `apps/agents/tools/artifact_tool.py`
 From addendum 1 Section A1:
-- `create_artifact` tool — accepts title, type, code, data, source_queries. Stores in DB, returns render URL.
-- `update_artifact` tool — creates new version of existing artifact, preserves history.
-- These REPLACE the simpler `create_visualization` tool from the base spec.
+- [x] `create_artifact` tool — accepts title, type, code, data, source_queries. Stores in DB, returns render URL.
+- [x] `update_artifact` tool — creates new version of existing artifact, preserves history.
+- [x] These REPLACE the simpler `create_visualization` tool from the base spec.
 
 ### 3.5 Artifact Prompt Addition
 From addendum 1 Section A1 (ARTIFACT_PROMPT_ADDITION):
-- Instructions for when to use each artifact type
-- React component guidelines: available libraries, Tailwind for styling, data prop pattern
-- Example React artifact code
-- Data best practices
+- [x] Instructions for when to use each artifact type
+- [x] React component guidelines: available libraries, Tailwind for styling, data prop pattern
+- [x] Example React artifact code
+- [x] Data best practices
 
 ### 3.6 Artifact Rendering in Chainlit
-- `chainlit_app/artifacts.py` — helpers for rendering artifacts in chat
-- When agent calls `create_artifact`, render an iframe pointing to the sandbox URL
-- Handle `postMessage` for resize, error reporting
-- For markdown artifacts: render inline (no iframe needed)
-- For Plotly: use `cl.Plotly` element as fallback
+- [x] `chainlit_app/artifacts.py` — helpers for rendering artifacts in chat
+- [x] When agent calls `create_artifact`, render an iframe pointing to the sandbox URL
+- [x] Handle `postMessage` for resize, error reporting
+- [x] For markdown artifacts: render inline (no iframe needed)
+- [x] For Plotly: use `cl.Plotly` element as fallback
 
 ### 3.7 Django URL Configuration
-- `/artifacts/<id>/sandbox` → ArtifactSandboxView
-- `/artifacts/<id>/data` → ArtifactDataView
-- `/shared/<token>` → SharedArtifactView
+- [x] `/artifacts/<id>/sandbox` → ArtifactSandboxView
+- [x] `/artifacts/<id>/data` → ArtifactDataView
+- [x] `/shared/<token>` → SharedArtifactView
 
 ### 3.8 Tests
-- Artifact CRUD
-- Sandbox CSP headers
-- Access control (project members only)
-- Artifact versioning
+- [x] Artifact CRUD
+- [x] Sandbox CSP headers
+- [x] Access control (project members only)
+- [x] Artifact versioning
 
 ---
 
