@@ -27,9 +27,6 @@ RUN uv pip install --system -e .
 # Copy project
 COPY . .
 
-# Install Playwright browsers for artifact export
-RUN python -m playwright install --with-deps chromium
-
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
