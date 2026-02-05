@@ -390,37 +390,37 @@ From base spec Section 10:
 **Goal**: Production-ready with documentation, monitoring, and operational guides.
 
 ### 6.1 Streaming Responses
-- Switch from `graph.invoke()` to `graph.astream()` in Chainlit handler
-- Stream tokens to the user as they're generated
-- Show tool call steps in real-time
+- [x] Switch from `graph.invoke()` to `graph.astream()` in Chainlit handler
+- [x] Stream tokens to the user as they're generated
+- [x] Show tool call steps in real-time
 
 ### 6.2 Artifact Export
-- Download artifact as standalone HTML (embed data + libraries)
-- Export as PNG (using playwright headless browser)
-- Export as PDF
+- [x] Download artifact as standalone HTML (embed data + libraries)
+- [x] Export as PNG (using playwright headless browser)
+- [x] Export as PDF
 
 ### 6.3 Rate Limiting
-- Per-user query rate limits
-- Per-project daily query budgets
-- Query cost estimation (optional: estimate before executing large queries)
+- [x] Per-user query rate limits
+- [x] Per-project daily query budgets
+- [ ] Query cost estimation (optional: estimate before executing large queries)
 
 ### 6.4 Conversation Logging
-- Store full conversation history in ConversationLog
-- Include tool calls, SQL executed, artifacts created
-- Queryable audit trail
+- [x] Store full conversation history in ConversationLog
+- [x] Include tool calls, SQL executed, artifacts created
+- [x] Queryable audit trail
 
 ### 6.5 Production Deployment Guide
-- Environment variable reference
-- Nginx/Caddy reverse proxy configuration
-- SSL/TLS setup
-- Backup strategy for platform DB
-- Monitoring and alerting recommendations
+- [ ] Environment variable reference
+- [ ] Nginx/Caddy reverse proxy configuration
+- [ ] SSL/TLS setup
+- [ ] Backup strategy for platform DB
+- [ ] Monitoring and alerting recommendations
 
 ### 6.6 User Documentation
-- Getting started guide for project admins
-- Knowledge authoring guide (how to write good table descriptions, metrics, business rules)
-- Recipe creation guide
-- Eval authoring guide (how to write golden queries)
+- [ ] Getting started guide for project admins
+- [ ] Knowledge authoring guide (how to write good table descriptions, metrics, business rules)
+- [ ] Recipe creation guide
+- [ ] Eval authoring guide (how to write golden queries)
 
 ---
 

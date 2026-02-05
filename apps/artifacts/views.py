@@ -15,6 +15,7 @@ from django.views.decorators.csrf import csrf_exempt
 from apps.projects.models import ProjectMembership
 
 from .models import AccessLevel, Artifact, SharedArtifact
+from .services.export import ArtifactExporter
 
 
 # Content Security Policy for the sandbox iframe
@@ -567,3 +568,69 @@ class SharedArtifactView(View):
             "version": artifact.version,
             "access_level": share.access_level,
         })
+
+
+class ArtifactExportView(View):
+    """
+    Export artifacts to various formats (HTML, PNG, PDF).
+
+    Requires project membership for access.
+    """
+
+    def get(self, request: HttpRequest, artifact_id: str, format: str) -> HttpResponse:
+        """
+        Export artifact to the specified format.
+
+        Args:
+            request: HTTP request
+            artifact_id: UUID of the artifact
+            format: Export format (html, png, pdf)
+
+        Returns:
+            HttpResponse with the exported content
+        """
+        artifact = get_object_or_404(Artifact, pk=artifact_id)
+
+        # Check access via project membership
+        if not request.user.is_authenticated:
+            return JsonResponse(
+                {"error": "Authentication required"},
+                status=401
+            )
+
+        has_access = ProjectMembership.objects.filter(
+            user=request.user,
+            project=artifact.project
+        ).exists()
+
+        if not has_access and not request.user.is_superuser:
+            return JsonResponse(
+                {"error": "Access denied. You are not a member of this project."},
+                status=403
+            )
+
+        # Validate format
+        if format not in ("html", "png", "pdf"):
+            return JsonResponse(
+                {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
+                status=400
+            )
+
+        exporter = ArtifactExporter(artifact)
+        filename = exporter.get_download_filename(format)
+
+        if format == "html":
+            content = exporter.export_html()
+            response = HttpResponse(content, content_type="text/html")
+            response["Content-Disposition"] = f'attachment; filename="{filename}"'
+            return response
+
+        # PNG and PDF require async - return error for now
+        # In production, this would use async views or background tasks
+        if format in ("png", "pdf"):
+            return JsonResponse(
+                {"error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."},
+                status=501
+            )
+
+        return JsonResponse({"error": "Export failed"}, status=500)

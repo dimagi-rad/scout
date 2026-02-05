@@ -6,7 +6,7 @@ Included at /api/artifacts/ in the main URL configuration.
 from django.urls import path
 
 from .api.views import CreateShareView, ListSharesView, RevokeShareView
-from .views import ArtifactDataView, ArtifactSandboxView, SharedArtifactView
+from .views import ArtifactDataView, ArtifactExportView, ArtifactSandboxView, SharedArtifactView
 
 app_name = "artifacts"
 
@@ -53,5 +53,12 @@ urlpatterns = [
         "<uuid:artifact_id>/shares/<str:share_token>/",
         RevokeShareView.as_view(),
         name="revoke_share",
+    ),
+    # Export artifact to HTML, PNG, or PDF
+    # GET /api/artifacts/<uuid>/export/<format>/
+    path(
+        "<uuid:artifact_id>/export/<str:format>/",
+        ArtifactExportView.as_view(),
+        name="export",
     ),
 ]
