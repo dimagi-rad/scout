@@ -54,7 +54,7 @@ async def password_auth_callback(username: str, password: str) -> cl.User | None
 
     if dev_username and dev_password:
         if username == dev_username and password == dev_password:
-            # Try to find or create the dev user
+            # Try to find the dev user
             try:
                 user = User.objects.get(email=dev_username)
             except User.DoesNotExist:
@@ -62,6 +62,11 @@ async def password_auth_callback(username: str, password: str) -> cl.User | None
                     "Dev user %s not found in database. Create the user first.",
                     dev_username,
                 )
+                return None
+
+            # Check is_active to prevent disabled users from logging in
+            if not user.is_active:
+                logger.warning("Dev user %s is inactive, denying access", dev_username)
                 return None
 
             logger.info("Dev user authenticated: %s", username)
@@ -172,29 +177,32 @@ async def oauth_callback(
             return None
 
         # Extract name fields (different providers use different field names)
+        # Parse name safely to avoid IndexError on empty strings
+        name_parts = raw_user_data.get("name", "").split() if raw_user_data.get("name") else []
         first_name = (
             raw_user_data.get("given_name")
             or raw_user_data.get("first_name")
-            or raw_user_data.get("name", "").split()[0] if raw_user_data.get("name") else ""
+            or (name_parts[0] if name_parts else "")
         )
         last_name = (
             raw_user_data.get("family_name")
             or raw_user_data.get("last_name")
-            or " ".join(raw_user_data.get("name", "").split()[1:]) if raw_user_data.get("name") else ""
+            or (" ".join(name_parts[1:]) if len(name_parts) > 1 else "")
         )
 
-        # Check if a user with this email already exists
-        try:
-            user = User.objects.get(email=email)
-            logger.info("Found existing user with email %s, linking social account", email)
-        except User.DoesNotExist:
-            # Create new user
-            user = User.objects.create(
-                email=email,
-                first_name=first_name,
-                last_name=last_name,
-            )
+        # Use get_or_create to prevent race conditions when two OAuth logins
+        # happen simultaneously for the same user
+        user, created = User.objects.get_or_create(
+            email=email,
+            defaults={
+                "first_name": first_name,
+                "last_name": last_name,
+            }
+        )
+        if created:
             logger.info("Created new user from OAuth: %s", email)
+        else:
+            logger.info("Found existing user with email %s, linking social account", email)
 
         # Create the SocialAccount link
         SocialAccount.objects.create(
@@ -230,6 +238,12 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
     that handles authentication (e.g., oauth2-proxy, Authelia, nginx with
     auth_request). The proxy passes user identity in headers.
 
+    SECURITY WARNING: Header-based authentication is only secure when:
+    1. The application is ONLY accessible through a trusted reverse proxy
+    2. The proxy strips any incoming auth headers from untrusted clients
+    3. Direct access to the application is blocked at the network level
+    Without these safeguards, attackers can forge headers and impersonate users.
+
     Common header patterns:
     - oauth2-proxy: X-Forwarded-Email, X-Forwarded-Preferred-Username
     - Authelia: Remote-Email, Remote-Name, Remote-User
@@ -239,6 +253,7 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
     - AUTH_USER_ID_HEADER: Header containing user's UUID (default: X-Auth-User-Id)
     - AUTH_USER_EMAIL_HEADER: Header containing user's email (default: X-Forwarded-Email)
     - AUTH_USER_NAME_HEADER: Header containing user's name (default: X-Forwarded-Preferred-Username)
+    - AUTH_HEADER_ENABLED: Must be set to "true" to enable header auth (default: disabled)
 
     Args:
         headers: HTTP headers from the request.
@@ -247,6 +262,11 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
         A Chainlit User object if valid headers are present, None otherwise.
     """
     from apps.users.models import User
+
+    # SECURITY: Require explicit opt-in for header auth
+    if os.environ.get("AUTH_HEADER_ENABLED", "false").lower() != "true":
+        logger.debug("Header auth is disabled (set AUTH_HEADER_ENABLED=true to enable)")
+        return None
 
     # Header names (configurable via environment)
     user_id_header = os.environ.get("AUTH_USER_ID_HEADER", "X-Auth-User-Id")
@@ -287,20 +307,26 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
         if user_id:
             user = User.objects.get(pk=user_id)
         else:
-            try:
-                user = User.objects.get(email=user_email)
-            except User.DoesNotExist:
-                # Auto-provision user from headers if allowed
-                auto_provision = os.environ.get("AUTH_HEADER_AUTO_PROVISION", "false").lower() == "true"
-                if auto_provision:
-                    user = User.objects.create(
-                        email=user_email,
-                        first_name=user_name.split()[0] if user_name else "",
-                        last_name=" ".join(user_name.split()[1:]) if user_name else "",
-                    )
+            # Auto-provision user from headers if allowed
+            auto_provision = os.environ.get("AUTH_HEADER_AUTO_PROVISION", "false").lower() == "true"
+            if auto_provision:
+                # Parse name safely to avoid IndexError on empty strings
+                name_parts = user_name.split() if user_name else []
+                first_name = name_parts[0] if name_parts else ""
+                last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+
+                # Use get_or_create to handle race conditions
+                user, created = User.objects.get_or_create(
+                    email=user_email,
+                    defaults={
+                        "first_name": first_name,
+                        "last_name": last_name,
+                    }
+                )
+                if created:
                     logger.info("Auto-provisioned user from header auth: %s", user_email)
-                else:
-                    raise
+            else:
+                user = User.objects.get(email=user_email)
 
         if not user.is_active:
             logger.warning("Header auth: inactive user %s", user.email)

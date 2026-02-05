@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from django.db import transaction
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -417,30 +418,31 @@ class RecipeRunner:
             len(steps),
         )
 
-        for step in steps:
-            step_result = self._execute_step(step, graph, config)
+        with transaction.atomic():
+            for step in steps:
+                step_result = self._execute_step(step, graph, config)
 
-            # Add result to the run
-            self._run.step_results.append(step_result)
-            self._run.save(update_fields=["step_results"])
+                # Add result to the run
+                self._run.step_results.append(step_result)
+                self._run.save(update_fields=["step_results"])
 
-            if not step_result["success"]:
-                all_successful = False
-                logger.error(
-                    "Recipe %s failed at step %d: %s",
-                    self.recipe.name,
+                if not step_result["success"]:
+                    all_successful = False
+                    logger.error(
+                        "Recipe %s failed at step %d: %s",
+                        self.recipe.name,
+                        step.order,
+                        step_result.get("error", "Unknown error"),
+                    )
+                    # Stop execution on failure
+                    break
+
+                logger.info(
+                    "Completed step %d/%d for recipe %s",
                     step.order,
-                    step_result.get("error", "Unknown error"),
+                    len(steps),
+                    self.recipe.name,
                 )
-                # Stop execution on failure
-                break
-
-            logger.info(
-                "Completed step %d/%d for recipe %s",
-                step.order,
-                len(steps),
-                self.recipe.name,
-            )
 
         # Update final status
         self._run.status = (

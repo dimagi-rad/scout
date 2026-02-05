@@ -1,6 +1,10 @@
 """
 Django production settings for Scout data agent platform.
 """
+import environ
+
+env = environ.Env()
+
 from .base import *  # noqa: F401, F403
 
 DEBUG = False

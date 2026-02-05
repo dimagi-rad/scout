@@ -13,6 +13,7 @@ Provides semantic knowledge beyond the auto-generated data dictionary:
 import uuid
 
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
 
@@ -257,6 +258,7 @@ class AgentLearning(models.Model):
     # Confidence and lifecycle
     confidence_score = models.FloatField(
         default=0.5,
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
         help_text="0-1 score. Increases when the learning is confirmed useful, decreases if contradicted.",
     )
     times_applied = models.IntegerField(

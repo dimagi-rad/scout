@@ -38,6 +38,7 @@ from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.describe_table import create_describe_table_tool
 from apps.agents.tools.learning_tool import create_save_learning_tool
+from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.agents.tools.sql_tool import create_sql_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.projects.services.data_dictionary import DataDictionaryGenerator
@@ -277,6 +278,10 @@ def _build_tools(project: "Project", user: "User | None") -> list:
     # Artifact tools (always included)
     artifact_tools = create_artifact_tools(project, user)
     tools.extend(artifact_tools)
+
+    # Recipe tool (always included)
+    recipe_tool = create_recipe_tool(project, user)
+    tools.append(recipe_tool)
 
     # Describe table tool (for large schemas)
     dd = project.data_dictionary or {}

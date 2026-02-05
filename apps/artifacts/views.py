@@ -502,17 +502,19 @@ class ArtifactDataView(View):
         }
 
 
-@method_decorator(csrf_exempt, name="dispatch")
 class SharedArtifactView(View):
     """
     Public view for accessing shared artifacts via token.
 
     Checks access level, expiration, and allowed users before
-    returning artifact data. Increments view count on access.
+    returning artifact data.
+
+    Note: View count is incremented via POST to avoid state changes on GET
+    requests and to properly support CSRF protection.
     """
 
     def get(self, request: HttpRequest, share_token: str) -> JsonResponse:
-        """Fetch shared artifact data."""
+        """Fetch shared artifact data (read-only, no state changes)."""
         share = get_object_or_404(
             SharedArtifact.objects.select_related("artifact", "artifact__project"),
             share_token=share_token
@@ -554,10 +556,7 @@ class SharedArtifactView(View):
                     status=403
                 )
 
-        # Record the view
-        share.increment_view_count()
-
-        # Return artifact data
+        # Return artifact data (no state changes on GET)
         artifact = share.artifact
         return JsonResponse({
             "id": str(artifact.id),
@@ -567,6 +566,60 @@ class SharedArtifactView(View):
             "data": artifact.data,
             "version": artifact.version,
             "access_level": share.access_level,
+            "view_count": share.view_count,
+        })
+
+    def post(self, request: HttpRequest, share_token: str) -> JsonResponse:
+        """
+        Record a view of the shared artifact.
+
+        This endpoint should be called by the client after successfully
+        loading and displaying the artifact to the user.
+        """
+        share = get_object_or_404(
+            SharedArtifact.objects.select_related("artifact", "artifact__project"),
+            share_token=share_token
+        )
+
+        # Check if share is expired
+        if share.is_expired:
+            return JsonResponse(
+                {"error": "This share link has expired."},
+                status=403
+            )
+
+        # Check access based on access level (same checks as GET)
+        if share.access_level == AccessLevel.PUBLIC:
+            pass
+        elif share.access_level == AccessLevel.PROJECT:
+            if not request.user.is_authenticated:
+                return JsonResponse(
+                    {"error": "Authentication required."},
+                    status=401
+                )
+            if not share.artifact.project.memberships.filter(user=request.user).exists():
+                return JsonResponse(
+                    {"error": "You must be a project member."},
+                    status=403
+                )
+        elif share.access_level == AccessLevel.SPECIFIC:
+            if not request.user.is_authenticated:
+                return JsonResponse(
+                    {"error": "Authentication required."},
+                    status=401
+                )
+            if not share.allowed_users.filter(pk=request.user.pk).exists():
+                return JsonResponse(
+                    {"error": "You do not have permission."},
+                    status=403
+                )
+
+        # Record the view
+        share.increment_view_count()
+
+        return JsonResponse({
+            "status": "ok",
+            "view_count": share.view_count,
         })
 
 

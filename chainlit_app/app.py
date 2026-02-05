@@ -215,6 +215,9 @@ async def setup_project(project_id: str) -> bool:
             content="You don't have access to this project.",
             author="system",
         ).send()
+        # Clear stale session state on failure
+        cl.user_session.set("current_project", None)
+        cl.user_session.set("agent", None)
         return False
 
     try:
@@ -225,6 +228,9 @@ async def setup_project(project_id: str) -> bool:
             content="Project not found. It may have been deleted.",
             author="system",
         ).send()
+        # Clear stale session state on failure
+        cl.user_session.set("current_project", None)
+        cl.user_session.set("agent", None)
         return False
 
     # Get Django user for the agent
@@ -252,6 +258,9 @@ async def setup_project(project_id: str) -> bool:
             content="Failed to initialize the agent. Please try again or contact support.",
             author="system",
         ).send()
+        # Clear stale session state on failure
+        cl.user_session.set("current_project", None)
+        cl.user_session.set("agent", None)
         return False
 
     # Store project info and agent in session
@@ -271,17 +280,37 @@ async def setup_project(project_id: str) -> bool:
     return True
 
 
+# Maximum allowed message length (10000 characters)
+MAX_MESSAGE_LENGTH = 10000
+
+
 @cl.on_message
 async def on_message(message: cl.Message) -> None:
     """
     Handle incoming user messages.
 
     This handler:
-    1. Validates the session has an active agent
-    2. Invokes the LangGraph agent with the user's message
-    3. Streams the response back to the user
-    4. Handles tool calls and artifact rendering
+    1. Validates the message content
+    2. Validates the session has an active agent
+    3. Invokes the LangGraph agent with the user's message
+    4. Streams the response back to the user
+    5. Handles tool calls and artifact rendering
     """
+    # Validate message content
+    if not message.content or not message.content.strip():
+        await cl.Message(
+            content="Please enter a message to continue.",
+            author="system",
+        ).send()
+        return
+
+    if len(message.content) > MAX_MESSAGE_LENGTH:
+        await cl.Message(
+            content=f"Message too long. Please limit your message to {MAX_MESSAGE_LENGTH} characters.",
+            author="system",
+        ).send()
+        return
+
     agent = cl.user_session.get("agent")
     if not agent:
         await cl.Message(
@@ -411,10 +440,25 @@ async def process_tool_output(tool_output: Any, response_message: cl.Message) ->
 
 
 def _is_artifact_result(content: str) -> bool:
-    """Check if the content appears to be an artifact creation result."""
+    """
+    Check if the content appears to be an artifact creation result.
+
+    Requires both a UUID pattern AND an artifact-related keyword to avoid
+    false positives from content that happens to mention artifact-related terms.
+    """
+    import re
+
     if not content:
         return False
 
+    # Check for UUID pattern (required)
+    uuid_pattern = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    has_uuid = bool(re.search(uuid_pattern, content, re.IGNORECASE))
+
+    if not has_uuid:
+        return False
+
+    # Also require an artifact-related keyword
     artifact_indicators = [
         "artifact_id",
         "artifact created",
@@ -440,16 +484,29 @@ def _extract_artifact_from_result(content: str) -> dict | None:
             if json_match:
                 data = json.loads(json_match.group())
                 if "artifact_id" in data:
+                    logger.debug("Extracted artifact from JSON: %s", data.get("artifact_id"))
                     return data
-    except (json.JSONDecodeError, AttributeError):
-        pass
+                else:
+                    logger.debug(
+                        "JSON found but no artifact_id key. Keys: %s",
+                        list(data.keys()) if isinstance(data, dict) else "not a dict",
+                    )
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.debug("JSON parsing failed during artifact extraction: %s", e)
 
     # Try regex for UUID
     uuid_pattern = r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
     match = re.search(uuid_pattern, content, re.IGNORECASE)
     if match:
-        return {"artifact_id": match.group(1)}
+        artifact_id = match.group(1)
+        logger.debug("Extracted artifact_id via UUID regex: %s", artifact_id)
+        return {"artifact_id": artifact_id}
 
+    logger.debug(
+        "Failed to extract artifact from content (length=%d): %s",
+        len(content),
+        content[:200] if len(content) > 200 else content,
+    )
     return None
 
 

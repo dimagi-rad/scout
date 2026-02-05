@@ -21,11 +21,14 @@ WORKDIR /app
 # Copy dependency files
 COPY pyproject.toml .
 
-# Install dependencies
-RUN uv pip install --system -e ".[dev]"
+# Install dependencies (production only, no dev dependencies)
+RUN uv pip install --system -e .
 
 # Copy project
 COPY . .
+
+# Install Playwright browsers for artifact export
+RUN python -m playwright install --with-deps chromium
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

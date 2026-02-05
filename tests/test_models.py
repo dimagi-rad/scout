@@ -3,6 +3,7 @@ Tests for core models.
 """
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
 from apps.projects.models import (
     ConversationLog,
@@ -100,6 +101,21 @@ class TestProjectModel:
         assert project._db_user != b"secretuser"
         assert project._db_password != b"secretpass123!"
 
+        # Verify Fernet encryption format (base64-encoded, starts with 'gAAAAA')
+        # Fernet tokens are base64-encoded and start with version byte 0x80 which encodes as 'gA'
+        raw_user = project._db_user
+        raw_password = project._db_password
+        if isinstance(raw_user, bytes):
+            raw_user_str = raw_user.decode("utf-8") if raw_user else ""
+        else:
+            raw_user_str = str(raw_user) if raw_user else ""
+        if isinstance(raw_password, bytes):
+            raw_password_str = raw_password.decode("utf-8") if raw_password else ""
+        else:
+            raw_password_str = str(raw_password) if raw_password else ""
+        assert raw_user_str.startswith("gAAAAA"), f"Expected Fernet format, got: {raw_user_str[:20]}"
+        assert raw_password_str.startswith("gAAAAA"), f"Expected Fernet format, got: {raw_password_str[:20]}"
+
     def test_get_connection_params(self, db, user):
         """Test get_connection_params returns correct dict."""
         project = Project.objects.create(
@@ -167,7 +183,7 @@ class TestProjectMembership:
 
         ProjectMembership.objects.create(user=user, project=project)
 
-        with pytest.raises(Exception):  # IntegrityError
+        with pytest.raises(IntegrityError):
             ProjectMembership.objects.create(user=user, project=project)
 
 

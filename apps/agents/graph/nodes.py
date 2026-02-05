@@ -17,7 +17,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 if TYPE_CHECKING:
     from apps.agents.graph.state import AgentState
@@ -35,6 +35,39 @@ ERROR_INDICATORS = frozenset({
     "timeout",
     "cancelled",
 })
+
+
+def reset_retry_on_new_message(state: AgentState) -> dict[str, Any]:
+    """
+    Reset retry count and correction context when a new user message arrives.
+
+    This node should be called at the entry point to check if the latest message
+    is a new HumanMessage (not a correction/retry). If so, it resets the retry
+    state to allow fresh correction attempts for new queries.
+
+    Args:
+        state: The current agent state containing messages and context.
+
+    Returns:
+        Updated state dict with reset `retry_count` and `correction_context`
+        if a new user message is detected, otherwise empty dict.
+    """
+    messages = state.get("messages", [])
+
+    if not messages:
+        return {}
+
+    # Check if the last message is a HumanMessage (new user input)
+    last_message = messages[-1]
+    if isinstance(last_message, HumanMessage):
+        # Reset retry state for new user messages
+        logger.debug("New user message detected, resetting retry count")
+        return {
+            "retry_count": 0,
+            "correction_context": {},
+        }
+
+    return {}
 
 
 def check_result_node(state: AgentState) -> dict[str, Any]:
@@ -65,14 +98,14 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
     messages = state.get("messages", [])
 
     if not messages:
-        return {"needs_correction": False, "correction_context": {}}
+        return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
 
     # Look at the most recent messages to find tool results
     last_message = messages[-1]
 
     # If the last message is not a ToolMessage, nothing to check
     if not isinstance(last_message, ToolMessage):
-        return {"needs_correction": False, "correction_context": {}}
+        return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
 
     # Parse the tool result content
     content = last_message.content
@@ -90,9 +123,11 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
                         "error_type": "execution",
                         "error_message": content,
                         "tool_name": last_message.name or "unknown",
+                        "failed_sql": "",
+                        "tables_accessed": [],
                     },
                 }
-            return {"needs_correction": False, "correction_context": {}}
+            return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
 
         # Check for explicit error field in the result
         if isinstance(result, dict) and result.get("error"):
@@ -129,7 +164,7 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
             }
 
     # No errors detected
-    return {"needs_correction": False, "correction_context": {}}
+    return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
 
 
 def diagnose_and_retry_node(state: AgentState) -> dict[str, Any]:
@@ -417,4 +452,5 @@ def _contains_error_indicators(text: str) -> bool:
 __all__ = [
     "check_result_node",
     "diagnose_and_retry_node",
+    "reset_retry_on_new_message",
 ]

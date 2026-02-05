@@ -129,14 +129,18 @@ async def get_postgres_checkpointer() -> AsyncGenerator["BaseCheckpointSaver", N
 
     except ImportError as e:
         logger.warning(
-            "langgraph-checkpoint-postgres not available, falling back to MemorySaver: %s",
+            "langgraph-checkpoint-postgres not available, falling back to MemorySaver. "
+            "Conversations will NOT be persisted across sessions. "
+            "Install langgraph-checkpoint-postgres for persistent storage. Error: %s",
             e,
         )
         yield MemorySaver()
 
     except Exception as e:
         logger.warning(
-            "Failed to connect to PostgreSQL for checkpointing, falling back to MemorySaver: %s",
+            "Failed to connect to PostgreSQL for checkpointing, falling back to MemorySaver. "
+            "Conversations will NOT be persisted across sessions. "
+            "Check your database configuration. Error: %s",
             e,
         )
         yield MemorySaver()

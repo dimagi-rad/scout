@@ -48,7 +48,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - MAX_CONNECTIONS_PER_PROJECT=5
     volumes:
-      - .:/app
+      - ./apps:/app/apps
+      - ./config:/app/config
+      - ./chainlit_app:/app/chainlit_app
       - static_files:/app/staticfiles
     ports:
       - "8000:8000"
@@ -79,7 +81,9 @@ services:
       - USE_POSTGRES_CHECKPOINTER=true
       - REDIS_URL=redis://redis:6379/0
     volumes:
-      - .:/app
+      - ./apps:/app/apps
+      - ./config:/app/config
+      - ./chainlit_app:/app/chainlit_app
     ports:
       - "8501:8501"
     depends_on:

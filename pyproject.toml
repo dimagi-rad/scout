@@ -38,6 +38,9 @@ dependencies = [
 
     # Utilities
     "python-dotenv>=1.0",
+
+    # Production server
+    "gunicorn>=21.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +48,7 @@ dev = [
     "pytest>=8.0",
     "pytest-django>=4.8",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
     "factory-boy>=3.3",
     "ruff>=0.5",
 ]

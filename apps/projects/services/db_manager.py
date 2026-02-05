@@ -143,14 +143,10 @@ class ConnectionPoolManager:
         """
         pool_key = self._get_pool_key(project)
 
-        # Fast path: pool already exists
-        if pool_key in self._pools:
-            return self._pools[pool_key]
-
-        # Slow path: create pool with lock
+        # Always acquire lock first to prevent race conditions
         lock = self._ensure_lock(pool_key)
         with lock:
-            # Double-check after acquiring lock (another thread may have created it)
+            # Check if pool exists after acquiring lock
             if pool_key in self._pools:
                 return self._pools[pool_key]
 

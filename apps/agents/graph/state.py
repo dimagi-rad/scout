@@ -13,9 +13,69 @@ The state is designed to be:
 
 from typing import Annotated
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
+
+
+# Default maximum number of messages to keep in conversation history
+DEFAULT_MAX_MESSAGES = 20
+
+
+def prune_messages(
+    messages: list[BaseMessage],
+    max_messages: int = DEFAULT_MAX_MESSAGES,
+) -> list[BaseMessage]:
+    """
+    Prune old messages when the conversation gets too long.
+
+    This function implements a message pruning strategy that:
+    1. Always preserves system messages at the start
+    2. Keeps the most recent N messages (default 20)
+    3. Ensures we don't break tool call/response pairs
+
+    Args:
+        messages: The full list of conversation messages.
+        max_messages: Maximum number of messages to keep (excluding system messages).
+            Default is 20 messages.
+
+    Returns:
+        A pruned list of messages that fits within the limit while
+        preserving conversation coherence.
+
+    Example:
+        >>> messages = [SystemMessage(...), HumanMessage(...), AIMessage(...), ...]
+        >>> pruned = prune_messages(messages, max_messages=10)
+        >>> len(pruned) <= 11  # 1 system + 10 messages max
+        True
+    """
+    if len(messages) <= max_messages:
+        return messages
+
+    # Separate system messages from conversation messages
+    system_messages: list[BaseMessage] = []
+    conversation_messages: list[BaseMessage] = []
+
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            system_messages.append(msg)
+        else:
+            conversation_messages.append(msg)
+
+    # If conversation is within limits, return as-is
+    if len(conversation_messages) <= max_messages:
+        return system_messages + conversation_messages
+
+    # Keep only the most recent messages
+    pruned_conversation = conversation_messages[-max_messages:]
+
+    # Ensure we don't start with a ToolMessage (orphaned from its AIMessage)
+    # ToolMessages should always follow an AIMessage with tool_calls
+    while pruned_conversation and hasattr(pruned_conversation[0], "tool_call_id"):
+        # This is a ToolMessage - remove it as its parent AIMessage was pruned
+        pruned_conversation = pruned_conversation[1:]
+
+    return system_messages + pruned_conversation
 
 
 class AgentState(TypedDict):

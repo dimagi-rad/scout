@@ -40,6 +40,16 @@ class TestSQLInjectionPrevention:
         # If we get here without exception, the query is valid
         assert result is not None
 
+        # Verify the validated query only contains SELECT statements
+        # by checking it's not a data manipulation statement
+        result_sql = result.sql(dialect="postgres").upper()
+        assert "INSERT" not in result_sql
+        assert "UPDATE" not in result_sql
+        assert "DELETE" not in result_sql
+        assert "DROP" not in result_sql
+        # Verify UNION is preserved (legitimate use case)
+        assert "UNION" in result_sql
+
     def test_reject_stacked_queries(self):
         """Test rejection of stacked queries (multiple statements)."""
         validator = SQLValidator(schema="public")

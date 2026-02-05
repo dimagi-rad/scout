@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import psycopg2
+from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 
 if TYPE_CHECKING:
@@ -194,15 +195,19 @@ class DataDictionaryGenerator:
 
         try:
             with conn.cursor() as cur:
-                # Use quote_ident for safety
-                cur.execute(
-                    f"""
-                    SELECT DISTINCT {column_name}::text
-                    FROM {self.schema}.{table_name}
-                    WHERE {column_name} IS NOT NULL
-                    LIMIT {limit}
-                    """
+                # Use psycopg2.sql.Identifier for safe identifier quoting
+                query = sql.SQL("""
+                    SELECT DISTINCT {}::text
+                    FROM {}.{}
+                    WHERE {} IS NOT NULL
+                    LIMIT %s
+                """).format(
+                    sql.Identifier(column_name),
+                    sql.Identifier(self.schema),
+                    sql.Identifier(table_name),
+                    sql.Identifier(column_name),
                 )
+                cur.execute(query, (limit,))
                 return [row[0] for row in cur.fetchall()]
         except Exception:
             return None

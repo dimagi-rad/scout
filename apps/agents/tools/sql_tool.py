@@ -348,6 +348,8 @@ class SQLValidator:
 
         If no LIMIT exists, adds one with max_limit.
         If a LIMIT exists but exceeds max_limit, caps it at max_limit.
+        If a LIMIT exists but cannot be parsed as a literal (e.g., subquery or expression),
+        it is replaced with max_limit to prevent unlimited queries.
 
         Args:
             statement: The parsed SQL expression
@@ -362,7 +364,14 @@ class SQLValidator:
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
-                if limit_value is not None and limit_value > self.max_limit:
+                if limit_value is None:
+                    # Non-literal LIMIT (e.g., subquery, expression) - force cap
+                    logger.warning(
+                        "Non-literal LIMIT expression detected, forcing cap to %d",
+                        self.max_limit,
+                    )
+                    statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
+                elif limit_value > self.max_limit:
                     statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
             else:
                 statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
@@ -373,7 +382,14 @@ class SQLValidator:
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
-                if limit_value is not None and limit_value > self.max_limit:
+                if limit_value is None:
+                    # Non-literal LIMIT (e.g., subquery, expression) - force cap
+                    logger.warning(
+                        "Non-literal LIMIT expression detected, forcing cap to %d",
+                        self.max_limit,
+                    )
+                    statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
+                elif limit_value > self.max_limit:
                     statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
             else:
                 statement = statement.limit(self.max_limit)
