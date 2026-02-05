@@ -5,6 +5,7 @@ Included at /api/artifacts/ in the main URL configuration.
 """
 from django.urls import path
 
+from .api.views import CreateShareView, ListSharesView, RevokeShareView
 from .views import ArtifactDataView, ArtifactSandboxView, SharedArtifactView
 
 app_name = "artifacts"
@@ -30,5 +31,27 @@ urlpatterns = [
         "shared/<str:share_token>/",
         SharedArtifactView.as_view(),
         name="shared",
+    ),
+    # Share link management API
+    # Create a new share link for an artifact
+    # POST /api/artifacts/<uuid>/share/
+    path(
+        "<uuid:artifact_id>/share/",
+        CreateShareView.as_view(),
+        name="create_share",
+    ),
+    # List all share links for an artifact
+    # GET /api/artifacts/<uuid>/shares/
+    path(
+        "<uuid:artifact_id>/shares/",
+        ListSharesView.as_view(),
+        name="list_shares",
+    ),
+    # Revoke (delete) a share link
+    # DELETE /api/artifacts/<uuid>/shares/<token>/
+    path(
+        "<uuid:artifact_id>/shares/<str:share_token>/",
+        RevokeShareView.as_view(),
+        name="revoke_share",
     ),
 ]

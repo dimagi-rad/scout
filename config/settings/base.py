@@ -48,6 +48,8 @@ INSTALLED_APPS = [
     "allauth.socialaccount",
     "allauth.socialaccount.providers.google",
     "allauth.socialaccount.providers.github",
+    # Custom OAuth providers (example implementation)
+    "apps.users.providers.commcare",
     # Local apps
     "apps.users",
     "apps.projects",
@@ -153,15 +155,40 @@ AUTHENTICATION_BACKENDS = [
 
 
 # django-allauth settings
+# Required for django.contrib.sites
 SITE_ID = 1
+
+# Account settings - use email as primary identifier
+# django-allauth 65+ uses new syntax for these settings
 ACCOUNT_LOGIN_METHODS = {"email"}
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
+# Keep these for compatibility with older allauth versions and documentation
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
+
+# Social account settings
+# Auto-create Django user on first OAuth login
 SOCIALACCOUNT_AUTO_SIGNUP = True
+# Auto-connect social account to existing user with matching email
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+# Allow OAuth users to skip email verification since provider already verified
+SOCIALACCOUNT_EMAIL_VERIFICATION = "none"
+
+# Redirect URLs after login/logout
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/"
+
+# Provider-specific settings (credentials stored in DB via Django admin SocialApp model)
+# Configure client IDs and secrets via Django admin at /admin/socialaccount/socialapp/
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "SCOPE": ["profile", "email"],
+        "AUTH_PARAMS": {"access_type": "online"},
+    },
+    "github": {
+        "SCOPE": ["user:email"],
+    },
+}
 
 
 # Django REST Framework settings

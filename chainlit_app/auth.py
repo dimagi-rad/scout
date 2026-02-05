@@ -1,10 +1,16 @@
 """
-Authentication helpers for the Scout Chainlit application.
+Authentication bridge between Chainlit and Django allauth.
 
-Provides authentication callbacks for different deployment scenarios:
-- password_auth_callback: Simple username/password for development
-- oauth_callback: OAuth integration via Django allauth for production
-- header_auth_callback: Trusted header auth for reverse proxy setups
+This module provides authentication callbacks for the Chainlit UI that
+integrate with Django's auth system and django-allauth for OAuth providers.
+
+Supports three authentication modes:
+1. Password auth - Simple username/password for development
+2. OAuth callback - Integration with django-allauth social accounts (Google, GitHub, etc.)
+3. Header auth - For reverse proxy setups (oauth2-proxy, Authelia, etc.)
+
+The callbacks are decorated with Chainlit's auth decorators and automatically
+register with the Chainlit app when this module is imported.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import os
 from typing import TYPE_CHECKING
 
 import chainlit as cl
+from django.conf import settings as django_settings
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -21,6 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@cl.password_auth_callback
 async def password_auth_callback(username: str, password: str) -> cl.User | None:
     """
     Authenticate users with username/password for development.
@@ -88,6 +96,7 @@ async def password_auth_callback(username: str, password: str) -> cl.User | None
     )
 
 
+@cl.oauth_callback
 async def oauth_callback(
     provider_id: str,
     token: str,
@@ -99,6 +108,8 @@ async def oauth_callback(
 
     This callback is invoked after successful OAuth flow. It looks up the
     Django user associated with the OAuth account via allauth's SocialAccount.
+    If SOCIALACCOUNT_AUTO_SIGNUP is enabled and no existing user is found,
+    a new user will be auto-created.
 
     Args:
         provider_id: OAuth provider identifier (e.g., "google", "github").
@@ -107,13 +118,14 @@ async def oauth_callback(
         default_user: Default Chainlit user constructed from OAuth data.
 
     Returns:
-        A Chainlit User object linked to the Django user, or None if not found.
+        A Chainlit User object linked to the Django user, or None if not found
+        and auto-signup is disabled.
     """
     from allauth.socialaccount.models import SocialAccount
 
     from apps.users.models import User
 
-    # Extract the provider's user ID
+    # Extract the provider's user ID (different providers use different keys)
     provider_user_id = raw_user_data.get("id") or raw_user_data.get("sub")
 
     if not provider_user_id:
@@ -145,27 +157,88 @@ async def oauth_callback(
             provider_id,
             provider_user_id,
         )
-        # In production, you might want to auto-create users here
-        # For now, require pre-existing accounts
-        return None
+
+        # Check if auto-signup is enabled
+        auto_signup = getattr(django_settings, "SOCIALACCOUNT_AUTO_SIGNUP", False)
+
+        if not auto_signup:
+            logger.info("Auto-signup disabled, OAuth login rejected")
+            return None
+
+        # Auto-create user from OAuth data
+        email = raw_user_data.get("email")
+        if not email:
+            logger.error("Cannot auto-create user: no email in OAuth data")
+            return None
+
+        # Extract name fields (different providers use different field names)
+        first_name = (
+            raw_user_data.get("given_name")
+            or raw_user_data.get("first_name")
+            or raw_user_data.get("name", "").split()[0] if raw_user_data.get("name") else ""
+        )
+        last_name = (
+            raw_user_data.get("family_name")
+            or raw_user_data.get("last_name")
+            or " ".join(raw_user_data.get("name", "").split()[1:]) if raw_user_data.get("name") else ""
+        )
+
+        # Check if a user with this email already exists
+        try:
+            user = User.objects.get(email=email)
+            logger.info("Found existing user with email %s, linking social account", email)
+        except User.DoesNotExist:
+            # Create new user
+            user = User.objects.create(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+            )
+            logger.info("Created new user from OAuth: %s", email)
+
+        # Create the SocialAccount link
+        SocialAccount.objects.create(
+            user=user,
+            provider=provider_id,
+            uid=str(provider_user_id),
+            extra_data=raw_user_data,
+        )
+        logger.info("Created social account link: %s -> %s", email, provider_id)
+
+        return cl.User(
+            identifier=str(user.id),
+            metadata={
+                "email": user.email,
+                "name": user.get_full_name(),
+                "provider": provider_id,
+                "provider_user_id": str(provider_user_id),
+                "auto_created": True,
+            },
+        )
 
     except Exception as e:
         logger.exception("Error during OAuth callback: %s", e)
         return None
 
 
+@cl.header_auth_callback
 async def header_auth_callback(headers: dict) -> cl.User | None:
     """
     Authenticate users via trusted proxy headers.
 
     This callback is used when Chainlit sits behind a reverse proxy
-    (e.g., nginx, Traefik) that handles authentication and passes
-    user identity in headers.
+    that handles authentication (e.g., oauth2-proxy, Authelia, nginx with
+    auth_request). The proxy passes user identity in headers.
 
-    Expected headers (configurable via environment):
-    - X-Auth-User-Id: User's UUID or primary key
-    - X-Auth-User-Email: User's email address
-    - X-Auth-User-Name: User's display name (optional)
+    Common header patterns:
+    - oauth2-proxy: X-Forwarded-Email, X-Forwarded-Preferred-Username
+    - Authelia: Remote-Email, Remote-Name, Remote-User
+    - Generic: X-Auth-User-Id, X-Auth-User-Email
+
+    The header names are configurable via environment variables:
+    - AUTH_USER_ID_HEADER: Header containing user's UUID (default: X-Auth-User-Id)
+    - AUTH_USER_EMAIL_HEADER: Header containing user's email (default: X-Forwarded-Email)
+    - AUTH_USER_NAME_HEADER: Header containing user's name (default: X-Forwarded-Preferred-Username)
 
     Args:
         headers: HTTP headers from the request.
@@ -177,15 +250,33 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
 
     # Header names (configurable via environment)
     user_id_header = os.environ.get("AUTH_USER_ID_HEADER", "X-Auth-User-Id")
-    user_email_header = os.environ.get("AUTH_USER_EMAIL_HEADER", "X-Auth-User-Email")
-    user_name_header = os.environ.get("AUTH_USER_NAME_HEADER", "X-Auth-User-Name")
+    user_email_header = os.environ.get("AUTH_USER_EMAIL_HEADER", "X-Forwarded-Email")
+    user_name_header = os.environ.get("AUTH_USER_NAME_HEADER", "X-Forwarded-Preferred-Username")
+
+    # Also support common reverse proxy header patterns
+    alt_email_headers = ["x-auth-request-email", "remote-email"]
+    alt_name_headers = ["x-auth-request-user", "remote-name", "remote-user"]
 
     # Normalize header keys (HTTP headers are case-insensitive)
     normalized_headers = {k.lower(): v for k, v in headers.items()}
 
+    # Extract user identification
     user_id = normalized_headers.get(user_id_header.lower())
     user_email = normalized_headers.get(user_email_header.lower())
     user_name = normalized_headers.get(user_name_header.lower(), "")
+
+    # Try alternative headers if primary not found
+    if not user_email:
+        for alt_header in alt_email_headers:
+            user_email = normalized_headers.get(alt_header)
+            if user_email:
+                break
+
+    if not user_name:
+        for alt_header in alt_name_headers:
+            user_name = normalized_headers.get(alt_header)
+            if user_name:
+                break
 
     if not user_id and not user_email:
         logger.debug("Header auth: no user identification headers found")
@@ -196,7 +287,20 @@ async def header_auth_callback(headers: dict) -> cl.User | None:
         if user_id:
             user = User.objects.get(pk=user_id)
         else:
-            user = User.objects.get(email=user_email)
+            try:
+                user = User.objects.get(email=user_email)
+            except User.DoesNotExist:
+                # Auto-provision user from headers if allowed
+                auto_provision = os.environ.get("AUTH_HEADER_AUTO_PROVISION", "false").lower() == "true"
+                if auto_provision:
+                    user = User.objects.create(
+                        email=user_email,
+                        first_name=user_name.split()[0] if user_name else "",
+                        last_name=" ".join(user_name.split()[1:]) if user_name else "",
+                    )
+                    logger.info("Auto-provisioned user from header auth: %s", user_email)
+                else:
+                    raise
 
         if not user.is_active:
             logger.warning("Header auth: inactive user %s", user.email)

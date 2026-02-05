@@ -696,3 +696,402 @@ class TestArtifactTools:
 
             artifact.refresh_from_db()
             assert artifact.version == original_version + 2
+
+
+# ============================================================================
+# 7. TestSharedArtifactAccessControl
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestSharedArtifactAccessControl:
+    """Tests for artifact sharing access control."""
+
+    def test_create_public_share_link(self, user, artifact):
+        """Test creating a public share link."""
+        token = SharedArtifact.generate_token()
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=token,
+            access_level="public",
+        )
+
+        assert shared.access_level == "public"
+        assert shared.share_token == token
+        assert shared.view_count == 0
+        assert shared.expires_at is None
+
+    def test_create_project_share_link(self, user, artifact):
+        """Test creating a project-level share link."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="project",
+        )
+
+        assert shared.access_level == "project"
+        assert shared.artifact == artifact
+
+    def test_create_specific_share_link(self, user, other_user, artifact):
+        """Test creating a specific user share link."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="specific",
+        )
+        shared.allowed_users.add(other_user)
+
+        assert shared.access_level == "specific"
+        assert shared.allowed_users.count() == 1
+        assert other_user in shared.allowed_users.all()
+
+    def test_create_share_link_with_expiry(self, user, artifact):
+        """Test creating a share link with expiration date."""
+        future_expiry = timezone.now() + timedelta(days=7)
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+            expires_at=future_expiry,
+        )
+
+        assert shared.expires_at == future_expiry
+        assert not shared.is_expired
+
+    def test_public_access_allows_unauthenticated_users(self, user, artifact):
+        """Test that public share links can be accessed by unauthenticated users."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+        )
+
+        # Unauthenticated user (None)
+        assert shared.can_access(None) is True
+
+    def test_public_access_allows_any_authenticated_user(self, user, other_user, artifact):
+        """Test that public share links work for any authenticated user."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+        )
+
+        assert shared.can_access(user) is True
+        assert shared.can_access(other_user) is True
+
+    def test_project_access_requires_membership(self, user, other_user, artifact, project_membership):
+        """Test that project-level access requires project membership."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="project",
+        )
+
+        # User with membership can access
+        assert shared.can_access(user) is True
+
+        # Other user without membership cannot access
+        assert shared.can_access(other_user) is False
+
+    def test_project_access_rejects_unauthenticated(self, user, artifact):
+        """Test that project-level access rejects unauthenticated users."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="project",
+        )
+
+        assert shared.can_access(None) is False
+
+    def test_specific_access_requires_allowed_user(self, user, other_user, artifact):
+        """Test that specific access requires user to be in allowed_users."""
+        third_user = User.objects.create_user(
+            email="third@example.com",
+            password="pass123",
+        )
+
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="specific",
+        )
+        shared.allowed_users.add(other_user)
+
+        # Allowed user can access
+        assert shared.can_access(other_user) is True
+
+        # Non-allowed user cannot access
+        assert shared.can_access(third_user) is False
+
+        # Creator is not automatically allowed
+        assert shared.can_access(user) is False
+
+    def test_specific_access_rejects_unauthenticated(self, user, artifact):
+        """Test that specific access rejects unauthenticated users."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="specific",
+        )
+
+        assert shared.can_access(None) is False
+
+    def test_expired_share_link_denies_all_access(self, user, artifact):
+        """Test that expired share links deny access regardless of access level."""
+        past_expiry = timezone.now() - timedelta(hours=1)
+
+        # Public share that's expired
+        public_expired = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+            expires_at=past_expiry,
+        )
+
+        assert public_expired.is_expired is True
+        assert public_expired.can_access(None) is False
+        assert public_expired.can_access(user) is False
+
+    def test_view_count_tracking(self, user, artifact):
+        """Test that view count is tracked correctly."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+        )
+
+        initial_count = shared.view_count
+        assert initial_count == 0
+
+        # Increment view count
+        shared.increment_view_count()
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count + 1
+
+        # Increment again
+        shared.increment_view_count()
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count + 2
+
+    def test_multiple_share_links_for_same_artifact(self, user, artifact):
+        """Test that multiple share links can be created for the same artifact."""
+        public_share = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="public",
+        )
+
+        project_share = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=SharedArtifact.generate_token(),
+            access_level="project",
+        )
+
+        artifact_shares = SharedArtifact.objects.filter(artifact=artifact)
+        assert artifact_shares.count() == 2
+
+    def test_share_token_is_unique(self, user, artifact):
+        """Test that share tokens are unique across all shares."""
+        token = SharedArtifact.generate_token()
+        SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token=token,
+            access_level="public",
+        )
+
+        # Creating another share with same token should fail
+        with pytest.raises(Exception):
+            SharedArtifact.objects.create(
+                artifact=artifact,
+                created_by=user,
+                share_token=token,  # Duplicate token
+                access_level="public",
+            )
+
+    def test_generate_token_produces_valid_token(self):
+        """Test that generate_token produces a valid 64-character token."""
+        token = SharedArtifact.generate_token()
+
+        assert len(token) == 64
+        assert all(c in "0123456789abcdef" for c in token)
+
+    def test_share_url_property(self, user, artifact):
+        """Test that share_url property generates correct URL."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="test_token_123",
+            access_level="public",
+        )
+
+        url = shared.share_url
+        assert "/artifacts/shared/test_token_123/" in url
+
+
+# ============================================================================
+# 8. TestSharedArtifactViewAccessControl
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestSharedArtifactViewAccessControl:
+    """Tests for SharedArtifactView access control enforcement."""
+
+    def test_access_public_share_without_auth(self, client, user, artifact):
+        """Test accessing public share without authentication."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="public_test_token",
+            access_level="public",
+        )
+
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == str(artifact.id)
+
+    def test_access_project_share_requires_membership(
+        self, client, user, other_user, artifact, project_membership
+    ):
+        """Test that project share requires project membership."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="project_test_token",
+            access_level="project",
+        )
+
+        # Without auth
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 401
+
+        # With auth but no membership
+        client.force_login(other_user)
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 403
+
+        # With auth and membership
+        client.force_login(user)
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 200
+
+    def test_access_specific_share_requires_allowed_user(
+        self, client, user, other_user, artifact
+    ):
+        """Test that specific share requires user in allowed_users."""
+        third_user = User.objects.create_user(
+            email="third@example.com",
+            password="pass123",
+        )
+
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="specific_test_token",
+            access_level="specific",
+        )
+        shared.allowed_users.add(other_user)
+
+        # Without auth
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 401
+
+        # With auth but not allowed
+        client.force_login(third_user)
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 403
+
+        # With auth and allowed
+        client.force_login(other_user)
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        assert response.status_code == 200
+
+    def test_expired_share_returns_403(self, client, user, artifact):
+        """Test that expired share returns 403 Forbidden."""
+        past_expiry = timezone.now() - timedelta(hours=1)
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="expired_test_token",
+            access_level="public",
+            expires_at=past_expiry,
+        )
+
+        response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
+
+        assert response.status_code == 403
+        data = response.json()
+        assert "error" in data
+        assert "expired" in data["error"].lower()
+
+    def test_nonexistent_share_token_returns_404(self, client):
+        """Test that non-existent share token returns 404."""
+        response = client.get("/api/artifacts/shared/nonexistent_token_123/")
+
+        assert response.status_code == 404
+
+    def test_view_count_incremented_on_successful_access(
+        self, client, user, artifact
+    ):
+        """Test that view_count is incremented on each successful access."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="view_count_token",
+            access_level="public",
+        )
+
+        initial_count = shared.view_count
+
+        # First access
+        client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count + 1
+
+        # Second access
+        client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count + 2
+
+    def test_view_count_not_incremented_on_failed_access(
+        self, client, user, other_user, artifact
+    ):
+        """Test that view_count is not incremented when access is denied."""
+        shared = SharedArtifact.objects.create(
+            artifact=artifact,
+            created_by=user,
+            share_token="failed_access_token",
+            access_level="specific",
+        )
+        # Don't add any allowed users
+
+        initial_count = shared.view_count
+
+        # Try to access without auth (should fail)
+        client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count  # Not incremented
+
+        # Try to access as unauthorized user (should fail)
+        client.force_login(other_user)
+        client.get(f"/api/artifacts/shared/{shared.share_token}/")
+        shared.refresh_from_db()
+        assert shared.view_count == initial_count  # Still not incremented

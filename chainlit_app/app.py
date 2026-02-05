@@ -35,7 +35,12 @@ from apps.agents.graph.base import build_agent_graph
 from apps.projects.models import Project, ProjectMembership, ProjectRole
 
 from chainlit_app.artifacts import handle_artifact_message, render_artifact_iframe
-from chainlit_app.auth import get_django_user, password_auth_callback
+from chainlit_app.auth import get_django_user
+
+# Import auth module to register the decorated callbacks
+# The @cl.password_auth_callback, @cl.oauth_callback, and @cl.header_auth_callback
+# decorators in auth.py auto-register with Chainlit when imported
+import chainlit_app.auth  # noqa: F401
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -45,17 +50,6 @@ logger = logging.getLogger(__name__)
 # In-memory checkpointer for MVP - stores conversation state
 # In production, replace with PostgresSaver for persistence
 memory_checkpointer = MemorySaver()
-
-
-@cl.password_auth_callback
-async def auth_callback(username: str, password: str) -> cl.User | None:
-    """
-    Password authentication callback for Chainlit.
-
-    Delegates to the auth module's password_auth_callback which validates
-    credentials against the Django User model.
-    """
-    return await password_auth_callback(username, password)
 
 
 @cl.on_chat_start

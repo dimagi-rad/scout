@@ -268,61 +268,61 @@ From addendum 1 Section A1 (ARTIFACT_PROMPT_ADDITION):
 
 ### 4.1 django-allauth Integration
 From addendum 1 Section A3:
-- Install and configure django-allauth
-- Add Google and GitHub providers
-- Configure `SOCIALACCOUNT_AUTO_SIGNUP`, `ACCOUNT_EMAIL_REQUIRED`, etc.
-- Provider credentials stored in DB via Django admin (SocialApp model)
+- [x] Install and configure django-allauth
+- [x] Add Google and GitHub providers
+- [x] Configure `SOCIALACCOUNT_AUTO_SIGNUP`, `ACCOUNT_EMAIL_REQUIRED`, etc.
+- [x] Provider credentials stored in DB via Django admin (SocialApp model)
 
 ### 4.2 Custom OAuth Provider Pattern
 From addendum 1 Section A3:
-- Example CommCare provider implementation (~50 lines)
-- `CommCareProvider` (extract_uid, extract_common_fields)
-- `CommCareOAuth2Adapter` (token URL, authorize URL, profile URL, complete_login)
-- URL configuration
+- [x] Example CommCare provider implementation (~50 lines)
+- [x] `CommCareProvider` (extract_uid, extract_common_fields)
+- [x] `CommCareOAuth2Adapter` (token URL, authorize URL, profile URL, complete_login)
+- [x] URL configuration
 
 ### 4.3 Chainlit Auth Bridge — `chainlit_app/auth.py`
 From addendum 1 Section A3:
-- `@cl.oauth_callback` — looks up Django user via allauth SocialAccount, auto-creates if needed
-- `@cl.header_auth_callback` — for reverse proxy setups (oauth2-proxy, Authelia)
-- `@cl.password_auth_callback` — development fallback
+- [x] `@cl.oauth_callback` — looks up Django user via allauth SocialAccount, auto-creates if needed
+- [x] `@cl.header_auth_callback` — for reverse proxy setups (oauth2-proxy, Authelia)
+- [x] `@cl.password_auth_callback` — development fallback
 
 ### 4.4 Artifact Sharing
 From addendum 1 Section A1:
-- Share link generation API (creates SharedArtifact with token)
-- Access levels: public (anyone with link), project (members only), specific (named users)
-- Optional expiry (expires_at)
-- View count tracking
-- `SharedArtifactView` — standalone viewer page (no chat context needed)
+- [x] Share link generation API (creates SharedArtifact with token)
+- [x] Access levels: public (anyone with link), project (members only), specific (named users)
+- [x] Optional expiry (expires_at)
+- [x] View count tracking
+- [x] `SharedArtifactView` — standalone viewer page (no chat context needed)
 
 ### 4.5 Recipe Models — `apps/recipes/`
 From addendum 1 Section A2:
-- `Recipe` — name, description, variable definitions (name, type, label, default, options)
-- `RecipeStep` — ordered steps with prompt templates, `{{variable}}` substitution, expected tools
-- `RecipeRun` — execution tracking (status, variable values, step results, timing)
+- [x] `Recipe` — name, description, variable definitions (name, type, label, default, options)
+- [x] `RecipeStep` — ordered steps with prompt templates, `{{variable}}` substitution, expected tools
+- [x] `RecipeRun` — execution tracking (status, variable values, step results, timing)
 
 ### 4.6 Recipe Tools
 From addendum 1 Section A2:
-- `save_as_recipe` tool — agent extracts steps from conversation, identifies variables, saves recipe
-- Include example in tool docstring showing the expected structure
+- [x] `save_as_recipe` tool — agent extracts steps from conversation, identifies variables, saves recipe
+- [x] Include example in tool docstring showing the expected structure
 
 ### 4.7 Recipe Runner — `apps/recipes/services/runner.py`
 From addendum 1 Section A2:
-- `RecipeRunner` class: validates variables, creates RecipeRun, iterates steps
-- Each step: render prompt template → send to agent → collect results → update RecipeRun
-- Uses same thread for context continuity across steps
-- Handles success/failure per step
+- [x] `RecipeRunner` class: validates variables, creates RecipeRun, iterates steps
+- [x] Each step: render prompt template → send to agent → collect results → update RecipeRun
+- [x] Uses same thread for context continuity across steps
+- [x] Handles success/failure per step
 
 ### 4.8 Recipe UI in Chainlit
-- Recipe browser: list available recipes for the current project
-- Run recipe: variable input form → execute → show progress per step → display results
-- Recipe sharing: toggle is_shared flag for project members
+- [ ] Recipe browser: list available recipes for the current project
+- [ ] Run recipe: variable input form → execute → show progress per step → display results
+- [ ] Recipe sharing: toggle is_shared flag for project members
 
 ### 4.9 Tests
-- OAuth flow (mock providers)
-- Share link access control (public, project, specific, expired)
-- Recipe CRUD
-- Recipe variable substitution
-- Recipe runner end-to-end
+- [x] OAuth flow (mock providers)
+- [x] Share link access control (public, project, specific, expired)
+- [x] Recipe CRUD
+- [x] Recipe variable substitution
+- [x] Recipe runner end-to-end
 
 ---
 
