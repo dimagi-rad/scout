@@ -1,7 +1,7 @@
 import { createBrowserRouter, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
-import { ProjectsPage } from "@/pages/ProjectsPage"
+import { ProjectsPage, ProjectForm } from "@/pages/ProjectsPage"
 
 // Placeholder pages (to be created later)
 const KnowledgePage = () => <div className="p-8">Knowledge Page (coming soon)</div>
@@ -16,8 +16,8 @@ export const router = createBrowserRouter([
       { index: true, element: <ChatPanel /> },
       { path: "chat", element: <ChatPanel /> },
       { path: "projects", element: <ProjectsPage /> },
-      { path: "projects/new", element: <ProjectsPage /> },
-      { path: "projects/:id/edit", element: <ProjectsPage /> },
+      { path: "projects/new", element: <ProjectForm /> },
+      { path: "projects/:id/edit", element: <ProjectForm /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
       { path: "knowledge/:id", element: <KnowledgePage /> },
