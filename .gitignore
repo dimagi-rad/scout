@@ -70,3 +70,5 @@ frontend/dist/
 
 # Documentation build output
 docs/site/
+node_modules/
+bun.lockb
