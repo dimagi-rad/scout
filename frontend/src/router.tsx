@@ -1,9 +1,9 @@
 import { createBrowserRouter, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
+import { ProjectsPage } from "@/pages/ProjectsPage"
 
 // Placeholder pages (to be created later)
-const ProjectsPage = () => <div className="p-8">Projects Page (coming soon)</div>
 const KnowledgePage = () => <div className="p-8">Knowledge Page (coming soon)</div>
 const RecipesPage = () => <div className="p-8">Recipes Page (coming soon)</div>
 const DataDictionaryPage = () => <div className="p-8">Data Dictionary Page (coming soon)</div>
