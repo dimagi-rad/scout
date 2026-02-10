@@ -4,6 +4,7 @@ Core project models for Scout data agent platform.
 Defines Project and ProjectMembership models.
 """
 import uuid
+import warnings
 
 from cryptography.fernet import Fernet
 from django.conf import settings
@@ -31,18 +32,27 @@ class Project(models.Model):
     slug = models.SlugField(unique=True)
     description = models.TextField(blank=True)
 
-    # Database connection (encrypted at rest)
-    db_host = models.CharField(max_length=255)
-    db_port = models.IntegerField(default=5432)
-    db_name = models.CharField(max_length=255)
+    # Database connection - reference to centralized credentials
+    database_connection = models.ForeignKey(
+        "datasources.DatabaseConnection",
+        on_delete=models.PROTECT,
+        related_name="projects",
+        null=True,  # Nullable during migration period
+        blank=True,
+    )
     db_schema = models.CharField(
         max_length=255,
         default="public",
         validators=[schema_validator],
     )
-    # Encrypted fields - store the encrypted connection credentials
-    _db_user = models.BinaryField(db_column="db_user")
-    _db_password = models.BinaryField(db_column="db_password")
+
+    # DEPRECATED: Legacy database connection fields (to be removed after migration)
+    # Use database_connection FK instead
+    db_host = models.CharField(max_length=255, blank=True)
+    db_port = models.IntegerField(default=5432)
+    db_name = models.CharField(max_length=255, blank=True)
+    _db_user = models.BinaryField(db_column="db_user", null=True, blank=True)
+    _db_password = models.BinaryField(db_column="db_password", null=True, blank=True)
 
     # Optional: restrict which tables the agent can see
     # Empty list = all tables in schema are visible
@@ -112,15 +122,27 @@ class Project(models.Model):
 
     @property
     def db_user(self):
-        """Decrypt and return the database username."""
+        """Decrypt and return the database username (DEPRECATED - use database_connection)."""
+        if self.database_connection:
+            return self.database_connection.db_user
         if not self._db_user:
             return ""
+        warnings.warn(
+            "Project.db_user is deprecated. Use database_connection instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         f = self._get_fernet()
         return f.decrypt(bytes(self._db_user)).decode()
 
     @db_user.setter
     def db_user(self, value):
-        """Encrypt and store the database username."""
+        """Encrypt and store the database username (DEPRECATED)."""
+        warnings.warn(
+            "Project.db_user is deprecated. Use database_connection instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not value:
             self._db_user = b""
             return
@@ -129,15 +151,27 @@ class Project(models.Model):
 
     @property
     def db_password(self):
-        """Decrypt and return the database password."""
+        """Decrypt and return the database password (DEPRECATED - use database_connection)."""
+        if self.database_connection:
+            return self.database_connection.db_password
         if not self._db_password:
             return ""
+        warnings.warn(
+            "Project.db_password is deprecated. Use database_connection instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         f = self._get_fernet()
         return f.decrypt(bytes(self._db_password)).decode()
 
     @db_password.setter
     def db_password(self, value):
-        """Encrypt and store the database password."""
+        """Encrypt and store the database password (DEPRECATED)."""
+        warnings.warn(
+            "Project.db_password is deprecated. Use database_connection instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if not value:
             self._db_password = b""
             return
@@ -146,6 +180,12 @@ class Project(models.Model):
 
     def get_connection_params(self) -> dict:
         """Return connection params for psycopg2/SQLAlchemy."""
+        if self.database_connection:
+            return self.database_connection.get_connection_params(
+                schema=self.db_schema,
+                timeout_seconds=self.max_query_timeout_seconds,
+            )
+        # Legacy fallback
         return {
             "host": self.db_host,
             "port": self.db_port,

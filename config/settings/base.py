@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     # Local apps
     "apps.users",
     "apps.projects",
+    "apps.datasources",
     "apps.knowledge",
     "apps.agents",
     "apps.artifacts",
