@@ -1,8 +1,9 @@
 import { useEffect } from "react"
+import { RouterProvider } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
-import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { Skeleton } from "@/components/ui/skeleton"
+import { router } from "@/router"
 
 export default function App() {
   const authStatus = useAppStore((s) => s.authStatus)
@@ -28,5 +29,5 @@ export default function App() {
     return <LoginForm />
   }
 
-  return <AppLayout />
+  return <RouterProvider router={router} />
 }
