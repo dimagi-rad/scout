@@ -77,3 +77,8 @@ ignore = ["E501"]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
+
+[dependency-groups]
+dev = [
+    "zensical>=0.0.21",
+]

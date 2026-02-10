@@ -67,3 +67,6 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+
+# Documentation build output
+docs/site/
