@@ -4,9 +4,7 @@ import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ProjectsPage, ProjectForm } from "@/pages/ProjectsPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
-
-// Placeholder pages (to be created later)
-const RecipesPage = () => <div className="p-8">Recipes Page (coming soon)</div>
+import { RecipesPage } from "@/pages/RecipesPage"
 
 export const router = createBrowserRouter([
   {
