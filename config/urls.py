@@ -21,6 +21,7 @@ urlpatterns = [
         "api/projects/<uuid:project_id>/recipes/",
         include("apps.recipes.urls"),
     ),
+    path("api/datasources/", include("apps.datasources.urls")),
 ]
 
 if settings.DEBUG:

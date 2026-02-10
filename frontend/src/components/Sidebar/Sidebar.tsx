@@ -4,6 +4,7 @@ import {
   BookOpen,
   ChefHat,
   Database,
+  Cloud,
   Settings,
   LogOut,
 } from "lucide-react"
@@ -73,6 +74,7 @@ export function Sidebar() {
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
+        <NavItem to="/datasources" icon={Cloud} label="Data Sources" />
       </nav>
 
       {/* User Section */}
