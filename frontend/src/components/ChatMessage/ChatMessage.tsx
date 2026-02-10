@@ -1,6 +1,7 @@
 import type { UIMessage } from "ai"
 import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { ArtifactViewer } from "@/components/ArtifactViewer/ArtifactViewer"
 import { Bot, User, Wrench } from "lucide-react"
 
@@ -62,7 +63,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 {isUser ? (
                   part.text
                 ) : (
-                  <Markdown>{part.text}</Markdown>
+                  <Markdown remarkPlugins={[remarkGfm]}>{part.text}</Markdown>
                 )}
               </div>
             )
