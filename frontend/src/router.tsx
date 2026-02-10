@@ -3,9 +3,9 @@ import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ProjectsPage, ProjectForm } from "@/pages/ProjectsPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
+import { KnowledgePage } from "@/pages/KnowledgePage"
 
 // Placeholder pages (to be created later)
-const KnowledgePage = () => <div className="p-8">Knowledge Page (coming soon)</div>
 const RecipesPage = () => <div className="p-8">Recipes Page (coming soon)</div>
 
 export const router = createBrowserRouter([
