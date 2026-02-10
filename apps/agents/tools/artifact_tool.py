@@ -189,7 +189,7 @@ def create_artifact_tools(
                 description=description.strip() if description else "",
                 artifact_type=artifact_type,
                 code=code,
-                data=data,
+                data=data or {},
                 version=1,
                 conversation_id=conversation_id or "",
             )
