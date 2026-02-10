@@ -34,8 +34,10 @@ dependencies = [
     # Security / HTML sanitization
     "bleach>=6.0",
 
-    # Caching
+    # Caching & Task Queue
     "redis>=5.0",
+    "celery[redis]>=5.4",
+    "django-celery-beat>=2.6",
 
     # Async database (required by langgraph-checkpoint-postgres)
     "asyncpg>=0.29",

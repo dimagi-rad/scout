@@ -44,6 +44,7 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     # Third-party apps
     "rest_framework",
+    "django_celery_beat",
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
@@ -243,3 +244,16 @@ MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
 CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
+
+
+# Celery configuration
+CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL or "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL or "redis://localhost:6379/0")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Don't prefetch tasks (better for long-running tasks)
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
