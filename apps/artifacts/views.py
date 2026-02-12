@@ -33,7 +33,7 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src 'none';"
+        "connect-src 'self';"
     )
 
 
@@ -64,6 +64,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Babel for JSX transformation -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+
+    <!-- PropTypes (required by Recharts UMD) -->
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/prop-types@15/prop-types.min.js"></script>
 
     <!-- Recharts for React charts -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/recharts@2/umd/Recharts.min.js"></script>
@@ -167,7 +170,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         }
     </style>
 </head>
-<body data-parent-origin="{{PARENT_ORIGIN}}">
+<body>
     <div id="root">
         <div id="artifact-container">
             <div class="loading-state" id="loading">
@@ -185,17 +188,31 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
             init() {
                 this.container = document.getElementById('artifact-container');
-                window.addEventListener('message', this.handleMessage.bind(this));
-                // Get the parent origin from data attribute (set by server) or default to same origin
-                this.parentOrigin = document.body.dataset.parentOrigin || window.location.origin;
-                // Signal that we're ready to receive artifacts
-                window.parent.postMessage({ type: 'sandbox-ready' }, this.parentOrigin);
+                // Extract artifact ID from the URL path: /api/artifacts/<uuid>/sandbox/
+                const match = window.location.pathname.match(
+                    /\\/api\\/artifacts\\/([0-9a-f-]+)\\/sandbox/i
+                );
+                if (match) {
+                    this.loadArtifact(match[1]);
+                } else {
+                    this.showError('Initialization Error', 'Could not determine artifact ID from URL.');
+                }
             },
 
-            handleMessage(event) {
-                const { type, artifact } = event.data || {};
-                if (type === 'render-artifact' && artifact) {
+            async loadArtifact(artifactId) {
+                try {
+                    const resp = await fetch('/api/artifacts/' + artifactId + '/data/', {
+                        credentials: 'include'
+                    });
+                    if (!resp.ok) {
+                        const text = await resp.text();
+                        this.showError('Failed to load artifact', text || resp.statusText);
+                        return;
+                    }
+                    const artifact = await resp.json();
                     this.render(artifact);
+                } catch (error) {
+                    this.showError('Network Error', error.message);
                 }
             },
 
@@ -432,11 +449,13 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 `;
 
-                // Notify parent of error
-                window.parent.postMessage({
-                    type: 'artifact-error',
-                    error: { title, message, details }
-                }, this.parentOrigin);
+                // Notify parent of error (if embedded in iframe)
+                try {
+                    window.parent.postMessage({
+                        type: 'artifact-error',
+                        error: { title, message, details }
+                    }, '*');
+                } catch (e) { /* ignore if not in iframe */ }
             },
 
             escapeHtml(text) {
@@ -481,15 +500,11 @@ class ArtifactSandboxView(View):
             if not has_access:
                 return HttpResponse("Access denied", status=403)
 
-        # Build the parent origin for secure postMessage
-        parent_origin = request.build_absolute_uri('/').rstrip('/')
-
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
-        # Inject the parent origin and nonce into the template
-        html_content = SANDBOX_HTML_TEMPLATE.replace('{{PARENT_ORIGIN}}', parent_origin)
-        html_content = html_content.replace('{{CSP_NONCE}}', csp_nonce)
+        # Inject the nonce into the template
+        html_content = SANDBOX_HTML_TEMPLATE.replace('{{CSP_NONCE}}', csp_nonce)
 
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
