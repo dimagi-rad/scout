@@ -25,17 +25,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Error patterns that indicate a query failure requiring correction
-ERROR_INDICATORS = frozenset({
-    "error",
-    "does not exist",
-    "permission denied",
-    "syntax error",
-    "invalid",
-    "timeout",
-    "cancelled",
-})
-
 
 def reset_retry_on_new_message(state: AgentState) -> dict[str, Any]:
     """
@@ -115,8 +104,10 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
         try:
             result = json.loads(content)
         except (json.JSONDecodeError, TypeError):
-            # Not JSON, check for error strings directly
-            if _contains_error_indicators(content):
+            # Not JSON — only flag as error if this is an error status from LangChain
+            # (tool raised an exception). Don't substring-match normal text content
+            # since words like "error" or "invalid" appear in regular data/responses.
+            if last_message.status == "error":
                 return {
                     "needs_correction": True,
                     "correction_context": {
@@ -434,19 +425,6 @@ def _get_error_guidance(error_type: str) -> str:
 
     return guidance_map.get(error_type, guidance_map["execution"])
 
-
-def _contains_error_indicators(text: str) -> bool:
-    """
-    Check if text contains error indicators.
-
-    Args:
-        text: Text to check.
-
-    Returns:
-        True if any error indicators are found.
-    """
-    text_lower = text.lower()
-    return any(indicator in text_lower for indicator in ERROR_INDICATORS)
 
 
 __all__ = [
