@@ -31,7 +31,7 @@ class RecipeAdmin(admin.ModelAdmin):
     ]
     list_filter = ["is_shared", "created_at", "project"]
     search_fields = ["name", "description"]
-    readonly_fields = ["id", "created_at", "updated_at"]
+    readonly_fields = ["id", "share_token", "created_at", "updated_at"]
     autocomplete_fields = ["project", "created_by"]
     inlines = [RecipeStepInline]
 
@@ -49,7 +49,7 @@ class RecipeAdmin(admin.ModelAdmin):
         (
             "Sharing",
             {
-                "fields": ("is_shared",),
+                "fields": ("is_shared", "is_public", "share_token"),
             },
         ),
         (
@@ -102,7 +102,7 @@ class RecipeRunAdmin(admin.ModelAdmin):
         "duration_display",
         "created_at",
     ]
-    list_filter = ["status", "created_at", "recipe__project"]
+    list_filter = ["status", "is_shared", "is_public", "created_at", "recipe__project"]
     search_fields = ["recipe__name", "run_by__email"]
     readonly_fields = [
         "id",
@@ -110,6 +110,7 @@ class RecipeRunAdmin(admin.ModelAdmin):
         "status",
         "variable_values",
         "step_results",
+        "share_token",
         "started_at",
         "completed_at",
         "run_by",
@@ -123,6 +124,12 @@ class RecipeRunAdmin(admin.ModelAdmin):
             "Execution",
             {
                 "fields": ("variable_values", "step_results"),
+            },
+        ),
+        (
+            "Sharing",
+            {
+                "fields": ("is_shared", "is_public", "share_token"),
             },
         ),
         (

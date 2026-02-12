@@ -4,6 +4,7 @@ Recipe models for the Scout data agent platform.
 Defines Recipe, RecipeStep, and RecipeRun models for creating and executing
 reusable conversation workflows with variable substitution.
 """
+import secrets
 import uuid
 
 from django.conf import settings
@@ -52,6 +53,18 @@ class Recipe(models.Model):
         default=False,
         help_text="If true, all project members can view and run this recipe.",
     )
+    is_public = models.BooleanField(
+        default=False,
+        help_text="If true, accessible via public share link without authentication.",
+    )
+    share_token = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Token for public share URL. Auto-generated when is_public is set.",
+    )
 
     # Metadata
     created_by = models.ForeignKey(
@@ -69,6 +82,13 @@ class Recipe(models.Model):
             models.Index(fields=["project", "is_shared"]),
             models.Index(fields=["project", "created_by"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.is_public and not self.share_token:
+            self.share_token = secrets.token_urlsafe(32)
+        elif not self.is_public:
+            self.share_token = None
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} ({self.project.name})"
@@ -278,6 +298,24 @@ class RecipeRun(models.Model):
         blank=True,
     )
 
+    # Sharing settings
+    is_shared = models.BooleanField(
+        default=False,
+        help_text="Visible to all project members.",
+    )
+    is_public = models.BooleanField(
+        default=False,
+        help_text="If true, accessible via public share link without authentication.",
+    )
+    share_token = models.CharField(
+        max_length=64,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Token for public share URL. Auto-generated when is_public is set.",
+    )
+
     # Who ran this
     run_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -296,6 +334,13 @@ class RecipeRun(models.Model):
             models.Index(fields=["run_by", "-created_at"]),
             models.Index(fields=["status"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.is_public and not self.share_token:
+            self.share_token = secrets.token_urlsafe(32)
+        elif not self.is_public:
+            self.share_token = None
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Run of {self.recipe.name} ({self.status})"

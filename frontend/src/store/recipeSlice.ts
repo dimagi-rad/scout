@@ -21,6 +21,9 @@ export interface Recipe {
   description: string
   variables: RecipeVariable[]
   steps: RecipeStep[]
+  is_shared: boolean
+  is_public: boolean
+  share_token: string | null
   step_count?: number
   variable_count?: number
   last_run_at?: string
@@ -45,6 +48,9 @@ export interface RecipeRun {
   status: "pending" | "running" | "completed" | "failed"
   variable_values: Record<string, string>
   step_results: StepResult[]
+  is_shared: boolean
+  is_public: boolean
+  share_token: string | null
   started_at: string | null
   completed_at: string | null
   created_at: string
@@ -65,6 +71,12 @@ export interface RecipeSlice {
     deleteRecipe: (projectId: string, recipeId: string) => Promise<void>
     runRecipe: (projectId: string, recipeId: string, variables: Record<string, string>) => Promise<RecipeRun>
     fetchRuns: (projectId: string, recipeId: string) => Promise<void>
+    updateRecipeRun: (
+      projectId: string,
+      recipeId: string,
+      runId: string,
+      data: { is_shared?: boolean; is_public?: boolean },
+    ) => Promise<RecipeRun>
   }
 }
 
@@ -134,6 +146,21 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       } catch {
         set({ recipeRuns: [] })
       }
+    },
+
+    updateRecipeRun: async (
+      projectId: string,
+      recipeId: string,
+      runId: string,
+      data: { is_shared?: boolean; is_public?: boolean },
+    ) => {
+      const updated = await api.patch<RecipeRun>(
+        `/api/projects/${projectId}/recipes/${recipeId}/runs/${runId}/`,
+        data,
+      )
+      const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))
+      set({ recipeRuns: runs })
+      return updated
     },
   },
 })

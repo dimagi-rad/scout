@@ -28,6 +28,9 @@ class RecipeListSerializer(serializers.ModelSerializer):
             "id",
             "name",
             "description",
+            "is_shared",
+            "is_public",
+            "share_token",
             "step_count",
             "variable_count",
             "last_run_at",
@@ -59,11 +62,14 @@ class RecipeDetailSerializer(serializers.ModelSerializer):
             "name",
             "description",
             "variables",
+            "is_shared",
+            "is_public",
+            "share_token",
             "steps",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "share_token", "created_at", "updated_at"]
 
 
 class RecipeUpdateSerializer(serializers.ModelSerializer):
@@ -73,7 +79,7 @@ class RecipeUpdateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Recipe
-        fields = ["name", "description", "variables", "steps"]
+        fields = ["name", "description", "variables", "steps", "is_shared", "is_public"]
 
     def update(self, instance, validated_data):
         steps_data = validated_data.pop("steps", None)
@@ -105,6 +111,52 @@ class RunRecipeSerializer(serializers.Serializer):
 
 class RecipeRunSerializer(serializers.ModelSerializer):
     """Serializer for recipe run history."""
+
+    class Meta:
+        model = RecipeRun
+        fields = [
+            "id",
+            "status",
+            "variable_values",
+            "step_results",
+            "is_shared",
+            "is_public",
+            "share_token",
+            "started_at",
+            "completed_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class RecipeRunUpdateSerializer(serializers.ModelSerializer):
+    """Serializer for updating recipe run sharing settings."""
+
+    class Meta:
+        model = RecipeRun
+        fields = ["is_shared", "is_public"]
+
+
+class PublicRecipeSerializer(serializers.ModelSerializer):
+    """Read-only serializer for public access to a recipe."""
+
+    steps = RecipeStepSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Recipe
+        fields = [
+            "id",
+            "name",
+            "description",
+            "variables",
+            "steps",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class PublicRecipeRunSerializer(serializers.ModelSerializer):
+    """Read-only serializer for public access to a recipe run."""
 
     class Meta:
         model = RecipeRun

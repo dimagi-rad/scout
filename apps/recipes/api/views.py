@@ -8,7 +8,7 @@ import logging
 
 from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -17,9 +17,12 @@ from apps.recipes.models import Recipe, RecipeRun
 from apps.recipes.services.runner import RecipeRunner, RecipeRunnerError, VariableValidationError
 
 from .serializers import (
+    PublicRecipeRunSerializer,
+    PublicRecipeSerializer,
     RecipeDetailSerializer,
     RecipeListSerializer,
     RecipeRunSerializer,
+    RecipeRunUpdateSerializer,
     RecipeUpdateSerializer,
     RunRecipeSerializer,
 )
@@ -209,4 +212,77 @@ class RecipeRunHistoryView(RecipePermissionMixin, APIView):
         runs = RecipeRun.objects.filter(recipe=recipe).order_by("-created_at")
 
         serializer = RecipeRunSerializer(runs, many=True)
+        return Response(serializer.data)
+
+
+class RecipeRunUpdateView(RecipePermissionMixin, APIView):
+    """
+    Update sharing settings on a recipe run.
+
+    PATCH /api/projects/{project_id}/recipes/{recipe_id}/runs/{run_id}/
+        Toggle is_shared / is_public on a run.
+        Requires edit permission (analyst/admin).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, project_id, recipe_id, run_id):
+        project = self.get_project(project_id)
+
+        can_edit, error_response = self.check_edit_permission(request, project)
+        if not can_edit:
+            return error_response
+
+        recipe = self.get_recipe(project, recipe_id)
+        run = get_object_or_404(RecipeRun, pk=run_id, recipe=recipe)
+
+        serializer = RecipeRunUpdateSerializer(run, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer.save()
+
+        response_serializer = RecipeRunSerializer(run)
+        return Response(response_serializer.data)
+
+
+class PublicRecipeView(APIView):
+    """
+    Public access to a shared recipe.
+
+    GET /api/recipes/shared/{share_token}/
+        No authentication required.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, share_token):
+        recipe = get_object_or_404(
+            Recipe.objects.prefetch_related("steps"),
+            share_token=share_token,
+            is_public=True,
+        )
+        serializer = PublicRecipeSerializer(recipe)
+        return Response(serializer.data)
+
+
+class PublicRecipeRunView(APIView):
+    """
+    Public access to a shared recipe run.
+
+    GET /api/recipes/runs/shared/{share_token}/
+        No authentication required.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request, share_token):
+        run = get_object_or_404(
+            RecipeRun,
+            share_token=share_token,
+            is_public=True,
+        )
+        serializer = PublicRecipeRunSerializer(run)
         return Response(serializer.data)

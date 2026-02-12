@@ -7,6 +7,7 @@ from django.contrib import admin
 from django.urls import include, path
 
 from apps.projects.views import health_check
+from apps.recipes.api.views import PublicRecipeRunView, PublicRecipeView
 
 urlpatterns = [
     path("health/", health_check, name="health_check"),
@@ -22,6 +23,17 @@ urlpatterns = [
         include("apps.recipes.urls"),
     ),
     path("api/datasources/", include("apps.datasources.urls")),
+    # Public share links (no auth required)
+    path(
+        "api/recipes/shared/<str:share_token>/",
+        PublicRecipeView.as_view(),
+        name="public-recipe",
+    ),
+    path(
+        "api/recipes/runs/shared/<str:share_token>/",
+        PublicRecipeRunView.as_view(),
+        name="public-recipe-run",
+    ),
 ]
 
 if settings.DEBUG:

@@ -1,4 +1,4 @@
-import { Play, Pencil, Trash2, Clock, Hash, Variable } from "lucide-react"
+import { Play, Pencil, Trash2, Clock, Hash, Variable, Users, Globe } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -40,9 +40,31 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
           <CardHeader className="pb-2">
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
-                <h3 className="font-medium truncate" title={recipe.name}>
-                  {recipe.name}
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-medium truncate" title={recipe.name}>
+                    {recipe.name}
+                  </h3>
+                  {recipe.is_shared && (
+                    <Badge
+                      variant="secondary"
+                      className="shrink-0 text-xs gap-1"
+                      data-testid={`recipe-badge-shared-${recipe.id}`}
+                    >
+                      <Users className="h-3 w-3" />
+                      Shared
+                    </Badge>
+                  )}
+                  {recipe.is_public && (
+                    <Badge
+                      variant="secondary"
+                      className="shrink-0 text-xs gap-1"
+                      data-testid={`recipe-badge-public-${recipe.id}`}
+                    >
+                      <Globe className="h-3 w-3" />
+                      Public
+                    </Badge>
+                  )}
+                </div>
                 {recipe.description && (
                   <p className="text-sm text-muted-foreground line-clamp-2 mt-1">
                     {recipe.description}

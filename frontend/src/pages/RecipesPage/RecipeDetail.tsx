@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react"
-import { ArrowLeft, Save, Play, Loader2, GripVertical, Clock, CheckCircle, XCircle, AlertCircle } from "lucide-react"
+import { useState, useEffect, useCallback } from "react"
+import { ArrowLeft, Save, Play, Loader2, GripVertical, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Link, Users, Globe } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -20,6 +20,10 @@ interface RecipeDetailProps {
   onBack: () => void
   onSave: (data: Partial<Recipe>) => Promise<void>
   onRun: () => void
+  onUpdateRun: (
+    runId: string,
+    data: { is_shared?: boolean; is_public?: boolean },
+  ) => Promise<void>
 }
 
 const variableTypeBadgeStyles: Record<string, string> = {
@@ -57,7 +61,37 @@ function getStatusIcon(status: RecipeRun["status"]) {
   }
 }
 
-export function RecipeDetail({ recipe, runs, onBack, onSave, onRun }: RecipeDetailProps) {
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = useCallback(async () => {
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [text])
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={handleCopy}
+      data-testid="copy-share-link"
+    >
+      {copied ? (
+        <Check className="mr-1 h-3 w-3" />
+      ) : (
+        <Copy className="mr-1 h-3 w-3" />
+      )}
+      {copied ? "Copied" : "Copy"}
+    </Button>
+  )
+}
+
+function getPublicUrl(path: string, token: string): string {
+  return `${window.location.origin}${path}${token}/`
+}
+
+export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun }: RecipeDetailProps) {
   const [name, setName] = useState(recipe.name)
   const [description, setDescription] = useState(recipe.description)
   const [steps, setSteps] = useState<RecipeStep[]>(recipe.steps || [])
@@ -70,6 +104,13 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun }: RecipeDeta
     setSteps(recipe.steps || [])
     setHasChanges(false)
   }, [recipe])
+
+  const handleSharingChange = useCallback(
+    async (field: "is_shared" | "is_public", value: boolean) => {
+      await onSave({ [field]: value })
+    },
+    [onSave],
+  )
 
   const handleNameChange = (value: string) => {
     setName(value)
@@ -159,6 +200,71 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun }: RecipeDeta
               rows={2}
             />
           </div>
+        </CardContent>
+      </Card>
+
+      {/* Sharing */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Sharing</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <label
+            className="flex items-start gap-3 cursor-pointer"
+            data-testid="recipe-sharing-project"
+          >
+            <input
+              type="checkbox"
+              checked={recipe.is_shared}
+              onChange={(e) => handleSharingChange("is_shared", e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300"
+            />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <Users className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">Share with project</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                All project members can view and run this recipe
+              </p>
+            </div>
+          </label>
+
+          <label
+            className="flex items-start gap-3 cursor-pointer"
+            data-testid="recipe-sharing-public"
+          >
+            <input
+              type="checkbox"
+              checked={recipe.is_public}
+              onChange={(e) => handleSharingChange("is_public", e.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-gray-300"
+            />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <Globe className="h-4 w-4 text-muted-foreground" />
+                <span className="text-sm font-medium">Public link</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Anyone with the link can view this recipe without signing in
+              </p>
+            </div>
+          </label>
+
+          {recipe.is_public && recipe.share_token && (
+            <div
+              className="flex items-center gap-2 rounded-md border bg-muted/50 p-2"
+              data-testid="recipe-share-url"
+            >
+              <Link className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <code className="flex-1 truncate text-xs">
+                {getPublicUrl("/api/recipes/shared/", recipe.share_token)}
+              </code>
+              <CopyButton
+                text={getPublicUrl("/api/recipes/shared/", recipe.share_token)}
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -268,37 +374,76 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun }: RecipeDeta
                     {runs.map((run) => (
                       <div
                         key={run.id}
-                        className="flex items-center justify-between rounded-lg border p-3"
+                        className="rounded-lg border p-3 space-y-2"
+                        data-testid={`recipe-run-${run.id}`}
                       >
-                        <div className="flex items-center gap-3">
-                          {getStatusIcon(run.status)}
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-medium capitalize">
-                                {run.status}
-                              </span>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            {getStatusIcon(run.status)}
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium capitalize">
+                                  {run.status}
+                                </span>
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                Started: {formatDateTime(run.started_at)}
+                              </p>
                             </div>
-                            <p className="text-xs text-muted-foreground">
-                              Started: {formatDateTime(run.started_at)}
-                            </p>
+                          </div>
+                          <div className="text-right">
+                            {run.variable_values && Object.keys(run.variable_values).length > 0 && (
+                              <div className="flex flex-wrap gap-1 justify-end">
+                                {Object.entries(run.variable_values)
+                                  .slice(0, 3)
+                                  .map(([key, value]) => (
+                                    <Badge key={key} variant="outline" className="text-xs">
+                                      {key}: {String(value).slice(0, 20)}
+                                    </Badge>
+                                  ))}
+                              </div>
+                            )}
+                            {run.completed_at && (
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Completed: {formatDateTime(run.completed_at)}
+                              </p>
+                            )}
                           </div>
                         </div>
-                        <div className="text-right">
-                          {run.variable_values && Object.keys(run.variable_values).length > 0 && (
-                            <div className="flex flex-wrap gap-1 justify-end">
-                              {Object.entries(run.variable_values)
-                                .slice(0, 3)
-                                .map(([key, value]) => (
-                                  <Badge key={key} variant="outline" className="text-xs">
-                                    {key}: {String(value).slice(0, 20)}
-                                  </Badge>
-                                ))}
-                            </div>
-                          )}
-                          {run.completed_at && (
-                            <p className="text-xs text-muted-foreground mt-1">
-                              Completed: {formatDateTime(run.completed_at)}
-                            </p>
+
+                        {/* Run sharing controls */}
+                        <div className="flex items-center gap-4 border-t pt-2">
+                          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                            <input
+                              type="checkbox"
+                              checked={run.is_shared}
+                              onChange={(e) =>
+                                onUpdateRun(run.id, { is_shared: e.target.checked })
+                              }
+                              className="h-3.5 w-3.5 rounded border-gray-300"
+                            />
+                            <Users className="h-3 w-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">Project</span>
+                          </label>
+                          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                            <input
+                              type="checkbox"
+                              checked={run.is_public}
+                              onChange={(e) =>
+                                onUpdateRun(run.id, { is_public: e.target.checked })
+                              }
+                              className="h-3.5 w-3.5 rounded border-gray-300"
+                            />
+                            <Globe className="h-3 w-3 text-muted-foreground" />
+                            <span className="text-muted-foreground">Public</span>
+                          </label>
+                          {run.is_public && run.share_token && (
+                            <CopyButton
+                              text={getPublicUrl(
+                                "/api/recipes/runs/shared/",
+                                run.share_token,
+                              )}
+                            />
                           )}
                         </div>
                       </div>
