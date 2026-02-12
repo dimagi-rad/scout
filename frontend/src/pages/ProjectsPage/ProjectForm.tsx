@@ -30,14 +30,13 @@ interface FormState {
   db_host: string
   db_port: number
   db_name: string
+  db_schema: string
   db_user: string
   db_password: string
-  allowed_schemas: string
   allowed_tables: string
-  blocked_tables: string
+  excluded_tables: string
   system_prompt: string
   llm_model: string
-  llm_temperature: number
 }
 
 const initialFormState: FormState = {
@@ -47,14 +46,13 @@ const initialFormState: FormState = {
   db_host: "",
   db_port: 5432,
   db_name: "",
+  db_schema: "public",
   db_user: "",
   db_password: "",
-  allowed_schemas: "",
   allowed_tables: "",
-  blocked_tables: "",
+  excluded_tables: "",
   system_prompt: "",
-  llm_model: "claude-sonnet-4-20250514",
-  llm_temperature: 0,
+  llm_model: "claude-sonnet-4-5-20250929",
 }
 
 export function ProjectForm() {
@@ -86,14 +84,13 @@ export function ProjectForm() {
             db_host: project.db_host,
             db_port: project.db_port,
             db_name: project.db_name,
+            db_schema: project.db_schema,
             db_user: project.db_user,
             db_password: "",  // Password is write-only, never returned from API
-            allowed_schemas: project.allowed_schemas.join(", "),
-            allowed_tables: project.allowed_tables.join(", "),
-            blocked_tables: project.blocked_tables.join(", "),
+            allowed_tables: (project.allowed_tables || []).join(", "),
+            excluded_tables: (project.excluded_tables || []).join(", "),
             system_prompt: project.system_prompt,
             llm_model: project.llm_model,
-            llm_temperature: project.llm_temperature,
           })
         })
         .catch(() => {
@@ -160,14 +157,13 @@ export function ProjectForm() {
       db_host: form.db_host,
       db_port: form.db_port,
       db_name: form.db_name,
+      db_schema: form.db_schema,
       db_user: form.db_user,
       db_password: form.db_password || undefined,
-      allowed_schemas: parseCommaSeparated(form.allowed_schemas),
       allowed_tables: parseCommaSeparated(form.allowed_tables),
-      blocked_tables: parseCommaSeparated(form.blocked_tables),
+      excluded_tables: parseCommaSeparated(form.excluded_tables),
       system_prompt: form.system_prompt,
       llm_model: form.llm_model,
-      llm_temperature: form.llm_temperature,
     }
 
     try {
@@ -400,17 +396,16 @@ export function ProjectForm() {
                 <AccordionContent>
                   <div className="space-y-4">
                     <div className="space-y-2">
-                      <Label htmlFor="allowed_schemas">Allowed Schemas</Label>
+                      <Label htmlFor="db_schema">Schema</Label>
                       <Input
-                        id="allowed_schemas"
-                        name="allowed_schemas"
-                        value={form.allowed_schemas}
+                        id="db_schema"
+                        name="db_schema"
+                        value={form.db_schema}
                         onChange={handleChange}
-                        placeholder="public, analytics"
+                        placeholder="public"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Comma-separated list of schemas to allow access (leave
-                        empty for all)
+                        Database schema to use for this project
                       </p>
                     </div>
 
@@ -430,16 +425,16 @@ export function ProjectForm() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="blocked_tables">Blocked Tables</Label>
+                      <Label htmlFor="excluded_tables">Excluded Tables</Label>
                       <Input
-                        id="blocked_tables"
-                        name="blocked_tables"
-                        value={form.blocked_tables}
+                        id="excluded_tables"
+                        name="excluded_tables"
+                        value={form.excluded_tables}
                         onChange={handleChange}
                         placeholder="sensitive_data, audit_logs"
                       />
                       <p className="text-xs text-muted-foreground">
-                        Comma-separated list of tables to block access
+                        Comma-separated list of tables to exclude from access
                       </p>
                     </div>
                   </div>
@@ -466,31 +461,15 @@ export function ProjectForm() {
                       </p>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="llm_model">LLM Model</Label>
-                        <Input
-                          id="llm_model"
-                          name="llm_model"
-                          value={form.llm_model}
-                          onChange={handleChange}
-                          placeholder="claude-sonnet-4-20250514"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="llm_temperature">Temperature</Label>
-                        <Input
-                          id="llm_temperature"
-                          name="llm_temperature"
-                          type="number"
-                          min="0"
-                          max="2"
-                          step="0.1"
-                          value={form.llm_temperature}
-                          onChange={handleChange}
-                        />
-                      </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="llm_model">LLM Model</Label>
+                      <Input
+                        id="llm_model"
+                        name="llm_model"
+                        value={form.llm_model}
+                        onChange={handleChange}
+                        placeholder="claude-sonnet-4-5-20250929"
+                      />
                     </div>
                   </div>
                 </AccordionContent>

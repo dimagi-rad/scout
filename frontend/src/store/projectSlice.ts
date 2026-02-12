@@ -17,14 +17,15 @@ export interface ProjectDetail extends Project {
   db_host: string
   db_port: number
   db_name: string
+  db_schema: string
   db_user: string
   // db_password is write-only, never returned from API
-  allowed_schemas: string[]
   allowed_tables: string[]
-  blocked_tables: string[]
+  excluded_tables: string[]
   system_prompt: string
+  max_rows_per_query: number
+  max_query_timeout_seconds: number
   llm_model: string
-  llm_temperature: number
   is_active: boolean
 }
 

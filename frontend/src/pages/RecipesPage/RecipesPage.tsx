@@ -32,6 +32,7 @@ export function RecipesPage() {
     deleteRecipe,
     runRecipe,
     fetchRuns,
+    updateRecipeRun,
   } = useAppStore((s) => s.recipeActions)
 
   const [runnerOpen, setRunnerOpen] = useState(false)
@@ -64,10 +65,21 @@ export function RecipesPage() {
     navigate("/recipes")
   }, [navigate])
 
-  const handleRun = useCallback((recipe: Recipe) => {
-    setRunnerRecipe(recipe)
-    setRunnerOpen(true)
-  }, [])
+  const handleRun = useCallback(
+    async (recipe: Recipe) => {
+      if (!activeProjectId) return
+      // Fetch full recipe details (list view doesn't include variables/steps)
+      try {
+        const full = await fetchRecipe(activeProjectId, recipe.id)
+        setRunnerRecipe(full)
+        setRunnerOpen(true)
+      } catch {
+        setRunnerRecipe(recipe)
+        setRunnerOpen(true)
+      }
+    },
+    [activeProjectId, fetchRecipe]
+  )
 
   const handleRunFromDetail = useCallback(() => {
     if (currentRecipe) {
@@ -100,6 +112,14 @@ export function RecipesPage() {
     [activeProjectId, currentRecipe, updateRecipe]
   )
 
+  const handleUpdateRun = useCallback(
+    async (runId: string, data: { is_shared?: boolean; is_public?: boolean }) => {
+      if (!activeProjectId || !currentRecipe) return
+      await updateRecipeRun(activeProjectId, currentRecipe.id, runId, data)
+    },
+    [activeProjectId, currentRecipe, updateRecipeRun]
+  )
+
   const handleExecuteRun = useCallback(
     async (variables: Record<string, string>) => {
       if (!activeProjectId || !runnerRecipe) {
@@ -130,6 +150,7 @@ export function RecipesPage() {
           onBack={handleBack}
           onSave={handleSave}
           onRun={handleRunFromDetail}
+          onUpdateRun={handleUpdateRun}
         />
 
         <RecipeRunner
