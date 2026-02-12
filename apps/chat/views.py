@@ -24,6 +24,7 @@ from django.views.decorators.http import require_GET, require_POST
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.memory.checkpointer import get_database_url
+from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.projects.models import Project, ProjectMembership
 
@@ -182,6 +183,50 @@ def _get_membership(user, project_id):
         return None
 
 
+@sync_to_async
+def _upsert_thread(thread_id, project_id, user, title):
+    """Create or update a Thread record.
+
+    auto_now on updated_at handles the timestamp on every save, so we only
+    need to pass project/user in defaults and title in create_defaults.
+    """
+    Thread.objects.update_or_create(
+        id=thread_id,
+        defaults={"project_id": project_id, "user": user},
+        create_defaults={
+            "project_id": project_id,
+            "user": user,
+            "title": title[:200],
+        },
+    )
+
+
+@sync_to_async
+def _get_thread(thread_id, user):
+    """Load a thread ensuring ownership."""
+    try:
+        return Thread.objects.get(id=thread_id, user=user)
+    except Thread.DoesNotExist:
+        return None
+
+
+@sync_to_async
+def _list_threads(project_id, user):
+    """Return recent threads for a project/user."""
+    qs = Thread.objects.filter(
+        project_id=project_id, user=user
+    ).order_by("-updated_at")[:50]
+    return [
+        {
+            "id": str(t.id),
+            "title": t.title,
+            "created_at": t.created_at.isoformat(),
+            "updated_at": t.updated_at.isoformat(),
+        }
+        for t in qs
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Streaming chat endpoint
 # ---------------------------------------------------------------------------
@@ -243,6 +288,12 @@ async def chat_view(request):
     if not project.is_active:
         return JsonResponse({"error": "Project is inactive"}, status=403)
 
+    # Record thread metadata (fire-and-forget on error)
+    try:
+        await _upsert_thread(thread_id, project_id, user, user_content)
+    except Exception:
+        logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
+
     # Build agent (retry once with fresh checkpointer on connection errors)
     try:
         checkpointer = await _ensure_checkpointer()
@@ -289,3 +340,127 @@ async def chat_view(request):
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+# ---------------------------------------------------------------------------
+# Thread list & messages endpoints
+# ---------------------------------------------------------------------------
+
+def _langchain_messages_to_ui(lc_messages) -> list[dict]:
+    """Convert LangChain BaseMessages to AI SDK v6 UIMessage format."""
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    ui_messages: list[dict] = []
+    # Collect tool results keyed by tool_call_id for pairing
+    tool_results: dict[str, ToolMessage] = {}
+    for msg in lc_messages:
+        if isinstance(msg, ToolMessage):
+            tool_results[msg.tool_call_id] = msg
+
+    for msg in lc_messages:
+        if isinstance(msg, HumanMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            ui_messages.append({
+                "id": msg.id or uuid.uuid4().hex,
+                "role": "user",
+                "parts": [{"type": "text", "text": content}],
+            })
+        elif isinstance(msg, AIMessage):
+            parts: list[dict] = []
+
+            # Text content
+            text = ""
+            if isinstance(msg.content, str):
+                text = msg.content
+            elif isinstance(msg.content, list):
+                text = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in msg.content
+                    if not isinstance(b, dict) or b.get("type") == "text"
+                )
+            if text:
+                parts.append({"type": "text", "text": text})
+
+            # Tool calls
+            for tc in getattr(msg, "tool_calls", []) or []:
+                tool_part = {
+                    "type": f"tool-{tc['name']}",
+                    "toolCallId": tc["id"],
+                    "toolName": tc["name"],
+                    "input": tc.get("args", {}),
+                    "state": "output-available",
+                }
+                # Pair with tool result if available
+                tr = tool_results.get(tc["id"])
+                if tr:
+                    tool_part["output"] = tr.content if isinstance(tr.content, str) else str(tr.content)
+                tool_part["state"] = "output-available" if tr else "input-available"
+                parts.append(tool_part)
+
+            if parts:
+                ui_messages.append({
+                    "id": msg.id or uuid.uuid4().hex,
+                    "role": "assistant",
+                    "parts": parts,
+                })
+
+    return ui_messages
+
+
+async def thread_list_view(request):
+    """
+    GET /api/chat/threads/?project_id=X
+
+    Returns recent threads for the authenticated user in a project.
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = await _get_user_if_authenticated(request)
+    if user is None:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    project_id = request.GET.get("project_id")
+    if not project_id:
+        return JsonResponse({"error": "project_id is required"}, status=400)
+
+    membership = await _get_membership(user, project_id)
+    if membership is None:
+        return JsonResponse({"error": "Project not found or access denied"}, status=403)
+
+    threads = await _list_threads(project_id, user)
+    return JsonResponse(threads, safe=False)
+
+
+async def thread_messages_view(request, thread_id):
+    """
+    GET /api/chat/threads/<thread_id>/messages/
+
+    Loads conversation from the checkpointer and returns UIMessage format.
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = await _get_user_if_authenticated(request)
+    if user is None:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    thread = await _get_thread(thread_id, user)
+    if thread is None:
+        return JsonResponse([], safe=False)
+
+    try:
+        checkpointer = await _ensure_checkpointer()
+        config = {"configurable": {"thread_id": str(thread_id)}}
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
+        return JsonResponse([], safe=False)
+
+    if checkpoint_tuple is None:
+        return JsonResponse([], safe=False)
+
+    checkpoint = checkpoint_tuple.checkpoint
+    lc_messages = (checkpoint.get("channel_values") or {}).get("messages", [])
+    ui_messages = _langchain_messages_to_ui(lc_messages)
+    return JsonResponse(ui_messages, safe=False)

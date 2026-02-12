@@ -1,3 +1,4 @@
+import { useEffect } from "react"
 import { Link } from "react-router-dom"
 import {
   MessageSquare,
@@ -7,6 +8,7 @@ import {
   Cloud,
   Settings,
   LogOut,
+  Plus,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { NavItem } from "./NavItem"
@@ -25,8 +27,18 @@ export function Sidebar() {
   const activeProjectId = useAppStore((s) => s.activeProjectId)
   const setActiveProject = useAppStore((s) => s.projectActions.setActiveProject)
   const logout = useAppStore((s) => s.authActions.logout)
+  const threadId = useAppStore((s) => s.threadId)
+  const threads = useAppStore((s) => s.threads)
+  const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
+  const newThread = useAppStore((s) => s.uiActions.newThread)
+  const selectThread = useAppStore((s) => s.uiActions.selectThread)
 
-  const activeProject = projects.find((p) => p.id === activeProjectId)
+  // Fetch threads when project changes
+  useEffect(() => {
+    if (activeProjectId) {
+      fetchThreads(activeProjectId)
+    }
+  }, [activeProjectId, fetchThreads])
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
@@ -67,13 +79,47 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 space-y-1 p-4">
+      <nav className="space-y-1 p-4">
         <NavItem to="/" icon={MessageSquare} label="Chat" />
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
         <NavItem to="/datasources" icon={Cloud} label="Data Sources" />
       </nav>
+
+      {/* Thread History */}
+      <div className="flex flex-1 flex-col border-t overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2">
+          <span className="text-xs font-medium text-muted-foreground">
+            Chat History
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6"
+            onClick={newThread}
+            data-testid="sidebar-new-chat"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-2 pb-2">
+          {threads.map((thread) => (
+            <button
+              key={thread.id}
+              onClick={() => selectThread(thread.id)}
+              data-testid={`sidebar-thread-${thread.id}`}
+              className={`w-full rounded-md px-3 py-1.5 text-left text-sm truncate transition-colors ${
+                thread.id === threadId
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+              }`}
+            >
+              {thread.title}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* User Section */}
       <div className="border-t p-4">
@@ -85,6 +131,7 @@ export function Sidebar() {
           size="sm"
           className="w-full justify-start"
           onClick={logout}
+          data-testid="logout-btn"
         >
           <LogOut className="mr-2 h-4 w-4" />
           Logout
