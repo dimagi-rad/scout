@@ -4,8 +4,8 @@ A project in Scout represents a single database scope. Each project has its own 
 
 ## Create a project
 
-1. Open the Django admin at `http://localhost:8000/admin/`.
-2. Navigate to **Projects > Projects** and click **Add Project**.
+1. Open Scout at `http://localhost:5173` and log in.
+2. Click **Projects** in the sidebar, then click **New Project**.
 3. Fill in the required fields:
 
 | Field | Description |
@@ -46,17 +46,20 @@ This introspects the target database and stores the schema information on the pr
 
 ## Add team members
 
-1. In the Django admin, navigate to **Projects > Project memberships**.
-2. Click **Add Project Membership**.
-3. Select the user, the project, and a role:
+Add members to a project via the API:
+
+```bash
+# Add a member with a role (viewer, analyst, or admin)
+curl -X POST http://localhost:8000/api/projects/<project-id>/members/ \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "role": "analyst"}'
+```
 
 | Role | Permissions |
 |------|-------------|
 | **Viewer** | Chat with the agent and view results |
 | **Analyst** | Chat, export data, create saved queries |
 | **Admin** | Full project configuration access |
-
-4. Click **Save**.
 
 ## Next step
 

@@ -25,7 +25,7 @@ Schema names are validated to prevent SQL injection -- they must match the patte
 
 ## Configuration
 
-Configure table access in the Django admin under the project's settings.
+Configure table access in the project edit form under the **Access Control** section. Navigate to **Projects** in the sidebar, click a project, and expand **Access Control**.
 
 ### Allow only specific tables
 

@@ -4,7 +4,7 @@ A project is the top-level organizational unit in Scout. Each project connects t
 
 ## Creating a project
 
-Projects are created through the Django admin at `/admin/projects/project/add/`.
+Projects are created through the Scout UI. Click **Projects** in the sidebar and then **New Project**.
 
 ### Required fields
 

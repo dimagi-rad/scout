@@ -61,7 +61,7 @@ The agent will review the conversation, extract the key steps, identify values t
 
 Alternatively, you can ask the agent in plain language to save a recipe -- it has access to the `save_as_recipe` tool.
 
-Recipes can also be created via the Django admin.
+Recipes can also be created and managed from the **Recipes** page in the sidebar.
 
 ## Running a recipe
 

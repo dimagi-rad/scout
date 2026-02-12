@@ -66,7 +66,7 @@ Learnings can be **promoted** to business rules or verified queries by an admin 
 
 ## Managing knowledge
 
-All knowledge types are managed through the Django admin. Navigate to the relevant section under the knowledge app.
+All knowledge types are managed through the **Knowledge** page in the sidebar. Use the type filter to switch between metrics, business rules, verified queries, and agent learnings.
 
 ### Evaluation
 
