@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react"
+import Markdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -177,8 +179,8 @@ export function PublicRecipeRunPage() {
                       {step.response && (
                         <div className="rounded-md border p-3">
                           <p className="text-xs font-medium text-muted-foreground mb-1">Response</p>
-                          <div className="prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap text-sm">
-                            {step.response}
+                          <div className="prose prose-sm dark:prose-invert max-w-none">
+                            <Markdown remarkPlugins={[remarkGfm]}>{step.response}</Markdown>
                           </div>
                         </div>
                       )}
