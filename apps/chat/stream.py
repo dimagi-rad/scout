@@ -23,51 +23,12 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import uuid
 from typing import Any, AsyncGenerator
 
 from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
-
-# UUID pattern for artifact detection
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-
-_ARTIFACT_INDICATORS = [
-    "artifact_id",
-    "artifact created",
-    "created artifact",
-    "chart saved",
-    "visualization created",
-]
-
-
-def _is_artifact_result(content: str) -> bool:
-    """Check if content appears to be an artifact creation result."""
-    if not content:
-        return False
-    if not _UUID_RE.search(content):
-        return False
-    content_lower = content.lower()
-    return any(ind in content_lower for ind in _ARTIFACT_INDICATORS)
-
-
-def _extract_artifact_from_result(content: str) -> dict | None:
-    """Extract artifact information from a tool result."""
-    try:
-        if "{" in content:
-            json_match = re.search(r"\{[^{}]*\}", content)
-            if json_match:
-                data = json.loads(json_match.group())
-                if "artifact_id" in data:
-                    return data
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    match = _UUID_RE.search(content)
-    if match:
-        return {"artifact_id": match.group(0)}
-    return None
 
 
 def _sse(chunk: dict) -> str:
@@ -147,26 +108,17 @@ async def langgraph_to_ui_stream(
                     tool_name = event.get("name", "unknown")
                     tool_call_id = run_id or uuid.uuid4().hex
 
-                    if _is_artifact_result(content):
-                        artifact_info = _extract_artifact_from_result(content)
-                        if artifact_info:
-                            yield _sse({
-                                "type": "data-artifact",
-                                "id": artifact_info["artifact_id"],
-                                "data": artifact_info,
-                            })
-                    else:
-                        yield _sse({
-                            "type": "tool-input-available",
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "input": {},
-                        })
-                        yield _sse({
-                            "type": "tool-output-available",
-                            "toolCallId": tool_call_id,
-                            "output": content[:2000],
-                        })
+                    yield _sse({
+                        "type": "tool-input-available",
+                        "toolCallId": tool_call_id,
+                        "toolName": tool_name,
+                        "input": {},
+                    })
+                    yield _sse({
+                        "type": "tool-output-available",
+                        "toolCallId": tool_call_id,
+                        "output": content[:2000],
+                    })
 
     except Exception:
         logger.exception("Error during agent streaming")
