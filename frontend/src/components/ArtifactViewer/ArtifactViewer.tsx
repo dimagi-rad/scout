@@ -7,7 +7,7 @@ export function ArtifactViewer({ artifactId }: ArtifactViewerProps) {
     <iframe
       src={`/api/artifacts/${artifactId}/sandbox/`}
       className="w-full h-96 rounded-lg border border-border"
-      sandbox="allow-scripts allow-same-origin"
+      sandbox="allow-scripts"
       loading="lazy"
       title="Artifact"
     />

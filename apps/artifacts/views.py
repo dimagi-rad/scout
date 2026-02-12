@@ -4,6 +4,7 @@ Artifact views for Scout data agent platform.
 Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, and serving shared artifacts.
 """
+import json
 import secrets
 from typing import Any
 
@@ -33,7 +34,7 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src 'self';"
+        "connect-src 'none';"
     )
 
 
@@ -180,6 +181,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Artifact data injected by server -->
+    <script id="artifact-data" type="application/json" nonce="{{CSP_NONCE}}">{{ARTIFACT_DATA}}</script>
+
     <script nonce="{{CSP_NONCE}}">
         // Artifact rendering system
         const ArtifactRenderer = {
@@ -188,31 +192,17 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
             init() {
                 this.container = document.getElementById('artifact-container');
-                // Extract artifact ID from the URL path: /api/artifacts/<uuid>/sandbox/
-                const match = window.location.pathname.match(
-                    /\\/api\\/artifacts\\/([0-9a-f-]+)\\/sandbox/i
-                );
-                if (match) {
-                    this.loadArtifact(match[1]);
-                } else {
-                    this.showError('Initialization Error', 'Could not determine artifact ID from URL.');
-                }
-            },
-
-            async loadArtifact(artifactId) {
-                try {
-                    const resp = await fetch('/api/artifacts/' + artifactId + '/data/', {
-                        credentials: 'include'
-                    });
-                    if (!resp.ok) {
-                        const text = await resp.text();
-                        this.showError('Failed to load artifact', text || resp.statusText);
-                        return;
+                // Read artifact data embedded in the page by the server
+                const dataEl = document.getElementById('artifact-data');
+                if (dataEl) {
+                    try {
+                        const artifact = JSON.parse(dataEl.textContent);
+                        this.render(artifact);
+                    } catch (error) {
+                        this.showError('Parse Error', 'Failed to parse embedded artifact data: ' + error.message);
                     }
-                    const artifact = await resp.json();
-                    this.render(artifact);
-                } catch (error) {
-                    this.showError('Network Error', error.message);
+                } else {
+                    this.showError('Initialization Error', 'No artifact data found in page.');
                 }
             },
 
@@ -536,8 +526,21 @@ class ArtifactSandboxView(View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
-        # Inject the nonce into the template
+        # Serialize artifact data for embedding in the template
+        artifact_json = json.dumps({
+            "id": str(artifact.id),
+            "title": artifact.title,
+            "type": artifact.artifact_type,
+            "code": artifact.code,
+            "data": artifact.data,
+            "version": artifact.version,
+        })
+        # Escape </script> in JSON to prevent breaking out of the script tag
+        artifact_json = artifact_json.replace("</", "<\\/")
+
+        # Inject the nonce and artifact data into the template
         html_content = SANDBOX_HTML_TEMPLATE.replace('{{CSP_NONCE}}', csp_nonce)
+        html_content = html_content.replace('{{ARTIFACT_DATA}}', artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
