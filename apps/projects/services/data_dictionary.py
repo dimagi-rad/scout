@@ -370,11 +370,16 @@ class DataDictionaryGenerator:
             return "No data dictionary available. Please generate one first."
 
         lines = []
-        lines.append(f"## Database Schema: {dd['schema']}")
-        lines.append(f"Generated: {dd['generated_at']}")
+        schema_name = dd.get("schema", self.schema)
+        generated_at = dd.get("generated_at", "")
+        if not generated_at and self.project.data_dictionary_generated_at:
+            generated_at = self.project.data_dictionary_generated_at.isoformat()
+        lines.append(f"## Database Schema: {schema_name}")
+        if generated_at:
+            lines.append(f"Generated: {generated_at}")
         lines.append("")
 
-        tables = dd["tables"]
+        tables = dd.get("tables", {})
 
         if dd.get("enums"):
             lines.append("### Enum Types")
@@ -386,9 +391,12 @@ class DataDictionaryGenerator:
             # Full inline detail
             for tname, tinfo in tables.items():
                 lines.append(f"### {tname}")
-                if tinfo["comment"]:
-                    lines.append(f"_{tinfo['comment']}_")
-                lines.append(f"Approximate rows: {tinfo['row_count']:,}")
+                comment = tinfo.get("comment", "")
+                if comment:
+                    lines.append(f"_{comment}_")
+                row_count = tinfo.get("row_count")
+                if row_count is not None:
+                    lines.append(f"Approximate rows: {row_count:,}")
                 lines.append("")
                 lines.append(
                     "| Column | Type | Nullable | PK | Description | Sample Values |"
@@ -396,21 +404,22 @@ class DataDictionaryGenerator:
                 lines.append(
                     "|--------|------|----------|----|-------------|---------------|"
                 )
-                for col in tinfo["columns"]:
-                    pk = "✓" if col["is_primary_key"] else ""
-                    nullable = "✓" if col["nullable"] else ""
+                for col in tinfo.get("columns", []):
+                    pk = "✓" if col.get("is_primary_key") or col.get("primary_key") else ""
+                    nullable = "✓" if col.get("nullable") else ""
                     samples = (
                         ", ".join(col["sample_values"][:3])
                         if col.get("sample_values")
                         else ""
                     )
-                    comment = col.get("comment", "")
+                    col_comment = col.get("comment", "")
+                    col_type = col.get("type") or col.get("data_type", "")
                     lines.append(
-                        f"| {col['name']} | {col['type']} | {nullable} | {pk} | {comment} | {samples} |"
+                        f"| {col['name']} | {col_type} | {nullable} | {pk} | {col_comment} | {samples} |"
                     )
                 lines.append("")
 
-                if tinfo["foreign_keys"]:
+                if tinfo.get("foreign_keys"):
                     lines.append("**Relationships:**")
                     for fk in tinfo["foreign_keys"]:
                         lines.append(
@@ -424,11 +433,18 @@ class DataDictionaryGenerator:
             )
             lines.append("")
             for tname, tinfo in tables.items():
-                comment = f" — {tinfo['comment']}" if tinfo["comment"] else ""
-                col_count = len(tinfo["columns"])
-                lines.append(
-                    f"- **{tname}** ({tinfo['row_count']:,} rows, {col_count} columns){comment}"
-                )
+                comment = tinfo.get("comment", "")
+                comment_str = f" — {comment}" if comment else ""
+                col_count = len(tinfo.get("columns", []))
+                row_count = tinfo.get("row_count")
+                if row_count is not None:
+                    lines.append(
+                        f"- **{tname}** ({row_count:,} rows, {col_count} columns){comment_str}"
+                    )
+                else:
+                    lines.append(
+                        f"- **{tname}** ({col_count} columns){comment_str}"
+                    )
             lines.append("")
 
         return "\n".join(lines)
