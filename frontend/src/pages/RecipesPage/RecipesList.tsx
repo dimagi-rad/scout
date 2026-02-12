@@ -1,4 +1,4 @@
-import { Play, Eye, Trash2, Clock, Variable, Users, Globe } from "lucide-react"
+import { Play, Eye, Trash2, Clock, Variable, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -52,16 +52,6 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
                     >
                       <Users className="h-3 w-3" />
                       Shared
-                    </Badge>
-                  )}
-                  {recipe.is_public && (
-                    <Badge
-                      variant="secondary"
-                      className="shrink-0 text-xs gap-1"
-                      data-testid={`recipe-badge-public-${recipe.id}`}
-                    >
-                      <Globe className="h-3 w-3" />
-                      Public
                     </Badge>
                   )}
                 </div>

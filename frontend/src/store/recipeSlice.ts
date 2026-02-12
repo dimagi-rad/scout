@@ -16,8 +16,6 @@ export interface Recipe {
   prompt: string
   variables: RecipeVariable[]
   is_shared: boolean
-  is_public: boolean
-  share_token: string | null
   variable_count?: number
   last_run_at?: string
   created_at: string

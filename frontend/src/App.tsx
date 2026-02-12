@@ -4,12 +4,10 @@ import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { Skeleton } from "@/components/ui/skeleton"
 import { router } from "@/router"
-import { PublicRecipePage } from "@/pages/PublicRecipePage"
 import { PublicRecipeRunPage } from "@/pages/PublicRecipeRunPage"
 
 function getPublicPageComponent(): React.ReactNode | null {
   const path = window.location.pathname
-  if (/^\/shared\/recipes\/[^/]+\/?$/.test(path)) return <PublicRecipePage />
   if (/^\/shared\/runs\/[^/]+\/?$/.test(path)) return <PublicRecipeRunPage />
   return null
 }
@@ -17,7 +15,7 @@ function getPublicPageComponent(): React.ReactNode | null {
 export default function App() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
-  const isPublicPage = /^\/shared\/(recipes|runs)\/[^/]+\/?$/.test(window.location.pathname)
+  const isPublicPage = /^\/shared\/runs\/[^/]+\/?$/.test(window.location.pathname)
 
   useEffect(() => {
     if (!isPublicPage) {

@@ -19,7 +19,6 @@ from apps.recipes.services.runner import RecipeRunner, RecipeRunnerError, Variab
 
 from .serializers import (
     PublicRecipeRunSerializer,
-    PublicRecipeSerializer,
     RecipeDetailSerializer,
     RecipeListSerializer,
     RecipeRunSerializer,
@@ -195,23 +194,6 @@ class RecipeRunUpdateView(RecipePermissionMixin, APIView):
 
         response_serializer = RecipeRunSerializer(run)
         return Response(response_serializer.data)
-
-
-class PublicRecipeView(APIView):
-    """Public access to a shared recipe."""
-
-    permission_classes = [AllowAny]
-    authentication_classes = []
-    renderer_classes = [JSONRenderer]
-
-    def get(self, request, share_token):
-        recipe = get_object_or_404(
-            Recipe,
-            share_token=share_token,
-            is_public=True,
-        )
-        serializer = PublicRecipeSerializer(recipe)
-        return Response(serializer.data)
 
 
 class PublicRecipeRunView(APIView):
