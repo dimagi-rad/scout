@@ -142,6 +142,13 @@ export function RecipesPage() {
     [activeProjectId, runnerRecipe, runRecipe]
   )
 
+  const handleRunComplete = useCallback(
+    (recipeId: string, runId: string) => {
+      navigate(`/recipes/${recipeId}/runs/${runId}`)
+    },
+    [navigate],
+  )
+
   if (!activeProjectId) {
     return (
       <div className="container mx-auto py-8">
@@ -188,6 +195,7 @@ export function RecipesPage() {
           onOpenChange={setRunnerOpen}
           recipe={runnerRecipe}
           onRun={handleExecuteRun}
+          onRunComplete={handleRunComplete}
         />
 
         <AlertDialog

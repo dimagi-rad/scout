@@ -1,7 +1,5 @@
 import { useState, useEffect } from "react"
-import Markdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import { Loader2, Play, CheckCircle, XCircle, Clock, AlertCircle } from "lucide-react"
+import { Loader2, Play } from "lucide-react"
 import {
   Dialog,
   DialogContent,
@@ -21,13 +19,14 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import type { Recipe, RecipeVariable, RecipeRun, StepResult } from "@/store/recipeSlice"
+import type { Recipe, RecipeVariable, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeRunnerProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   recipe: Recipe | null
   onRun: (variables: Record<string, string>) => Promise<RecipeRun>
+  onRunComplete: (recipeId: string, runId: string) => void
 }
 
 function getDefaultValue(variable: RecipeVariable): string {
@@ -46,23 +45,9 @@ function getDefaultValue(variable: RecipeVariable): string {
   }
 }
 
-function getStatusIcon(status: RecipeRun["status"]) {
-  switch (status) {
-    case "completed":
-      return <CheckCircle className="h-5 w-5 text-green-600" />
-    case "failed":
-      return <XCircle className="h-5 w-5 text-destructive" />
-    case "running":
-      return <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-    case "pending":
-      return <Clock className="h-5 w-5 text-muted-foreground" />
-  }
-}
-
-export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunnerProps) {
+export function RecipeRunner({ open, onOpenChange, recipe, onRun, onRunComplete }: RecipeRunnerProps) {
   const [variables, setVariables] = useState<Record<string, string>>({})
   const [running, setRunning] = useState(false)
-  const [result, setResult] = useState<RecipeRun | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   // Initialize variables when recipe changes
@@ -73,7 +58,6 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunner
         initialValues[v.name] = getDefaultValue(v)
       }
       setVariables(initialValues)
-      setResult(null)
       setError(null)
     }
   }, [recipe, open])
@@ -85,23 +69,13 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunner
   const handleRun = async () => {
     if (!recipe) return
 
-    // Validate required fields
-    const missingRequired = (recipe.variables || [])
-      .filter((v) => v.required && !variables[v.name])
-      .map((v) => v.name)
-
-    if (missingRequired.length > 0) {
-      setError(`Missing required fields: ${missingRequired.join(", ")}`)
-      return
-    }
-
     setRunning(true)
     setError(null)
-    setResult(null)
 
     try {
       const run = await onRun(variables)
-      setResult(run)
+      onOpenChange(false)
+      onRunComplete(recipe.id, run.id)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to run recipe")
     } finally {
@@ -121,7 +95,7 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunner
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className={result ? "max-w-3xl max-h-[80vh] overflow-y-auto" : "max-w-lg"}>
+      <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Run Recipe: {recipe.name}</DialogTitle>
           <DialogDescription>
@@ -137,67 +111,12 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunner
           </div>
         )}
 
-        {result && (
-          <div className="rounded-md border p-4">
-            <div className="flex items-center gap-3">
-              {getStatusIcon(result.status)}
-              <div>
-                <p className="font-medium capitalize">{result.status}</p>
-                <p className="text-sm text-muted-foreground">
-                  {result.status === "running"
-                    ? "Recipe is currently running..."
-                    : result.status === "pending"
-                      ? "Recipe is queued for execution..."
-                      : result.status === "completed"
-                        ? "Recipe completed successfully!"
-                        : "Recipe execution failed."}
-                </p>
-              </div>
-            </div>
-            {result.step_results && result.step_results.length > 0 && (
-              <div className="mt-3 pt-3 border-t space-y-3">
-                {result.step_results.map((step: StepResult, index: number) => (
-                  <div key={index} className="rounded border bg-muted/30">
-                    <div className="flex items-center gap-2 px-3 py-2 border-b bg-muted/50">
-                      {step.success ? (
-                        <CheckCircle className="h-3.5 w-3.5 text-green-600 shrink-0" />
-                      ) : (
-                        <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
-                      )}
-                      <span className="text-sm font-medium">Step {step.step_order}</span>
-                      {step.tools_used.length > 0 && (
-                        <div className="flex gap-1 ml-auto">
-                          {step.tools_used.map((tool) => (
-                            <Badge key={tool} variant="secondary" className="text-xs">
-                              {tool}
-                            </Badge>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="p-3 text-sm prose prose-sm dark:prose-invert max-w-none prose-p:my-1 prose-headings:my-2 prose-table:my-2 prose-pre:my-1 overflow-x-auto">
-                      {step.error ? (
-                        <p className="text-destructive">{step.error}</p>
-                      ) : (
-                        <Markdown remarkPlugins={[remarkGfm]}>{step.response}</Markdown>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {!result && hasVariables && (
+        {hasVariables && (
           <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2">
             {recipe.variables.map((variable) => (
               <div key={variable.name} className="space-y-2">
                 <div className="flex items-center gap-2">
                   <Label htmlFor={variable.name}>{variable.name}</Label>
-                  {variable.required && (
-                    <span className="text-xs text-destructive">*</span>
-                  )}
                   <Badge variant="outline" className="text-xs">
                     {variable.type}
                   </Badge>
@@ -269,18 +188,16 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun }: RecipeRunner
 
         <DialogFooter>
           <Button variant="outline" onClick={handleClose} disabled={running}>
-            {result ? "Close" : "Cancel"}
+            Cancel
           </Button>
-          {!result && (
-            <Button onClick={handleRun} disabled={running}>
-              {running ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="mr-1 h-4 w-4" />
-              )}
-              Run Recipe
-            </Button>
-          )}
+          <Button onClick={handleRun} disabled={running}>
+            {running ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+            ) : (
+              <Play className="mr-1 h-4 w-4" />
+            )}
+            Run Recipe
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
