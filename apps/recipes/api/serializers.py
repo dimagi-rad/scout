@@ -11,8 +11,8 @@ class RecipeStepSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RecipeStep
-        fields = ["id", "order", "prompt_template", "created_at", "updated_at"]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        fields = ["id", "order", "prompt_template"]
+        read_only_fields = ["id"]
 
 
 class RecipeListSerializer(serializers.ModelSerializer):
