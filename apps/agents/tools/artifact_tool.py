@@ -282,7 +282,7 @@ def create_artifact_tools(
             ... )
         """
         # Import here to avoid circular imports
-        from apps.artifacts.models import Artifact, ArtifactVersion
+        from apps.artifacts.models import Artifact
 
         # Validate code is provided
         if not code or not code.strip():
@@ -311,49 +311,38 @@ def create_artifact_tools(
                     "message": f"Artifact with ID '{artifact_id}' not found in this project.",
                 }
 
-            # Save current state to version history
-            ArtifactVersion.objects.create(
-                artifact=original,
-                version_number=original.version,
-                code=original.code,
-                data=original.data,
-                created_by=original.created_by,
-            )
-
-            # Update the artifact
-            previous_version = original.version
-            original.code = code
-            original.version = previous_version + 1
-
+            # Create a new version linked to the original
+            updates = {
+                "code": code,
+                "created_by": user,
+                "conversation_id": original.conversation_id,
+            }
             if title is not None:
-                original.title = title.strip()
-
+                updates["title"] = title.strip()
             if data is not None:
-                original.data = data
+                updates["data"] = data
 
-            # Update the user who made this change
-            original.created_by = user
-
-            original.save()
+            new_artifact = original.create_new_version(**updates)
 
             logger.info(
-                "Updated artifact %s to version %d for project %s",
+                "Created artifact version %s (v%d) from %s for project %s",
+                new_artifact.id,
+                new_artifact.version,
                 original.id,
-                original.version,
                 project.slug,
             )
 
             # Build render URL
-            render_url = f"/artifacts/{original.id}/render/"
+            render_url = f"/artifacts/{new_artifact.id}/render/"
 
             return {
-                "artifact_id": str(original.id),
+                "artifact_id": str(new_artifact.id),
                 "previous_version_id": artifact_id,
                 "status": "updated",
-                "version": original.version,
-                "title": original.title,
+                "version": new_artifact.version,
+                "title": new_artifact.title,
                 "render_url": render_url,
-                "message": f"Artifact '{original.title}' updated to version {original.version}.",
+                "message": f"Artifact '{new_artifact.title}' updated to version {new_artifact.version}.",
             }
 
         except Exception as e:
