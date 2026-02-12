@@ -1,5 +1,5 @@
 import { useEffect } from "react"
-import { Link } from "react-router-dom"
+import { Link, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
   BookOpen,
@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select"
 
 export function Sidebar() {
+  const navigate = useNavigate()
   const user = useAppStore((s) => s.user)
   const projects = useAppStore((s) => s.projects)
   const activeProjectId = useAppStore((s) => s.activeProjectId)
@@ -97,7 +98,7 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={newThread}
+            onClick={() => { newThread(); navigate("/chat") }}
             data-testid="sidebar-new-chat"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -107,7 +108,7 @@ export function Sidebar() {
           {threads.map((thread) => (
             <button
               key={thread.id}
-              onClick={() => selectThread(thread.id)}
+              onClick={() => { selectThread(thread.id); navigate("/chat") }}
               data-testid={`sidebar-thread-${thread.id}`}
               className={`w-full rounded-md px-3 py-1.5 text-left text-sm truncate transition-colors ${
                 thread.id === threadId
