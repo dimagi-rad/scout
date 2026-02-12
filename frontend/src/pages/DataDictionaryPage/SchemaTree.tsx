@@ -81,6 +81,7 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="h-8"
+          data-testid="table-search"
         />
       </div>
 
@@ -95,6 +96,7 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
               <button
                 onClick={() => toggleSchema(schemaName)}
                 className="flex w-full items-center gap-1 rounded px-2 py-1.5 text-sm font-medium hover:bg-accent"
+                data-testid={`schema-group-${schemaName}`}
               >
                 {expandedSchemas.has(schemaName) ? (
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -124,11 +126,12 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
                           "flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent",
                           isSelected && "bg-accent"
                         )}
+                        data-testid={`table-item-${tableName}`}
                       >
                         <Table2 className="h-4 w-4 text-muted-foreground" />
                         <span className="truncate">{tableName}</span>
                         {annotated && (
-                          <span className="ml-auto h-2 w-2 rounded-full bg-primary" />
+                          <span className="ml-auto h-2 w-2 rounded-full bg-primary" data-testid={`annotation-indicator-${tableName}`} />
                         )}
                       </button>
                     )

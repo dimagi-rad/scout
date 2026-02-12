@@ -92,7 +92,7 @@ export function DataDictionaryPage() {
   return (
     <div className="flex h-full">
       {/* Left Panel - Schema Tree */}
-      <div className="w-64 flex-shrink-0 border-r bg-muted/30">
+      <div className="w-64 flex-shrink-0 border-r bg-muted/30" data-testid="schema-panel">
         <div className="flex items-center justify-between border-b p-3">
           <h2 className="text-sm font-medium">Tables</h2>
           <Button
@@ -101,6 +101,7 @@ export function DataDictionaryPage() {
             className="h-7 w-7"
             onClick={handleRefresh}
             disabled={isRefreshing}
+            data-testid="refresh-schema-btn"
           >
             <RefreshCw
               className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`}
@@ -121,7 +122,7 @@ export function DataDictionaryPage() {
       </div>
 
       {/* Right Panel - Table Detail */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
         {selectedTable ? (
           <TableDetail projectId={activeProjectId} table={selectedTable} />
         ) : (

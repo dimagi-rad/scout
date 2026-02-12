@@ -188,6 +188,7 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
                         value={columnNotes[column.name] ?? column.description ?? ""}
                         onChange={(e) => updateColumnNote(column.name, e.target.value)}
                         className="h-8 border-0 bg-transparent px-0 focus-visible:ring-0"
+                        data-testid={`column-note-${column.name}`}
                       />
                     </TableCell>
                   </TableRow>
