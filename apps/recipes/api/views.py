@@ -9,6 +9,7 @@ import logging
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -256,6 +257,7 @@ class PublicRecipeView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
+    renderer_classes = [JSONRenderer]
 
     def get(self, request, share_token):
         recipe = get_object_or_404(
@@ -277,6 +279,7 @@ class PublicRecipeRunView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
+    renderer_classes = [JSONRenderer]
 
     def get(self, request, share_token):
         run = get_object_or_404(

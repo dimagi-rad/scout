@@ -258,10 +258,10 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun 
             >
               <Link className="h-4 w-4 shrink-0 text-muted-foreground" />
               <code className="flex-1 truncate text-xs">
-                {getPublicUrl("/api/recipes/shared/", recipe.share_token)}
+                {getPublicUrl("/shared/recipes/", recipe.share_token)}
               </code>
               <CopyButton
-                text={getPublicUrl("/api/recipes/shared/", recipe.share_token)}
+                text={getPublicUrl("/shared/recipes/", recipe.share_token)}
               />
             </div>
           )}
@@ -440,7 +440,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun 
                           {run.is_public && run.share_token && (
                             <CopyButton
                               text={getPublicUrl(
-                                "/api/recipes/runs/shared/",
+                                "/shared/runs/",
                                 run.share_token,
                               )}
                             />
