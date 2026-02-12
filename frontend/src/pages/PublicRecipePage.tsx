@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react"
+import Markdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -6,23 +8,16 @@ import { Skeleton } from "@/components/ui/skeleton"
 interface RecipeVariable {
   name: string
   type: string
-  required: boolean
   default?: string
   options?: string[]
-}
-
-interface RecipeStep {
-  id: string
-  order: number
-  prompt_template: string
 }
 
 interface PublicRecipe {
   id: string
   name: string
   description: string
+  prompt: string
   variables: RecipeVariable[]
-  steps: RecipeStep[]
   created_at: string
 }
 
@@ -118,12 +113,7 @@ export function PublicRecipePage() {
                   className="flex items-center justify-between gap-4 rounded-lg border p-3"
                 >
                   <div>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{variable.name}</span>
-                      {variable.required && (
-                        <span className="text-xs text-destructive">required</span>
-                      )}
-                    </div>
+                    <span className="font-medium">{variable.name}</span>
                     {variable.default && (
                       <p className="text-xs text-muted-foreground">
                         Default: {variable.default}
@@ -143,39 +133,18 @@ export function PublicRecipePage() {
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Steps</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {recipe.steps.length > 0 ? (
-            <div className="space-y-4">
-              {recipe.steps
-                .sort((a, b) => a.order - b.order)
-                .map((step, index) => (
-                  <div key={step.id} className="flex gap-3">
-                    <div className="flex flex-col items-center">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-sm font-medium">
-                        {index + 1}
-                      </div>
-                      {index < recipe.steps.length - 1 && (
-                        <div className="w-px flex-1 bg-border mt-2" />
-                      )}
-                    </div>
-                    <div className="flex-1 pb-4">
-                      <span className="text-sm font-medium">Step {index + 1}</span>
-                      <pre className="mt-2 whitespace-pre-wrap rounded-md border bg-muted/50 p-3 text-sm font-mono">
-                        {step.prompt_template}
-                      </pre>
-                    </div>
-                  </div>
-                ))}
+      {recipe.prompt && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Prompt</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="prose prose-sm dark:prose-invert max-w-none">
+              <Markdown remarkPlugins={[remarkGfm]}>{recipe.prompt}</Markdown>
             </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No steps defined</p>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { Play, Pencil, Trash2, Clock, Hash, Variable, Users, Globe } from "lucide-react"
+import { Play, Eye, Trash2, Clock, Variable, Users, Globe } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -77,10 +77,6 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
             {/* Stats */}
             <div className="flex flex-wrap gap-3 mb-4">
               <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Hash className="h-4 w-4" />
-                <span>{recipe.step_count ?? recipe.steps?.length ?? 0} steps</span>
-              </div>
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
                 <Variable className="h-4 w-4" />
                 <span>{recipe.variable_count ?? recipe.variables?.length ?? 0} variables</span>
               </div>
@@ -125,8 +121,8 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
                 size="sm"
                 onClick={() => onView(recipe)}
               >
-                <Pencil className="mr-1 h-4 w-4" />
-                Edit
+                <Eye className="mr-1 h-4 w-4" />
+                View
               </Button>
               <Button
                 variant="ghost"

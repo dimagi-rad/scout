@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { ArrowLeft, Save, Play, Loader2, GripVertical, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Link, Users, Globe, Eye } from "lucide-react"
+import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Link, Users, Globe, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -12,7 +12,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion"
-import type { Recipe, RecipeStep, RecipeRun } from "@/store/recipeSlice"
+import type { Recipe, RecipeRun } from "@/store/recipeSlice"
 
 interface RecipeDetailProps {
   recipe: Recipe
@@ -95,14 +95,14 @@ function getPublicUrl(path: string, token: string): string {
 export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun, onViewRun }: RecipeDetailProps) {
   const [name, setName] = useState(recipe.name)
   const [description, setDescription] = useState(recipe.description)
-  const [steps, setSteps] = useState<RecipeStep[]>(recipe.steps || [])
+  const [prompt, setPrompt] = useState(recipe.prompt || "")
   const [saving, setSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
 
   useEffect(() => {
     setName(recipe.name)
     setDescription(recipe.description)
-    setSteps(recipe.steps || [])
+    setPrompt(recipe.prompt || "")
     setHasChanges(false)
   }, [recipe])
 
@@ -123,10 +123,8 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
     setHasChanges(true)
   }
 
-  const handleStepChange = (stepId: string, promptTemplate: string) => {
-    setSteps((prev) =>
-      prev.map((s) => (s.id === stepId ? { ...s, prompt_template: promptTemplate } : s))
-    )
+  const handlePromptChange = (value: string) => {
+    setPrompt(value)
     setHasChanges(true)
   }
 
@@ -136,7 +134,7 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
       await onSave({
         name,
         description,
-        steps,
+        prompt,
       })
       setHasChanges(false)
     } finally {
@@ -204,6 +202,26 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardContent>
       </Card>
 
+      {/* Prompt */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Prompt</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Textarea
+            value={prompt}
+            onChange={(e) => handlePromptChange(e.target.value)}
+            placeholder="Enter the prompt template. Use {{variable_name}} for variable placeholders."
+            rows={8}
+            className="font-mono text-sm"
+            data-testid="recipe-prompt-editor"
+          />
+          <p className="mt-2 text-xs text-muted-foreground">
+            Use {"{{variable_name}}"} syntax for variable placeholders. Supports markdown formatting.
+          </p>
+        </CardContent>
+      </Card>
+
       {/* Sharing */}
       <Card>
         <CardHeader>
@@ -230,42 +248,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
               </p>
             </div>
           </label>
-
-          <label
-            className="flex items-start gap-3 cursor-pointer"
-            data-testid="recipe-sharing-public"
-          >
-            <input
-              type="checkbox"
-              checked={recipe.is_public}
-              onChange={(e) => handleSharingChange("is_public", e.target.checked)}
-              className="mt-0.5 h-4 w-4 rounded border-gray-300"
-            />
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <Globe className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Public link</span>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Anyone with the link can view this recipe without signing in
-              </p>
-            </div>
-          </label>
-
-          {recipe.is_public && recipe.share_token && (
-            <div
-              className="flex items-center gap-2 rounded-md border bg-muted/50 p-2"
-              data-testid="recipe-share-url"
-            >
-              <Link className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <code className="flex-1 truncate text-xs">
-                {getPublicUrl("/shared/recipes/", recipe.share_token)}
-              </code>
-              <CopyButton
-                text={getPublicUrl("/shared/recipes/", recipe.share_token)}
-              />
-            </div>
-          )}
         </CardContent>
       </Card>
 
@@ -286,9 +268,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="font-medium">{variable.name}</span>
-                        {variable.required && (
-                          <span className="text-xs text-destructive">required</span>
-                        )}
                       </div>
                       {variable.default && (
                         <p className="text-xs text-muted-foreground">
@@ -315,48 +294,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No variables defined</p>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Steps */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Steps</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {steps.length > 0 ? (
-            <div className="space-y-4">
-              {steps
-                .sort((a, b) => a.order - b.order)
-                .map((step, index) => (
-                  <div key={step.id} className="flex gap-3">
-                    <div className="flex flex-col items-center">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-sm font-medium">
-                        {index + 1}
-                      </div>
-                      {index < steps.length - 1 && (
-                        <div className="w-px flex-1 bg-border mt-2" />
-                      )}
-                    </div>
-                    <div className="flex-1 pb-4">
-                      <div className="flex items-center gap-2 mb-2">
-                        <GripVertical className="h-4 w-4 text-muted-foreground cursor-grab" />
-                        <span className="text-sm font-medium">Step {index + 1}</span>
-                      </div>
-                      <Textarea
-                        value={step.prompt_template}
-                        onChange={(e) => handleStepChange(step.id, e.target.value)}
-                        placeholder="Enter the prompt template for this step..."
-                        rows={3}
-                        className="font-mono text-sm"
-                      />
-                    </div>
-                  </div>
-                ))}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">No steps defined</p>
           )}
         </CardContent>
       </Card>

@@ -2,8 +2,9 @@
 Recipe creation tool for the Scout data agent platform.
 
 This module provides a tool that allows the agent to save conversation patterns
-as reusable recipes. The agent can extract steps from the conversation, identify
-variables for parameterization, and save them as a recipe that can be re-run.
+as reusable recipes. The agent can extract the workflow as a prompt template,
+identify variables for parameterization, and save them as a recipe that can be
+re-run.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def create_recipe_tool(project: "Project", user: "User | None"):
     """
     Factory function to create a recipe saving tool for a specific project.
 
-    The returned tool allows the agent to save a series of prompts as a reusable
+    The returned tool allows the agent to save a prompt template as a reusable
     recipe with variable substitution support.
 
     Args:
@@ -54,7 +55,7 @@ def create_recipe_tool(project: "Project", user: "User | None"):
         ...     "name": "Monthly Sales Report",
         ...     "description": "Generate a monthly sales summary",
         ...     "variables": [...],
-        ...     "steps": [...]
+        ...     "prompt": "Show me sales for {{region}} between {{start_date}} and {{end_date}}"
         ... })
     """
 
@@ -63,7 +64,7 @@ def create_recipe_tool(project: "Project", user: "User | None"):
         name: str,
         description: str,
         variables: list[dict[str, Any]],
-        steps: list[dict[str, Any]],
+        prompt: str,
         is_shared: bool = False,
     ) -> dict[str, Any]:
         """
@@ -71,8 +72,8 @@ def create_recipe_tool(project: "Project", user: "User | None"):
 
         Use this tool when the user wants to save their current analysis workflow
         as a template that can be re-run with different parameters. Extract the
-        key steps from the conversation and identify values that should become
-        variables.
+        key instructions from the conversation and identify values that should
+        become variables.
 
         Args:
             name: A descriptive name for the recipe (e.g., "Monthly Sales Analysis").
@@ -87,10 +88,9 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                 - default (any, optional): Default value for the variable
                 - options (list, optional): For type="select", list of allowed values
 
-            steps: List of step definitions in execution order. Each step is a dict with:
-                - prompt_template (str, required): The prompt with {{variable}} placeholders
-                - expected_tool (str, optional): Tool the agent should use (e.g., "execute_sql")
-                - description (str, optional): What this step accomplishes
+            prompt: The prompt template with {{variable}} placeholders. This is a
+                markdown-formatted instruction that will be sent to the agent when
+                the recipe is run. Use {{variable_name}} syntax for parameterized values.
 
             is_shared: If True, all project members can view and run this recipe.
                 Default is False (only the creator can see it).
@@ -100,7 +100,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
             - recipe_id: UUID of the created recipe (as string)
             - name: The recipe name
             - status: "created" on success, "error" on failure
-            - step_count: Number of steps in the recipe
             - variable_names: List of variable names defined
             - message: Success or error message
 
@@ -122,47 +121,25 @@ def create_recipe_tool(project: "Project", user: "User | None"):
             ...             "default": "2024-01-01"
             ...         },
             ...         {
-            ...             "name": "end_date",
-            ...             "type": "date",
-            ...             "label": "End Date"
-            ...         },
-            ...         {
             ...             "name": "limit",
             ...             "type": "number",
             ...             "label": "Top N Results",
             ...             "default": 10
             ...         }
             ...     ],
-            ...     steps=[
-            ...         {
-            ...             "prompt_template": "Show me total sales for the {{region}} region between {{start_date}} and {{end_date}}",
-            ...             "expected_tool": "execute_sql",
-            ...             "description": "Query total sales for the region"
-            ...         },
-            ...         {
-            ...             "prompt_template": "Now show me the top {{limit}} products by revenue in {{region}} for that period",
-            ...             "expected_tool": "execute_sql",
-            ...             "description": "Get top products by revenue"
-            ...         },
-            ...         {
-            ...             "prompt_template": "Create a bar chart visualization of those top products",
-            ...             "expected_tool": "create_artifact",
-            ...             "description": "Visualize the results"
-            ...         }
-            ...     ],
+            ...     prompt="Show me total sales for the {{region}} region between {{start_date}} and {{end_date}}.\\n\\nThen show me the top {{limit}} products by revenue.",
             ...     is_shared=True
             ... )
             {
                 "recipe_id": "123e4567-e89b-12d3-a456-426614174000",
                 "name": "Regional Sales Summary",
                 "status": "created",
-                "step_count": 3,
                 "variable_names": ["region", "start_date", "end_date", "limit"],
-                "message": "Recipe 'Regional Sales Summary' created successfully with 3 steps."
+                "message": "Recipe 'Regional Sales Summary' created successfully."
             }
         """
         # Import here to avoid circular imports
-        from apps.recipes.models import Recipe, RecipeStep
+        from apps.recipes.models import Recipe
 
         # Validate name
         if not name or not name.strip():
@@ -170,20 +147,18 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                 "recipe_id": None,
                 "name": name,
                 "status": "error",
-                "step_count": 0,
                 "variable_names": [],
                 "message": "Recipe name is required.",
             }
 
-        # Validate we have at least one step
-        if not steps:
+        # Validate prompt
+        if not prompt or not prompt.strip():
             return {
                 "recipe_id": None,
                 "name": name,
                 "status": "error",
-                "step_count": 0,
                 "variable_names": [],
-                "message": "At least one step is required.",
+                "message": "Prompt is required.",
             }
 
         # Validate variables structure
@@ -194,7 +169,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable {i+1} must be a dictionary.",
                 }
@@ -208,7 +182,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable {i+1} is missing 'name' field.",
                 }
@@ -218,7 +191,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable '{var_name}' is missing 'type' field.",
                 }
@@ -228,7 +200,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable '{var_name}' has invalid type '{var_type}'. "
                     f"Must be one of: {', '.join(sorted(VALID_VARIABLE_TYPES))}",
@@ -239,7 +210,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable '{var_name}' is missing 'label' field.",
                 }
@@ -250,7 +220,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                     "recipe_id": None,
                     "name": name,
                     "status": "error",
-                    "step_count": 0,
                     "variable_names": [],
                     "message": f"Variable '{var_name}' of type 'select' requires 'options' list.",
                 }
@@ -268,53 +237,19 @@ def create_recipe_tool(project: "Project", user: "User | None"):
 
             validated_variables.append(validated_var)
 
-        # Validate steps structure
-        validated_steps = []
+        # Validate that referenced variables in prompt are defined
         variable_names = [v["name"] for v in validated_variables]
-
-        for i, step in enumerate(steps):
-            if not isinstance(step, dict):
-                return {
-                    "recipe_id": None,
-                    "name": name,
-                    "status": "error",
-                    "step_count": 0,
-                    "variable_names": [],
-                    "message": f"Step {i+1} must be a dictionary.",
-                }
-
-            prompt_template = step.get("prompt_template")
-            if not prompt_template or not prompt_template.strip():
-                return {
-                    "recipe_id": None,
-                    "name": name,
-                    "status": "error",
-                    "step_count": 0,
-                    "variable_names": [],
-                    "message": f"Step {i+1} is missing 'prompt_template' field.",
-                }
-
-            # Check that referenced variables are defined
-            referenced_vars = re.findall(r"\{\{(\w+)\}\}", prompt_template)
-            undefined_vars = set(referenced_vars) - set(variable_names)
-            if undefined_vars:
-                return {
-                    "recipe_id": None,
-                    "name": name,
-                    "status": "error",
-                    "step_count": 0,
-                    "variable_names": [],
-                    "message": f"Step {i+1} references undefined variables: {', '.join(undefined_vars)}. "
-                    f"Please define them in the variables list.",
-                }
-
-            validated_step = {
-                "order": i + 1,
-                "prompt_template": prompt_template.strip(),
-                "expected_tool": step.get("expected_tool", "").strip(),
-                "description": step.get("description", "").strip(),
+        referenced_vars = re.findall(r"\{\{(\w+)\}\}", prompt)
+        undefined_vars = set(referenced_vars) - set(variable_names)
+        if undefined_vars:
+            return {
+                "recipe_id": None,
+                "name": name,
+                "status": "error",
+                "variable_names": [],
+                "message": f"Prompt references undefined variables: {', '.join(undefined_vars)}. "
+                f"Please define them in the variables list.",
             }
-            validated_steps.append(validated_step)
 
         # Create the recipe
         try:
@@ -322,35 +257,24 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                 project=project,
                 name=name.strip(),
                 description=description.strip() if description else "",
+                prompt=prompt.strip(),
                 variables=validated_variables,
                 is_shared=is_shared,
                 created_by=user,
             )
 
-            # Create the steps
-            for step_data in validated_steps:
-                RecipeStep.objects.create(
-                    recipe=recipe,
-                    order=step_data["order"],
-                    prompt_template=step_data["prompt_template"],
-                    expected_tool=step_data["expected_tool"],
-                    description=step_data["description"],
-                )
-
             logger.info(
-                "Created recipe %s for project %s with %d steps",
+                "Created recipe %s for project %s",
                 recipe.id,
                 project.slug,
-                len(validated_steps),
             )
 
             return {
                 "recipe_id": str(recipe.id),
                 "name": recipe.name,
                 "status": "created",
-                "step_count": len(validated_steps),
                 "variable_names": variable_names,
-                "message": f"Recipe '{name}' created successfully with {len(validated_steps)} steps.",
+                "message": f"Recipe '{name}' created successfully.",
             }
 
         except Exception as e:
@@ -363,7 +287,6 @@ def create_recipe_tool(project: "Project", user: "User | None"):
                 "recipe_id": None,
                 "name": name,
                 "status": "error",
-                "step_count": 0,
                 "variable_names": [],
                 "message": f"Failed to create recipe: {str(e)}",
             }

@@ -28,7 +28,6 @@ export type {
 export { getKnowledgeItemName } from "./knowledgeSlice"
 export type {
   RecipeVariable,
-  RecipeStep,
   Recipe,
   RecipeRun,
   RecipeStatus,

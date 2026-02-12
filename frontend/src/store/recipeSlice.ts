@@ -9,22 +9,15 @@ export interface RecipeVariable {
   options?: string[] // for select type
 }
 
-export interface RecipeStep {
-  id: string
-  order: number
-  prompt_template: string
-}
-
 export interface Recipe {
   id: string
   name: string
   description: string
+  prompt: string
   variables: RecipeVariable[]
-  steps: RecipeStep[]
   is_shared: boolean
   is_public: boolean
   share_token: string | null
-  step_count?: number
   variable_count?: number
   last_run_at?: string
   created_at: string

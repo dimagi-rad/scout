@@ -41,6 +41,13 @@ class Recipe(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
 
+    # Single prompt template (markdown) with {{variable}} placeholders
+    prompt = models.TextField(
+        blank=True,
+        default="",
+        help_text="Prompt template with {{variable}} placeholders. Supports markdown.",
+    )
+
     # Variable definitions - list of variable specs
     variables = models.JSONField(
         default=list,
@@ -96,6 +103,14 @@ class Recipe(models.Model):
     def get_variable_names(self) -> list[str]:
         """Return a list of variable names defined in this recipe."""
         return [var.get("name") for var in self.variables if var.get("name")]
+
+    def render_prompt(self, variable_values: dict) -> str:
+        """Render the prompt template by substituting variable values."""
+        rendered = self.prompt
+        for name, value in variable_values.items():
+            placeholder = "{{" + name + "}}"
+            rendered = rendered.replace(placeholder, str(value))
+        return rendered
 
     def validate_variable_values(self, values: dict) -> list[str]:
         """

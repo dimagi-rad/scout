@@ -69,7 +69,7 @@ export function RecipesPage() {
   const handleRun = useCallback(
     async (recipe: Recipe) => {
       if (!activeProjectId) return
-      // Fetch full recipe details (list view doesn't include variables/steps)
+      // Fetch full recipe details (list view doesn't include prompt/variables)
       try {
         const full = await fetchRecipe(activeProjectId, recipe.id)
         setRunnerRecipe(full)

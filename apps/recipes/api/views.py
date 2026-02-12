@@ -32,65 +32,40 @@ logger = logging.getLogger(__name__)
 
 
 class RecipePermissionMixin(ProjectPermissionMixin):
-    """
-    Extended permission mixin for recipe operations.
-
-    Adds recipe-specific helper methods on top of base project permissions.
-    """
+    """Extended permission mixin for recipe operations."""
 
     def get_recipe(self, project, recipe_id):
         """Retrieve a recipe by ID within a project."""
         return get_object_or_404(
-            Recipe.objects.prefetch_related("steps"),
+            Recipe,
             pk=recipe_id,
             project=project,
         )
 
 
 class RecipeListView(RecipePermissionMixin, APIView):
-    """
-    List all recipes for a project.
-
-    GET /api/projects/{project_id}/recipes/
-        Returns list of recipes for the project.
-        Requires project membership.
-    """
+    """List all recipes for a project."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id):
-        """List all recipes for a project."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
         if not has_access:
             return error_response
 
-        recipes = Recipe.objects.filter(project=project).prefetch_related(
-            "steps", "runs"
-        )
+        recipes = Recipe.objects.filter(project=project).prefetch_related("runs")
         serializer = RecipeListSerializer(recipes, many=True)
         return Response(serializer.data)
 
 
 class RecipeDetailView(RecipePermissionMixin, APIView):
-    """
-    Retrieve, update, or delete a recipe.
-
-    GET /api/projects/{project_id}/recipes/{recipe_id}/
-        Returns recipe details with steps. Requires project membership.
-
-    PUT /api/projects/{project_id}/recipes/{recipe_id}/
-        Updates recipe and its steps. Requires project membership.
-
-    DELETE /api/projects/{project_id}/recipes/{recipe_id}/
-        Deletes recipe. Requires admin role.
-    """
+    """Retrieve, update, or delete a recipe."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id, recipe_id):
-        """Retrieve a recipe by ID."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
@@ -102,10 +77,8 @@ class RecipeDetailView(RecipePermissionMixin, APIView):
         return Response(serializer.data)
 
     def put(self, request, project_id, recipe_id):
-        """Update a recipe."""
         project = self.get_project(project_id)
 
-        # Require analyst or admin permission to edit recipes
         can_edit, error_response = self.check_edit_permission(request, project)
         if not can_edit:
             return error_response
@@ -122,12 +95,10 @@ class RecipeDetailView(RecipePermissionMixin, APIView):
 
         serializer.save()
 
-        # Return the updated recipe with full details
         response_serializer = RecipeDetailSerializer(recipe)
         return Response(response_serializer.data)
 
     def delete(self, request, project_id, recipe_id):
-        """Delete a recipe."""
         project = self.get_project(project_id)
 
         is_admin, error_response = self.check_admin_permission(request, project)
@@ -140,19 +111,11 @@ class RecipeDetailView(RecipePermissionMixin, APIView):
 
 
 class RecipeRunView(RecipePermissionMixin, APIView):
-    """
-    Run a recipe with provided variable values.
-
-    POST /api/projects/{project_id}/recipes/{recipe_id}/run/
-        Executes the recipe with provided variables via RecipeRunner.
-        Returns the completed (or failed) RecipeRun record.
-        Requires project membership.
-    """
+    """Run a recipe with provided variable values."""
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, project_id, recipe_id):
-        """Run a recipe."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
@@ -191,18 +154,11 @@ class RecipeRunView(RecipePermissionMixin, APIView):
 
 
 class RecipeRunHistoryView(RecipePermissionMixin, APIView):
-    """
-    List run history for a recipe.
-
-    GET /api/projects/{project_id}/recipes/{recipe_id}/runs/
-        Returns list of recipe runs ordered by creation date (newest first).
-        Requires project membership.
-    """
+    """List run history for a recipe."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id, recipe_id):
-        """List run history for a recipe."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
@@ -217,13 +173,7 @@ class RecipeRunHistoryView(RecipePermissionMixin, APIView):
 
 
 class RecipeRunUpdateView(RecipePermissionMixin, APIView):
-    """
-    Update sharing settings on a recipe run.
-
-    PATCH /api/projects/{project_id}/recipes/{recipe_id}/runs/{run_id}/
-        Toggle is_shared / is_public on a run.
-        Requires edit permission (analyst/admin).
-    """
+    """Update sharing settings on a recipe run."""
 
     permission_classes = [IsAuthenticated]
 
@@ -248,12 +198,7 @@ class RecipeRunUpdateView(RecipePermissionMixin, APIView):
 
 
 class PublicRecipeView(APIView):
-    """
-    Public access to a shared recipe.
-
-    GET /api/recipes/shared/{share_token}/
-        No authentication required.
-    """
+    """Public access to a shared recipe."""
 
     permission_classes = [AllowAny]
     authentication_classes = []
@@ -261,7 +206,7 @@ class PublicRecipeView(APIView):
 
     def get(self, request, share_token):
         recipe = get_object_or_404(
-            Recipe.objects.prefetch_related("steps"),
+            Recipe,
             share_token=share_token,
             is_public=True,
         )
@@ -270,12 +215,7 @@ class PublicRecipeView(APIView):
 
 
 class PublicRecipeRunView(APIView):
-    """
-    Public access to a shared recipe run.
-
-    GET /api/recipes/runs/shared/{share_token}/
-        No authentication required.
-    """
+    """Public access to a shared recipe run."""
 
     permission_classes = [AllowAny]
     authentication_classes = []
