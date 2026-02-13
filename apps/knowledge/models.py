@@ -3,9 +3,7 @@ Knowledge layer models for Scout data agent platform.
 
 Provides semantic knowledge beyond the auto-generated data dictionary:
 - TableKnowledge: Enriched table metadata
-- CanonicalMetric: Agreed-upon metric definitions
-- VerifiedQuery: Query patterns known to produce correct results
-- BusinessRule: Institutional knowledge and gotchas
+- KnowledgeEntry: General-purpose knowledge (title + markdown + tags)
 - AgentLearning: Agent-discovered corrections
 - GoldenQuery: Test cases for evaluation
 - EvalRun: Evaluation run results
@@ -82,119 +80,22 @@ class TableKnowledge(models.Model):
         return f"{self.table_name} ({self.project.name})"
 
 
-class CanonicalMetric(models.Model):
+class KnowledgeEntry(models.Model):
     """
-    An agreed-upon metric definition.
+    General-purpose knowledge entry with title, markdown content, and tags.
 
-    This is the single source of truth for "what does MRR mean" or
-    "how do we count active users". When the agent needs to compute
-    a metric, it MUST use the canonical definition if one exists.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    project = models.ForeignKey(
-        "projects.Project", on_delete=models.CASCADE, related_name="canonical_metrics"
-    )
-
-    name = models.CharField(
-        max_length=255, help_text='Metric name. E.g. "MRR", "DAU", "Churn Rate"'
-    )
-    definition = models.TextField(
-        help_text="Plain English definition. E.g. 'Sum of active subscription amounts, excluding trials.'"
-    )
-    sql_template = models.TextField(
-        help_text="The canonical SQL for computing this metric. May include {{date_range}} or other variables."
-    )
-    unit = models.CharField(
-        max_length=50, blank=True, help_text='E.g. "USD", "users", "percentage"'
-    )
-    owner = models.CharField(
-        max_length=255, blank=True, help_text="Who owns the definition of this metric."
-    )
-    caveats = models.JSONField(
-        default=list,
-        help_text='Known limitations. E.g. ["Excludes enterprise contracts billed annually"]',
-    )
-    tags = models.JSONField(
-        default=list, blank=True, help_text='E.g. ["finance", "growth", "product"]'
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
-    )
-
-    class Meta:
-        unique_together = ["project", "name"]
-        ordering = ["name"]
-
-    def __str__(self):
-        return f"{self.name} ({self.project.name})"
-
-
-class VerifiedQuery(models.Model):
-    """
-    A query pattern that is known to produce correct results.
-
-    These serve as examples for the agent — when a user asks a question
-    similar to one covered by a verified query, the agent should use
-    (or closely adapt) the verified pattern.
+    Replaces the previous CanonicalMetric, VerifiedQuery, and BusinessRule
+    models with a single flexible model. Use tags to categorize entries
+    (e.g. "metric", "query", "rule").
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     project = models.ForeignKey(
-        "projects.Project", on_delete=models.CASCADE, related_name="verified_queries"
-    )
-
-    name = models.CharField(max_length=255, help_text="Short name for this query pattern.")
-    description = models.TextField(
-        help_text="What question does this query answer? Written in natural language."
-    )
-    sql = models.TextField(help_text="The verified SQL query.")
-    # Tags for retrieval
-    tags = models.JSONField(default=list, blank=True)
-    # Tables involved (for efficient lookup)
-    tables_used = models.JSONField(
-        default=list, help_text="List of table names this query uses."
-    )
-
-    verified_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
-    )
-    verified_at = models.DateTimeField(null=True, blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["name"]
-        verbose_name_plural = "Verified queries"
-
-    def __str__(self):
-        return f"{self.name} ({self.project.name})"
-
-
-class BusinessRule(models.Model):
-    """
-    Institutional knowledge that isn't captured in schema or metrics.
-
-    Examples:
-    - "In the APAC region, 'active user' means logged in within 7 days, not 30"
-    - "The orders table has duplicate rows for Q1 2024 due to a migration bug"
-    - "Revenue numbers before 2023 are in the legacy_revenue table"
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    project = models.ForeignKey(
-        "projects.Project", on_delete=models.CASCADE, related_name="business_rules"
+        "projects.Project", on_delete=models.CASCADE, related_name="knowledge_entries"
     )
 
     title = models.CharField(max_length=255)
-    description = models.TextField()
-    # Which tables/metrics this rule applies to
-    applies_to_tables = models.JSONField(default=list, blank=True)
-    applies_to_metrics = models.JSONField(default=list, blank=True)
+    content = models.TextField(help_text="Markdown content for this knowledge entry.")
     tags = models.JSONField(default=list, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -204,7 +105,8 @@ class BusinessRule(models.Model):
     )
 
     class Meta:
-        ordering = ["title"]
+        ordering = ["-updated_at"]
+        verbose_name_plural = "Knowledge entries"
 
     def __str__(self):
         return f"{self.title} ({self.project.name})"
@@ -266,21 +168,6 @@ class AgentLearning(models.Model):
     )
     is_active = models.BooleanField(default=True)
 
-    # Can be promoted to a BusinessRule or VerifiedQuery by an admin
-    promoted_to = models.CharField(
-        max_length=50,
-        blank=True,
-        choices=[
-            ("business_rule", "Business Rule"),
-            ("verified_query", "Verified Query"),
-        ],
-    )
-    promoted_to_id = models.UUIDField(
-        null=True,
-        blank=True,
-        help_text="UUID of the promoted BusinessRule or VerifiedQuery.",
-    )
-
     # Source
     discovered_in_conversation = models.CharField(max_length=255, blank=True)
     discovered_by_user = models.ForeignKey(
@@ -298,128 +185,16 @@ class AgentLearning(models.Model):
         return f"Learning: {self.description[:80]}..."
 
     def increase_confidence(self, amount: float = 0.1) -> float:
-        """
-        Increase the confidence score, capping at 1.0.
-
-        Args:
-            amount: The amount to increase (default 0.1)
-
-        Returns:
-            The new confidence score
-        """
+        """Increase the confidence score, capping at 1.0."""
         self.confidence_score = min(1.0, self.confidence_score + amount)
         self.save(update_fields=["confidence_score"])
         return self.confidence_score
 
     def decrease_confidence(self, amount: float = 0.1) -> float:
-        """
-        Decrease the confidence score, flooring at 0.0.
-
-        Args:
-            amount: The amount to decrease (default 0.1)
-
-        Returns:
-            The new confidence score
-        """
+        """Decrease the confidence score, flooring at 0.0."""
         self.confidence_score = max(0.0, self.confidence_score - amount)
         self.save(update_fields=["confidence_score"])
         return self.confidence_score
-
-    def promote_to_business_rule(self, user=None) -> "BusinessRule":
-        """
-        Promote this learning to a BusinessRule.
-
-        Creates a new BusinessRule based on this learning's content,
-        marks this learning as promoted, and deactivates it.
-
-        Args:
-            user: The user performing the promotion (optional)
-
-        Returns:
-            The created BusinessRule instance
-        """
-        if self.promoted_to:
-            raise ValueError(
-                f"This learning has already been promoted to {self.promoted_to}"
-            )
-
-        business_rule = BusinessRule.objects.create(
-            project=self.project,
-            title=self.description[:255],
-            description=self._build_promotion_description(),
-            applies_to_tables=self.applies_to_tables,
-            tags=[self.category] if self.category != "other" else [],
-            created_by=user,
-        )
-
-        self.promoted_to = "business_rule"
-        self.promoted_to_id = business_rule.id
-        self.is_active = False
-        self.save(update_fields=["promoted_to", "promoted_to_id", "is_active"])
-
-        return business_rule
-
-    def promote_to_verified_query(self, user=None) -> "VerifiedQuery":
-        """
-        Promote this learning to a VerifiedQuery.
-
-        Requires that corrected_sql is present. Creates a new VerifiedQuery
-        based on this learning's corrected SQL, marks this learning as
-        promoted, and deactivates it.
-
-        Args:
-            user: The user performing the promotion (optional)
-
-        Returns:
-            The created VerifiedQuery instance
-
-        Raises:
-            ValueError: If no corrected_sql is available
-        """
-        if self.promoted_to:
-            raise ValueError(
-                f"This learning has already been promoted to {self.promoted_to}"
-            )
-
-        if not self.corrected_sql:
-            raise ValueError(
-                "Cannot promote to VerifiedQuery: no corrected_sql available"
-            )
-
-        from django.utils import timezone
-
-        verified_query = VerifiedQuery.objects.create(
-            project=self.project,
-            name=self.description[:255],
-            description=self._build_promotion_description(),
-            sql=self.corrected_sql,
-            tables_used=self.applies_to_tables,
-            tags=[self.category] if self.category != "other" else [],
-            verified_by=user,
-            verified_at=timezone.now(),
-        )
-
-        self.promoted_to = "verified_query"
-        self.promoted_to_id = verified_query.id
-        self.is_active = False
-        self.save(update_fields=["promoted_to", "promoted_to_id", "is_active"])
-
-        return verified_query
-
-    def _build_promotion_description(self) -> str:
-        """Build a detailed description for promoted items."""
-        parts = [self.description]
-
-        if self.original_error:
-            parts.append(f"\n\nOriginal Error:\n{self.original_error}")
-
-        if self.original_sql:
-            parts.append(f"\n\nOriginal SQL:\n{self.original_sql}")
-
-        if self.corrected_sql:
-            parts.append(f"\n\nCorrected SQL:\n{self.corrected_sql}")
-
-        return "".join(parts)
 
 
 class GoldenQuery(models.Model):

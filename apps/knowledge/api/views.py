@@ -1,57 +1,32 @@
-"""
-API views for knowledge management.
-
-Provides endpoints for listing, creating, updating, and deleting knowledge items
-(CanonicalMetric, BusinessRule, VerifiedQuery, AgentLearning) with a unified
-interface and type-specific operations.
-"""
+"""API views for knowledge management."""
+import io
 import logging
+import zipfile
 
 from django.db.models import Q
+from django.http import HttpResponse
 from rest_framework import status
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.knowledge.models import (
-    AgentLearning,
-    BusinessRule,
-    CanonicalMetric,
-    VerifiedQuery,
-)
+from apps.knowledge.models import AgentLearning, KnowledgeEntry
+from apps.knowledge.utils import parse_frontmatter, render_frontmatter
 from apps.projects.api.permissions import ProjectPermissionMixin
 
-from .serializers import (
-    AgentLearningSerializer,
-    BusinessRuleSerializer,
-    CanonicalMetricSerializer,
-    PromoteLearningSerializer,
-    VerifiedQuerySerializer,
-)
+from .serializers import AgentLearningSerializer, KnowledgeEntrySerializer
 
 logger = logging.getLogger(__name__)
 
-# Pagination settings
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 
-
-# Mapping of type names to models and serializers
 KNOWLEDGE_TYPES = {
-    "metric": {
-        "model": CanonicalMetric,
-        "serializer": CanonicalMetricSerializer,
-        "search_fields": ["name", "definition", "sql_template"],
-    },
-    "rule": {
-        "model": BusinessRule,
-        "serializer": BusinessRuleSerializer,
-        "search_fields": ["title", "description"],
-    },
-    "query": {
-        "model": VerifiedQuery,
-        "serializer": VerifiedQuerySerializer,
-        "search_fields": ["name", "description", "sql"],
+    "entry": {
+        "model": KnowledgeEntry,
+        "serializer": KnowledgeEntrySerializer,
+        "search_fields": ["title", "content"],
     },
     "learning": {
         "model": AgentLearning,
@@ -63,36 +38,22 @@ KNOWLEDGE_TYPES = {
 
 class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
     """
-    List all knowledge items or create a new one.
-
-    GET /api/projects/{project_id}/knowledge/
-        Returns list of all knowledge items (metrics, rules, queries, learnings).
-        Supports filtering by type and text search.
-
-        Query parameters:
-        - type: Filter by knowledge type (metric, rule, query, learning)
-        - search: Text search across relevant fields
-
+    GET  /api/projects/{project_id}/knowledge/
     POST /api/projects/{project_id}/knowledge/
-        Creates a new knowledge item. The type field in the request body
-        determines which model to create.
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, project_id):
-        """List all knowledge items for a project with pagination."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
         if not has_access:
             return error_response
 
-        # Get filter parameters
         type_filter = request.query_params.get("type")
         search_query = request.query_params.get("search", "").strip()
 
-        # Get pagination parameters
         try:
             page = max(1, int(request.query_params.get("page", 1)))
         except (ValueError, TypeError):
@@ -106,13 +67,11 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         except (ValueError, TypeError):
             page_size = DEFAULT_PAGE_SIZE
 
-        # Determine which types to query
         if type_filter and type_filter in KNOWLEDGE_TYPES:
             types_to_query = [type_filter]
         else:
             types_to_query = list(KNOWLEDGE_TYPES.keys())
 
-        # Collect all items
         all_items = []
 
         for type_name in types_to_query:
@@ -120,30 +79,24 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
             model = type_config["model"]
             serializer_class = type_config["serializer"]
 
-            # Base queryset filtered by project
             queryset = model.objects.filter(project=project)
 
-            # Apply text search if provided
             if search_query:
                 search_q = Q()
                 for field in type_config["search_fields"]:
                     search_q |= Q(**{f"{field}__icontains": search_query})
                 queryset = queryset.filter(search_q)
 
-            # Serialize and add type info
             serializer = serializer_class(queryset, many=True)
             all_items.extend(serializer.data)
 
-        # Sort by created_at descending (most recent first)
         all_items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 
-        # Apply pagination
         total_count = len(all_items)
         start_index = (page - 1) * page_size
         end_index = start_index + page_size
         paginated_items = all_items[start_index:end_index]
 
-        # Calculate pagination metadata
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
 
         return Response({
@@ -159,14 +112,12 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         })
 
     def post(self, request, project_id):
-        """Create a new knowledge item."""
         project = self.get_project(project_id)
 
         can_edit, error_response = self.check_edit_permission(request, project)
         if not can_edit:
             return error_response
 
-        # Determine the type from request body
         item_type = request.data.get("type")
         if not item_type or item_type not in KNOWLEDGE_TYPES:
             return Response(
@@ -177,58 +128,33 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         type_config = KNOWLEDGE_TYPES[item_type]
         serializer_class = type_config["serializer"]
 
-        # Create the item
         serializer = serializer_class(data=request.data, context={"request": request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # Save with project association
         instance = serializer.save(project=project)
 
-        # Handle type-specific user associations
-        if item_type == "metric":
-            instance.updated_by = request.user
-            instance.save(update_fields=["updated_by"])
-        elif item_type == "rule":
+        if item_type == "entry":
             instance.created_by = request.user
             instance.save(update_fields=["created_by"])
-        elif item_type == "query":
-            from django.utils import timezone
-            instance.verified_by = request.user
-            instance.verified_at = timezone.now()
-            instance.save(update_fields=["verified_by", "verified_at"])
         elif item_type == "learning":
             instance.discovered_by_user = request.user
             instance.save(update_fields=["discovered_by_user"])
 
-        # Return the created item
         response_serializer = serializer_class(instance)
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class KnowledgeDetailView(ProjectPermissionMixin, APIView):
     """
-    Retrieve, update, or delete a knowledge item.
-
-    GET /api/projects/{project_id}/knowledge/{item_id}/
-        Returns knowledge item details. Searches across all knowledge types.
-
-    PUT /api/projects/{project_id}/knowledge/{item_id}/
-        Updates a knowledge item. Requires editor or admin role.
-
+    GET    /api/projects/{project_id}/knowledge/{item_id}/
+    PUT    /api/projects/{project_id}/knowledge/{item_id}/
     DELETE /api/projects/{project_id}/knowledge/{item_id}/
-        Deletes a knowledge item. Requires editor or admin role.
     """
 
     permission_classes = [IsAuthenticated]
 
     def _find_item(self, project, item_id):
-        """
-        Find a knowledge item by ID across all types.
-
-        Returns:
-            tuple: (item, type_name, serializer_class) or (None, None, None)
-        """
         for type_name, type_config in KNOWLEDGE_TYPES.items():
             model = type_config["model"]
             try:
@@ -239,7 +165,6 @@ class KnowledgeDetailView(ProjectPermissionMixin, APIView):
         return None, None, None
 
     def get(self, request, project_id, item_id):
-        """Retrieve a knowledge item by ID."""
         project = self.get_project(project_id)
 
         has_access, error_response = self.check_project_access(request, project)
@@ -257,7 +182,6 @@ class KnowledgeDetailView(ProjectPermissionMixin, APIView):
         return Response(serializer.data)
 
     def put(self, request, project_id, item_id):
-        """Update a knowledge item."""
         project = self.get_project(project_id)
 
         can_edit, error_response = self.check_edit_permission(request, project)
@@ -280,17 +204,10 @@ class KnowledgeDetailView(ProjectPermissionMixin, APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        instance = serializer.save()
-
-        # Update the updated_by field for types that have it
-        if type_name == "metric":
-            instance.updated_by = request.user
-            instance.save(update_fields=["updated_by"])
-
+        serializer.save()
         return Response(serializer.data)
 
     def delete(self, request, project_id, item_id):
-        """Delete a knowledge item."""
         project = self.get_project(project_id)
 
         can_edit, error_response = self.check_edit_permission(request, project)
@@ -308,53 +225,98 @@ class KnowledgeDetailView(ProjectPermissionMixin, APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class PromoteLearningView(ProjectPermissionMixin, APIView):
+class KnowledgeExportView(ProjectPermissionMixin, APIView):
     """
-    Promote an AgentLearning to a BusinessRule or VerifiedQuery.
+    GET /api/projects/{project_id}/knowledge/export/
 
-    POST /api/projects/{project_id}/knowledge/{item_id}/promote/
-        Promotes the learning to the specified type.
-        Creates a new BusinessRule or VerifiedQuery based on the learning,
-        marks the learning as promoted, and deactivates it.
-
-        Request body:
-        - promote_to: "business_rule" or "verified_query"
+    Export all KnowledgeEntry records as a zip of markdown files with YAML frontmatter.
     """
 
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, project_id, item_id):
-        """Promote an AgentLearning to a BusinessRule or VerifiedQuery."""
+    def get(self, request, project_id):
+        project = self.get_project(project_id)
+
+        has_access, error_response = self.check_project_access(request, project)
+        if not has_access:
+            return error_response
+
+        entries = KnowledgeEntry.objects.filter(project=project).order_by("title")
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for entry in entries:
+                # Sanitize filename
+                safe_title = "".join(
+                    c if c.isalnum() or c in " -_" else "_" for c in entry.title
+                ).strip()[:80]
+                filename = f"{safe_title}.md"
+                content = render_frontmatter(entry.title, entry.tags or [], entry.content)
+                zf.writestr(filename, content)
+
+        buf.seek(0)
+        response = HttpResponse(buf.read(), content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="knowledge-{project.slug}.zip"'
+        return response
+
+
+class KnowledgeImportView(ProjectPermissionMixin, APIView):
+    """
+    POST /api/projects/{project_id}/knowledge/import/
+
+    Import knowledge entries from a zip of markdown files with YAML frontmatter.
+    """
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, project_id):
         project = self.get_project(project_id)
 
         can_edit, error_response = self.check_edit_permission(request, project)
         if not can_edit:
             return error_response
 
-        # Find the learning
-        try:
-            learning = AgentLearning.objects.get(pk=item_id, project=project)
-        except AgentLearning.DoesNotExist:
+        uploaded = request.FILES.get("file")
+        if not uploaded:
             return Response(
-                {"error": "Agent learning not found."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "No file uploaded. Send a zip file as 'file'."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate and promote
-        serializer = PromoteLearningSerializer(
-            data=request.data,
-            context={"learning": learning, "request": request},
+        try:
+            with zipfile.ZipFile(uploaded) as zf:
+                created = 0
+                updated = 0
+                for name in zf.namelist():
+                    if not name.endswith(".md"):
+                        continue
+                    raw = zf.read(name).decode("utf-8")
+                    title, tags, body = parse_frontmatter(raw)
+                    if not title:
+                        continue
+
+                    _, was_created = KnowledgeEntry.objects.update_or_create(
+                        project=project,
+                        title=title,
+                        defaults={
+                            "content": body,
+                            "tags": tags,
+                            "created_by": request.user,
+                        },
+                    )
+                    if was_created:
+                        created += 1
+                    else:
+                        updated += 1
+
+        except zipfile.BadZipFile:
+            return Response(
+                {"error": "Invalid zip file."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response(
+            {"created": created, "updated": updated},
+            status=status.HTTP_200_OK,
         )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        promoted_item = serializer.save()
-
-        # Return the promoted item with appropriate serializer
-        promote_to = request.data.get("promote_to")
-        if promote_to == "business_rule":
-            response_serializer = BusinessRuleSerializer(promoted_item)
-        else:
-            response_serializer = VerifiedQuerySerializer(promoted_item)
-
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)

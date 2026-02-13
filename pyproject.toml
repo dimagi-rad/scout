@@ -11,44 +11,36 @@ dependencies = [
     "djangorestframework>=3.15",
     "django-environ>=0.11",
     "psycopg2-binary>=2.9",
-
     # Auth
     "django-allauth>=65.0",
     "PyJWT[crypto]>=2.0",
     "cryptography>=42.0",
-
     # LangGraph / LangChain
     "langgraph>=0.2",
     "langchain-anthropic>=0.2",
     "langchain-core>=0.3",
     "langgraph-checkpoint-postgres>=2.0",
-
     # SQL validation
     "sqlglot>=25.0",
-
     # Visualization & data
     "plotly>=5.0",
     "pandas>=2.0",
     "kaleido>=0.2",
     "sqlalchemy>=2.0",
-
     # Security / HTML sanitization
     "bleach>=6.0",
-
     # Caching & Task Queue
     "redis>=5.0",
     "celery[redis]>=5.4",
     "django-celery-beat>=2.6",
-
     # Async database (required by langgraph-checkpoint-postgres)
     "asyncpg>=0.29",
-
     # Utilities
     "python-dotenv>=1.0",
-
     # Production server
     "gunicorn>=21.0",
     "uvicorn[standard]>=0.30",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]

@@ -19,7 +19,8 @@ from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db import connection as django_connection
 
-from apps.knowledge.models import BusinessRule, CanonicalMetric, TableKnowledge
+from apps.projects.models import DatabaseConnection
+from apps.knowledge.models import KnowledgeEntry, TableKnowledge
 from apps.projects.models import Project, ProjectMembership, ProjectRole
 from apps.users.models import User
 
@@ -278,13 +279,30 @@ class Command(BaseCommand):
         # 2. Create sample schema and tables in the platform database
         self._create_sample_schema(reset)
 
-        # 3. Determine the DB host (platform-db in Docker, localhost otherwise)
+        # 3. Create or get DatabaseConnection from Django DB settings
         db_settings = settings.DATABASES["default"]
         db_host = db_settings.get("HOST", "localhost")
         db_port = db_settings.get("PORT", 5432)
         db_name = db_settings.get("NAME", "agent_platform")
         db_user_name = db_settings.get("USER", "platform")
         db_password = db_settings.get("PASSWORD", "")
+
+        connection, conn_created = DatabaseConnection.objects.get_or_create(
+            name="Platform Database",
+            defaults={
+                "db_host": db_host,
+                "db_port": db_port,
+                "db_name": db_name,
+                "created_by": user,
+            },
+        )
+        if conn_created:
+            connection.db_user = db_user_name
+            connection.db_password = db_password
+            connection.save()
+            self.stdout.write(self.style.SUCCESS("Created database connection: Platform Database"))
+        else:
+            self.stdout.write("Using existing database connection: Platform Database")
 
         # 4. Create or update the Project
         project, created = Project.objects.update_or_create(
@@ -295,9 +313,7 @@ class Command(BaseCommand):
                     "A sample e-commerce dataset with customers, products, orders, "
                     "and reviews. Use this project to explore Scout's capabilities."
                 ),
-                "db_host": db_host,
-                "db_port": db_port,
-                "db_name": db_name,
+                "database_connection": connection,
                 "db_schema": SAMPLE_SCHEMA,
                 "max_rows_per_query": 500,
                 "max_query_timeout_seconds": 30,
@@ -312,10 +328,6 @@ class Command(BaseCommand):
                 ),
             },
         )
-        # Set encrypted credentials via property setters
-        project.db_user = db_user_name
-        project.db_password = db_password
-        project.save()
 
         action = "Created" if created else "Updated"
         self.stdout.write(self.style.SUCCESS(f"{action} project: {project.name}"))
@@ -517,140 +529,137 @@ class Command(BaseCommand):
         ))
 
     def _create_metrics(self, project, user):
-        """Add canonical metric definitions."""
+        """Add metric knowledge entries."""
         metrics = [
             {
-                "name": "Gross Revenue",
-                "definition": (
+                "title": "Gross Revenue",
+                "content": (
                     "Total revenue from all non-cancelled, non-refunded orders. "
-                    "Calculated as SUM(total_amount) from orders."
-                ),
-                "sql_template": (
+                    "Calculated as SUM(total_amount) from orders.\n\n"
+                    "```sql\n"
                     "SELECT SUM(total_amount) AS gross_revenue\n"
                     "FROM orders\n"
-                    "WHERE status NOT IN ('cancelled', 'refunded')"
+                    "WHERE status NOT IN ('cancelled', 'refunded')\n"
+                    "```\n\n"
+                    "**Unit:** USD\n\n"
+                    "**Caveats:**\n"
+                    "- Does not subtract discounts - use Net Revenue for that\n"
+                    "- Includes shipping amounts in total"
                 ),
-                "unit": "USD",
-                "caveats": [
-                    "Does not subtract discounts - use Net Revenue for that",
-                    "Includes shipping amounts in total",
-                ],
-                "tags": ["finance", "revenue"],
+                "tags": ["metric", "finance", "revenue"],
             },
             {
-                "name": "Net Revenue",
-                "definition": (
+                "title": "Net Revenue",
+                "content": (
                     "Revenue after discounts, excluding cancelled and refunded orders. "
-                    "Calculated as SUM(total_amount - discount_amount)."
-                ),
-                "sql_template": (
+                    "Calculated as SUM(total_amount - discount_amount).\n\n"
+                    "```sql\n"
                     "SELECT SUM(total_amount - discount_amount) AS net_revenue\n"
                     "FROM orders\n"
-                    "WHERE status NOT IN ('cancelled', 'refunded')"
+                    "WHERE status NOT IN ('cancelled', 'refunded')\n"
+                    "```\n\n"
+                    "**Unit:** USD\n\n"
+                    "**Caveats:**\n"
+                    "- Does not include shipping revenue"
                 ),
-                "unit": "USD",
-                "caveats": [
-                    "Does not include shipping revenue",
-                ],
-                "tags": ["finance", "revenue"],
+                "tags": ["metric", "finance", "revenue"],
             },
             {
-                "name": "Average Order Value (AOV)",
-                "definition": (
-                    "Average total amount per order, excluding cancelled and refunded."
-                ),
-                "sql_template": (
+                "title": "Average Order Value (AOV)",
+                "content": (
+                    "Average total amount per order, excluding cancelled and refunded.\n\n"
+                    "```sql\n"
                     "SELECT AVG(total_amount) AS aov\n"
                     "FROM orders\n"
-                    "WHERE status NOT IN ('cancelled', 'refunded')"
+                    "WHERE status NOT IN ('cancelled', 'refunded')\n"
+                    "```\n\n"
+                    "**Unit:** USD"
                 ),
-                "unit": "USD",
-                "tags": ["finance", "orders"],
+                "tags": ["metric", "finance", "orders"],
             },
             {
-                "name": "Customer Count",
-                "definition": "Total number of active customers (status = 'active').",
-                "sql_template": (
+                "title": "Customer Count",
+                "content": (
+                    "Total number of active customers (status = 'active').\n\n"
+                    "```sql\n"
                     "SELECT COUNT(*) AS active_customers\n"
                     "FROM customers\n"
-                    "WHERE status = 'active'"
+                    "WHERE status = 'active'\n"
+                    "```\n\n"
+                    "**Unit:** customers"
                 ),
-                "unit": "customers",
-                "tags": ["customers", "growth"],
+                "tags": ["metric", "customers", "growth"],
             },
             {
-                "name": "Churn Rate",
-                "definition": (
-                    "Percentage of customers with status 'churned' out of all customers."
-                ),
-                "sql_template": (
+                "title": "Churn Rate",
+                "content": (
+                    "Percentage of customers with status 'churned' out of all customers.\n\n"
+                    "```sql\n"
                     "SELECT\n"
                     "  ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'churned') "
                     "/ COUNT(*), 2) AS churn_rate_pct\n"
-                    "FROM customers"
+                    "FROM customers\n"
+                    "```\n\n"
+                    "**Unit:** percentage\n\n"
+                    "**Caveats:**\n"
+                    "- Simple lifetime churn rate, not a period-based cohort metric"
                 ),
-                "unit": "percentage",
-                "caveats": [
-                    "Simple lifetime churn rate, not a period-based cohort metric",
-                ],
-                "tags": ["customers", "retention"],
+                "tags": ["metric", "customers", "retention"],
             },
         ]
 
         count = 0
         for m in metrics:
-            _, created = CanonicalMetric.objects.update_or_create(
+            _, created = KnowledgeEntry.objects.update_or_create(
                 project=project,
-                name=m["name"],
-                defaults={**m, "updated_by": user},
+                title=m["title"],
+                defaults={**m, "created_by": user},
             )
             if created:
                 count += 1
 
         self.stdout.write(self.style.SUCCESS(
-            f"Canonical metrics: {count} created, {len(metrics) - count} updated"
+            f"Metric entries: {count} created, {len(metrics) - count} updated"
         ))
 
     def _create_business_rules(self, project, user):
-        """Add business rules."""
+        """Add business rule knowledge entries."""
         rules = [
             {
                 "title": "Revenue excludes cancelled and refunded orders",
-                "description": (
+                "content": (
                     "When calculating revenue metrics, always exclude orders with "
                     "status 'cancelled' or 'refunded'. These do not represent "
-                    "actual earned revenue."
+                    "actual earned revenue.\n\n"
+                    "**Applies to:** Tables: orders; "
+                    "Metrics: Gross Revenue, Net Revenue, Average Order Value (AOV)"
                 ),
-                "applies_to_tables": ["orders"],
-                "applies_to_metrics": ["Gross Revenue", "Net Revenue", "Average Order Value (AOV)"],
-                "tags": ["finance", "revenue"],
+                "tags": ["rule", "finance", "revenue"],
             },
             {
                 "title": "Net revenue subtracts discounts",
-                "description": (
+                "content": (
                     "Net revenue is total_amount minus discount_amount. "
                     "When asked about 'revenue' without qualification, "
-                    "default to gross revenue but mention the discount impact."
+                    "default to gross revenue but mention the discount impact.\n\n"
+                    "**Applies to:** Tables: orders; Metrics: Net Revenue"
                 ),
-                "applies_to_tables": ["orders"],
-                "applies_to_metrics": ["Net Revenue"],
-                "tags": ["finance"],
+                "tags": ["rule", "finance"],
             },
             {
                 "title": "Churned customers defined by status field",
-                "description": (
+                "content": (
                     "A customer is considered churned when their status field is 'churned'. "
-                    "Do not infer churn from last_login_at alone."
+                    "Do not infer churn from last_login_at alone.\n\n"
+                    "**Applies to:** Tables: customers; Metrics: Churn Rate"
                 ),
-                "applies_to_tables": ["customers"],
-                "applies_to_metrics": ["Churn Rate"],
-                "tags": ["customers"],
+                "tags": ["rule", "customers"],
             },
         ]
 
         count = 0
         for r in rules:
-            _, created = BusinessRule.objects.update_or_create(
+            _, created = KnowledgeEntry.objects.update_or_create(
                 project=project,
                 title=r["title"],
                 defaults={**r, "created_by": user},
@@ -659,5 +668,5 @@ class Command(BaseCommand):
                 count += 1
 
         self.stdout.write(self.style.SUCCESS(
-            f"Business rules: {count} created, {len(rules) - count} updated"
+            f"Rule entries: {count} created, {len(rules) - count} updated"
         ))

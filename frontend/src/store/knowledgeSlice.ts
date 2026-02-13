@@ -1,60 +1,26 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 
-export type KnowledgeType = "metric" | "rule" | "query" | "learning"
+export type KnowledgeType = "entry" | "learning"
 
 /**
- * Base fields shared across all knowledge item types
+ * KnowledgeEntry - type: "entry"
  */
-interface KnowledgeItemBase {
+export interface KnowledgeEntryItem {
   id: string
-  type: KnowledgeType
-  tags?: string[]
-  created_at: string
-  updated_at?: string
-}
-
-/**
- * CanonicalMetric - type: "metric"
- */
-export interface MetricItem extends KnowledgeItemBase {
-  type: "metric"
-  name: string
-  definition?: string
-  sql_template?: string
-  unit?: string
-  owner?: string
-  caveats?: string
-}
-
-/**
- * BusinessRule - type: "rule"
- */
-export interface RuleItem extends KnowledgeItemBase {
-  type: "rule"
+  type: "entry"
   title: string
-  description?: string
-  applies_to_tables?: string[]
-  applies_to_metrics?: string[]
-}
-
-/**
- * VerifiedQuery - type: "query"
- */
-export interface QueryItem extends KnowledgeItemBase {
-  type: "query"
-  name: string
-  description?: string
-  sql: string
-  tables_used?: string[]
-  verified_by?: string
-  verified_at?: string
+  content: string
+  tags: string[]
+  created_at: string
+  updated_at: string
 }
 
 /**
  * AgentLearning - type: "learning"
  */
-export interface LearningItem extends KnowledgeItemBase {
+export interface LearningItem {
+  id: string
   type: "learning"
   description: string
   category?: string
@@ -65,24 +31,20 @@ export interface LearningItem extends KnowledgeItemBase {
   confidence_score?: number
   times_applied?: number
   is_active?: boolean
-  promoted_to?: string
-  promoted_to_id?: string
+  created_at: string
 }
 
 /**
  * Union type for all knowledge items
  */
-export type KnowledgeItem = MetricItem | RuleItem | QueryItem | LearningItem
+export type KnowledgeItem = KnowledgeEntryItem | LearningItem
 
 /**
  * Helper to get display name for any knowledge item
  */
 export function getKnowledgeItemName(item: KnowledgeItem): string {
   switch (item.type) {
-    case "metric":
-    case "query":
-      return item.name
-    case "rule":
+    case "entry":
       return item.title
     case "learning":
       return item.description.slice(0, 50) + (item.description.length > 50 ? "..." : "")
@@ -101,9 +63,6 @@ export interface PaginationInfo {
   has_previous: boolean
 }
 
-/**
- * Paginated response from the knowledge API
- */
 interface PaginatedKnowledgeResponse {
   results: KnowledgeItem[]
   pagination: PaginationInfo
@@ -123,7 +82,8 @@ export interface KnowledgeSlice {
     createKnowledge: (projectId: string, data: Partial<KnowledgeItem> & { type: KnowledgeType }) => Promise<KnowledgeItem>
     updateKnowledge: (projectId: string, id: string, data: Partial<KnowledgeItem>) => Promise<KnowledgeItem>
     deleteKnowledge: (projectId: string, id: string) => Promise<void>
-    promoteKnowledge: (projectId: string, id: string, data: { promote_to: "business_rule" | "verified_query" }) => Promise<KnowledgeItem>
+    exportKnowledge: (projectId: string) => Promise<void>
+    importKnowledge: (projectId: string, file: File) => Promise<void>
     setFilter: (type: KnowledgeType | null) => void
     setSearch: (search: string) => void
   }
@@ -183,11 +143,24 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
       set({ knowledgeItems: items })
     },
 
-    promoteKnowledge: async (projectId: string, id: string, data: { promote_to: "business_rule" | "verified_query" }) => {
-      const item = await api.post<KnowledgeItem>(`/api/projects/${projectId}/knowledge/${id}/promote/`, data)
-      const items = get().knowledgeItems.map((i) => (i.id === id ? item : i))
-      set({ knowledgeItems: items })
-      return item
+    exportKnowledge: async (projectId: string) => {
+      const blob = await api.getBlob(`/api/projects/${projectId}/knowledge/export/`)
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `knowledge-export.zip`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    },
+
+    importKnowledge: async (projectId: string, file: File) => {
+      const formData = new FormData()
+      formData.append("file", file)
+      await api.upload(`/api/projects/${projectId}/knowledge/import/`, formData)
+      // Re-fetch to get updated list
+      await get().knowledgeActions.fetchKnowledge(projectId)
     },
 
     setFilter: (type: KnowledgeType | null) => {

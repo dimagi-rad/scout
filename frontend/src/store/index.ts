@@ -17,9 +17,7 @@ export type {
 export type {
   KnowledgeType,
   KnowledgeItem,
-  MetricItem,
-  RuleItem,
-  QueryItem,
+  KnowledgeEntryItem,
   LearningItem,
   PaginationInfo,
   KnowledgeStatus,

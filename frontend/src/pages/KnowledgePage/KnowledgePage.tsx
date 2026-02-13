@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import { useNavigate, useParams, useLocation } from "react-router-dom"
-import { Loader2, Plus } from "lucide-react"
+import { Download, Loader2, Plus, Upload } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import {
@@ -13,13 +13,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { KnowledgeList } from "./KnowledgeList"
-import { KnowledgeForm, PromoteDialog } from "./KnowledgeForm"
+import { KnowledgeForm } from "./KnowledgeForm"
 import type { KnowledgeItem, KnowledgeType } from "@/store/knowledgeSlice"
 
 export function KnowledgePage() {
   const { id } = useParams<{ id: string }>()
   const location = useLocation()
   const navigate = useNavigate()
+  const importInputRef = useRef<HTMLInputElement>(null)
 
   const activeProjectId = useAppStore((s) => s.activeProjectId)
   const knowledgeItems = useAppStore((s) => s.knowledgeItems)
@@ -31,7 +32,8 @@ export function KnowledgePage() {
     createKnowledge,
     updateKnowledge,
     deleteKnowledge,
-    promoteKnowledge,
+    exportKnowledge,
+    importKnowledge,
     setFilter,
     setSearch,
   } = useAppStore((s) => s.knowledgeActions)
@@ -39,13 +41,10 @@ export function KnowledgePage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editItem, setEditItem] = useState<KnowledgeItem | null>(null)
   const [deleteItem, setDeleteItem] = useState<KnowledgeItem | null>(null)
-  const [promoteItem, setPromoteItem] = useState<KnowledgeItem | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
 
-  // Check if we're on /knowledge/new
   const isNew = location.pathname.endsWith("/new")
 
-  // Fetch knowledge on mount and when project/filter/search changes
   useEffect(() => {
     if (activeProjectId) {
       fetchKnowledge(activeProjectId, {
@@ -55,7 +54,6 @@ export function KnowledgePage() {
     }
   }, [activeProjectId, knowledgeFilter, knowledgeSearch, fetchKnowledge])
 
-  // Open form for new item
   useEffect(() => {
     if (isNew) {
       setEditItem(null)
@@ -63,7 +61,6 @@ export function KnowledgePage() {
     }
   }, [isNew])
 
-  // Open form for editing specific item
   useEffect(() => {
     if (id && !isNew && knowledgeItems.length > 0) {
       const item = knowledgeItems.find((i) => i.id === id)
@@ -94,15 +91,10 @@ export function KnowledgePage() {
     setDeleteItem(item)
   }
 
-  const handlePromote = (item: KnowledgeItem) => {
-    setPromoteItem(item)
-  }
-
   const handleFormClose = (open: boolean) => {
     setFormOpen(open)
     if (!open) {
       setEditItem(null)
-      // Navigate back to list if we were on /new or /:id
       if (isNew || id) {
         navigate("/knowledge")
       }
@@ -131,15 +123,18 @@ export function KnowledgePage() {
     }
   }
 
-  const handleConfirmPromote = async (data: { promote_to: "business_rule" | "verified_query" }) => {
-    if (!activeProjectId || !promoteItem) return
-
-    await promoteKnowledge(activeProjectId, promoteItem.id, data)
-    setPromoteItem(null)
+  const handleExport = async () => {
+    if (!activeProjectId) return
+    await exportKnowledge(activeProjectId)
   }
 
-  // The API now handles filtering and search, so we just use the items directly
-  // Local filtering is only a fallback for immediate UI response
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!activeProjectId || !e.target.files?.[0]) return
+    await importKnowledge(activeProjectId, e.target.files[0])
+    // Reset input so same file can be re-imported
+    e.target.value = ""
+  }
+
   const filteredItems = knowledgeItems
 
   if (!activeProjectId) {
@@ -159,13 +154,35 @@ export function KnowledgePage() {
         <div>
           <h1 className="text-2xl font-bold">Knowledge Base</h1>
           <p className="text-muted-foreground">
-            Manage metrics, rules, queries, and learnings
+            Manage knowledge entries and learnings
           </p>
         </div>
-        <Button onClick={handleNewClick}>
-          <Plus className="mr-2 h-4 w-4" />
-          New
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={handleExport} data-testid="knowledge-export">
+            <Download className="mr-2 h-4 w-4" />
+            Export
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => importInputRef.current?.click()}
+            data-testid="knowledge-import"
+          >
+            <Upload className="mr-2 h-4 w-4" />
+            Import
+          </Button>
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".zip"
+            className="hidden"
+            onChange={handleImport}
+          />
+          <Button onClick={handleNewClick} data-testid="knowledge-new">
+            <Plus className="mr-2 h-4 w-4" />
+            New
+          </Button>
+        </div>
       </div>
 
       {/* Loading state */}
@@ -190,7 +207,6 @@ export function KnowledgePage() {
           onSearchChange={handleSearchChange}
           onEdit={handleEdit}
           onDelete={handleDelete}
-          onPromote={handlePromote}
         />
       )}
 
@@ -200,14 +216,6 @@ export function KnowledgePage() {
         onOpenChange={handleFormClose}
         item={editItem}
         onSave={handleSave}
-      />
-
-      {/* Promote Dialog */}
-      <PromoteDialog
-        open={!!promoteItem}
-        onOpenChange={(open) => !open && setPromoteItem(null)}
-        item={promoteItem}
-        onPromote={handleConfirmPromote}
       />
 
       {/* Delete Confirmation Dialog */}

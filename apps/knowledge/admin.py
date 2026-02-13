@@ -1,24 +1,17 @@
-"""
-Admin configuration for Knowledge models.
-"""
+"""Admin configuration for Knowledge models."""
 from django.contrib import admin
-from django.utils import timezone
 
 from .models import (
     AgentLearning,
-    BusinessRule,
-    CanonicalMetric,
     EvalRun,
     GoldenQuery,
+    KnowledgeEntry,
     TableKnowledge,
-    VerifiedQuery,
 )
 
 
 @admin.register(TableKnowledge)
 class TableKnowledgeAdmin(admin.ModelAdmin):
-    """Admin interface for TableKnowledge model."""
-
     list_display = ["table_name", "project", "owner", "refresh_frequency", "updated_at"]
     list_filter = ["project", "updated_at"]
     search_fields = ["table_name", "description", "owner"]
@@ -47,92 +40,17 @@ class TableKnowledgeAdmin(admin.ModelAdmin):
         super().save_model(request, obj, form, change)
 
 
-@admin.register(CanonicalMetric)
-class CanonicalMetricAdmin(admin.ModelAdmin):
-    """Admin interface for CanonicalMetric model."""
-
-    list_display = ["name", "project", "unit", "owner", "updated_at"]
-    list_filter = ["project", "tags"]
-    search_fields = ["name", "definition", "owner"]
-    autocomplete_fields = ["project", "updated_by"]
-
-    fieldsets = (
-        (None, {"fields": ("project", "name", "unit")}),
-        ("Definition", {"fields": ("definition", "sql_template")}),
-        ("Ownership", {"fields": ("owner", "caveats", "tags")}),
-        (
-            "Metadata",
-            {
-                "fields": ("updated_by", "created_at", "updated_at"),
-                "classes": ("collapse",),
-            },
-        ),
-    )
-    readonly_fields = ["created_at", "updated_at"]
-
-    def save_model(self, request, obj, form, change):
-        obj.updated_by = request.user
-        super().save_model(request, obj, form, change)
-
-
-@admin.register(VerifiedQuery)
-class VerifiedQueryAdmin(admin.ModelAdmin):
-    """Admin interface for VerifiedQuery model."""
-
-    list_display = ["name", "project", "tables_used_display", "verified_by", "verified_at"]
-    list_filter = ["project", "verified_at"]
-    search_fields = ["name", "description", "sql"]
-    autocomplete_fields = ["project", "verified_by"]
-    actions = ["mark_as_verified"]
-
-    fieldsets = (
-        (None, {"fields": ("project", "name", "description")}),
-        ("Query", {"fields": ("sql", "tables_used", "tags")}),
-        ("Verification", {"fields": ("verified_by", "verified_at")}),
-        (
-            "Metadata",
-            {
-                "fields": ("created_at", "updated_at"),
-                "classes": ("collapse",),
-            },
-        ),
-    )
-    readonly_fields = ["created_at", "updated_at"]
-
-    @admin.display(description="Tables")
-    def tables_used_display(self, obj):
-        return ", ".join(obj.tables_used) if obj.tables_used else "-"
-
-    @admin.action(description="Mark selected queries as verified")
-    def mark_as_verified(self, request, queryset):
-        queryset.update(verified_by=request.user, verified_at=timezone.now())
-
-
-@admin.register(BusinessRule)
-class BusinessRuleAdmin(admin.ModelAdmin):
-    """Admin interface for BusinessRule model."""
-
-    list_display = ["title", "project", "applies_to_tables_display", "created_at"]
-    list_filter = ["project", "created_at"]
-    search_fields = ["title", "description"]
+@admin.register(KnowledgeEntry)
+class KnowledgeEntryAdmin(admin.ModelAdmin):
+    list_display = ["title", "project", "tags_display", "updated_at"]
+    list_filter = ["project", "updated_at"]
+    search_fields = ["title", "content"]
     autocomplete_fields = ["project", "created_by"]
-
-    fieldsets = (
-        (None, {"fields": ("project", "title", "description")}),
-        ("Scope", {"fields": ("applies_to_tables", "applies_to_metrics", "tags")}),
-        (
-            "Metadata",
-            {
-                "fields": ("created_by", "created_at", "updated_at"),
-                "classes": ("collapse",),
-            },
-        ),
-    )
     readonly_fields = ["created_at", "updated_at"]
 
-    @admin.display(description="Tables")
-    def applies_to_tables_display(self, obj):
-        return ", ".join(obj.applies_to_tables) if obj.applies_to_tables else "All"
+    @admin.display(description="Tags")
+    def tags_display(self, obj):
+        return ", ".join(obj.tags) if obj.tags else "-"
 
     def save_model(self, request, obj, form, change):
         if not obj.created_by:
@@ -141,8 +59,6 @@ class BusinessRuleAdmin(admin.ModelAdmin):
 
 
 class ConfidenceRangeFilter(admin.SimpleListFilter):
-    """Filter learnings by confidence score ranges."""
-
     title = "confidence range"
     parameter_name = "confidence_range"
 
@@ -165,8 +81,6 @@ class ConfidenceRangeFilter(admin.SimpleListFilter):
 
 @admin.register(AgentLearning)
 class AgentLearningAdmin(admin.ModelAdmin):
-    """Admin interface for AgentLearning model with curation workflow."""
-
     list_display = [
         "description_short",
         "project",
@@ -174,16 +88,13 @@ class AgentLearningAdmin(admin.ModelAdmin):
         "confidence_badge",
         "times_applied",
         "is_active",
-        "promoted_to",
         "created_at",
     ]
-    list_filter = ["project", "category", "is_active", "promoted_to", ConfidenceRangeFilter]
+    list_filter = ["project", "category", "is_active", ConfidenceRangeFilter]
     search_fields = ["description", "original_error", "original_sql", "corrected_sql"]
     actions = [
         "approve_learnings",
         "reject_learnings",
-        "promote_to_business_rule",
-        "promote_to_verified_query",
         "increase_confidence",
         "decrease_confidence",
     ]
@@ -200,7 +111,7 @@ class AgentLearningAdmin(admin.ModelAdmin):
         ),
         (
             "Lifecycle",
-            {"fields": ("confidence_score", "times_applied", "is_active", "promoted_to")},
+            {"fields": ("confidence_score", "times_applied", "is_active")},
         ),
         (
             "Source",
@@ -264,45 +175,9 @@ class AgentLearningAdmin(admin.ModelAdmin):
             count += 1
         self.message_user(request, f"Decreased confidence for {count} learnings")
 
-    @admin.action(description="Promote to Business Rule")
-    def promote_to_business_rule(self, request, queryset):
-        count = 0
-        for learning in queryset:
-            if learning.promoted_to:
-                continue  # Skip already promoted
-            try:
-                learning.promote_to_business_rule(user=request.user)
-                count += 1
-            except ValueError as e:
-                self.message_user(request, f"Error promoting learning: {e}", level="error")
-        self.message_user(request, f"Promoted {count} learnings to Business Rules")
-
-    @admin.action(description="Promote to Verified Query")
-    def promote_to_verified_query(self, request, queryset):
-        count = 0
-        skipped = 0
-        for learning in queryset:
-            if learning.promoted_to:
-                skipped += 1
-                continue
-            if not learning.corrected_sql:
-                skipped += 1
-                continue
-            try:
-                learning.promote_to_verified_query(user=request.user)
-                count += 1
-            except ValueError as e:
-                self.message_user(request, f"Error promoting learning: {e}", level="error")
-        self.message_user(
-            request,
-            f"Promoted {count} learnings to Verified Queries (skipped {skipped})",
-        )
-
 
 @admin.register(GoldenQuery)
 class GoldenQueryAdmin(admin.ModelAdmin):
-    """Admin interface for GoldenQuery model."""
-
     list_display = ["question_short", "project", "difficulty", "comparison_mode", "created_at"]
     list_filter = ["project", "difficulty", "comparison_mode"]
     search_fields = ["question", "expected_sql"]
@@ -335,8 +210,6 @@ class GoldenQueryAdmin(admin.ModelAdmin):
 
 @admin.register(EvalRun)
 class EvalRunAdmin(admin.ModelAdmin):
-    """Admin interface for EvalRun model."""
-
     list_display = [
         "project",
         "model_used",

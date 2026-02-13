@@ -142,6 +142,98 @@ POST /api/artifacts/<id>/share/
 
 Access levels: `public`, `project`, `specific`.
 
+## Knowledge
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects/<pid>/knowledge/` | List knowledge items (entries and learnings). |
+| POST | `/api/projects/<pid>/knowledge/` | Create a knowledge entry. |
+| GET | `/api/projects/<pid>/knowledge/<id>/` | Get a single knowledge item. |
+| PUT | `/api/projects/<pid>/knowledge/<id>/` | Update a knowledge item. |
+| DELETE | `/api/projects/<pid>/knowledge/<id>/` | Delete a knowledge item. |
+| GET | `/api/projects/<pid>/knowledge/export/` | Export entries as a zip of markdown files. |
+| POST | `/api/projects/<pid>/knowledge/import/` | Import a zip of markdown files as entries. |
+
+### List parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| `type` | Filter by type: `entry` or `learning`. |
+| `search` | Search entries by title/content and learnings by description. |
+| `page` | Page number (default: 1). |
+| `page_size` | Items per page (default: 50). |
+
+### List response
+
+```json
+{
+  "results": [
+    {
+      "id": "...",
+      "type": "entry",
+      "title": "MRR Definition",
+      "content": "Monthly Recurring Revenue is...",
+      "tags": ["metric", "finance"],
+      "created_at": "2026-01-15T10:00:00Z",
+      "updated_at": "2026-01-15T10:00:00Z"
+    },
+    {
+      "id": "...",
+      "type": "learning",
+      "description": "The events.timestamp column stores Unix epoch milliseconds",
+      "category": "type_mismatch",
+      "applies_to_tables": ["events"],
+      "original_error": "invalid input syntax for type timestamp",
+      "original_sql": "SELECT timestamp FROM events",
+      "corrected_sql": "SELECT to_timestamp(timestamp / 1000.0) FROM events",
+      "confidence_score": 0.9,
+      "times_applied": 15,
+      "created_at": "2026-01-20T14:30:00Z"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total_count": 12,
+    "total_pages": 1,
+    "has_next": false,
+    "has_previous": false
+  }
+}
+```
+
+### Create entry
+
+```json
+POST /api/projects/<pid>/knowledge/
+{
+  "type": "entry",
+  "title": "MRR Definition",
+  "content": "Monthly Recurring Revenue is the sum of...",
+  "tags": ["metric", "finance"]
+}
+```
+
+### Update learning
+
+```json
+PUT /api/projects/<pid>/knowledge/<id>/
+{
+  "type": "learning",
+  "description": "Updated description of the learning",
+  "category": "type_mismatch",
+  "applies_to_tables": ["events", "sessions"]
+}
+```
+
+### Export
+
+`GET /api/projects/<pid>/knowledge/export/` returns a zip file (`application/zip`) containing one `.md` file per entry with YAML frontmatter.
+
+### Import
+
+`POST /api/projects/<pid>/knowledge/import/` accepts `multipart/form-data` with a `file` field containing a zip of markdown files. Each file must have YAML frontmatter with at least a `title` field.
+
 ## Health check
 
 | Method | Endpoint | Description |

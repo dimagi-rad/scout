@@ -1,4 +1,4 @@
-import { Search, Pencil, Trash2, ArrowUpCircle } from "lucide-react"
+import { Search, Pencil, Trash2 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -18,47 +18,33 @@ interface KnowledgeListProps {
   onSearchChange: (search: string) => void
   onEdit: (item: KnowledgeItem) => void
   onDelete: (item: KnowledgeItem) => void
-  onPromote: (item: KnowledgeItem) => void
 }
 
 const typeFilters: { value: KnowledgeType | null; label: string }[] = [
   { value: null, label: "All" },
-  { value: "metric", label: "Metrics" },
-  { value: "rule", label: "Rules" },
-  { value: "query", label: "Queries" },
+  { value: "entry", label: "Entries" },
   { value: "learning", label: "Learnings" },
 ]
 
 const typeBadgeStyles: Record<KnowledgeType, string> = {
-  metric: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  rule: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
-  query: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
+  entry: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
   learning: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
 }
 
 function getItemDescription(item: KnowledgeItem): string | null {
   switch (item.type) {
-    case "metric":
-      return item.sql_template ? `SQL: ${item.sql_template.slice(0, 100)}...` : item.definition || null
-    case "rule":
-      return item.description || null
-    case "query":
-      return item.sql ? `SQL: ${item.sql.slice(0, 100)}...` : item.description || null
+    case "entry":
+      return item.content ? item.content.slice(0, 120) + (item.content.length > 120 ? "..." : "") : null
     case "learning":
       return item.corrected_sql ? `Corrected: ${item.corrected_sql.slice(0, 100)}...` : null
   }
 }
 
 function getRelatedTables(item: KnowledgeItem): string[] {
-  switch (item.type) {
-    case "rule":
-    case "learning":
-      return item.applies_to_tables || []
-    case "query":
-      return item.tables_used || []
-    default:
-      return []
+  if (item.type === "learning") {
+    return item.applies_to_tables || []
   }
+  return []
 }
 
 export function KnowledgeList({
@@ -69,7 +55,6 @@ export function KnowledgeList({
   onSearchChange,
   onEdit,
   onDelete,
-  onPromote,
 }: KnowledgeListProps) {
   return (
     <div className="space-y-4">
@@ -158,8 +143,8 @@ export function KnowledgeList({
                   </div>
                 )}
 
-                {/* Tags for items that have them */}
-                {item.tags && item.tags.length > 0 && (
+                {/* Tags for entries */}
+                {item.type === "entry" && item.tags && item.tags.length > 0 && (
                   <div className="flex flex-wrap gap-1 mb-3">
                     {item.tags.slice(0, 3).map((tag) => (
                       <Badge key={tag} variant="secondary" className="text-xs">
@@ -174,35 +159,16 @@ export function KnowledgeList({
                   </div>
                 )}
 
-                {/* Promoted indicator for learnings */}
-                {learningItem?.promoted_to && (
-                  <p className="text-xs text-green-600 dark:text-green-400 mb-3">
-                    Promoted to {learningItem.promoted_to}
-                  </p>
-                )}
-
                 {/* Actions */}
                 <div className="mt-auto flex items-center gap-2 pt-2 border-t">
-                  {learningItem && !learningItem.promoted_to ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => onPromote(item)}
-                      className="flex-1"
-                    >
-                      <ArrowUpCircle className="mr-1 h-4 w-4" />
-                      Promote
-                    </Button>
-                  ) : !isLearning ? (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onEdit(item)}
-                    >
-                      <Pencil className="mr-1 h-4 w-4" />
-                      Edit
-                    </Button>
-                  ) : null}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => onEdit(item)}
+                  >
+                    <Pencil className="mr-1 h-4 w-4" />
+                    Edit
+                  </Button>
                   <Button
                     variant="ghost"
                     size="sm"

@@ -505,23 +505,15 @@ class EvalRunner:
         """Get a snapshot of the current knowledge state."""
         from apps.knowledge.models import (
             AgentLearning,
-            BusinessRule,
-            CanonicalMetric,
+            KnowledgeEntry,
             TableKnowledge,
-            VerifiedQuery,
         )
 
         return {
             "table_knowledge_count": TableKnowledge.objects.filter(
                 project=self.project
             ).count(),
-            "canonical_metric_count": CanonicalMetric.objects.filter(
-                project=self.project
-            ).count(),
-            "verified_query_count": VerifiedQuery.objects.filter(
-                project=self.project
-            ).count(),
-            "business_rule_count": BusinessRule.objects.filter(
+            "knowledge_entry_count": KnowledgeEntry.objects.filter(
                 project=self.project
             ).count(),
             "agent_learning_count": AgentLearning.objects.filter(

@@ -178,7 +178,7 @@ Core agent behavior (~150 lines):
 - **Response format**: Markdown tables for small results, summaries for large results
 - **Query explanation**: Mandatory plain English breakdown for every SQL query
 - **Provenance requirements**: Source tables, filters, aggregation method, row counts, time range
-- **Canonical metrics**: Must use canonical definitions, cite by name
+- **Knowledge entries**: Use metric definitions and business rules from the knowledge base
 - **Error handling**: Explain in plain language, identify cause, suggest fix
 - **Security constraints**: SELECT only, schema-scoped, no system tables
 
@@ -201,29 +201,26 @@ Custom instructions from the project configuration. Use for:
 
 ### 4. Knowledge context
 
-Assembled by the `KnowledgeRetriever` from five sources:
+Assembled by the `KnowledgeRetriever` from three sources:
 
-**Canonical metrics** (always included):
+**Knowledge entries** (always included):
 ```markdown
-## Canonical Metric Definitions
+## Knowledge Base
 
-### MRR
-**Definition:** Monthly Recurring Revenue
-**Unit:** USD
-**SQL:**
-```sql
-SELECT SUM(amount) FROM subscriptions WHERE status = 'active'
-```
-**Caveats:**
-- Excludes annual contracts
-```
+### MRR (Monthly Recurring Revenue)
+Definition: Sum of active subscription amounts, excluding annual contracts billed upfront.
 
-**Business rules** (always included):
-```markdown
-## Business Rules & Gotchas
+SQL:
+    SELECT SUM(amount) FROM subscriptions WHERE status = 'active'
 
-- **APAC active users**: In APAC, 'active' means logged in within 7 days, not 30
-  - *Applies to: Tables: users, sessions*
+Unit: USD
+Caveats:
+- Excludes enterprise contracts billed annually.
+- Amounts are in cents.
+
+### APAC Active Users
+In the APAC region, 'active user' means logged in within 7 days, not 30.
+Applies to: users, sessions tables.
 ```
 
 **Table knowledge** (enriched metadata):
@@ -242,20 +239,6 @@ Order transactions from all channels.
 
 **Related Tables:**
 - `customers`: `orders.customer_id = customers.id`
-```
-
-**Verified queries** (top 10 by recency):
-```markdown
-## Verified Query Patterns
-
-### Monthly Active Users
-**Question:** How many users were active last month?
-**Tables:** `users`, `sessions`
-**SQL:**
-```sql
-SELECT COUNT(DISTINCT user_id) FROM sessions
-WHERE created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
-```
 ```
 
 **Agent learnings** (top 20 by confidence):

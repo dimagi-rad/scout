@@ -55,11 +55,9 @@ Key details:
 - [x] `allowed_tables` and `excluded_tables` are JSONFields for table-level access control
 
 ### 1.3 Knowledge Models — `apps/knowledge/`
-Create the models from addendum 2 Section B1:
+Create the models from addendum 2 Section B1 (simplified in later iteration):
 - [x] `TableKnowledge` — enriched table metadata (description, use cases, data quality notes, column notes, ownership)
-- [x] `CanonicalMetric` — agreed-upon metric definitions with canonical SQL
-- [x] `VerifiedQuery` — query patterns known to produce correct results
-- [x] `BusinessRule` — institutional knowledge and gotchas
+- [x] `KnowledgeEntry` — flexible markdown documents with title, content, and tags (replaces CanonicalMetric, VerifiedQuery, BusinessRule)
 - [x] `AgentLearning` — agent-discovered corrections (from addendum 2 Section B2)
 
 ### 1.4 User Model — `apps/users/`
@@ -82,16 +80,10 @@ Implement the `DataDictionaryGenerator` class from base spec Section 3:
 - [x] `render_for_prompt()` formats for system prompt (full detail for ≤15 tables, table listing for larger schemas)
 
 ### 1.7 Knowledge Import Command — `apps/knowledge/management/commands/import_knowledge.py`
-- [x] Bulk import from JSON/YAML files following the directory structure:
-  ```
-  knowledge/
-  ├── tables/*.json
-  ├── metrics/*.json
-  ├── queries/*.sql
-  └── business/*.json
-  ```
-- [x] Upsert semantics (update existing, create new)
-- [x] `--recreate` flag for fresh start
+- [x] Bulk import from a directory of markdown files with YAML frontmatter
+- [x] `--project-slug` and `--dir` arguments
+- [x] Recursively finds `**/*.md` files, parses frontmatter (title, tags)
+- [x] Upsert semantics via `update_or_create` on (project, title)
 
 ### 1.8 Data Dictionary Command — `apps/projects/management/commands/generate_data_dictionary.py`
 From base spec Section 9:
@@ -128,17 +120,16 @@ Implement `create_sql_tool()` factory from base spec Section 4:
 - [x] Returns structured result: columns, rows, row_count, truncated, sql_executed
 - [x] Add provenance metadata to response (from addendum 2 Section B4):
   - tables_accessed
-  - metric_used (if canonical metric applied)
+  - metric_used (if knowledge entry metric applied)
   - knowledge_applied (list of applied knowledge descriptions)
   - caveats
 - [x] Handle errors: QueryCanceled (timeout), general psycopg2 errors
 
 ### 2.3 Knowledge Retriever — `apps/knowledge/services/retriever.py`
-Implement `KnowledgeRetriever` from addendum 2 Section B1:
-- [x] Always includes: canonical metrics, business rules
+Implement `KnowledgeRetriever` from addendum 2 Section B1 (simplified):
+- [x] Always includes: knowledge entries (all for the project)
 - [x] Includes table knowledge (all if <20 tables, otherwise match on question)
-- [x] Includes top-10 verified query patterns
-- [x] Includes active agent learnings (ordered by confidence)
+- [x] Includes active agent learnings (ordered by confidence, max 20)
 - [x] Returns formatted string for system prompt injection
 
 ### 2.4 Base System Prompt — `apps/agents/prompts/base_system.py`
@@ -148,7 +139,7 @@ From base spec Section 5, plus additions from addendum 2 Sections B4-B5:
 - [x] Error handling: explain errors, suggest fixes, never fabricate
 - [x] Provenance requirements: always explain HOW the answer was computed
 - [x] Query explanation: plain English explanation alongside SQL
-- [x] Canonical metric enforcement: MUST use canonical SQL when available
+- [x] Knowledge entry enforcement: use metric definitions and business rules from knowledge base when available
 - [x] Security: SELECT only, schema-scoped
 
 ### 2.5 Agent State — `apps/agents/graph/state.py`
@@ -374,9 +365,9 @@ From base spec Section 10:
 - [x] Shared volumes, environment variables, proper networking
 
 ### 5.8 Knowledge Curation Workflow
-- [x] Admin action: promote AgentLearning → BusinessRule or VerifiedQuery
-- [x] Review interface for learnings (approve, reject, edit)
+- [x] Edit and delete learnings directly from the Knowledge page
 - [x] Learning confidence score management (increases when confirmed, decreases when contradicted)
+- [x] Import/export knowledge entries as zip of markdown files with YAML frontmatter
 
 ### 5.9 Tests
 - [ ] Eval runner with known golden queries
@@ -418,7 +409,7 @@ From base spec Section 10:
 
 ### 6.6 User Documentation
 - [ ] Getting started guide for project admins
-- [ ] Knowledge authoring guide (how to write good table descriptions, metrics, business rules)
+- [ ] Knowledge authoring guide (how to write good table descriptions, knowledge entries, and tags)
 - [ ] Recipe creation guide
 - [ ] Eval authoring guide (how to write golden queries)
 
@@ -488,9 +479,10 @@ data-agent-platform/
 │   │   ├── urls.py
 │   │   └── migrations/
 │   ├── knowledge/
-│   │   ├── models.py              # TableKnowledge, CanonicalMetric, VerifiedQuery,
-│   │   │                          #   BusinessRule, AgentLearning, GoldenQuery, EvalRun
+│   │   ├── models.py              # KnowledgeEntry, TableKnowledge, AgentLearning,
+│   │   │                          #   GoldenQuery, EvalRun
 │   │   ├── admin.py
+│   │   ├── utils.py               # YAML frontmatter parsing/rendering
 │   │   ├── services/
 │   │   │   ├── retriever.py       # KnowledgeRetriever
 │   │   │   └── eval_runner.py     # EvalRunner
@@ -500,7 +492,7 @@ data-agent-platform/
 │   │   │       └── import_knowledge.py
 │   │   ├── api/
 │   │   │   ├── serializers.py
-│   │   │   └── views.py
+│   │   │   └── views.py           # CRUD + export/import
 │   │   └── migrations/
 │   └── users/
 │       ├── models.py              # Custom User
@@ -574,6 +566,7 @@ dependencies = [
 
     # Utilities
     "python-dotenv>=1.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -594,7 +587,7 @@ dev = [
 
 2. **Write tests first** for the SQL validator (Phase 2.1) — this is security-critical. Test injection attempts, multi-statement attacks, schema boundary violations, and dangerous function calls.
 
-3. **The knowledge layer should be populated early** — even with just a few TableKnowledge entries and BusinessRules, the agent's accuracy improves dramatically. Include seed data fixtures for testing.
+3. **The knowledge layer should be populated early** — even with just a few TableKnowledge and KnowledgeEntry records, the agent's accuracy improves dramatically. Include seed data fixtures for testing.
 
 4. **The artifact sandbox HTML** (addendum 1) is a single self-contained template — it loads all libraries from CDN and communicates via postMessage. Copy it as-is from the spec.
 

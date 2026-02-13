@@ -36,9 +36,8 @@ Regenerate the data dictionary whenever the target database schema changes -- fo
 
 The data dictionary provides structural information (columns and types), but it doesn't explain what the data *means*. For that, use the [knowledge layer](../admin/knowledge.md):
 
+- **Knowledge entries** -- markdown documents covering metric definitions, business rules, verified queries, and other institutional knowledge.
 - **Table knowledge** -- human-written descriptions of what tables represent and when to use them.
-- **Canonical metrics** -- agreed-upon definitions for business metrics.
-- **Verified queries** -- query patterns known to produce correct results.
-- **Business rules** -- institutional knowledge and gotchas.
+- **Agent learnings** -- corrections the agent has discovered from previous errors.
 
 The combination of the auto-generated data dictionary and the human-curated knowledge layer gives the agent the context it needs to write accurate queries.

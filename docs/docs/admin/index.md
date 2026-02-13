@@ -7,5 +7,5 @@ This section covers project administration: setting up projects, managing users,
 - **[Projects](projects.md)** -- Creating and configuring projects, database connections, and agent settings.
 - **[Users](users.md)** -- User management, roles, and authentication.
 - **[Table access](table-access.md)** -- Controlling which tables the agent can query.
-- **[Knowledge](knowledge.md)** -- Table descriptions, canonical metrics, verified queries, and business rules.
+- **[Knowledge](knowledge.md)** -- Knowledge entries, table descriptions, agent learnings, and import/export.
 - **[Data dictionary](data-dictionary.md)** -- Generating and maintaining schema documentation.

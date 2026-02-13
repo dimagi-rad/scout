@@ -3,7 +3,7 @@
  */
 
 export function getCsrfToken(): string {
-  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/)
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
   return match ? match[1] : ""
 }
 
@@ -33,7 +33,7 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new ApiError(res.status, body.error ?? res.statusText)
+    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText)
   }
 
   // Handle 204 No Content (common for DELETE responses)
@@ -65,4 +65,11 @@ export const api = {
   delete: <T>(url: string) => request<T>(url, { method: "DELETE" }),
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
+  getBlob: async (url: string): Promise<Blob> => {
+    const res = await fetch(url, { credentials: "include" })
+    if (!res.ok) {
+      throw new ApiError(res.status, res.statusText)
+    }
+    return res.blob()
+  },
 }

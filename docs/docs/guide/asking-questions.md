@@ -40,10 +40,8 @@ You can ask for specific formats:
 The agent has access to:
 
 - **Data dictionary** -- auto-generated schema documentation listing all visible tables, columns, and their types.
+- **Knowledge entries** -- markdown documents covering metric definitions, business rules, verified queries, and other institutional knowledge.
 - **Table knowledge** -- human-written descriptions of what tables mean, use cases, and data quality notes.
-- **Canonical metrics** -- agreed-upon definitions for metrics like MRR, DAU, or churn rate.
-- **Verified queries** -- query patterns known to produce correct results.
-- **Business rules** -- institutional knowledge and gotchas (e.g., "amounts are in cents, not dollars").
 - **Agent learnings** -- corrections the agent has discovered from previous errors.
 
 The more knowledge you add to a project, the better the agent's answers become.

@@ -22,7 +22,7 @@ Try starting with simple, concrete questions about your data:
 When you send a message, Scout:
 
 1. **Validates** your project membership and permissions.
-2. **Sends** your message to the LangGraph agent with context about your project's schema, knowledge base, and business rules.
+2. **Sends** your message to the LangGraph agent with context about your project's schema, knowledge base, and agent learnings.
 3. **Generates SQL** -- the agent writes a SQL query based on your question and the data dictionary.
 4. **Validates the query** -- only SELECT statements are allowed; dangerous functions are blocked; table access controls are enforced.
 5. **Executes the query** -- the query runs against your database with a read-only connection, row limits, and a statement timeout.
