@@ -2,56 +2,111 @@
 Scout MCP Server.
 
 Database access layer for the Scout agent, exposed via the Model Context
-Protocol. This is a standalone service — no Django dependency.
+Protocol. Runs as a standalone process but uses Django ORM to load project
+configuration and database credentials.
 
 Usage:
     # stdio transport (for local clients)
-    python -m mcp_server
+    python -m mcp_server --project-id <uuid>
 
     # HTTP transport (for networked clients)
-    python -m mcp_server --transport streamable-http
+    python -m mcp_server --project-id <uuid> --transport streamable-http
 
     # Specify host/port for HTTP
-    python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 9000
+    python -m mcp_server --project-id <uuid> --transport streamable-http --host 0.0.0.0 --port 9000
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from mcp.server.fastmcp import FastMCP
+
+from mcp_server.context import ProjectContext, get_project_context, set_project_context
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("scout")
 
 
-# --- Tools will be registered here as the service is built out ---
+# --- v1 Tool stubs ---
 
 
 @mcp.tool()
-def execute_sql(query: str) -> dict:
-    """Execute a read-only SQL query against the project database.
+def list_tables() -> dict:
+    """List all tables and views in the project database.
+
+    Returns table names, types (table/view), approximate row counts,
+    and descriptions. Respects project-level table allow/exclude lists.
+    """
+    ctx = get_project_context()
+    return {
+        "project_id": ctx.project_id,
+        "schema": ctx.db_schema,
+        "tables": [],  # TODO: Milestone 2
+    }
+
+
+@mcp.tool()
+def describe_table(table_name: str) -> dict:
+    """Get detailed metadata for a specific table.
+
+    Returns columns (name, type, nullable, default), primary keys,
+    foreign key relationships, indexes, and semantic descriptions
+    if available.
 
     Args:
-        query: A SQL SELECT query to execute.
-
-    Returns:
-        A dict with columns, rows, row_count, and error (null on success).
+        table_name: Name of the table to describe.
     """
-    raise NotImplementedError
+    ctx = get_project_context()
+    return {
+        "project_id": ctx.project_id,
+        "schema": ctx.db_schema,
+        "table_name": table_name,
+        "columns": [],  # TODO: Milestone 2
+    }
 
 
 @mcp.tool()
-def get_schema() -> dict:
-    """Return the database schema (tables, columns, types, relationships).
+def get_metadata() -> dict:
+    """Get a complete metadata snapshot for the project database.
 
-    Returns:
-        A dict describing all tables and their columns.
+    Returns all tables, columns, relationships, and semantic layer
+    information in a single call. Useful for building comprehensive
+    understanding of available data.
     """
-    raise NotImplementedError
+    ctx = get_project_context()
+    return {
+        "project_id": ctx.project_id,
+        "schema": ctx.db_schema,
+        "tables": {},  # TODO: Milestone 2
+    }
+
+
+@mcp.tool()
+def query(sql: str) -> dict:
+    """Execute a read-only SQL query against the project database.
+
+    The query is validated for safety (SELECT only, no dangerous functions),
+    row limits are enforced, and execution uses a read-only database role.
+
+    Args:
+        sql: A SQL SELECT query to execute.
+    """
+    ctx = get_project_context()
+    return {
+        "project_id": ctx.project_id,
+        "schema": ctx.db_schema,
+        "columns": [],  # TODO: Milestone 3
+        "rows": [],
+        "row_count": 0,
+    }
+
+
+# --- Server setup ---
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -63,8 +118,51 @@ def _configure_logging(verbose: bool = False) -> None:
     )
 
 
+def _setup_django() -> None:
+    """Initialize Django ORM for model access."""
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
+    import django
+
+    django.setup()
+
+
+def _load_project(project_id: str) -> None:
+    """Load a project from the database and set the global context."""
+    from apps.projects.models import Project
+
+    try:
+        project = Project.objects.select_related("database_connection").get(
+            id=project_id, is_active=True
+        )
+    except Project.DoesNotExist:
+        logger.error("Project %s not found or not active", project_id)
+        sys.exit(1)
+
+    if not project.database_connection.is_active:
+        logger.error(
+            "Database connection '%s' for project '%s' is not active",
+            project.database_connection.name,
+            project.name,
+        )
+        sys.exit(1)
+
+    ctx = ProjectContext.from_project(project)
+    set_project_context(ctx)
+    logger.info(
+        "Loaded project '%s' (schema=%s, tables=%s)",
+        ctx.project_name,
+        ctx.db_schema,
+        f"allow={ctx.allowed_tables}" if ctx.allowed_tables else "all",
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scout MCP Server")
+    parser.add_argument(
+        "--project-id",
+        required=True,
+        help="UUID of the Scout project to serve",
+    )
     parser.add_argument(
         "--transport",
         choices=["stdio", "streamable-http"],
@@ -78,6 +176,8 @@ def main() -> None:
     args = parser.parse_args()
 
     _configure_logging(args.verbose)
+    _setup_django()
+    _load_project(args.project_id)
 
     logger.info("Starting Scout MCP server (transport=%s)", args.transport)
 
