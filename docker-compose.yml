@@ -31,6 +31,24 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # MCP data server (Scout agent data access layer)
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8100
+    environment:
+      - DATABASE_URL=postgresql://platform:${PLATFORM_DB_PASSWORD:-devpassword}@platform-db:5432/agent_platform
+      - DJANGO_SETTINGS_MODULE=config.settings.development
+      - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
+    ports:
+      - "8100:8100"
+    depends_on:
+      platform-db:
+        condition: service_healthy
+    restart: unless-stopped
+
   # Django API server (ASGI via uvicorn)
   api:
     build:
@@ -46,6 +64,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
+      - MCP_SERVER_URL=http://mcp-server:8100/mcp
       - MAX_CONNECTIONS_PER_PROJECT=5
     volumes:
       - ./apps:/app/apps
@@ -58,6 +77,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mcp-server:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
       interval: 30s
