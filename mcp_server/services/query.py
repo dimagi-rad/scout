@@ -16,6 +16,13 @@ from asgiref.sync import sync_to_async
 from apps.agents.tools.sql_tool import SQLValidationError, SQLValidator
 from apps.projects.services.db_manager import get_pool_manager
 from mcp_server.context import ProjectContext
+from mcp_server.envelope import (
+    CONNECTION_ERROR,
+    INTERNAL_ERROR,
+    QUERY_TIMEOUT,
+    VALIDATION_ERROR,
+    error_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +104,7 @@ async def execute_query(ctx: ProjectContext, sql: str) -> dict[str, Any]:
         statement = validator.validate(sql)
     except SQLValidationError as e:
         logger.warning("SQL validation failed for project %s: %s", ctx.project_name, e.message)
-        return {"error": e.message}
+        return error_response(VALIDATION_ERROR, e.message)
 
     tables_accessed = validator.get_tables_accessed(statement)
 
@@ -116,9 +123,9 @@ async def execute_query(ctx: ProjectContext, sql: str) -> dict[str, Any]:
     try:
         result = await sync_to_async(_execute_sync)(ctx, sql_executed, ctx.max_query_timeout_seconds)
     except Exception as e:
-        error_msg = _sanitize_error(e)
-        logger.error("Query error for project %s: %s", ctx.project_name, error_msg, exc_info=True)
-        return {"error": error_msg}
+        code, message = _classify_error(e)
+        logger.error("Query error for project %s: %s", ctx.project_name, message, exc_info=True)
+        return error_response(code, message)
 
     if result["row_count"] == validator.max_limit:
         truncated = True
@@ -133,22 +140,22 @@ async def execute_query(ctx: ProjectContext, sql: str) -> dict[str, Any]:
     }
 
 
-def _sanitize_error(exc: Exception) -> str:
-    """Return a user-safe error message for database exceptions."""
+def _classify_error(exc: Exception) -> tuple[str, str]:
+    """Classify a database exception into an error code and user-safe message."""
     import psycopg2
     import psycopg2.errors
 
     if isinstance(exc, psycopg2.errors.QueryCanceled):
-        return "Query timed out. Consider adding filters or limiting the data range."
+        return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
 
     if isinstance(exc, psycopg2.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
-            return "Database authentication failed. Please contact an administrator."
+            return CONNECTION_ERROR, "Database authentication failed. Please contact an administrator."
         if "could not connect" in msg.lower():
-            return "Could not connect to the database. Please try again later."
+            return CONNECTION_ERROR, "Could not connect to the database. Please try again later."
         if "does not exist" in msg.lower():
-            return f"Database error: {msg}"
-        return f"Query execution failed: {msg}"
+            return VALIDATION_ERROR, f"Database error: {msg}"
+        return CONNECTION_ERROR, f"Query execution failed: {msg}"
 
-    return "An unexpected error occurred while executing the query."
+    return INTERNAL_ERROR, "An unexpected error occurred while executing the query."
