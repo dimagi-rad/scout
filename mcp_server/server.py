@@ -159,14 +159,11 @@ async def query(sql: str) -> dict:
     Args:
         sql: A SQL SELECT query to execute.
     """
+    from mcp_server.services.query import execute_query
+
     ctx = get_project_context()
-    return {
-        "project_id": ctx.project_id,
-        "schema": ctx.db_schema,
-        "columns": [],  # TODO: Milestone 3
-        "rows": [],
-        "row_count": 0,
-    }
+    result = await execute_query(ctx, sql)
+    return {"project_id": ctx.project_id, "schema": ctx.db_schema, **result}
 
 
 # --- Server setup ---
