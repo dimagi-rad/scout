@@ -11,15 +11,11 @@ export interface Project {
 
 /**
  * Project details returned from the API.
- * Note: db_password is write-only on the backend and is never returned.
  */
 export interface ProjectDetail extends Project {
-  db_host: string
-  db_port: number
-  db_name: string
+  database_connection: string
+  database_connection_name: string
   db_schema: string
-  db_user: string
-  // db_password is write-only, never returned from API
   allowed_tables: string[]
   excluded_tables: string[]
   system_prompt: string
@@ -31,11 +27,8 @@ export interface ProjectDetail extends Project {
 
 /**
  * Data for creating or updating a project.
- * db_password is only used for writes, never reads.
  */
-export interface ProjectFormData extends Partial<ProjectDetail> {
-  db_password?: string
-}
+export interface ProjectFormData extends Partial<ProjectDetail> {}
 
 export interface ProjectMember {
   id: string

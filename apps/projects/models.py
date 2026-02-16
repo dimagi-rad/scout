@@ -1,10 +1,9 @@
 """
 Core project models for Scout data agent platform.
 
-Defines Project and ProjectMembership models.
+Defines Project, ProjectMembership, and DatabaseConnection models.
 """
 import uuid
-import warnings
 
 from cryptography.fernet import Fernet
 from django.conf import settings
@@ -17,6 +16,100 @@ schema_validator = RegexValidator(
     regex=r'^[a-zA-Z_][a-zA-Z0-9_]*$',
     message='Invalid schema name format. Must start with a letter or underscore, and contain only letters, numbers, and underscores.'
 )
+
+
+class DatabaseConnection(models.Model):
+    """
+    Centralized storage for database connection credentials.
+    Multiple projects can reference the same connection.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255, help_text="Display name, e.g. 'Production Analytics DB'")
+    description = models.TextField(blank=True)
+
+    # Connection details
+    db_host = models.CharField(max_length=255)
+    db_port = models.IntegerField(default=5432)
+    db_name = models.CharField(max_length=255)
+
+    # Encrypted credentials
+    _db_user = models.BinaryField(db_column="db_user")
+    _db_password = models.BinaryField(db_column="db_password")
+
+    # Metadata
+    is_active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="created_database_connections",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "datasources_databaseconnection"
+        ordering = ["name"]
+        permissions = [
+            ("manage_database_connections", "Can create and edit database connections"),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def _get_fernet(self):
+        """Get Fernet instance for encryption/decryption."""
+        key = settings.DB_CREDENTIAL_KEY
+        if not key:
+            raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
+        return Fernet(key.encode() if isinstance(key, str) else key)
+
+    @property
+    def db_user(self):
+        """Decrypt and return the database username."""
+        if not self._db_user:
+            return ""
+        f = self._get_fernet()
+        return f.decrypt(bytes(self._db_user)).decode()
+
+    @db_user.setter
+    def db_user(self, value):
+        """Encrypt and store the database username."""
+        if not value:
+            self._db_user = b""
+            return
+        f = self._get_fernet()
+        self._db_user = f.encrypt(value.encode())
+
+    @property
+    def db_password(self):
+        """Decrypt and return the database password."""
+        if not self._db_password:
+            return ""
+        f = self._get_fernet()
+        return f.decrypt(bytes(self._db_password)).decode()
+
+    @db_password.setter
+    def db_password(self, value):
+        """Encrypt and store the database password."""
+        if not value:
+            self._db_password = b""
+            return
+        f = self._get_fernet()
+        self._db_password = f.encrypt(value.encode())
+
+    def get_connection_params(self, schema: str = "public", timeout_seconds: int = 30) -> dict:
+        """Return connection params for psycopg2/SQLAlchemy."""
+        return {
+            "host": self.db_host,
+            "port": self.db_port,
+            "dbname": self.db_name,
+            "user": self.db_user,
+            "password": self.db_password,
+            "options": f"-c search_path={schema},public -c statement_timeout={timeout_seconds * 1000}",
+        }
 
 
 class Project(models.Model):
@@ -34,25 +127,15 @@ class Project(models.Model):
 
     # Database connection - reference to centralized credentials
     database_connection = models.ForeignKey(
-        "datasources.DatabaseConnection",
+        "projects.DatabaseConnection",
         on_delete=models.PROTECT,
         related_name="projects",
-        null=True,  # Nullable during migration period
-        blank=True,
     )
     db_schema = models.CharField(
         max_length=255,
         default="public",
         validators=[schema_validator],
     )
-
-    # DEPRECATED: Legacy database connection fields (to be removed after migration)
-    # Use database_connection FK instead
-    db_host = models.CharField(max_length=255, blank=True)
-    db_port = models.IntegerField(default=5432)
-    db_name = models.CharField(max_length=255, blank=True)
-    _db_user = models.BinaryField(db_column="db_user", null=True, blank=True)
-    _db_password = models.BinaryField(db_column="db_password", null=True, blank=True)
 
     # Optional: restrict which tables the agent can see
     # Empty list = all tables in schema are visible
@@ -113,87 +196,12 @@ class Project(models.Model):
     def __str__(self):
         return self.name
 
-    def _get_fernet(self):
-        """Get Fernet instance for encryption/decryption."""
-        key = settings.DB_CREDENTIAL_KEY
-        if not key:
-            raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
-        return Fernet(key.encode() if isinstance(key, str) else key)
-
-    @property
-    def db_user(self):
-        """Decrypt and return the database username (DEPRECATED - use database_connection)."""
-        if self.database_connection:
-            return self.database_connection.db_user
-        if not self._db_user:
-            return ""
-        warnings.warn(
-            "Project.db_user is deprecated. Use database_connection instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        f = self._get_fernet()
-        return f.decrypt(bytes(self._db_user)).decode()
-
-    @db_user.setter
-    def db_user(self, value):
-        """Encrypt and store the database username (DEPRECATED)."""
-        warnings.warn(
-            "Project.db_user is deprecated. Use database_connection instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not value:
-            self._db_user = b""
-            return
-        f = self._get_fernet()
-        self._db_user = f.encrypt(value.encode())
-
-    @property
-    def db_password(self):
-        """Decrypt and return the database password (DEPRECATED - use database_connection)."""
-        if self.database_connection:
-            return self.database_connection.db_password
-        if not self._db_password:
-            return ""
-        warnings.warn(
-            "Project.db_password is deprecated. Use database_connection instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        f = self._get_fernet()
-        return f.decrypt(bytes(self._db_password)).decode()
-
-    @db_password.setter
-    def db_password(self, value):
-        """Encrypt and store the database password (DEPRECATED)."""
-        warnings.warn(
-            "Project.db_password is deprecated. Use database_connection instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        if not value:
-            self._db_password = b""
-            return
-        f = self._get_fernet()
-        self._db_password = f.encrypt(value.encode())
-
     def get_connection_params(self) -> dict:
         """Return connection params for psycopg2/SQLAlchemy."""
-        if self.database_connection:
-            return self.database_connection.get_connection_params(
-                schema=self.db_schema,
-                timeout_seconds=self.max_query_timeout_seconds,
-            )
-        # Legacy fallback
-        return {
-            "host": self.db_host,
-            "port": self.db_port,
-            "dbname": self.db_name,
-            "user": self.db_user,
-            "password": self.db_password,
-            "options": f"-c search_path={self.db_schema},public -c statement_timeout={self.max_query_timeout_seconds * 1000}",
-        }
+        return self.database_connection.get_connection_params(
+            schema=self.db_schema,
+            timeout_seconds=self.max_query_timeout_seconds,
+        )
 
 
 class ProjectRole(models.TextChoices):

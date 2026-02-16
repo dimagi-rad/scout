@@ -17,6 +17,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from apps.artifacts.models import AccessLevel, Artifact, ArtifactType, SharedArtifact
+from apps.projects.models import DatabaseConnection
 from apps.projects.models import Project, ProjectMembership, ProjectRole
 from apps.users.models import User
 
@@ -45,17 +46,23 @@ class ArtifactShareAPITestCase(TestCase):
             password="testpass123",
         )
 
-        # Create a project with encrypted credentials
-        cls.project = Project(
+        # Create a database connection and project
+        cls.db_conn = DatabaseConnection(
+            name="Test Connection",
+            db_host="localhost",
+            db_port=5432,
+            db_name="testdb",
+        )
+        cls.db_conn.db_user = "testuser"
+        cls.db_conn.db_password = "testpassword"
+        cls.db_conn.save()
+
+        cls.project = Project.objects.create(
             name="Test Project",
             slug="test-project",
-            db_host="localhost",
-            db_name="testdb",
+            database_connection=cls.db_conn,
             db_schema="public",
         )
-        cls.project.db_user = "testuser"
-        cls.project.db_password = "testpassword"
-        cls.project.save()
 
         # Create project memberships
         ProjectMembership.objects.create(

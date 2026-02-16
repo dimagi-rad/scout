@@ -19,23 +19,17 @@ from apps.projects.models import Project
 
 
 @pytest.fixture
-def mock_project(db, user):
+def mock_project(db_connection, user):
     """Create a mock project for testing."""
-    project = Project.objects.create(
+    return Project.objects.create(
         name="Test Project",
         slug="test-project",
-        db_host="localhost",
-        db_port=5432,
-        db_name="testdb",
+        database_connection=db_connection,
         db_schema="public",
         max_rows_per_query=100,
         max_query_timeout_seconds=30,
         created_by=user,
     )
-    project.db_user = "testuser"
-    project.db_password = "testpass"
-    project.save()
-    return project
 
 
 class TestSuccessfulQueryExecution:
@@ -478,11 +472,12 @@ class TestDatabaseConnectionManagement:
         mock_connect.assert_called_once()
         call_kwargs = mock_connect.call_args[1]
 
-        assert call_kwargs["host"] == mock_project.db_host
-        assert call_kwargs["port"] == mock_project.db_port
-        assert call_kwargs["dbname"] == mock_project.db_name
-        assert call_kwargs["user"] == mock_project.db_user
-        assert call_kwargs["password"] == mock_project.db_password
+        params = mock_project.get_connection_params()
+        assert call_kwargs["host"] == params["host"]
+        assert call_kwargs["port"] == params["port"]
+        assert call_kwargs["dbname"] == params["dbname"]
+        assert call_kwargs["user"] == params["user"]
+        assert call_kwargs["password"] == params["password"]
 
 
 class TestEdgeCases:

@@ -1,8 +1,7 @@
 """
 Serializers for projects API.
 
-Provides serializers for project CRUD operations, member management,
-and database connection testing.
+Provides serializers for project CRUD operations and member management.
 """
 from rest_framework import serializers
 
@@ -55,20 +54,12 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
     """
     Serializer for project create/update operations.
 
-    Includes all project fields including database credentials.
-    The db_password field is write-only for security.
+    Uses a database_connection FK (UUID) instead of inline credentials.
     """
 
-    db_password = serializers.CharField(
-        write_only=True,
-        required=False,
-        allow_blank=True,
-        help_text="Database password. Write-only for security.",
-    )
-    db_user = serializers.CharField(
-        required=False,
-        allow_blank=True,
-        help_text="Database username.",
+    database_connection_name = serializers.CharField(
+        source="database_connection.name",
+        read_only=True,
     )
     member_count = serializers.SerializerMethodField(read_only=True)
     role = serializers.SerializerMethodField(read_only=True)
@@ -80,12 +71,9 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
             "name",
             "slug",
             "description",
-            "db_host",
-            "db_port",
-            "db_name",
+            "database_connection",
+            "database_connection_name",
             "db_schema",
-            "db_user",
-            "db_password",
             "allowed_tables",
             "excluded_tables",
             "system_prompt",
@@ -133,17 +121,11 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create a new project with the requesting user as admin."""
         request = self.context.get("request")
-        db_password = validated_data.pop("db_password", "")
-        db_user = validated_data.pop("db_user", "")
-
-        project = Project(**validated_data)
-        project.db_user = db_user
-        project.db_password = db_password
 
         if request and request.user.is_authenticated:
-            project.created_by = request.user
+            validated_data["created_by"] = request.user
 
-        project.save()
+        project = Project.objects.create(**validated_data)
 
         # Add the creator as an admin member
         if request and request.user.is_authenticated:
@@ -154,24 +136,6 @@ class ProjectDetailSerializer(serializers.ModelSerializer):
             )
 
         return project
-
-    def update(self, instance, validated_data):
-        """Update a project, handling encrypted fields specially."""
-        db_password = validated_data.pop("db_password", None)
-        db_user = validated_data.pop("db_user", None)
-
-        # Update regular fields
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-
-        # Update encrypted fields only if provided
-        if db_user is not None:
-            instance.db_user = db_user
-        if db_password is not None and db_password != "":
-            instance.db_password = db_password
-
-        instance.save()
-        return instance
 
 
 class ProjectMemberSerializer(serializers.ModelSerializer):
@@ -249,46 +213,3 @@ class AddMemberSerializer(serializers.Serializer):
             role=validated_data["role"],
         )
         return membership
-
-
-class TestConnectionSerializer(serializers.Serializer):
-    """
-    Serializer for testing a database connection.
-
-    Validates connection parameters and returns schema/table information.
-    """
-
-    db_host = serializers.CharField(
-        max_length=255,
-        help_text="Database host address.",
-    )
-    db_port = serializers.IntegerField(
-        default=5432,
-        help_text="Database port number.",
-    )
-    db_name = serializers.CharField(
-        max_length=255,
-        help_text="Database name.",
-    )
-    db_user = serializers.CharField(
-        max_length=255,
-        help_text="Database username.",
-    )
-    db_password = serializers.CharField(
-        write_only=True,
-        help_text="Database password.",
-    )
-    db_schema = serializers.CharField(
-        max_length=255,
-        default="public",
-        required=False,
-        help_text="Database schema to inspect.",
-    )
-
-    def validate_db_port(self, value):
-        """Validate port is in valid range."""
-        if not (1 <= value <= 65535):
-            raise serializers.ValidationError(
-                "Port must be between 1 and 65535."
-            )
-        return value

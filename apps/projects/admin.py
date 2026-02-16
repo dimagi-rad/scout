@@ -1,32 +1,31 @@
 """
 Admin configuration for Project models.
 """
-from django import forms
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import Project, ProjectMembership
+from .models import DatabaseConnection, Project, ProjectMembership
 
 
-class ProjectForm(forms.ModelForm):
-    """Custom form that adds plaintext input fields for encrypted credentials."""
+@admin.register(DatabaseConnection)
+class DatabaseConnectionAdmin(admin.ModelAdmin):
+    list_display = ["name", "db_host", "db_name", "is_active", "created_by", "created_at"]
+    list_filter = ["is_active", "created_at"]
+    search_fields = ["name", "db_host", "db_name"]
+    readonly_fields = ["id", "created_at", "updated_at"]
+    exclude = ["_db_user", "_db_password"]
 
-    db_user_input = forms.CharField(
-        label="Database user",
-        required=False,
-        widget=forms.TextInput(attrs={"autocomplete": "off"}),
-        help_text="Leave blank to keep existing value.",
-    )
-    db_password_input = forms.CharField(
-        label="Database password",
-        required=False,
-        widget=forms.PasswordInput(attrs={"autocomplete": "new-password"}, render_value=False),
-        help_text="Leave blank to keep existing value.",
-    )
-
-    class Meta:
-        model = Project
-        exclude = ("_db_user", "_db_password")
+    fieldsets = [
+        (None, {"fields": ["id", "name", "description"]}),
+        (
+            "Connection",
+            {"fields": ["db_host", "db_port", "db_name"]},
+        ),
+        (
+            "Metadata",
+            {"fields": ["is_active", "created_by", "created_at", "updated_at"]},
+        ),
+    ]
 
 
 class ProjectMembershipInline(admin.TabularInline):
@@ -41,13 +40,10 @@ class ProjectMembershipInline(admin.TabularInline):
 class ProjectAdmin(admin.ModelAdmin):
     """Admin interface for Project model."""
 
-    form = ProjectForm
-
     list_display = [
         "name",
         "slug",
-        "db_host",
-        "db_name",
+        "database_connection",
         "db_schema",
         "member_count",
         "has_data_dictionary",
@@ -63,7 +59,7 @@ class ProjectAdmin(admin.ModelAdmin):
         "data_dictionary_generated_at",
         "data_dictionary_display",
     ]
-    autocomplete_fields = ["created_by"]
+    autocomplete_fields = ["created_by", "database_connection"]
     inlines = [ProjectMembershipInline]
     actions = ["regenerate_data_dictionary"]
 
@@ -73,14 +69,9 @@ class ProjectAdmin(admin.ModelAdmin):
             "Database Connection",
             {
                 "fields": (
-                    "db_host",
-                    "db_port",
-                    "db_name",
+                    "database_connection",
                     "db_schema",
-                    "db_user_input",
-                    "db_password_input",
                 ),
-                "description": "Database credentials are encrypted at rest.",
             },
         ),
         (
@@ -120,13 +111,6 @@ class ProjectAdmin(admin.ModelAdmin):
         ),
     )
 
-    def get_form(self, request, obj=None, **kwargs):
-        form = super().get_form(request, obj, **kwargs)
-        # Pre-populate username (not password) when editing
-        if obj and hasattr(form, "base_fields") and "db_user_input" in form.base_fields:
-            form.base_fields["db_user_input"].initial = obj.db_user
-        return form
-
     @admin.display(description="Members")
     def member_count(self, obj):
         return obj.memberships.count()
@@ -141,23 +125,13 @@ class ProjectAdmin(admin.ModelAdmin):
             table_count = len(obj.data_dictionary.get("tables", {}))
             return format_html(
                 '<span style="color: green;">{}</span> ({} tables)',
-                "✓ Generated",
+                "Generated",
                 table_count,
             )
         return format_html(
             '<span style="color: orange;">{}</span>',
             "Not generated",
         )
-
-    # Custom handling for encrypted fields - using form field prefixes
-    def save_model(self, request, obj, form, change):
-        """Handle encrypted field saving."""
-        # Check if db_user or db_password were provided in the form
-        if "db_user_input" in form.data and form.data["db_user_input"]:
-            obj.db_user = form.data["db_user_input"]
-        if "db_password_input" in form.data and form.data["db_password_input"]:
-            obj.db_password = form.data["db_password_input"]
-        super().save_model(request, obj, form, change)
 
     @admin.action(description="Regenerate data dictionary for selected projects")
     def regenerate_data_dictionary(self, request, queryset):
@@ -197,5 +171,3 @@ class ProjectMembershipAdmin(admin.ModelAdmin):
     list_filter = ["role", "created_at", "project"]
     search_fields = ["user__email", "project__name"]
     autocomplete_fields = ["user", "project"]
-
-

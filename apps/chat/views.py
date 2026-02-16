@@ -118,6 +118,7 @@ def me_view(request):
         "id": str(user.id),
         "email": user.email,
         "name": user.get_full_name(),
+        "is_staff": user.is_staff,
     })
 
 
@@ -150,6 +151,7 @@ def login_view(request):
         "id": str(user.id),
         "email": user.email,
         "name": user.get_full_name(),
+        "is_staff": user.is_staff,
     })
 
 
@@ -379,7 +381,7 @@ async def chat_view(request):
         "retry_count": 0,
         "correction_context": {},
     }
-    config = {"configurable": {"thread_id": thread_id}}
+    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
 
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)
     response = StreamingHttpResponse(

@@ -7,15 +7,14 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('datasources', '0001_initial'),
-        ('projects', '0005_remove_savedquery_and_conversationlog'),
+        ('projects', '0009_own_databaseconnection'),
     ]
 
     operations = [
         migrations.AddField(
             model_name='project',
             name='database_connection',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='projects', to='datasources.databaseconnection'),
+            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='projects', to='projects.databaseconnection'),
         ),
         migrations.AlterField(
             model_name='project',

@@ -23,23 +23,16 @@ User = get_user_model()
 
 
 @pytest.fixture
-def project(db, user):
-    """Create a test project with encrypted credentials."""
-    project = Project.objects.create(
+def project(db_connection, user):
+    """Create a test project."""
+    return Project.objects.create(
         name="Test Project",
         slug="test-project",
         description="A test project",
-        db_host="localhost",
-        db_port=5432,
-        db_name="test_db",
+        database_connection=db_connection,
         db_schema="public",
         created_by=user,
     )
-    # Set encrypted credentials
-    project.db_user = "test_user"
-    project.db_password = "test_password"
-    project.save()
-    return project
 
 
 @pytest.fixture

@@ -23,7 +23,6 @@ urlpatterns = [
         "api/projects/<uuid:project_id>/recipes/",
         include("apps.recipes.urls"),
     ),
-    path("api/datasources/", include("apps.datasources.urls")),
     # Public share links (no auth required)
     path(
         "api/recipes/runs/shared/<str:share_token>/",

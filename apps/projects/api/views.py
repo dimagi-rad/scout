@@ -1,13 +1,10 @@
 """
 API views for project management.
 
-Provides endpoints for CRUD operations on projects, member management,
-and database connection testing.
+Provides endpoints for CRUD operations on projects and member management.
 """
-import asyncio
 import logging
 
-from django.db.models import Count
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -22,7 +19,6 @@ from .serializers import (
     ProjectDetailSerializer,
     ProjectListSerializer,
     ProjectMemberSerializer,
-    TestConnectionSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -301,95 +297,3 @@ class ProjectMemberDetailView(ProjectPermissionMixin, APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class TestConnectionView(APIView):
-    """
-    Test a database connection and return schema information.
-
-    POST /api/projects/test-connection/
-        Tests connection with provided credentials.
-        Returns list of schemas and tables on success.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        """Test a database connection."""
-        serializer = TestConnectionSerializer(data=request.data)
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        data = serializer.validated_data
-
-        try:
-            result = asyncio.run(self._test_connection(
-                host=data["db_host"],
-                port=data["db_port"],
-                database=data["db_name"],
-                user=data["db_user"],
-                password=data["db_password"],
-                schema=data.get("db_schema", "public"),
-            ))
-            return Response(result)
-        except Exception as e:
-            logger.exception("Database connection test failed")
-            return Response(
-                {"error": f"Connection failed: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-    async def _test_connection(
-        self,
-        host: str,
-        port: int,
-        database: str,
-        user: str,
-        password: str,
-        schema: str,
-    ) -> dict:
-        """
-        Test the database connection and retrieve schema information.
-
-        Returns:
-            dict with 'success', 'schemas', and 'tables' keys.
-        """
-        import asyncpg
-
-        conn = await asyncpg.connect(
-            host=host,
-            port=port,
-            database=database,
-            user=user,
-            password=password,
-        )
-
-        try:
-            # Get list of schemas
-            schemas = await conn.fetch("""
-                SELECT schema_name
-                FROM information_schema.schemata
-                WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
-                ORDER BY schema_name
-            """)
-
-            # Get tables in the specified schema
-            tables = await conn.fetch("""
-                SELECT table_name, table_type
-                FROM information_schema.tables
-                WHERE table_schema = $1
-                ORDER BY table_name
-            """, schema)
-
-            return {
-                "success": True,
-                "schemas": [row["schema_name"] for row in schemas],
-                "tables": [
-                    {
-                        "name": row["table_name"],
-                        "type": row["table_type"],
-                    }
-                    for row in tables
-                ],
-            }
-        finally:
-            await conn.close()

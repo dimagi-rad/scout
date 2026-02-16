@@ -55,7 +55,6 @@ INSTALLED_APPS = [
     # Local apps
     "apps.users",
     "apps.projects",
-    "apps.datasources",
     "apps.knowledge",
     "apps.agents",
     "apps.artifacts",
@@ -241,9 +240,11 @@ MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
 
 # SPA / CSRF settings
 # Allow the SPA to read the CSRF cookie via JavaScript
+CSRF_COOKIE_NAME = "csrftoken_scout"
 CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
+SESSION_COOKIE_NAME = "sessionid_scout"
 
 
 # Celery configuration

@@ -25,7 +25,6 @@ export const router = createBrowserRouter([
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
       { path: "data-dictionary", element: <DataDictionaryPage /> },
       { path: "datasources", element: <DataSourcesPage /> },
-      { path: "datasources/connect", element: <DataSourcesPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

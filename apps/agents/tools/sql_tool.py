@@ -27,11 +27,6 @@ import sqlglot
 from langchain_core.tools import tool
 from sqlglot import exp
 
-from apps.datasources.services.materialized_data import (
-    build_search_path,
-    get_user_materialized_schemas,
-    track_materialized_data_activity,
-)
 from apps.projects.services.db_manager import get_pool_manager
 from apps.projects.services.rate_limiter import RateLimitExceeded, get_rate_limiter
 
@@ -485,14 +480,12 @@ def create_sql_tool(project: Project, user: User | None = None):
     Factory function to create a SQL execution tool for a specific project.
 
     The returned tool validates and executes SQL queries against the project's
-    database with appropriate security restrictions. It also includes access
-    to materialized data schemas from configured data sources.
+    database with appropriate security restrictions.
 
     Args:
         project: The Project model instance containing database connection
                  settings and access restrictions.
-        user: The user executing the queries (for rate limiting and
-              materialized data access).
+        user: The user executing the queries (for rate limiting).
 
     Returns:
         A LangChain tool function that executes SQL queries.
@@ -503,18 +496,13 @@ def create_sql_tool(project: Project, user: User | None = None):
         >>> sql_tool = create_sql_tool(project, user)
         >>> result = sql_tool.invoke({"query": "SELECT * FROM users LIMIT 10"})
     """
-    # Get materialized schemas the user has access to
-    materialized_schemas = []
-    if user:
-        materialized_schemas = get_user_materialized_schemas(project, user)
-
     # Build search_path for the connection
-    search_path = build_search_path(project, user)
+    search_path = project.db_schema
 
-    # Create validator with project settings and materialized schemas
+    # Create validator with project settings
     validator = SQLValidator(
         schema=project.db_schema,
-        allowed_schemas=materialized_schemas,
+        allowed_schemas=[],
         allowed_tables=project.allowed_tables or [],
         excluded_tables=project.excluded_tables or [],
         max_limit=project.max_rows_per_query,
@@ -626,10 +614,6 @@ def create_sql_tool(project: Project, user: User | None = None):
 
             # Record successful query for rate limiting
             get_rate_limiter().record_query(user, project)
-
-            # Track activity for materialized data cleanup scheduling
-            if user and materialized_schemas:
-                track_materialized_data_activity(project, user)
 
             logger.info(
                 "SQL query executed for project %s: %d rows returned",

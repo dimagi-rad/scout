@@ -92,12 +92,13 @@ async def fetch_schema(project: Project) -> dict:
     """
     import asyncpg
 
+    params = project.get_connection_params()
     conn = await asyncpg.connect(
-        host=project.db_host,
-        port=project.db_port,
-        database=project.db_name,
-        user=project.db_user,
-        password=project.db_password,
+        host=params["host"],
+        port=params["port"],
+        database=params["dbname"],
+        user=params["user"],
+        password=params["password"],
     )
 
     try:

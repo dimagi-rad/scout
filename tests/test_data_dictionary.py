@@ -14,25 +14,19 @@ class TestDataDictionaryGenerator:
     """Tests for DataDictionaryGenerator."""
 
     @pytest.fixture
-    def mock_project(self, db, user):
+    def mock_project(self, db_connection, user):
         """Create a mock project for testing."""
         from apps.projects.models import Project
 
-        project = Project.objects.create(
+        return Project.objects.create(
             name="Test Project",
             slug="test-project",
-            db_host="localhost",
-            db_port=5432,
-            db_name="testdb",
+            database_connection=db_connection,
             db_schema="public",
             allowed_tables=[],
             excluded_tables=[],
             created_by=user,
         )
-        project.db_user = "testuser"
-        project.db_password = "testpass"
-        project.save()
-        return project
 
     def test_get_visible_tables_all(self, mock_project):
         """Test that all tables are visible when no filters set."""
@@ -193,6 +187,7 @@ class TestDataDictionaryGeneratorIntegration:
     def real_project(self, db, user):
         """Create a project pointing to a real test database."""
         import os
+        from apps.projects.models import DatabaseConnection
         from apps.projects.models import Project
 
         db_url = os.environ.get("TEST_DATABASE_URL")
@@ -203,19 +198,24 @@ class TestDataDictionaryGeneratorIntegration:
         from urllib.parse import urlparse
         parsed = urlparse(db_url)
 
-        project = Project.objects.create(
-            name="Integration Test",
-            slug="integration-test",
+        conn = DatabaseConnection(
+            name="Integration Test Connection",
             db_host=parsed.hostname,
             db_port=parsed.port or 5432,
-            db_name=parsed.path[1:],  # Remove leading /
+            db_name=parsed.path[1:],
+            created_by=user,
+        )
+        conn.db_user = parsed.username
+        conn.db_password = parsed.password
+        conn.save()
+
+        return Project.objects.create(
+            name="Integration Test",
+            slug="integration-test",
+            database_connection=conn,
             db_schema="public",
             created_by=user,
         )
-        project.db_user = parsed.username
-        project.db_password = parsed.password
-        project.save()
-        return project
 
     @pytest.mark.skip(reason="Requires TEST_DATABASE_URL")
     def test_generate_real_database(self, real_project):

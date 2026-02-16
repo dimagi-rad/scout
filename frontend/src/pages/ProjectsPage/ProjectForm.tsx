@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react"
-import { useNavigate, useParams } from "react-router-dom"
-import { ArrowLeft, Loader2, CheckCircle, XCircle } from "lucide-react"
+import { useNavigate, useParams, Link } from "react-router-dom"
+import { ArrowLeft, Loader2 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import {
   Accordion,
   AccordionContent,
@@ -16,23 +23,19 @@ import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/
 import { api } from "@/api/client"
 import type { ProjectFormData } from "@/store/projectSlice"
 
-interface ConnectionTestResult {
-  success: boolean
-  schemas?: string[]
-  tables?: { schema: string; table: string }[]
-  error?: string
+interface DatabaseConnectionOption {
+  id: string
+  name: string
+  db_host: string
+  db_name: string
 }
 
 interface FormState {
   name: string
   slug: string
   description: string
-  db_host: string
-  db_port: number
-  db_name: string
+  database_connection: string
   db_schema: string
-  db_user: string
-  db_password: string
   allowed_tables: string
   excluded_tables: string
   system_prompt: string
@@ -43,12 +46,8 @@ const initialFormState: FormState = {
   name: "",
   slug: "",
   description: "",
-  db_host: "",
-  db_port: 5432,
-  db_name: "",
+  database_connection: "",
   db_schema: "public",
-  db_user: "",
-  db_password: "",
   allowed_tables: "",
   excluded_tables: "",
   system_prompt: "",
@@ -67,9 +66,22 @@ export function ProjectForm() {
   const [form, setForm] = useState<FormState>(initialFormState)
   const [loading, setLoading] = useState(false)
   const [fetchingProject, setFetchingProject] = useState(false)
-  const [testingConnection, setTestingConnection] = useState(false)
-  const [connectionResult, setConnectionResult] = useState<ConnectionTestResult | null>(null)
+  const [connections, setConnections] = useState<DatabaseConnectionOption[]>([])
+  const [connectionsLoading, setConnectionsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Fetch available database connections
+  useEffect(() => {
+    setConnectionsLoading(true)
+    api
+      .get<DatabaseConnectionOption[]>("/api/projects/connections/")
+      .then(setConnections)
+      .catch(() => {
+        // Non-admin users may not have access - that's fine,
+        // the current connection name will be shown read-only
+      })
+      .finally(() => setConnectionsLoading(false))
+  }, [])
 
   // Load project data when editing
   useEffect(() => {
@@ -81,12 +93,8 @@ export function ProjectForm() {
             name: project.name,
             slug: project.slug,
             description: project.description,
-            db_host: project.db_host,
-            db_port: project.db_port,
-            db_name: project.db_name,
+            database_connection: project.database_connection || "",
             db_schema: project.db_schema,
-            db_user: project.db_user,
-            db_password: "",  // Password is write-only, never returned from API
             allowed_tables: (project.allowed_tables || []).join(", "),
             excluded_tables: (project.excluded_tables || []).join(", "),
             system_prompt: project.system_prompt,
@@ -112,32 +120,6 @@ export function ProjectForm() {
     }))
   }
 
-  const handleTestConnection = async () => {
-    setTestingConnection(true)
-    setConnectionResult(null)
-
-    try {
-      const result = await api.post<ConnectionTestResult>(
-        "/api/projects/test-connection/",
-        {
-          db_host: form.db_host,
-          db_port: form.db_port,
-          db_name: form.db_name,
-          db_user: form.db_user,
-          db_password: form.db_password,
-        }
-      )
-      setConnectionResult(result)
-    } catch (err) {
-      setConnectionResult({
-        success: false,
-        error: err instanceof Error ? err.message : "Connection test failed",
-      })
-    } finally {
-      setTestingConnection(false)
-    }
-  }
-
   const parseCommaSeparated = (value: string): string[] => {
     return value
       .split(",")
@@ -150,16 +132,18 @@ export function ProjectForm() {
     setLoading(true)
     setError(null)
 
+    if (!form.database_connection) {
+      setError("Please select a database connection")
+      setLoading(false)
+      return
+    }
+
     const projectData: ProjectFormData = {
       name: form.name,
       slug: form.slug,
       description: form.description,
-      db_host: form.db_host,
-      db_port: form.db_port,
-      db_name: form.db_name,
+      database_connection: form.database_connection,
       db_schema: form.db_schema,
-      db_user: form.db_user,
-      db_password: form.db_password || undefined,
       allowed_tables: parseCommaSeparated(form.allowed_tables),
       excluded_tables: parseCommaSeparated(form.excluded_tables),
       system_prompt: form.system_prompt,
@@ -238,6 +222,7 @@ export function ProjectForm() {
                         onChange={handleChange}
                         placeholder="My Data Project"
                         required
+                        data-testid="project-form-name"
                       />
                     </div>
 
@@ -250,6 +235,7 @@ export function ProjectForm() {
                         onChange={handleChange}
                         placeholder="my-data-project"
                         required
+                        data-testid="project-form-slug"
                       />
                       <p className="text-xs text-muted-foreground">
                         URL-friendly identifier (lowercase, hyphens only)
@@ -276,115 +262,54 @@ export function ProjectForm() {
                 <AccordionTrigger>Database Connection</AccordionTrigger>
                 <AccordionContent>
                   <div className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="db_host">Host</Label>
-                        <Input
-                          id="db_host"
-                          name="db_host"
-                          value={form.db_host}
-                          onChange={handleChange}
-                          placeholder="localhost"
-                          required
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="db_port">Port</Label>
-                        <Input
-                          id="db_port"
-                          name="db_port"
-                          type="number"
-                          value={form.db_port}
-                          onChange={handleChange}
-                          required
-                        />
-                      </div>
-                    </div>
-
                     <div className="space-y-2">
-                      <Label htmlFor="db_name">Database Name</Label>
-                      <Input
-                        id="db_name"
-                        name="db_name"
-                        value={form.db_name}
-                        onChange={handleChange}
-                        placeholder="my_database"
-                        required
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="db_user">User</Label>
-                        <Input
-                          id="db_user"
-                          name="db_user"
-                          value={form.db_user}
-                          onChange={handleChange}
-                          placeholder="postgres"
-                          required
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label htmlFor="db_password">Password</Label>
-                        <Input
-                          id="db_password"
-                          name="db_password"
-                          type="password"
-                          value={form.db_password}
-                          onChange={handleChange}
-                          placeholder={isEdit ? "(unchanged)" : ""}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="pt-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={handleTestConnection}
-                        disabled={testingConnection}
-                      >
-                        {testingConnection && (
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        )}
-                        Test Connection
-                      </Button>
-
-                      {connectionResult && (
-                        <div
-                          className={`mt-3 rounded-md p-3 ${
-                            connectionResult.success
-                              ? "bg-green-50 text-green-800 dark:bg-green-900/20 dark:text-green-400"
-                              : "bg-red-50 text-red-800 dark:bg-red-900/20 dark:text-red-400"
-                          }`}
-                        >
-                          <div className="flex items-center">
-                            {connectionResult.success ? (
-                              <CheckCircle className="mr-2 h-4 w-4" />
-                            ) : (
-                              <XCircle className="mr-2 h-4 w-4" />
-                            )}
-                            <span className="font-medium">
-                              {connectionResult.success
-                                ? "Connection successful!"
-                                : "Connection failed"}
-                            </span>
-                          </div>
-                          {connectionResult.success && connectionResult.schemas && (
-                            <p className="mt-1 text-sm">
-                              Found {connectionResult.schemas.length} schema(s)
-                              {connectionResult.tables &&
-                                `, ${connectionResult.tables.length} table(s)`}
-                            </p>
-                          )}
-                          {connectionResult.error && (
-                            <p className="mt-1 text-sm">{connectionResult.error}</p>
-                          )}
+                      <Label>Connection</Label>
+                      {connectionsLoading ? (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Loading connections...
                         </div>
+                      ) : connections.length > 0 ? (
+                        <Select
+                          value={form.database_connection}
+                          onValueChange={(value) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              database_connection: value,
+                            }))
+                          }
+                        >
+                          <SelectTrigger
+                            className="w-full"
+                            data-testid="project-form-connection"
+                          >
+                            <SelectValue placeholder="Select a database connection" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {connections.map((conn) => (
+                              <SelectItem key={conn.id} value={conn.id}>
+                                {conn.name}{" "}
+                                <span className="text-muted-foreground">
+                                  ({conn.db_host}/{conn.db_name})
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          No database connections available.
+                        </p>
                       )}
+                      <p className="text-xs text-muted-foreground">
+                        Don&apos;t see the connection you need?{" "}
+                        <Link
+                          to="/datasources"
+                          className="text-primary underline underline-offset-4"
+                        >
+                          Create a new connection
+                        </Link>
+                      </p>
                     </div>
                   </div>
                 </AccordionContent>
@@ -484,7 +409,7 @@ export function ProjectForm() {
               >
                 Cancel
               </Button>
-              <Button type="submit" disabled={loading}>
+              <Button type="submit" disabled={loading} data-testid="project-form-submit">
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 {isEdit ? "Save Changes" : "Create Project"}
               </Button>
