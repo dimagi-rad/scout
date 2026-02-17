@@ -60,6 +60,7 @@ def build_agent_graph(
     user: "User | None" = None,
     checkpointer: "BaseCheckpointSaver | None" = None,
     mcp_tools: list | None = None,
+    oauth_tokens: dict | None = None,
 ):
     """
     Build a LangGraph agent graph for a specific project.

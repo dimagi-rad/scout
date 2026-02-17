@@ -216,3 +216,42 @@ class TestTokenRefresh:
         from apps.users.services.token_refresh import token_needs_refresh
 
         assert token_needs_refresh(None) is False
+
+
+class TestGraphOAuthConfig:
+    """Test that build_agent_graph accepts oauth_tokens gracefully."""
+
+    @patch("apps.agents.graph.base.ChatAnthropic")
+    @patch("apps.agents.graph.base.KnowledgeRetriever")
+    @patch("apps.agents.graph.base.DataDictionaryGenerator")
+    def test_build_graph_accepts_oauth_tokens(self, mock_dd, mock_kr, mock_llm):
+        """build_agent_graph should accept oauth_tokens without error."""
+        from apps.agents.graph.base import build_agent_graph
+
+        mock_kr_instance = MagicMock()
+        mock_kr_instance.retrieve.return_value = ""
+        mock_kr.return_value = mock_kr_instance
+
+        mock_dd_instance = MagicMock()
+        mock_dd_instance.render_for_prompt.return_value = "schema info"
+        mock_dd.return_value = mock_dd_instance
+
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.bind_tools.return_value = mock_llm_instance
+        mock_llm.return_value = mock_llm_instance
+
+        project = MagicMock()
+        project.slug = "test"
+        project.id = "test-id"
+        project.llm_model = "claude-sonnet-4-5-20250929"
+        project.system_prompt = ""
+        project.max_rows_per_query = 500
+        project.max_query_timeout_seconds = 30
+        project.db_schema = "public"
+
+        # Should not raise
+        graph = build_agent_graph(
+            project=project,
+            oauth_tokens={"commcare": "test_token"},
+        )
+        assert graph is not None

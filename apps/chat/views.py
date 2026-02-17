@@ -23,7 +23,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools
+from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.agents.memory.checkpointer import get_database_url
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
@@ -354,6 +354,9 @@ async def chat_view(request):
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
 
+    # Retrieve user's OAuth tokens for materialization
+    oauth_tokens = await get_user_oauth_tokens(user)
+
     # Build agent (retry once with fresh checkpointer on connection errors)
     try:
         checkpointer = await _ensure_checkpointer()
@@ -362,6 +365,7 @@ async def chat_view(request):
             user=user,
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
+            oauth_tokens=oauth_tokens,
         )
     except Exception:
         # Connection may have gone stale -- force a new checkpointer and retry
@@ -373,6 +377,7 @@ async def chat_view(request):
                 user=user,
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
+                oauth_tokens=oauth_tokens,
             )
         except Exception as e:
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
@@ -392,7 +397,11 @@ async def chat_view(request):
         "retry_count": 0,
         "correction_context": {},
     }
-    config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 50}
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 50,
+        "oauth_tokens": oauth_tokens,
+    }
 
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)
     response = StreamingHttpResponse(
