@@ -178,6 +178,7 @@ SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
 SOCIALACCOUNT_EMAIL_VERIFICATION = "none"
 # Store OAuth tokens so we can use them for data materialization
 SOCIALACCOUNT_STORE_TOKENS = True
+SOCIALACCOUNT_ADAPTER = "apps.users.adapters.EncryptingSocialAccountAdapter"
 
 # Redirect URLs after login/logout
 LOGIN_REDIRECT_URL = "/"
