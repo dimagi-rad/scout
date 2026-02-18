@@ -275,20 +275,24 @@ def _get_membership(user, project_id):
 
 
 @sync_to_async
-def _upsert_thread(thread_id, project_id, user, title):
+def _upsert_thread(thread_id, project_id, user, title, *, tenant_membership=None):
     """Create or update a Thread record.
 
     auto_now on updated_at handles the timestamp on every save, so we only
     need to pass project/user in defaults and title in create_defaults.
     """
+    defaults = {"user": user}
+    create_defaults = {"user": user, "title": title[:200]}
+    if project_id:
+        defaults["project_id"] = project_id
+        create_defaults["project_id"] = project_id
+    if tenant_membership:
+        defaults["tenant_membership"] = tenant_membership
+        create_defaults["tenant_membership"] = tenant_membership
     Thread.objects.update_or_create(
         id=thread_id,
-        defaults={"project_id": project_id, "user": user},
-        create_defaults={
-            "project_id": project_id,
-            "user": user,
-            "title": title[:200],
-        },
+        defaults=defaults,
+        create_defaults=create_defaults,
     )
 
 
@@ -348,11 +352,14 @@ def _get_thread_artifacts(thread_id):
 
 
 @sync_to_async
-def _list_threads(project_id, user):
-    """Return recent threads for a project/user."""
-    qs = Thread.objects.filter(
-        project_id=project_id, user=user
-    ).order_by("-updated_at")[:50]
+def _list_threads(user, *, project_id=None, tenant_membership_id=None):
+    """Return recent threads for a project or tenant/user."""
+    qs = Thread.objects.filter(user=user)
+    if project_id:
+        qs = qs.filter(project_id=project_id)
+    elif tenant_membership_id:
+        qs = qs.filter(tenant_membership_id=tenant_membership_id)
+    qs = qs.order_by("-updated_at")[:50]
     return [
         {
             "id": str(t.id),
@@ -397,13 +404,13 @@ async def chat_view(request):
 
     messages = body.get("messages", [])
     data = body.get("data", {})
-    project_id = data.get("projectId") or body.get("projectId")
+    tenant_id = data.get("tenantId") or body.get("tenantId")
     thread_id = data.get("threadId") or body.get("threadId") or str(uuid.uuid4())
 
     if not messages:
         return JsonResponse({"error": "messages is required"}, status=400)
-    if not project_id:
-        return JsonResponse({"error": "projectId is required"}, status=400)
+    if not tenant_id:
+        return JsonResponse({"error": "tenantId is required"}, status=400)
 
     # Get the last user message.
     # AI SDK v6 sends {parts: [{type:"text", text:"..."}]} instead of {content: "..."}.
@@ -419,18 +426,22 @@ async def chat_view(request):
     if len(user_content) > MAX_MESSAGE_LENGTH:
         return JsonResponse({"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400)
 
-    # Validate project membership
-    membership = await _get_membership(user, project_id)
-    if membership is None:
-        return JsonResponse({"error": "Project not found or access denied"}, status=403)
+    # Validate tenant membership
+    from apps.users.models import TenantMembership
 
-    project = membership.project
-    if not project.is_active:
-        return JsonResponse({"error": "Project is inactive"}, status=403)
+    try:
+        tenant_membership = await TenantMembership.objects.aget(
+            id=tenant_id, user=user
+        )
+    except TenantMembership.DoesNotExist:
+        return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
     try:
-        await _upsert_thread(thread_id, project_id, user, user_content)
+        await _upsert_thread(
+            thread_id, None, user, user_content,
+            tenant_membership=tenant_membership,
+        )
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
@@ -449,7 +460,7 @@ async def chat_view(request):
     try:
         checkpointer = await _ensure_checkpointer()
         agent = await sync_to_async(build_agent_graph)(
-            project=project,
+            tenant_membership=tenant_membership,
             user=user,
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
@@ -461,7 +472,7 @@ async def chat_view(request):
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await _ensure_checkpointer(force_new=True)
             agent = await sync_to_async(build_agent_graph)(
-                project=project,
+                tenant_membership=tenant_membership,
                 user=user,
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
@@ -477,10 +488,10 @@ async def chat_view(request):
 
     input_state = {
         "messages": [HumanMessage(content=user_content)],
-        "project_id": str(project.id),
-        "project_name": project.name,
+        "tenant_id": tenant_membership.tenant_id,
+        "tenant_name": tenant_membership.tenant_name,
         "user_id": str(user.id),
-        "user_role": membership.role,
+        "user_role": "analyst",
         "needs_correction": False,
         "retry_count": 0,
         "correction_context": {},
@@ -568,9 +579,9 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
 
 async def thread_list_view(request):
     """
-    GET /api/chat/threads/?project_id=X
+    GET /api/chat/threads/?project_id=X or ?tenant_id=X
 
-    Returns recent threads for the authenticated user in a project.
+    Returns recent threads for the authenticated user in a project or tenant.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -580,14 +591,24 @@ async def thread_list_view(request):
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     project_id = request.GET.get("project_id")
-    if not project_id:
-        return JsonResponse({"error": "project_id is required"}, status=400)
+    tenant_id = request.GET.get("tenant_id")
 
-    membership = await _get_membership(user, project_id)
-    if membership is None:
-        return JsonResponse({"error": "Project not found or access denied"}, status=403)
+    if project_id:
+        membership = await _get_membership(user, project_id)
+        if membership is None:
+            return JsonResponse({"error": "Project not found or access denied"}, status=403)
+        threads = await _list_threads(user, project_id=project_id)
+    elif tenant_id:
+        from apps.users.models import TenantMembership
 
-    threads = await _list_threads(project_id, user)
+        try:
+            await TenantMembership.objects.aget(id=tenant_id, user=user)
+        except TenantMembership.DoesNotExist:
+            return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
+        threads = await _list_threads(user, tenant_membership_id=tenant_id)
+    else:
+        return JsonResponse({"error": "project_id or tenant_id is required"}, status=400)
+
     return JsonResponse(threads, safe=False)
 
 

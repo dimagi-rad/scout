@@ -85,7 +85,7 @@ class AgentState(TypedDict):
     This TypedDict defines all the data that persists across conversation turns
     and gets checkpointed to the database. LangGraph uses this state to:
     - Track conversation history with automatic message deduplication
-    - Maintain user and project context for permission scoping
+    - Maintain user and tenant context for permission scoping
     - Enable the self-correction loop when queries fail
 
     Attributes
@@ -98,14 +98,12 @@ class AgentState(TypedDict):
         - ToolMessage: Results from tool execution (SQL results, errors)
         - SystemMessage: Dynamic context injection
 
-    project_id : str
-        UUID of the current project (as string for serialization).
+    tenant_id : str
+        Identifier for the current tenant (e.g. CommCare domain name).
         Used to scope all database queries and knowledge lookups.
-        The agent can ONLY access data within this project's schema.
 
-    project_name : str
-        Human-readable project name for use in responses.
-        Displayed to users and included in provenance explanations.
+    tenant_name : str
+        Human-readable tenant name for use in responses.
 
     user_id : str
         UUID of the current user (as string for serialization).
@@ -144,32 +142,13 @@ class AgentState(TypedDict):
 
         state = AgentState(
             messages=[],
-            project_id="550e8400-e29b-41d4-a716-446655440000",
-            project_name="Acme Analytics",
+            tenant_id="dimagi",
+            tenant_name="Dimagi",
             user_id="user-123",
             user_role="analyst",
             needs_correction=False,
             retry_count=0,
             correction_context={},
-        )
-
-    State after a failed query::
-
-        state = AgentState(
-            messages=[...],  # includes error in ToolMessage
-            project_id="550e8400-e29b-41d4-a716-446655440000",
-            project_name="Acme Analytics",
-            user_id="user-123",
-            user_role="analyst",
-            needs_correction=True,
-            retry_count=1,
-            correction_context={
-                "error_type": "syntax",
-                "error_message": "column 'usr_id' does not exist",
-                "failed_sql": "SELECT * FROM orders WHERE usr_id = 1",
-                "suggestion": "Column is named 'user_id', not 'usr_id'",
-                "relevant_learnings": [],
-            },
         )
 
     Notes
@@ -185,9 +164,9 @@ class AgentState(TypedDict):
     # Conversation history with automatic deduplication
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Project context - scopes all data access
-    project_id: str
-    project_name: str
+    # Tenant context - scopes all data access
+    tenant_id: str
+    tenant_name: str
 
     # User context - for permissions and audit
     user_id: str

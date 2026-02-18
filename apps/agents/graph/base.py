@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from apps.projects.models import Project
-    from apps.users.models import User
+    from apps.users.models import TenantMembership, User
 
 logger = logging.getLogger(__name__)
 
@@ -56,94 +56,48 @@ DEFAULT_TEMPERATURE = 0
 
 
 def build_agent_graph(
-    project: "Project",
+    project: "Project | None" = None,
     user: "User | None" = None,
     checkpointer: "BaseCheckpointSaver | None" = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
+    tenant_membership: "TenantMembership | None" = None,
 ):
     """
-    Build a LangGraph agent graph for a specific project.
+    Build a LangGraph agent graph for a project or tenant.
 
-    This function assembles all components of the Scout agent:
-    1. Creates project-scoped tools (SQL execution, table description, learning)
-    2. Binds tools to the LLM (ChatAnthropic)
-    3. Assembles the system prompt from multiple sources
-    4. Builds the graph with self-correction loop
-    5. Compiles with optional checkpointer for persistence
-
-    The resulting graph handles:
-    - User questions about data
-    - SQL query generation and execution
-    - Automatic error detection and correction (up to 3 retries)
-    - Learning from successful corrections
-    - Knowledge-grounded responses using canonical metrics and business rules
-
-    Args:
-        project: The Project model instance containing database connection
-            settings, system prompt, and configuration.
-        user: Optional User model instance for tracking who triggered learnings.
-            If None, learnings will have no associated user.
-        checkpointer: Optional LangGraph checkpointer for conversation persistence.
-            If None, conversations won't persist between sessions.
-            Use MemorySaver for development, PostgresSaver for production.
-
-    Returns:
-        A compiled LangGraph that can be invoked with:
-            graph.invoke(
-                {
-                    "messages": [HumanMessage(content="...")],
-                    "project_id": str(project.id),
-                    "project_name": project.name,
-                    "user_id": str(user.id) if user else "",
-                    "user_role": "analyst",
-                    "needs_correction": False,
-                    "retry_count": 0,
-                    "correction_context": {},
-                },
-                config={"configurable": {"thread_id": "unique-thread-id"}}
-            )
-
-    Example:
-        >>> from apps.projects.models import Project
-        >>> from langgraph.checkpoint.memory import MemorySaver
-        >>>
-        >>> project = Project.objects.get(slug="analytics")
-        >>> checkpointer = MemorySaver()
-        >>> graph = build_agent_graph(project, checkpointer=checkpointer)
-        >>>
-        >>> result = graph.invoke({
-        ...     "messages": [HumanMessage(content="How many users signed up last month?")],
-        ...     "project_id": str(project.id),
-        ...     "project_name": project.name,
-        ...     "user_id": "",
-        ...     "user_role": "analyst",
-        ...     "needs_correction": False,
-        ...     "retry_count": 0,
-        ...     "correction_context": {},
-        ... }, config={"configurable": {"thread_id": "thread-123"}})
+    Accepts either a Project (legacy) or TenantMembership (new tenant flow).
+    When tenant_membership is provided, uses MCP tools only (no project-local tools).
     """
-    logger.info("Building agent graph for project: %s", project.slug)
+    context_label = (
+        f"tenant:{tenant_membership.tenant_id}"
+        if tenant_membership
+        else f"project:{project.slug}" if project else "unknown"
+    )
+    logger.info("Building agent graph for %s", context_label)
 
     # --- Build tools ---
-    tools = _build_tools(project, user, mcp_tools or [])
-    logger.debug("Created %d tools for project %s", len(tools), project.slug)
+    if project:
+        tools = _build_tools(project, user, mcp_tools or [])
+    else:
+        tools = list(mcp_tools or [])
+    logger.debug("Created %d tools for %s", len(tools), context_label)
 
     # --- Build LLM with tools ---
+    llm_model = project.llm_model if project else "claude-sonnet-4-5-20250929"
     llm = ChatAnthropic(
-        model=project.llm_model,
+        model=llm_model,
         max_tokens=DEFAULT_MAX_TOKENS,
         temperature=DEFAULT_TEMPERATURE,
     )
     llm_with_tools = llm.bind_tools(tools)
 
     # --- Build system prompt ---
-    system_prompt = _build_system_prompt(project)
-    logger.debug(
-        "System prompt assembled: %d characters for project %s",
-        len(system_prompt),
-        project.slug,
-    )
+    if tenant_membership and not project:
+        system_prompt = _build_tenant_system_prompt(tenant_membership)
+    else:
+        system_prompt = _build_system_prompt(project)
+    logger.debug("System prompt assembled: %d characters for %s", len(system_prompt), context_label)
 
     # --- Create tool node ---
     tool_node = ToolNode(tools)
@@ -237,8 +191,8 @@ def build_agent_graph(
     compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "Agent graph compiled for project %s (checkpointer: %s)",
-        project.slug,
+        "Agent graph compiled for %s (checkpointer: %s)",
+        context_label,
         type(checkpointer).__name__ if checkpointer else "None",
     )
 
@@ -352,6 +306,35 @@ def _build_system_prompt(project: "Project") -> str:
 **Important:** When using the `query`, `list_tables`, `describe_table`, or `get_metadata` tools, always pass `project_id` = "{project.id}".
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+""")
+
+    return "\n".join(sections)
+
+
+def _build_tenant_system_prompt(tenant_membership: "TenantMembership") -> str:
+    """Build a system prompt for tenant-based (non-project) conversations."""
+    sections = [BASE_SYSTEM_PROMPT]
+
+    sections.append(f"""
+## Tenant Context
+
+- Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant_id})
+- Provider: {tenant_membership.provider}
+
+## Query Configuration
+
+- Tenant ID: {tenant_membership.tenant_id}
+- Maximum rows per query: 500
+- Query timeout: 30 seconds
+- Schema: {tenant_membership.tenant_id}
+
+**Important:** When using the `query`, `list_tables`, `describe_table`, or `get_metadata` tools, \
+always pass `tenant_id` = "{tenant_membership.tenant_id}".
+
+When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+
+You can materialize data from CommCare using the `run_materialization` tool with \
+`tenant_id` = "{tenant_membership.tenant_id}".
 """)
 
     return "\n".join(sections)

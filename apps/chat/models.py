@@ -13,6 +13,15 @@ class Thread(models.Model):
         "projects.Project",
         on_delete=models.CASCADE,
         related_name="threads",
+        null=True,
+        blank=True,
+    )
+    tenant_membership = models.ForeignKey(
+        "users.TenantMembership",
+        on_delete=models.CASCADE,
+        related_name="threads",
+        null=True,
+        blank=True,
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
