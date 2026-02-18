@@ -5,7 +5,6 @@ import {
   BookOpen,
   ChefHat,
   Database,
-  Settings,
   LogOut,
   Plus,
   Link2,
@@ -24,9 +23,10 @@ import {
 export function Sidebar() {
   const navigate = useNavigate()
   const user = useAppStore((s) => s.user)
-  const projects = useAppStore((s) => s.projects)
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
-  const setActiveProject = useAppStore((s) => s.projectActions.setActiveProject)
+  const domains = useAppStore((s) => s.domains)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const logout = useAppStore((s) => s.authActions.logout)
   const threadId = useAppStore((s) => s.threadId)
   const threads = useAppStore((s) => s.threads)
@@ -34,12 +34,17 @@ export function Sidebar() {
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
 
-  // Fetch threads when project changes
+  // Fetch domains on mount
   useEffect(() => {
-    if (activeProjectId) {
-      fetchThreads(activeProjectId)
+    fetchDomains()
+  }, [fetchDomains])
+
+  // Fetch threads when domain changes
+  useEffect(() => {
+    if (activeDomainId) {
+      fetchThreads(activeDomainId)
     }
-  }, [activeProjectId, fetchThreads])
+  }, [activeDomainId, fetchThreads])
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
@@ -50,33 +55,26 @@ export function Sidebar() {
         </Link>
       </div>
 
-      {/* Project Selector */}
+      {/* Domain Selector */}
       <div className="border-b p-4">
         <label className="text-xs font-medium text-muted-foreground">
-          Project
+          Domain
         </label>
         <Select
-          value={activeProjectId ?? ""}
-          onValueChange={setActiveProject}
+          value={activeDomainId ?? ""}
+          onValueChange={(value) => { setActiveDomain(value); newThread() }}
         >
-          <SelectTrigger className="mt-1 w-full">
-            <SelectValue placeholder="Select project" />
+          <SelectTrigger className="mt-1 w-full" data-testid="domain-selector">
+            <SelectValue placeholder="Select domain" />
           </SelectTrigger>
           <SelectContent>
-            {projects.map((project) => (
-              <SelectItem key={project.id} value={project.id}>
-                {project.name}
+            {domains.map((d) => (
+              <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
+                {d.tenant_name}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
-        <Link
-          to="/projects"
-          className="mt-2 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
-        >
-          <Settings className="h-3 w-3" />
-          Manage Projects
-        </Link>
       </div>
 
       {/* Navigation */}

@@ -10,8 +10,8 @@ import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-re
 import { SLASH_COMMANDS } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 
-function threadStorageKey(projectId: string) {
-  return `scout:thread:${projectId}`
+function threadStorageKey(domainId: string) {
+  return `scout:thread:${domainId}`
 }
 
 function getPublicUrl(token: string): string {
@@ -110,7 +110,7 @@ function ShareMenu({
 }
 
 export function ChatPanel() {
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
@@ -122,8 +122,8 @@ export function ChatPanel() {
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
-  const contextRef = useRef({ projectId: activeProjectId, threadId })
-  contextRef.current = { projectId: activeProjectId, threadId }
+  const contextRef = useRef({ tenantId: activeDomainId, threadId })
+  contextRef.current = { tenantId: activeDomainId, threadId }
 
   const [transport] = useState(
     () =>
@@ -156,21 +156,21 @@ export function ChatPanel() {
 
   // Persist threadId to localStorage when it changes
   useEffect(() => {
-    if (activeProjectId) {
-      localStorage.setItem(threadStorageKey(activeProjectId), threadId)
+    if (activeDomainId) {
+      localStorage.setItem(threadStorageKey(activeDomainId), threadId)
     }
-  }, [threadId, activeProjectId])
+  }, [threadId, activeDomainId])
 
-  // Restore threadId from localStorage when project changes
+  // Restore threadId from localStorage when domain changes
   useEffect(() => {
-    if (!activeProjectId) return
-    const saved = localStorage.getItem(threadStorageKey(activeProjectId))
+    if (!activeDomainId) return
+    const saved = localStorage.getItem(threadStorageKey(activeDomainId))
     if (saved && saved !== threadId) {
       selectThread(saved)
     }
-    // Only run when project changes
+    // Only run when domain changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProjectId])
+  }, [activeDomainId])
 
   // Load messages from backend when threadId changes
   useEffect(() => {
@@ -198,11 +198,11 @@ export function ChatPanel() {
 
   // Refresh thread list when streaming finishes (so new threads appear)
   useEffect(() => {
-    if (prevStatusRef.current === "streaming" && status === "ready" && activeProjectId) {
-      fetchThreads(activeProjectId)
+    if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
+      fetchThreads(activeDomainId)
     }
     prevStatusRef.current = status
-  }, [status, activeProjectId, fetchThreads])
+  }, [status, activeDomainId, fetchThreads])
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
@@ -247,10 +247,10 @@ export function ChatPanel() {
     }
   }
 
-  if (!activeProjectId) {
+  if (!activeDomainId) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
-        Select a project to start chatting.
+        Select a domain to start chatting
       </div>
     )
   }

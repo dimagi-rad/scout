@@ -28,7 +28,7 @@ export interface UiSlice {
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => void
-    fetchThreads: (projectId: string) => Promise<void>
+    fetchThreads: (tenantId: string) => Promise<void>
     updateThreadSharing: (
       threadId: string,
       data: { is_shared?: boolean; is_public?: boolean },
@@ -50,10 +50,10 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
     selectThread: (id: string) => {
       set({ threadId: id, activeArtifactId: null })
     },
-    fetchThreads: async (projectId: string) => {
+    fetchThreads: async (tenantId: string) => {
       set({ threadsStatus: "loading" })
       try {
-        const threads = await api.get<Thread[]>(`/api/chat/threads/?project_id=${projectId}`)
+        const threads = await api.get<Thread[]>(`/api/chat/threads/?tenant_id=${tenantId}`)
         set({ threads, threadsStatus: "loaded" })
       } catch {
         set({ threads: [], threadsStatus: "loaded" })
