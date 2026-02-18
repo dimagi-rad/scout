@@ -8,6 +8,7 @@ import {
   Settings,
   LogOut,
   Plus,
+  Link2,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { NavItem } from "./NavItem"
@@ -126,6 +127,18 @@ export function Sidebar() {
         <div className="mb-2 truncate text-sm text-muted-foreground">
           {user?.email}
         </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start"
+          asChild
+          data-testid="sidebar-connections"
+        >
+          <Link to="/settings/connections">
+            <Link2 className="mr-2 h-4 w-4" />
+            Connected Accounts
+          </Link>
+        </Button>
         <Button
           variant="ghost"
           size="sm"
