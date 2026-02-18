@@ -199,8 +199,51 @@ async def run_materialization(tenant_id: str, pipeline: str = "commcare_sync") -
         tenant_id: The tenant identifier (CommCare domain name).
         pipeline: Pipeline to run (default: commcare_sync).
     """
-    # Implementation in Task 8
-    return error_response("NOT_IMPLEMENTED", "Materialization not yet implemented")
+    from mcp_server.envelope import INTERNAL_ERROR
+
+    async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
+        from apps.users.models import TenantMembership
+
+        try:
+            tm = await TenantMembership.objects.aget(tenant_id=tenant_id, provider="commcare")
+        except TenantMembership.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
+            return tc["result"]
+
+        # Get OAuth token from the user's social account
+        from allauth.socialaccount.models import SocialToken
+
+        token_obj = await SocialToken.objects.filter(
+            account__user=tm.user,
+            account__provider="commcare",
+        ).afirst()
+        if not token_obj:
+            tc["result"] = error_response(
+                "AUTH_TOKEN_MISSING", "No CommCare OAuth token found"
+            )
+            return tc["result"]
+
+        # Run materialization (sync, wrapped in sync_to_async)
+        from asgiref.sync import sync_to_async
+
+        from mcp_server.services.materializer import run_commcare_sync
+
+        try:
+            result = await sync_to_async(run_commcare_sync)(tm, token_obj.token)
+        except Exception as e:
+            logger.exception("Materialization failed for tenant %s", tenant_id)
+            tc["result"] = error_response(
+                INTERNAL_ERROR, f"Materialization failed: {e}"
+            )
+            return tc["result"]
+
+        tc["result"] = success_response(
+            result,
+            tenant_id=tenant_id,
+            schema=result.get("schema", ""),
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
 
 
 # --- Server setup ---
