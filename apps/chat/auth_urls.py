@@ -9,6 +9,7 @@ from apps.chat.views import (
     me_view,
     providers_view,
 )
+from apps.users.views import tenant_list_view, tenant_select_view
 
 app_name = "auth"
 
@@ -23,4 +24,6 @@ urlpatterns = [
         disconnect_provider_view,
         name="disconnect-provider",
     ),
+    path("tenants/", tenant_list_view, name="tenant-list"),
+    path("tenants/select/", tenant_select_view, name="tenant-select"),
 ]
