@@ -2,20 +2,27 @@
 Artifact views for Scout data agent platform.
 
 Provides views for rendering artifacts in a sandboxed iframe,
-fetching artifact data via API, and serving shared artifacts.
+fetching artifact data via API, executing live queries, and serving shared artifacts.
 """
 import json
+import logging
 import secrets
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.projects.models import ProjectMembership
+from apps.projects.services.db_manager import get_pool_manager
 
 from .models import AccessLevel, Artifact, SharedArtifact
 from .services.export import ArtifactExporter
+
+logger = logging.getLogger(__name__)
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
@@ -34,7 +41,7 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src https://cdn.jsdelivr.net;"
+        "connect-src 'self' https://cdn.jsdelivr.net;"
     )
 
 
@@ -193,19 +200,76 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
             container: null,
             currentArtifact: null,
 
-            init() {
+            async init() {
                 this.container = document.getElementById('artifact-container');
-                // Read artifact data embedded in the page by the server
                 const dataEl = document.getElementById('artifact-data');
-                if (dataEl) {
-                    try {
-                        const artifact = JSON.parse(dataEl.textContent);
-                        this.render(artifact);
-                    } catch (error) {
-                        this.showError('Parse Error', 'Failed to parse embedded artifact data: ' + error.message);
-                    }
-                } else {
+                if (!dataEl) {
                     this.showError('Initialization Error', 'No artifact data found in page.');
+                    return;
+                }
+
+                let artifact;
+                try {
+                    artifact = JSON.parse(dataEl.textContent);
+                } catch (error) {
+                    this.showError('Parse Error', 'Failed to parse embedded artifact data: ' + error.message);
+                    return;
+                }
+
+                // If the artifact has live queries, fetch fresh data from the server
+                if (artifact.has_live_queries) {
+                    this.showLoading('Querying database...');
+                    try {
+                        const resp = await fetch('/api/artifacts/' + artifact.id + '/query-data/', {
+                            credentials: 'include',
+                        });
+                        if (!resp.ok) {
+                            const err = await resp.json().catch(() => ({}));
+                            throw new Error(err.error || 'Query failed with status ' + resp.status);
+                        }
+                        const queryData = await resp.json();
+                        artifact.data = this.mergeQueryResults(queryData, artifact.data || {});
+                        // Expose raw query info for parent frame (Data tab)
+                        artifact._queryResults = queryData;
+                        window.parent.postMessage({
+                            type: 'artifact-query-data',
+                            artifactId: artifact.id,
+                            queryData: queryData,
+                        }, '*');
+                    } catch (error) {
+                        this.showError('Data Fetch Error', error.message);
+                        return;
+                    }
+                }
+
+                this.render(artifact);
+            },
+
+            mergeQueryResults(queryData, staticData) {
+                const queries = queryData.queries || [];
+                if (queries.length === 0) return staticData;
+
+                const merged = { ...staticData };
+                for (const q of queries) {
+                    if (q.error) continue;
+                    // Key by query name so the component can access data.kpis, data.monthly, etc.
+                    const rows = (q.rows || []).map(row => {
+                        const obj = {};
+                        (q.columns || []).forEach((col, i) => { obj[col] = row[i]; });
+                        return obj;
+                    });
+                    // If only one row, expose as object; otherwise as array
+                    merged[q.name] = rows.length === 1 ? rows[0] : rows;
+                }
+                return merged;
+            },
+
+            showLoading(message) {
+                const loading = document.getElementById('loading');
+                if (loading) {
+                    loading.style.display = 'flex';
+                    const span = loading.querySelector('span');
+                    if (span) span.textContent = message || 'Loading...';
                 }
             },
 
@@ -544,9 +608,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
         // Initialize when DOM is ready
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => ArtifactRenderer.init());
+            document.addEventListener('DOMContentLoaded', () => ArtifactRenderer.init().catch(console.error));
         } else {
-            ArtifactRenderer.init();
+            ArtifactRenderer.init().catch(console.error);
         }
     </script>
 </body>
@@ -580,13 +644,16 @@ class ArtifactSandboxView(View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
+        has_live_queries = bool(artifact.source_queries)
+
         # Serialize artifact data for embedding in the template
         artifact_json = json.dumps({
             "id": str(artifact.id),
             "title": artifact.title,
             "type": artifact.artifact_type,
             "code": artifact.code,
-            "data": artifact.data,
+            "data": artifact.data if not has_live_queries else {},
+            "has_live_queries": has_live_queries,
             "version": artifact.version,
         })
         # Escape </script> in JSON to prevent breaking out of the script tag
@@ -643,8 +710,142 @@ class ArtifactDataView(View):
             "type": artifact.artifact_type,
             "code": artifact.code,
             "data": artifact.data,
+            "source_queries": artifact.source_queries,
             "version": artifact.version,
         }
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce psycopg2 result values to JSON-serializable types."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+class ArtifactQueryDataView(View):
+    """
+    Execute an artifact's stored SQL queries against the project database
+    and return fresh results. This enables artifacts to display live data
+    rather than stale snapshots.
+
+    Each query in ``artifact.source_queries`` is executed with the project's
+    connection pool, respecting row limits and statement timeouts.
+
+    Response shape::
+
+        {
+            "queries": [
+                {"name": "kpis", "sql": "SELECT ...", "columns": [...], "rows": [...], "row_count": 5},
+                ...
+            ],
+            "static_data": { ... }   // artifact.data, for non-query config
+        }
+    """
+
+    def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+        artifact = get_object_or_404(
+            Artifact.objects.select_related("project", "project__database_connection"),
+            pk=artifact_id,
+        )
+
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project=artifact.project
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+        source_queries = artifact.source_queries or []
+        if not source_queries:
+            return JsonResponse({
+                "queries": [],
+                "static_data": artifact.data or {},
+            })
+
+        project = artifact.project
+        results = []
+
+        for entry in source_queries:
+            if isinstance(entry, dict):
+                name = entry.get("name", f"query_{len(results)}")
+                sql = entry.get("sql", "")
+            else:
+                name = f"query_{len(results)}"
+                sql = str(entry)
+
+            if not sql.strip():
+                results.append({"name": name, "sql": sql, "error": "Empty query"})
+                continue
+
+            try:
+                result = self._execute_query(project, sql)
+                results.append({"name": name, "sql": sql, **result})
+            except Exception as e:
+                logger.exception(
+                    "Artifact query failed [artifact=%s, query=%s]", artifact_id, name
+                )
+                results.append({
+                    "name": name,
+                    "sql": sql,
+                    "columns": [],
+                    "rows": [],
+                    "row_count": 0,
+                    "error": str(e),
+                })
+
+        return JsonResponse({
+            "queries": results,
+            "static_data": artifact.data or {},
+        })
+
+    @staticmethod
+    def _execute_query(project, sql: str) -> dict[str, Any]:
+        from psycopg2 import sql as psql
+
+        pool_mgr = get_pool_manager()
+        timeout = project.max_query_timeout_seconds
+        max_rows = project.max_rows_per_query
+
+        with pool_mgr.get_connection(project) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    psql.SQL("SET search_path TO {}").format(
+                        psql.Identifier(project.db_schema)
+                    )
+                )
+                cursor.execute("SET statement_timeout TO %s", (f"{timeout}s",))
+                cursor.execute(sql)
+
+                columns: list[str] = []
+                rows: list[list[Any]] = []
+
+                if cursor.description:
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = [
+                        [_json_safe(cell) for cell in row]
+                        for row in cursor.fetchmany(max_rows)
+                    ]
+
+                return {
+                    "columns": columns,
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "truncated": cursor.rowcount > max_rows if cursor.rowcount >= 0 else False,
+                }
+            finally:
+                cursor.close()
 
 
 class SharedArtifactView(View):

@@ -70,7 +70,7 @@ def create_artifact_tools(
         code: str,
         description: str = "",
         data: dict | None = None,
-        source_queries: list[str] | None = None,
+        source_queries: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """
         Create a new interactive artifact (visualization, chart, or content).
@@ -78,6 +78,12 @@ def create_artifact_tools(
         Use this tool when the user needs a visual representation of data,
         such as charts, tables, dashboards, or formatted content. The artifact
         will be rendered in an interactive preview.
+
+        IMPORTANT: For data-driven artifacts, always provide source_queries with
+        the SQL queries that produce the data the component needs. The artifact
+        will execute these queries at render time to fetch live data. Do NOT
+        embed query results in the data parameter -- instead, write your
+        component to consume data keyed by the query name.
 
         Args:
             title: Human-readable title for the artifact. Should describe
@@ -94,7 +100,11 @@ def create_artifact_tools(
                 - "svg": SVG graphic (for custom diagrams, icons).
 
             code: The source code for the artifact:
-                - For "react": JSX code with a default export component
+                - For "react": JSX code with a default export component.
+                  The component receives a `data` prop whose keys match the
+                  query names from source_queries. For example, if you provide
+                  a query named "monthly_revenue", access it as data.monthly_revenue
+                  (an array of objects with column-name keys).
                 - For "plotly": JSON string of Plotly figure specification
                 - For "html": HTML markup
                 - For "markdown": Markdown text
@@ -103,12 +113,25 @@ def create_artifact_tools(
             description: Optional description of what this artifact visualizes.
                 Helps users understand the artifact's purpose.
 
-            data: Optional JSON data to pass to the artifact. For React components,
-                this is available as a `data` prop. Useful for separating data
-                from presentation logic.
+            data: Optional static JSON data to pass to the artifact. For
+                data-driven artifacts, prefer source_queries instead so the
+                artifact always shows live data. Use this only for non-query
+                configuration (e.g., color schemes, labels, thresholds).
 
-            source_queries: Optional list of SQL queries that generated the data
-                for this artifact. Aids provenance tracking.
+            source_queries: List of named SQL queries that provide live data
+                to the artifact. Each entry is a dict with "name" and "sql"
+                keys. The queries are executed at render time against the
+                project database, and results are passed to the component
+                under data[name].
+
+                Example:
+                    [
+                        {"name": "monthly_revenue", "sql": "SELECT ..."},
+                        {"name": "top_products", "sql": "SELECT ..."}
+                    ]
+
+                The component then accesses data.monthly_revenue (array of
+                row objects) and data.top_products.
 
         Returns:
             A dict containing:
@@ -124,24 +147,23 @@ def create_artifact_tools(
             ...     title="Monthly Active Users",
             ...     artifact_type="react",
             ...     code='''
-            ...     import { LineChart, Line, XAxis, YAxis, Tooltip } from "recharts";
             ...     export default function Chart({ data }) {
+            ...       const rows = data.monthly_users || [];
             ...       return (
-            ...         <LineChart width={600} height={300} data={data}>
-            ...           <XAxis dataKey="month" />
-            ...           <YAxis />
-            ...           <Tooltip />
-            ...           <Line type="monotone" dataKey="users" stroke="#8884d8" />
-            ...         </LineChart>
+            ...         <ResponsiveContainer width="100%" height={300}>
+            ...           <LineChart data={rows}>
+            ...             <XAxis dataKey="month" />
+            ...             <YAxis />
+            ...             <Tooltip />
+            ...             <Line type="monotone" dataKey="users" stroke="#8884d8" />
+            ...           </LineChart>
+            ...         </ResponsiveContainer>
             ...       );
             ...     }
             ...     ''',
-            ...     data=[
-            ...         {"month": "Jan", "users": 1200},
-            ...         {"month": "Feb", "users": 1350},
-            ...         {"month": "Mar", "users": 1500},
-            ...     ],
-            ...     source_queries=["SELECT month, count(*) as users FROM..."]
+            ...     source_queries=[
+            ...         {"name": "monthly_users", "sql": "SELECT month, count(*) as users FROM ..."}
+            ...     ]
             ... )
         """
         # Import here to avoid circular imports
@@ -192,15 +214,8 @@ def create_artifact_tools(
                 data=data or {},
                 version=1,
                 conversation_id=conversation_id or "",
+                source_queries=source_queries or [],
             )
-
-            # Store source queries in the data field if provided
-            # (the model doesn't have a dedicated field, so we include in data)
-            if source_queries:
-                artifact_data = artifact.data or {}
-                artifact_data["_source_queries"] = source_queries
-                artifact.data = artifact_data
-                artifact.save(update_fields=["data"])
 
             logger.info(
                 "Created artifact %s for project %s: %s",
@@ -242,6 +257,7 @@ def create_artifact_tools(
         code: str,
         title: str | None = None,
         data: dict | None = None,
+        source_queries: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         """
         Update an existing artifact by creating a new version.
@@ -259,6 +275,9 @@ def create_artifact_tools(
 
             data: Optional new data payload. If not provided, keeps the existing data.
                 Set to an empty dict {} to clear the data.
+
+            source_queries: Optional new list of named SQL queries. Same format
+                as create_artifact. If not provided, keeps existing queries.
 
         Returns:
             A dict containing:
@@ -321,6 +340,8 @@ def create_artifact_tools(
                 updates["title"] = title.strip()
             if data is not None:
                 updates["data"] = data
+            if source_queries is not None:
+                updates["source_queries"] = source_queries
 
             new_artifact = original.create_new_version(**updates)
 

@@ -6,7 +6,13 @@ Included at /api/artifacts/ in the main URL configuration.
 from django.urls import path
 
 from .api.views import CreateShareView, ListSharesView, RevokeShareView
-from .views import ArtifactDataView, ArtifactExportView, ArtifactSandboxView, SharedArtifactView
+from .views import (
+    ArtifactDataView,
+    ArtifactExportView,
+    ArtifactQueryDataView,
+    ArtifactSandboxView,
+    SharedArtifactView,
+)
 
 app_name = "artifacts"
 
@@ -24,6 +30,13 @@ urlpatterns = [
         "<uuid:artifact_id>/data/",
         ArtifactDataView.as_view(),
         name="data",
+    ),
+    # Live query execution - runs stored SQL queries and returns fresh results
+    # Full URL: /api/artifacts/<uuid>/query-data/
+    path(
+        "<uuid:artifact_id>/query-data/",
+        ArtifactQueryDataView.as_view(),
+        name="query_data",
     ),
     # Shared artifact view - public access via share token
     # Full URL: /api/artifacts/shared/<token>/
