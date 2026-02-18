@@ -7,9 +7,6 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2LoginView,
 )
 
-from .provider import CommCareConnectProvider
-
-
 class CommCareConnectOAuth2Adapter(OAuth2Adapter):
     """
     OAuth2 adapter for CommCare Connect.
@@ -18,7 +15,7 @@ class CommCareConnectOAuth2Adapter(OAuth2Adapter):
     are confirmed.
     """
 
-    provider_id = CommCareConnectProvider.id
+    provider_id = "commcare_connect"
 
     # Placeholder endpoints -- replace with actual Connect OAuth URLs
     access_token_url = "https://connect.commcarehq.org/oauth/token/"

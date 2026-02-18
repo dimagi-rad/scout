@@ -11,6 +11,8 @@ Follow this pattern for other identity providers.
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 
+from .views import CommCareOAuth2Adapter
+
 
 class CommCareAccount(ProviderAccount):
     """
@@ -48,10 +50,11 @@ class CommCareProvider(OAuth2Provider):
     id = "commcare"
     name = "CommCare"
     account_class = CommCareAccount
+    oauth2_adapter_class = CommCareOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
         """Return the default OAuth scopes to request."""
-        return ["read"]
+        return ["access_apis"]
 
     def extract_uid(self, data: dict) -> str:
         """

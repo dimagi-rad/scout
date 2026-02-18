@@ -169,9 +169,11 @@ ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 # Keep these for compatibility with older allauth versions and documentation
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
+ACCOUNT_DEFAULT_HTTP_PROTOCOL = env("ACCOUNT_DEFAULT_HTTP_PROTOCOL", default="http")
 
 # Social account settings
 # Auto-create Django user on first OAuth login
+SOCIALACCOUNT_LOGIN_ON_GET = True
 SOCIALACCOUNT_AUTO_SIGNUP = True
 # Auto-connect social account to existing user with matching email
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
@@ -195,9 +197,7 @@ SOCIALACCOUNT_PROVIDERS = {
     "github": {
         "SCOPE": ["user:email"],
     },
-    "commcare_connect": {
-        "SCOPE": ["read"],
-    },
+    "commcare_connect": {},
 }
 
 
@@ -253,7 +253,9 @@ MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
 CSRF_COOKIE_NAME = "csrftoken_scout"
 CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
-CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
+CSRF_TRUSTED_ORIGINS = env.list(
+    "CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"]
+)
 SESSION_COOKIE_NAME = "sessionid_scout"
 
 

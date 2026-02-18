@@ -17,9 +17,6 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2LoginView,
 )
 
-from .provider import CommCareProvider
-
-
 class CommCareOAuth2Adapter(OAuth2Adapter):
     """
     OAuth2 adapter for CommCare HQ.
@@ -32,7 +29,7 @@ class CommCareOAuth2Adapter(OAuth2Adapter):
     via Django settings.
     """
 
-    provider_id = CommCareProvider.id
+    provider_id = "commcare"
 
     # CommCare OAuth endpoints
     # See: https://confluence.dimagi.com/display/commcarepublic/CommCare+HQ+APIs
