@@ -2,6 +2,7 @@ import { createBrowserRouter, Navigate } from "react-router-dom"
 import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ProjectsPage, ProjectForm } from "@/pages/ProjectsPage"
+import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
 import { DataSourcesPage } from "@/pages/DataSourcesPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
@@ -17,6 +18,7 @@ export const router = createBrowserRouter([
       { path: "projects", element: <ProjectsPage /> },
       { path: "projects/new", element: <ProjectForm /> },
       { path: "projects/:id/edit", element: <ProjectForm /> },
+      { path: "artifacts", element: <ArtifactsPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
       { path: "knowledge/:id", element: <KnowledgePage /> },

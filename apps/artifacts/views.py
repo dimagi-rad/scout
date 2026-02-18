@@ -1033,3 +1033,105 @@ class ArtifactExportView(View):
             )
 
         return JsonResponse({"error": "Export failed"}, status=500)
+
+
+class ProjectArtifactListView(View):
+    """
+    List artifacts belonging to a project.
+
+    GET /api/projects/<project_id>/artifacts/
+    Optional query params: ?search=<title substring>
+    """
+
+    def get(self, request: HttpRequest, project_id: str) -> JsonResponse:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project_id=project_id
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+        qs = Artifact.objects.filter(project_id=project_id).order_by("-created_at")
+
+        search = request.GET.get("search", "").strip()
+        if search:
+            qs = qs.filter(title__icontains=search)
+
+        artifacts = list(
+            qs.values(
+                "id", "title", "description", "artifact_type",
+                "version", "source_queries", "created_at", "updated_at",
+            )[:200]
+        )
+
+        for a in artifacts:
+            a["id"] = str(a["id"])
+            a["has_live_queries"] = bool(a.pop("source_queries", None))
+            a["created_at"] = a["created_at"].isoformat() if a["created_at"] else None
+            a["updated_at"] = a["updated_at"].isoformat() if a["updated_at"] else None
+
+        return JsonResponse({"results": artifacts})
+
+
+class ProjectArtifactDetailView(View):
+    """
+    Detail operations on a single artifact.
+
+    PATCH /api/projects/<project_id>/artifacts/<artifact_id>/  -- update title/description
+    DELETE /api/projects/<project_id>/artifacts/<artifact_id>/ -- delete
+    """
+
+    def _check_access(self, request: HttpRequest, project_id: str) -> JsonResponse | None:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project_id=project_id
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+        return None
+
+    def patch(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
+        error_resp = self._check_access(request, project_id)
+        if error_resp:
+            return error_resp
+
+        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
+
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        allowed_fields = {"title", "description"}
+        update_fields = []
+
+        for field in allowed_fields:
+            if field in body:
+                setattr(artifact, field, str(body[field]).strip())
+                update_fields.append(field)
+
+        if not update_fields:
+            return JsonResponse({"error": "No valid fields to update"}, status=400)
+
+        update_fields.append("updated_at")
+        artifact.save(update_fields=update_fields)
+
+        return JsonResponse({
+            "id": str(artifact.id),
+            "title": artifact.title,
+            "description": artifact.description,
+        })
+
+    def delete(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
+        error_resp = self._check_access(request, project_id)
+        if error_resp:
+            return error_resp
+
+        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
+        artifact.delete()
+        return JsonResponse({"status": "deleted"}, status=200)

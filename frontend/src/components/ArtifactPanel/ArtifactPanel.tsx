@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useAppStore } from "@/store/store"
 import { X, Eye, Database, RefreshCw, Loader2 } from "lucide-react"
 import { api } from "@/api/client"
@@ -20,6 +20,10 @@ interface QueryDataResponse {
 
 type Tab = "view" | "data"
 
+const MIN_WIDTH = 320
+const DEFAULT_WIDTH = 600
+const MAX_WIDTH_RATIO = 0.75
+
 export function ArtifactPanel() {
   const artifactId = useAppStore((s) => s.activeArtifactId)
   const closeArtifact = useAppStore((s) => s.uiActions.closeArtifact)
@@ -29,6 +33,9 @@ export function ArtifactPanel() {
   const [queryData, setQueryData] = useState<QueryDataResponse | null>(null)
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState<string | null>(null)
+  const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
+  const [isResizing, setIsResizing] = useState(false)
+  const panelRef = useRef<HTMLElement>(null)
 
   const fetchQueryData = useCallback(async (id: string) => {
     setDataLoading(true)
@@ -49,7 +56,6 @@ export function ArtifactPanel() {
     }
   }, [artifactId, activeTab, fetchQueryData])
 
-  // Also listen for postMessage from the sandbox iframe with query results
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
       if (event.data?.type === "artifact-query-data" && event.data.artifactId === artifactId) {
@@ -60,19 +66,59 @@ export function ArtifactPanel() {
     return () => window.removeEventListener("message", handleMessage)
   }, [artifactId])
 
-  // Reset state when artifact changes
   useEffect(() => {
     setActiveTab("view")
     setQueryData(null)
     setDataError(null)
   }, [artifactId])
 
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }, [])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const maxWidth = window.innerWidth * MAX_WIDTH_RATIO
+      const newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, window.innerWidth - e.clientX))
+      setPanelWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+
+    document.addEventListener("mousemove", handleMouseMove)
+    document.addEventListener("mouseup", handleMouseUp)
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove)
+      document.removeEventListener("mouseup", handleMouseUp)
+    }
+  }, [isResizing])
+
   return (
-    <aside
-      className={`overflow-hidden border-l border-border transition-[flex] duration-200 ${
-        isOpen ? "flex-1 min-w-0" : "w-0 border-l-0"
-      }`}
-    >
+    <>
+      {/* Full-screen overlay during resize to capture mouse events over iframes */}
+      {isResizing && (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
+      )}
+      <aside
+        ref={panelRef}
+        className={`relative overflow-hidden border-l border-border shrink-0 ${
+          isOpen ? "" : "w-0 border-l-0"
+        }`}
+        style={isOpen ? { width: panelWidth } : { width: 0 }}
+      >
+        {/* Resize handle */}
+        {isOpen && (
+          <div
+            onMouseDown={handleMouseDown}
+            className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-10 hover:bg-primary/20 active:bg-primary/30 transition-colors"
+            data-testid="artifact-panel-resize"
+          />
+        )}
       {artifactId && (
         <div className="flex h-full flex-col">
           {/* Header with tabs */}
@@ -177,6 +223,7 @@ export function ArtifactPanel() {
         </div>
       )}
     </aside>
+    </>
   )
 }
 
