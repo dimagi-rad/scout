@@ -64,6 +64,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Worktrees
+.worktrees/
+
 # Frontend
 frontend/node_modules/
 frontend/dist/
