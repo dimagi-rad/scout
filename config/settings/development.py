@@ -11,6 +11,10 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", "0.0.0.0", ".ngrok-free.app"]
 # Use console email backend for development
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
+# For dev, default to the same database as the app (separate schema isolation still applies)
+if not MANAGED_DATABASE_URL:  # noqa: F405
+    MANAGED_DATABASE_URL = DATABASES["default"]["NAME"]  # noqa: F405
+
 # Debug toolbar (optional, add to INSTALLED_APPS if needed)
 # INSTALLED_APPS += ["debug_toolbar"]
 # MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")

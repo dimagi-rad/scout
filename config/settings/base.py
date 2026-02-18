@@ -102,6 +102,10 @@ DATABASES = {
     "default": env.db("DATABASE_URL", default="postgresql://localhost/scout"),
 }
 
+# Scout-managed database for materialized tenant data.
+# Separate from the application database to allow future migration to Snowflake etc.
+MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
