@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Link, Users, Globe, Eye } from "lucide-react"
+import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Users, Globe, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"

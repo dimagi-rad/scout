@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo } from "react"
 import { ChevronDown, ChevronRight, Table2, Database } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
@@ -14,7 +14,7 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
   const [searchQuery, setSearchQuery] = useState("")
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set())
 
-  const schemas = dictionary?.schemas || {}
+  const schemas = useMemo(() => dictionary?.schemas ?? {}, [dictionary?.schemas])
 
   // Filter tables based on search query
   const filteredSchemas = useMemo(() => {
@@ -45,12 +45,10 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
     return result
   }, [schemas, searchQuery])
 
-  // Auto-expand schemas when searching
-  useEffect(() => {
-    if (searchQuery.trim()) {
-      setExpandedSchemas(new Set(Object.keys(filteredSchemas)))
-    }
-  }, [searchQuery, filteredSchemas])
+  // When searching, auto-expand all matching schemas; otherwise use manual toggle state
+  const effectiveExpandedSchemas = searchQuery.trim()
+    ? new Set(Object.keys(filteredSchemas))
+    : expandedSchemas
 
   const toggleSchema = (schemaName: string) => {
     setExpandedSchemas((prev) => {
@@ -98,7 +96,7 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
                 className="flex w-full items-center gap-1 rounded px-2 py-1.5 text-sm font-medium hover:bg-accent"
                 data-testid={`schema-group-${schemaName}`}
               >
-                {expandedSchemas.has(schemaName) ? (
+                {effectiveExpandedSchemas.has(schemaName) ? (
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />
                 ) : (
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -110,7 +108,7 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
                 </span>
               </button>
 
-              {expandedSchemas.has(schemaName) && (
+              {effectiveExpandedSchemas.has(schemaName) && (
                 <div className="ml-4 mt-1 space-y-0.5">
                   {Object.entries(tables).map(([tableName, tableInfo]) => {
                     const isSelected =

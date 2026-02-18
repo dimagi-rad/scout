@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useCallback, useRef, useEffect } from "react"
 import { useAppStore } from "@/store/store"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -47,23 +47,21 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
   const [owner, setOwner] = useState("")
   const [columnNotes, setColumnNotes] = useState<Record<string, string>>({})
 
-  // Track if we've initialized from props
-  const initializedRef = useRef<string | null>(null)
+  // Track which table we've initialized form state for
+  const [initializedForTable, setInitializedForTable] = useState<string | null>(null)
   const tableKey = `${table.schema}.${table.table}`
 
-  // Initialize form when table changes
-  useEffect(() => {
-    if (initializedRef.current !== tableKey) {
-      const annotations = table.annotations
-      setDescription(annotations?.description ?? "")
-      setUseCases(annotations?.use_cases ?? "")
-      setDataQualityNotes(annotations?.data_quality_notes ?? "")
-      setRefreshFrequency(annotations?.refresh_frequency ?? "")
-      setOwner(annotations?.owner ?? "")
-      setColumnNotes(annotations?.column_notes ?? {})
-      initializedRef.current = tableKey
-    }
-  }, [table, tableKey])
+  // Render-time state adjustment when table changes (React recommended pattern)
+  if (initializedForTable !== tableKey) {
+    setInitializedForTable(tableKey)
+    const annotations = table.annotations
+    setDescription(annotations?.description ?? "")
+    setUseCases(annotations?.use_cases ?? "")
+    setDataQualityNotes(annotations?.data_quality_notes ?? "")
+    setRefreshFrequency(annotations?.refresh_frequency ?? "")
+    setOwner(annotations?.owner ?? "")
+    setColumnNotes(annotations?.column_notes ?? {})
+  }
 
   // Debounced values for auto-save
   const debouncedDescription = useDebounce(description, 1000)
@@ -75,7 +73,7 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
 
   // Auto-save when debounced values change
   const saveAnnotations = useCallback(async () => {
-    if (initializedRef.current !== tableKey) return
+    if (initializedForTable !== tableKey) return
 
     const annotations: Partial<TableAnnotations> = {
       description: debouncedDescription,
@@ -96,6 +94,7 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
     table.schema,
     table.table,
     tableKey,
+    initializedForTable,
     debouncedDescription,
     debouncedUseCases,
     debouncedDataQualityNotes,
@@ -125,10 +124,10 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
     }
 
     // Only save if we're still on the same table we started editing
-    if (initializedRef.current === tableKey) {
+    if (initializedForTable === tableKey) {
       saveAnnotations()
     }
-  }, [saveAnnotations, tableKey])
+  }, [saveAnnotations, tableKey, initializedForTable])
 
   const updateColumnNote = (columnName: string, note: string) => {
     setColumnNotes((prev) => ({
