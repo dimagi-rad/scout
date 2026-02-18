@@ -81,6 +81,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Lodash for data manipulation -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/lodash@4/lodash.min.js"></script>
 
+    <!-- Lucide icons (referenced by agent-generated React code) -->
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+
     <!-- Marked for Markdown rendering -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
 
@@ -288,6 +291,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         'd3',
                         '_',
                         'data',
+                        'lucide',
                         `
                         const { useState, useEffect, useRef, useMemo, useCallback, memo, Fragment } = React;
                         const {
@@ -298,6 +302,38 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             PolarGrid, PolarAngleAxis, PolarRadiusAxis,
                             Treemap, Sankey, FunnelChart, Funnel
                         } = Recharts;
+
+                        // Lucide icon helper: creates a React component from a lucide icon name
+                        function _lucideIcon(name) {
+                            return function LucideIcon(props) {
+                                const ref = React.useRef(null);
+                                React.useEffect(() => {
+                                    if (ref.current && lucide && lucide[name]) {
+                                        const svg = lucide.createElement(lucide[name]);
+                                        ref.current.innerHTML = '';
+                                        ref.current.appendChild(svg);
+                                        const svgEl = ref.current.querySelector('svg');
+                                        if (svgEl) {
+                                            if (props.size) { svgEl.setAttribute('width', props.size); svgEl.setAttribute('height', props.size); }
+                                            if (props.style && props.style.color) svgEl.setAttribute('stroke', props.style.color);
+                                            if (props.className) svgEl.setAttribute('class', props.className);
+                                        }
+                                    }
+                                }, []);
+                                return React.createElement('span', { ref: ref, style: { display: 'inline-flex', ...props.style } });
+                            };
+                        }
+                        const TrendingUp = _lucideIcon('TrendingUp');
+                        const TrendingDown = _lucideIcon('TrendingDown');
+                        const ShoppingCart = _lucideIcon('ShoppingCart');
+                        const DollarSign = _lucideIcon('DollarSign');
+                        const Users = _lucideIcon('Users');
+                        const Package = _lucideIcon('Package');
+                        const BarChart3 = _lucideIcon('BarChart3');
+                        const Activity = _lucideIcon('Activity');
+                        const ArrowUp = _lucideIcon('ArrowUp');
+                        const ArrowDown = _lucideIcon('ArrowDown');
+                        const Star = _lucideIcon('Star');
 
                         ${transformed}
 
@@ -320,12 +356,30 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         Recharts,
                         d3,
                         _,
-                        data || {}
+                        data || {},
+                        typeof lucide !== 'undefined' ? lucide : {}
                     );
 
                     if (Component) {
                         const root = ReactDOM.createRoot(reactRoot);
-                        root.render(React.createElement(Component, { data: data || {} }));
+                        // Wrap in error boundary to catch render-time crashes
+                        class _ErrorBoundary extends React.Component {
+                            constructor(props) { super(props); this.state = { error: null }; }
+                            static getDerivedStateFromError(error) { return { error }; }
+                            render() {
+                                if (this.state.error) {
+                                    return React.createElement('div', { className: 'error-state' },
+                                        React.createElement('div', { className: 'error-title' }, 'Render Error'),
+                                        React.createElement('div', { className: 'error-message' }, this.state.error.message),
+                                        React.createElement('div', { className: 'error-details' }, this.state.error.stack)
+                                    );
+                                }
+                                return this.props.children;
+                            }
+                        }
+                        root.render(React.createElement(_ErrorBoundary, null,
+                            React.createElement(Component, { data: data || {} })
+                        ));
                     } else {
                         this.showError('Component Not Found', 'Could not find a valid React component to render. Make sure your code exports a component or defines App, Component, Chart, or Visualization.');
                     }
