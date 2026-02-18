@@ -14,8 +14,10 @@ import logging
 import time
 import uuid
 
+from allauth.socialaccount.models import SocialAccount, SocialApp
 from asgiref.sync import sync_to_async
 from django.contrib.auth import authenticate, login, logout
+from django.contrib.sites.models import Site
 from django.core.cache import cache
 from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
@@ -161,6 +163,42 @@ def logout_view(request):
     """Logout and clear session."""
     logout(request)
     return JsonResponse({"ok": True})
+
+
+PROVIDER_DISPLAY = {
+    "google": "Google",
+    "github": "GitHub",
+    "commcare": "CommCare",
+    "commcare_connect": "CommCare Connect",
+}
+
+
+@require_GET
+def providers_view(request):
+    """Return OAuth providers configured for this site, with connection status if authenticated."""
+    current_site = Site.objects.get_current()
+    apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
+
+    connected_providers = set()
+    if request.user.is_authenticated:
+        connected_providers = set(
+            SocialAccount.objects.filter(user=request.user).values_list(
+                "provider", flat=True
+            )
+        )
+
+    providers = []
+    for app in apps:
+        entry = {
+            "id": app.provider,
+            "name": PROVIDER_DISPLAY.get(app.provider, app.name),
+            "login_url": f"/accounts/{app.provider}/login/",
+        }
+        if request.user.is_authenticated:
+            entry["connected"] = app.provider in connected_providers
+        providers.append(entry)
+
+    return JsonResponse({"providers": providers})
 
 
 # ---------------------------------------------------------------------------

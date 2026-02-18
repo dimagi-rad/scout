@@ -640,3 +640,44 @@ class TestCustomCommCareProvider:
 
         account = CommCareAccount(mock_account)
         assert account.get_avatar_url() is None
+
+
+# ============================================================================
+# 8. TestProvidersEndpoint
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestProvidersEndpoint:
+    """Tests for GET /api/auth/providers/."""
+
+    def test_returns_configured_providers(self, client, google_social_app, github_social_app):
+        """Unauthenticated request returns configured providers without connection status."""
+        resp = client.get("/api/auth/providers/")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "providers" in data
+        ids = {p["id"] for p in data["providers"]}
+        assert "google" in ids
+        assert "github" in ids
+        for p in data["providers"]:
+            assert "name" in p
+            assert "login_url" in p
+            assert "connected" not in p  # not authenticated
+
+    def test_returns_empty_when_no_providers(self, client, site):
+        """Returns empty list when no SocialApps are configured."""
+        resp = client.get("/api/auth/providers/")
+        assert resp.status_code == 200
+        assert resp.json()["providers"] == []
+
+    def test_includes_connection_status_when_authenticated(
+        self, client, user, google_social_app, github_social_app, social_account
+    ):
+        """Authenticated request includes connected boolean per provider."""
+        client.force_login(user)
+        resp = client.get("/api/auth/providers/")
+        assert resp.status_code == 200
+        providers = {p["id"]: p for p in resp.json()["providers"]}
+        assert providers["google"]["connected"] is True  # social_account fixture is google
+        assert providers["github"]["connected"] is False
