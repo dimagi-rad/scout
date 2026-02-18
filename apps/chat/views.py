@@ -182,9 +182,22 @@ def disconnect_provider_view(request, provider_id):
     from django.db import transaction
 
     with transaction.atomic():
+        # SocialAccount.provider may store provider_id (e.g. "commcare_prod")
+        # rather than the provider class id (e.g. "commcare"), so check both.
         account = SocialAccount.objects.select_for_update().filter(
             user=request.user, provider=provider_id
         ).first()
+        if not account:
+            # Try matching via SocialApp.provider_id
+            app_provider_ids = list(
+                SocialApp.objects.filter(provider=provider_id).values_list(
+                    "provider_id", flat=True
+                )
+            )
+            if app_provider_ids:
+                account = SocialAccount.objects.select_for_update().filter(
+                    user=request.user, provider__in=app_provider_ids
+                ).first()
         if not account:
             return JsonResponse({"error": "Not connected"}, status=404)
 
@@ -227,7 +240,12 @@ def providers_view(request):
             "login_url": f"/accounts/{app.provider}/login/",
         }
         if request.user.is_authenticated:
-            entry["connected"] = app.provider in connected_providers
+            # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
+            # not the provider class id (e.g. "commcare"), so check both.
+            entry["connected"] = (
+                app.provider in connected_providers
+                or app.provider_id in connected_providers
+            )
         providers.append(entry)
 
     return JsonResponse({"providers": providers})
