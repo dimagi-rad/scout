@@ -32,6 +32,15 @@ def admin_user(db):
 
 
 @pytest.fixture
+def tenant_membership(user):
+    from apps.users.models import TenantMembership
+
+    return TenantMembership.objects.create(
+        user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
+    )
+
+
+@pytest.fixture
 def db_connection(db, user):
     """Create a DatabaseConnection for tests."""
     conn = DatabaseConnection(

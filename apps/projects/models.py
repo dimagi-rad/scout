@@ -204,6 +204,68 @@ class Project(models.Model):
         )
 
 
+class SchemaState(models.TextChoices):
+    PROVISIONING = "provisioning"
+    ACTIVE = "active"
+    MATERIALIZING = "materializing"
+    EXPIRED = "expired"
+    TEARDOWN = "teardown"
+
+
+class TenantSchema(models.Model):
+    """Tracks a tenant's provisioned schema in the managed database."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_membership = models.ForeignKey(
+        "users.TenantMembership",
+        on_delete=models.CASCADE,
+        related_name="schemas",
+    )
+    schema_name = models.CharField(max_length=255, unique=True)
+    state = models.CharField(
+        max_length=20,
+        choices=SchemaState.choices,
+        default=SchemaState.PROVISIONING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_accessed_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_accessed_at"]
+
+    def __str__(self):
+        return f"{self.schema_name} ({self.state})"
+
+
+class MaterializationRun(models.Model):
+    """Records a materialization pipeline execution."""
+
+    class RunState(models.TextChoices):
+        STARTED = "started"
+        LOADING = "loading"
+        TRANSFORMING = "transforming"
+        COMPLETED = "completed"
+        FAILED = "failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_schema = models.ForeignKey(
+        TenantSchema,
+        on_delete=models.CASCADE,
+        related_name="materialization_runs",
+    )
+    pipeline = models.CharField(max_length=255)
+    state = models.CharField(max_length=20, choices=RunState.choices, default=RunState.STARTED)
+    result = models.JSONField(null=True, blank=True)
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self):
+        return f"{self.pipeline} - {self.state}"
+
+
 class ProjectRole(models.TextChoices):
     """Role choices for project membership."""
 
