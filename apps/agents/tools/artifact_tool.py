@@ -11,16 +11,10 @@ The tools support:
 - Linking artifacts to source SQL queries for provenance tracking
 """
 
-from __future__ import annotations
-
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from langchain_core.tools import tool
-
-if TYPE_CHECKING:
-    from apps.projects.models import Project
-    from apps.users.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +30,8 @@ VALID_ARTIFACT_TYPES = frozenset({
 
 
 def create_artifact_tools(
-    project: Project,
-    user: User | None,
+    project: "Project",
+    user: "User | None",
     conversation_id: str | None = None
 ) -> list:
     """
