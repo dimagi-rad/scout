@@ -86,6 +86,7 @@ dev = [
     "pytest-django>=4.11.1",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
+    "pytest-mock>=3.12",
     "factory-boy>=3.3",
     "ruff>=0.5",
     "zensical>=0.0.21",

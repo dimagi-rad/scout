@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 from django.db import IntegrityError
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.knowledge.models import TableKnowledge
@@ -549,9 +550,16 @@ class TestRefreshSchemaView:
     ):
         """Admin triggers refresh; DB connection mocked to avoid real introspection."""
         mock_fetch = mocker.patch(
-            "apps.projects.api.data_dictionary.RefreshSchemaView._fetch_schema",
-            return_value=SAMPLE_DATA_DICTIONARY,
+            "apps.projects.api.data_dictionary.refresh_project_schema",
         )
+
+        def fake_refresh(proj):
+            proj.data_dictionary = SAMPLE_DATA_DICTIONARY
+            proj.data_dictionary_generated_at = timezone.now()
+            proj.save(update_fields=["data_dictionary", "data_dictionary_generated_at"])
+
+        mock_fetch.side_effect = fake_refresh
+
         api_client.force_authenticate(user)
         resp = api_client.post(self.url_for(project.id))
 
@@ -565,14 +573,14 @@ class TestRefreshSchemaView:
         project.refresh_from_db()
         assert project.data_dictionary is not None
         assert project.data_dictionary_generated_at is not None
-        mock_fetch.assert_awaited_once()
+        mock_fetch.assert_called_once()
 
     def test_refresh_failure_returns_500(
         self, api_client, user, project, admin_membership, mocker
     ):
         """If the DB introspection fails, 500 is returned with error message."""
         mocker.patch(
-            "apps.projects.api.data_dictionary.RefreshSchemaView._fetch_schema",
+            "apps.projects.api.data_dictionary.refresh_project_schema",
             side_effect=Exception("Connection refused"),
         )
         api_client.force_authenticate(user)

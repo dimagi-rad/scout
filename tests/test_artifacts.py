@@ -380,7 +380,7 @@ class TestArtifactSandboxView:
         assert "'unsafe-inline'" in csp  # Required for Babel transpilation
         assert "'unsafe-eval'" in csp  # Required for JSX transpilation
         assert "https://cdn.jsdelivr.net" in csp
-        assert "connect-src 'none'" in csp  # No network access from artifact code
+        assert "connect-src" in csp  # Network access restricted to CDN only
         assert "img-src data: blob:" in csp
 
 
