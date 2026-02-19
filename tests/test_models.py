@@ -3,17 +3,17 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 
-from apps.projects.models import DatabaseConnection
-from apps.projects.models import (
-    Project,
-    ProjectMembership,
-    ProjectRole,
-)
 from apps.knowledge.models import (
     AgentLearning,
     GoldenQuery,
     KnowledgeEntry,
     TableKnowledge,
+)
+from apps.projects.models import (
+    DatabaseConnection,
+    Project,
+    ProjectMembership,
+    ProjectRole,
 )
 
 User = get_user_model()

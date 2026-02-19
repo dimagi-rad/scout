@@ -9,6 +9,7 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
+from django.db import IntegrityError
 
 User = get_user_model()
 
@@ -180,14 +181,14 @@ class TestSocialAccountHelpers:
 
     def test_multiple_social_accounts_per_user(self, user):
         """Test that a user can have multiple social accounts (different providers)."""
-        google_account = SocialAccount.objects.create(
+        SocialAccount.objects.create(
             user=user,
             provider="google",
             uid="google_123",
             extra_data={"email": user.email},
         )
 
-        github_account = SocialAccount.objects.create(
+        SocialAccount.objects.create(
             user=user,
             provider="github",
             uid="github_456",
@@ -202,7 +203,7 @@ class TestSocialAccountHelpers:
         """Test that each provider UID should be unique."""
         # Attempt to create another account with the same provider and uid should fail
         # (or be prevented by database constraints)
-        with pytest.raises(Exception):  # Could be IntegrityError depending on DB constraints
+        with pytest.raises(IntegrityError):
             SocialAccount.objects.create(
                 user=user,
                 provider="google",
@@ -297,8 +298,8 @@ class TestOAuthFlow:
     def test_invalid_oauth_provider_not_configured(self):
         """Test that unconfigured OAuth providers are not accessible."""
         # Try to look up a provider that doesn't have a SocialApp
-        with pytest.raises(Exception):
-            app = SocialApp.objects.get(provider="unknown_provider")
+        with pytest.raises(SocialApp.DoesNotExist):
+            SocialApp.objects.get(provider="unknown_provider")
 
     def test_oauth_app_requires_client_credentials(self, site):
         """Test that OAuth apps must have client_id and secret."""
@@ -420,7 +421,6 @@ class TestChainlitAuthIntegration:
         """Test password authentication as fallback for development."""
         # Simulate password auth callback
         username = user.email
-        password = "testpass123"
 
         # In real scenario, this would check password
         authenticated_user = User.objects.filter(email=username).first()
@@ -473,7 +473,7 @@ class TestMultiProviderSupport:
     def test_user_can_link_multiple_providers(self, user, site):
         """Test that a user can link accounts from multiple OAuth providers."""
         # Create Google account
-        google_account = SocialAccount.objects.create(
+        SocialAccount.objects.create(
             user=user,
             provider="google",
             uid="google_user_123",
@@ -481,7 +481,7 @@ class TestMultiProviderSupport:
         )
 
         # Create GitHub account for same user
-        github_account = SocialAccount.objects.create(
+        SocialAccount.objects.create(
             user=user,
             provider="github",
             uid="github_user_456",
@@ -530,14 +530,11 @@ class TestCustomCommCareProvider:
     def test_commcare_provider_imports(self):
         """Test that CommCare provider classes can be imported."""
         from apps.users.providers.commcare.provider import (
-            CommCareAccount,
             CommCareProvider,
             provider_classes,
         )
         from apps.users.providers.commcare.views import (
             CommCareOAuth2Adapter,
-            oauth2_callback,
-            oauth2_login,
         )
 
         assert CommCareProvider.id == "commcare"
@@ -606,7 +603,7 @@ class TestCustomCommCareProvider:
 
         provider = CommCareProvider(request=None, app=app)
         scope = provider.get_default_scope()
-        assert "read" in scope
+        assert "access_apis" in scope
 
     def test_commcare_oauth2_adapter_endpoints(self):
         """Test CommCare adapter has correct OAuth endpoint URLs."""
@@ -622,7 +619,6 @@ class TestCustomCommCareProvider:
     def test_commcare_account_to_str(self):
         """Test CommCare account string representation."""
         from apps.users.providers.commcare.provider import CommCareAccount
-        from unittest.mock import Mock
 
         mock_account = Mock()
         mock_account.extra_data = {"username": "testuser"}
@@ -633,7 +629,6 @@ class TestCustomCommCareProvider:
     def test_commcare_account_no_avatar(self):
         """Test CommCare account has no avatar URL."""
         from apps.users.providers.commcare.provider import CommCareAccount
-        from unittest.mock import Mock
 
         mock_account = Mock()
         mock_account.extra_data = {}

@@ -17,7 +17,6 @@ from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-
 # Default maximum number of messages to keep in conversation history
 DEFAULT_MAX_MESSAGES = 20
 

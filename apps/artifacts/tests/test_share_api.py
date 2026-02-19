@@ -17,8 +17,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from apps.artifacts.models import AccessLevel, Artifact, ArtifactType, SharedArtifact
-from apps.projects.models import DatabaseConnection
-from apps.projects.models import Project, ProjectMembership, ProjectRole
+from apps.projects.models import DatabaseConnection, Project, ProjectMembership, ProjectRole
 from apps.users.models import User
 
 

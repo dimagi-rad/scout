@@ -24,85 +24,89 @@ logger = logging.getLogger(__name__)
 
 
 # Dangerous PostgreSQL functions that could be used for data exfiltration or system access
-DANGEROUS_FUNCTIONS: frozenset[str] = frozenset({
-    # File system access
-    "pg_read_file",
-    "pg_read_binary_file",
-    "pg_ls_dir",
-    "pg_stat_file",
-    "pg_ls_logdir",
-    "pg_ls_waldir",
-    "pg_ls_archive_statusdir",
-    "pg_ls_tmpdir",
-    # Large object manipulation
-    "lo_import",
-    "lo_export",
-    "lo_create",
-    "lo_open",
-    "lo_write",
-    "lo_read",
-    "lo_unlink",
-    # Remote database access
-    "dblink",
-    "dblink_connect",
-    "dblink_connect_u",
-    "dblink_disconnect",
-    "dblink_exec",
-    "dblink_open",
-    "dblink_fetch",
-    "dblink_close",
-    "dblink_get_connections",
-    "dblink_send_query",
-    "dblink_is_busy",
-    "dblink_get_result",
-    "dblink_cancel_query",
-    "dblink_error_message",
-    # Copy commands via functions
-    "pg_copy_from",
-    "pg_copy_to",
-    # Extension management
-    "pg_extension_config_dump",
-    # Advisory locks (potential for DoS)
-    "pg_advisory_lock",
-    "pg_advisory_lock_shared",
-    "pg_try_advisory_lock",
-    "pg_try_advisory_lock_shared",
-    # System information that could aid attacks
-    "pg_reload_conf",
-    "pg_rotate_logfile",
-    "pg_terminate_backend",
-    "pg_cancel_backend",
-    # Command execution
-    "query_to_xml",
-    "query_to_xml_and_xmlschema",
-    "cursor_to_xml",
-    "cursor_to_xmlschema",
-    "table_to_xml",
-    "table_to_xmlschema",
-    "table_to_xml_and_xmlschema",
-    "schema_to_xml",
-    "schema_to_xmlschema",
-    "schema_to_xml_and_xmlschema",
-    "database_to_xml",
-    "database_to_xmlschema",
-    "database_to_xml_and_xmlschema",
-})
+DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        # File system access
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "pg_ls_logdir",
+        "pg_ls_waldir",
+        "pg_ls_archive_statusdir",
+        "pg_ls_tmpdir",
+        # Large object manipulation
+        "lo_import",
+        "lo_export",
+        "lo_create",
+        "lo_open",
+        "lo_write",
+        "lo_read",
+        "lo_unlink",
+        # Remote database access
+        "dblink",
+        "dblink_connect",
+        "dblink_connect_u",
+        "dblink_disconnect",
+        "dblink_exec",
+        "dblink_open",
+        "dblink_fetch",
+        "dblink_close",
+        "dblink_get_connections",
+        "dblink_send_query",
+        "dblink_is_busy",
+        "dblink_get_result",
+        "dblink_cancel_query",
+        "dblink_error_message",
+        # Copy commands via functions
+        "pg_copy_from",
+        "pg_copy_to",
+        # Extension management
+        "pg_extension_config_dump",
+        # Advisory locks (potential for DoS)
+        "pg_advisory_lock",
+        "pg_advisory_lock_shared",
+        "pg_try_advisory_lock",
+        "pg_try_advisory_lock_shared",
+        # System information that could aid attacks
+        "pg_reload_conf",
+        "pg_rotate_logfile",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        # Command execution
+        "query_to_xml",
+        "query_to_xml_and_xmlschema",
+        "cursor_to_xml",
+        "cursor_to_xmlschema",
+        "table_to_xml",
+        "table_to_xmlschema",
+        "table_to_xml_and_xmlschema",
+        "schema_to_xml",
+        "schema_to_xmlschema",
+        "schema_to_xml_and_xmlschema",
+        "database_to_xml",
+        "database_to_xmlschema",
+        "database_to_xml_and_xmlschema",
+    }
+)
 
 # Statement types that are not allowed (only SELECT is permitted)
-FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset({
-    exp.Insert,
-    exp.Update,
-    exp.Delete,
-    exp.Drop,
-    exp.Alter,
-    exp.TruncateTable,
-    exp.Create,
-    exp.Grant,
-    exp.Revoke,
-    exp.Merge,
-    exp.Set,
-    exp.Command,
-})
+FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset(
+    {
+        exp.Insert,
+        exp.Update,
+        exp.Delete,
+        exp.Drop,
+        exp.Alter,
+        exp.TruncateTable,
+        exp.Create,
+        exp.Grant,
+        exp.Revoke,
+        exp.Merge,
+        exp.Set,
+        exp.Command,
+    }
+)
 
 
 class SQLValidationError(Exception):
@@ -223,7 +227,7 @@ class SQLValidator:
         # Check if it's a SELECT statement
         if not isinstance(statement, exp.Select):
             # Also allow UNION, INTERSECT, EXCEPT which wrap SELECT statements
-            if isinstance(statement, (exp.Union, exp.Intersect, exp.Except)):
+            if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
                 # These are valid compound SELECT operations
                 return
 
@@ -245,9 +249,7 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
-    def _validate_no_dangerous_functions(
-        self, statement: exp.Expression, sql: str
-    ) -> None:
+    def _validate_no_dangerous_functions(self, statement: exp.Expression, sql: str) -> None:
         """Check for dangerous function calls in the query."""
         for func in statement.find_all(exp.Func):
             func_name = func.name.lower() if func.name else ""
@@ -355,7 +357,7 @@ class SQLValidator:
             The modified expression with appropriate LIMIT
         """
         # Handle compound queries (UNION, INTERSECT, EXCEPT)
-        if isinstance(statement, (exp.Union, exp.Intersect, exp.Except)):
+        if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
             # For compound queries, we need to wrap in a subquery or apply limit to outer
             # Get existing limit if any
             existing_limit = statement.args.get("limit")

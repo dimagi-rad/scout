@@ -17,11 +17,9 @@ Usage:
 import psycopg2
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.db import connection as django_connection
 
-from apps.projects.models import DatabaseConnection
 from apps.knowledge.models import KnowledgeEntry, TableKnowledge
-from apps.projects.models import Project, ProjectMembership, ProjectRole
+from apps.projects.models import DatabaseConnection, Project, ProjectMembership, ProjectRole
 from apps.users.models import User
 
 SAMPLE_SCHEMA = "sample_ecommerce"

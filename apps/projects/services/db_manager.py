@@ -15,16 +15,18 @@ Features:
 from __future__ import annotations
 
 import logging
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Lock
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING
 
 import psycopg2.pool
 from django.conf import settings
 
 if TYPE_CHECKING:
-    from apps.projects.models import Project
     from psycopg2.extensions import connection as Psycopg2Connection
+
+    from apps.projects.models import Project
 
 logger = logging.getLogger(__name__)
 

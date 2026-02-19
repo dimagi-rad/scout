@@ -11,12 +11,11 @@ The tools support:
 - Linking artifacts to source SQL queries for provenance tracking
 """
 
-from __future__ import annotations
-
 import logging
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from apps.projects.models import Project
@@ -25,20 +24,37 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class CreateArtifactInput(BaseModel):
+    title: str
+    artifact_type: str
+    code: str
+    description: str = ""
+    data: dict | None = None
+    source_queries: list[dict[str, str]] | None = Field(default=None)
+
+
+class UpdateArtifactInput(BaseModel):
+    artifact_id: str
+    code: str
+    title: str | None = None
+    data: dict | None = None
+    source_queries: list[dict[str, str]] | None = Field(default=None)
+
+
 # Valid artifact types that can be created
-VALID_ARTIFACT_TYPES = frozenset({
-    "react",
-    "html",
-    "markdown",
-    "plotly",
-    "svg",
-})
+VALID_ARTIFACT_TYPES = frozenset(
+    {
+        "react",
+        "html",
+        "markdown",
+        "plotly",
+        "svg",
+    }
+)
 
 
 def create_artifact_tools(
-    project: "Project",
-    user: "User | None",
-    conversation_id: str | None = None
+    project: "Project", user: "User | None", conversation_id: str | None = None
 ) -> list:
     """
     Factory function to create artifact creation tools for a specific project.
@@ -63,14 +79,9 @@ def create_artifact_tools(
         >>> create_tool, update_tool = tools
     """
 
-    @tool
+    @tool(args_schema=CreateArtifactInput)
     def create_artifact(
-        title: str,
-        artifact_type: str,
-        code: str,
-        description: str = "",
-        data: dict | None = None,
-        source_queries: list[dict[str, str]] | None = None,
+        title, artifact_type, code, description="", data=None, source_queries=None
     ) -> dict[str, Any]:
         """
         Create a new interactive artifact (visualization, chart, or content).
@@ -178,7 +189,7 @@ def create_artifact_tools(
                 "type": artifact_type,
                 "render_url": None,
                 "message": f"Invalid artifact_type '{artifact_type}'. "
-                          f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_TYPES))}",
+                f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_TYPES))}",
             }
 
         # Validate code is provided
@@ -251,13 +262,9 @@ def create_artifact_tools(
                 "message": f"Failed to create artifact: {str(e)}",
             }
 
-    @tool
+    @tool(args_schema=UpdateArtifactInput)
     def update_artifact(
-        artifact_id: str,
-        code: str,
-        title: str | None = None,
-        data: dict | None = None,
-        source_queries: list[dict[str, str]] | None = None,
+        artifact_id, code, title=None, data=None, source_queries=None
     ) -> dict[str, Any]:
         """
         Update an existing artifact by creating a new version.

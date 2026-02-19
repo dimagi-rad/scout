@@ -29,7 +29,7 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.agents.memory.checkpointer import get_database_url
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
-from apps.projects.models import Project, ProjectMembership
+from apps.projects.models import ProjectMembership
 
 logger = logging.getLogger(__name__)
 

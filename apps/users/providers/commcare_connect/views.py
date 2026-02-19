@@ -7,6 +7,7 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2LoginView,
 )
 
+
 class CommCareConnectOAuth2Adapter(OAuth2Adapter):
     """
     OAuth2 adapter for CommCare Connect.

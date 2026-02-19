@@ -151,8 +151,6 @@ export function ChatMessage({ message }: ChatMessageProps) {
           }
 
           if (isToolUIPart(part)) {
-            const toolName = getToolName(part)
-
             if (isArtifactToolPart(part)) {
               const artifactId = extractArtifactId(part)
               if (artifactId && part.state === "output-available") {

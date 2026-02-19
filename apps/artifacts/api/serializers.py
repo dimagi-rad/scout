@@ -5,11 +5,10 @@ Provides serializers for creating and listing shared artifact links.
 """
 import secrets
 
-from django.conf import settings
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.artifacts.models import AccessLevel, Artifact, SharedArtifact
+from apps.artifacts.models import AccessLevel, SharedArtifact
 
 
 class CreateShareSerializer(serializers.Serializer):

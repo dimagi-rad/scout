@@ -54,10 +54,10 @@ class Command(BaseCommand):
         # Get project
         try:
             project = Project.objects.get(slug=options["project_slug"])
-        except Project.DoesNotExist:
+        except Project.DoesNotExist as err:
             raise CommandError(
                 f"Project with slug '{options['project_slug']}' not found"
-            )
+            ) from err
 
         # Check for golden queries
         query_count = GoldenQuery.objects.filter(project=project).count()

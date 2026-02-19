@@ -28,7 +28,7 @@ export interface ProjectDetail extends Project {
 /**
  * Data for creating or updating a project.
  */
-export interface ProjectFormData extends Partial<ProjectDetail> {}
+export type ProjectFormData = Partial<ProjectDetail>
 
 export interface ProjectMember {
   id: string

@@ -144,9 +144,7 @@ class EvalRunner:
             sql_executed = self._extract_sql(result)
 
         except Exception as e:
-            logger.exception(
-                "Error running golden query %s: %s", golden_query.id, str(e)
-            )
+            logger.exception("Error running golden query %s: %s", golden_query.id, str(e))
             error = str(e)
             actual_result = None
 
@@ -296,14 +294,10 @@ class EvalRunner:
             )
             return False, details
 
-        for i, (exp_row, act_row) in enumerate(zip(expected_data, actual_data)):
-            if not isinstance(exp_row, (list, tuple)) or not isinstance(
-                act_row, (list, tuple)
-            ):
+        for i, (exp_row, act_row) in enumerate(zip(expected_data, actual_data, strict=False)):
+            if not isinstance(exp_row, list | tuple) or not isinstance(act_row, list | tuple):
                 if not self._values_match(exp_row, act_row, tolerance):
-                    details["mismatches"].append(
-                        f"Row {i}: expected {exp_row}, got {act_row}"
-                    )
+                    details["mismatches"].append(f"Row {i}: expected {exp_row}, got {act_row}")
                 continue
 
             if len(exp_row) != len(act_row):
@@ -312,7 +306,7 @@ class EvalRunner:
                 )
                 continue
 
-            for j, (exp_val, act_val) in enumerate(zip(exp_row, act_row)):
+            for j, (exp_val, act_val) in enumerate(zip(exp_row, act_row, strict=False)):
                 if not self._values_match(exp_val, act_val, tolerance):
                     details["mismatches"].append(
                         f"Row {i}, Col {j}: expected {exp_val}, got {act_val}"
@@ -510,12 +504,8 @@ class EvalRunner:
         )
 
         return {
-            "table_knowledge_count": TableKnowledge.objects.filter(
-                project=self.project
-            ).count(),
-            "knowledge_entry_count": KnowledgeEntry.objects.filter(
-                project=self.project
-            ).count(),
+            "table_knowledge_count": TableKnowledge.objects.filter(project=self.project).count(),
+            "knowledge_entry_count": KnowledgeEntry.objects.filter(project=self.project).count(),
             "agent_learning_count": AgentLearning.objects.filter(
                 project=self.project, is_active=True
             ).count(),

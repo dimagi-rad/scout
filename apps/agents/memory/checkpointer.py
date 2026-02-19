@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import TYPE_CHECKING
 
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -88,7 +89,7 @@ def get_database_url() -> str:
 
 
 @asynccontextmanager
-async def get_postgres_checkpointer() -> AsyncGenerator["BaseCheckpointSaver", None]:
+async def get_postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, None]:
     """
     Create an async PostgreSQL checkpointer for LangGraph.
 
@@ -146,7 +147,7 @@ async def get_postgres_checkpointer() -> AsyncGenerator["BaseCheckpointSaver", N
         yield MemorySaver()
 
 
-def get_sync_checkpointer() -> "BaseCheckpointSaver":
+def get_sync_checkpointer() -> BaseCheckpointSaver:
     """
     Get a synchronous checkpointer for non-async contexts.
 

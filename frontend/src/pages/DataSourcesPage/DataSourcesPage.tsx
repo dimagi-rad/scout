@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, useCallback } from "react"
 import { Link } from "react-router-dom"
 import { CheckCircle, AlertCircle, Database, RefreshCw, Upload, Plus, Pencil, Trash2, Plug } from "lucide-react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -26,7 +26,7 @@ function deriveTableName(filename: string): string {
   return filename
     .replace(/\.csv$/i, "")
     .toLowerCase()
-    .replace(/[\s\-\.@]+/g, "_")
+    .replace(/[\s\-.@]+/g, "_")
     .replace(/[^a-z0-9_]/g, "")
     .replace(/^(\d)/, "col_$1")
 }
@@ -70,11 +70,7 @@ export function DataSourcesPage() {
   const user = useAppStore((s) => s.user)
   const isAdmin = user?.is_staff ?? false
 
-  useEffect(() => {
-    fetchData()
-  }, [])
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     setLoading(true)
     if (isAdmin) {
       try {
@@ -85,7 +81,11 @@ export function DataSourcesPage() {
       }
     }
     setLoading(false)
-  }
+  }, [isAdmin])
+
+  useEffect(() => {
+    fetchData()
+  }, [fetchData])
 
   // --- CSV Import ---
 

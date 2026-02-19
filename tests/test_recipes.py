@@ -3,15 +3,14 @@ Comprehensive tests for Phase 4 (Recipes) of the Scout data agent platform.
 
 Tests recipe CRUD, variable substitution, recipe runner, and save_as_recipe tool.
 """
-import json
-from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.utils import timezone
 
-from apps.projects.models import Project, ProjectMembership, ProjectRole
+from apps.projects.models import Project
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
 
 User = get_user_model()
@@ -42,6 +41,7 @@ def recipe(db, user, project):
         project=project,
         name="Sales Analysis",
         description="Analyze sales data for a specific region and time period",
+        prompt="Show me the top {{limit}} customers in {{region}} region starting from {{start_date}}",
         variables=[
             {
                 "name": "region",
@@ -335,13 +335,13 @@ class TestRecipeStepModel:
 
     def test_recipe_step_ordering(self, recipe):
         """Test that recipe steps are ordered by recipe and order."""
-        step1 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=1, prompt_template="Step 1"
         )
-        step2 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=2, prompt_template="Step 2"
         )
-        step3 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=3, prompt_template="Step 3"
         )
 
@@ -356,15 +356,15 @@ class TestRecipeStepModel:
         RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
 
         # Creating another step with same order should fail
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Duplicate")
 
     def test_recipe_cascade_delete_steps(self, recipe):
         """Test that deleting a recipe deletes its steps."""
-        step1 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=1, prompt_template="Step 1"
         )
-        step2 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=2, prompt_template="Step 2"
         )
 
@@ -602,7 +602,7 @@ class TestRecipeRunModel:
 class TestRecipeRunner:
     """Tests for the RecipeRunner with mocked agent graph."""
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_recipe_runner_validates_variables(self, mock_build_graph, recipe, user, recipe_step_1):
         """Test that RecipeRunner validates variables before execution."""
         # Import here to avoid circular imports
@@ -611,13 +611,13 @@ class TestRecipeRunner:
         # Invalid values (missing required variable)
         invalid_values = {"region": "North", "limit": 10}
 
-        runner = RecipeRunner(recipe, invalid_values, user)
+        RecipeRunner(recipe, invalid_values, user)
 
         # start_date is missing - should raise validation error
         errors = recipe.validate_variable_values(invalid_values)
         assert len(errors) > 0
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_recipe_runner_creates_run_record(self, mock_build_graph, recipe, user, recipe_step_1):
         """Test that RecipeRunner creates a RecipeRun record."""
         from apps.recipes.services.runner import RecipeRunner
@@ -644,11 +644,11 @@ class TestRecipeRunner:
         assert run.variable_values == values
         assert run.run_by == user
 
-    @patch("apps.agents.graph.base.build_agent_graph")
-    def test_recipe_runner_executes_steps_in_order(
-        self, mock_build_graph, recipe, user, recipe_step_1, recipe_step_2
+    @patch("apps.recipes.services.runner.build_agent_graph")
+    def test_recipe_runner_executes_prompt(
+        self, mock_build_graph, recipe, user, recipe_step_1
     ):
-        """Test that RecipeRunner executes steps in order."""
+        """Test that RecipeRunner executes the rendered prompt."""
         from apps.recipes.services.runner import RecipeRunner
 
         # Mock the agent graph
@@ -667,12 +667,12 @@ class TestRecipeRunner:
         runner = RecipeRunner(recipe, values, user)
         run = runner.execute()
 
-        # Check that both steps were executed
-        assert len(run.step_results) == 2
+        # Runner executes a single prompt (not multi-step)
+        assert len(run.step_results) == 1
         assert run.step_results[0]["step_order"] == 1
-        assert run.step_results[1]["step_order"] == 2
+        assert run.step_results[0]["success"] is True
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_recipe_runner_substitutes_variables_in_prompts(
         self, mock_build_graph, recipe, user, recipe_step_1
     ):
@@ -700,7 +700,7 @@ class TestRecipeRunner:
         assert "East" in step_result["prompt"]
         assert "25" in step_result["prompt"]
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_recipe_runner_handles_execution_failure(
         self, mock_build_graph, recipe, user, recipe_step_1
     ):
@@ -728,7 +728,7 @@ class TestRecipeRunner:
         assert run.step_results[0]["success"] is False
         assert "error" in run.step_results[0]
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_recipe_runner_updates_run_status(
         self, mock_build_graph, recipe, user, recipe_step_1
     ):
@@ -765,7 +765,7 @@ class TestRecipeRunner:
 class TestSaveAsRecipeTool:
     """Tests for the save_as_recipe tool functionality."""
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_save_as_recipe_tool_exists(self, mock_build_graph, project, user):
         """Test that save_as_recipe tool can be created."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -776,7 +776,7 @@ class TestSaveAsRecipeTool:
         assert hasattr(tool, "name")
         assert hasattr(tool, "description")
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_save_as_recipe_creates_recipe(self, mock_build_graph, project, user):
         """Test that save_as_recipe tool creates a recipe."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -794,13 +794,7 @@ class TestSaveAsRecipeTool:
                     "options": ["Premium", "Standard", "Basic"],
                 }
             ],
-            "steps": [
-                {
-                    "order": 1,
-                    "prompt_template": "Show {{segment}} customers",
-                    "expected_tool": "execute_sql",
-                }
-            ],
+            "prompt": "Show {{segment}} customers",
         })
 
         assert result["status"] == "created"
@@ -810,45 +804,31 @@ class TestSaveAsRecipeTool:
         recipe = Recipe.objects.get(id=result["recipe_id"])
         assert recipe.name == "Customer Analysis"
         assert len(recipe.variables) == 1
-        assert recipe.steps.count() == 1
+        assert recipe.prompt == "Show {{segment}} customers"
 
-    @patch("apps.agents.graph.base.build_agent_graph")
-    def test_save_as_recipe_with_multiple_steps(self, mock_build_graph, project, user):
-        """Test saving recipe with multiple steps."""
+    @patch("apps.recipes.services.runner.build_agent_graph")
+    def test_save_as_recipe_with_prompt_and_variables(self, mock_build_graph, project, user):
+        """Test saving recipe with prompt template and variables."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(project, user)
 
         result = tool.invoke({
-            "name": "Multi-Step Analysis",
-            "description": "Analysis with multiple steps",
+            "name": "Multi-Variable Analysis",
+            "description": "Analysis with multiple variables",
             "variables": [
-                {"name": "year", "type": "number", "label": "Year"}
+                {"name": "year", "type": "number", "label": "Year"},
+                {"name": "region", "type": "string", "label": "Region"},
             ],
-            "steps": [
-                {
-                    "order": 1,
-                    "prompt_template": "Get sales for {{year}}",
-                },
-                {
-                    "order": 2,
-                    "prompt_template": "Compare {{year}} to previous year",
-                },
-                {
-                    "order": 3,
-                    "prompt_template": "Create visualization for {{year}}",
-                },
-            ],
+            "prompt": "Get sales for {{year}} in {{region}} and create a visualization",
         })
 
+        assert result["status"] == "created"
         recipe = Recipe.objects.get(id=result["recipe_id"])
-        assert recipe.steps.count() == 3
-        steps = list(recipe.steps.all())
-        assert steps[0].order == 1
-        assert steps[1].order == 2
-        assert steps[2].order == 3
+        assert recipe.prompt == "Get sales for {{year}} in {{region}} and create a visualization"
+        assert len(recipe.variables) == 2
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_save_as_recipe_extracts_variables(self, mock_build_graph, project, user):
         """Test that save_as_recipe can extract variables from steps."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -863,12 +843,7 @@ class TestSaveAsRecipeTool:
                 {"name": "category", "type": "string", "label": "Category"},
                 {"name": "threshold", "type": "number", "label": "Threshold"},
             ],
-            "steps": [
-                {
-                    "order": 1,
-                    "prompt_template": "Show {{category}} with value > {{threshold}}",
-                }
-            ],
+            "prompt": "Show {{category}} with value > {{threshold}}",
         })
 
         recipe = Recipe.objects.get(id=result["recipe_id"])
@@ -876,7 +851,7 @@ class TestSaveAsRecipeTool:
         assert "category" in variable_names
         assert "threshold" in variable_names
 
-    @patch("apps.agents.graph.base.build_agent_graph")
+    @patch("apps.recipes.services.runner.build_agent_graph")
     def test_save_as_recipe_sets_sharing(self, mock_build_graph, project, user):
         """Test that save_as_recipe can set is_shared flag."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -888,9 +863,7 @@ class TestSaveAsRecipeTool:
             "description": "Recipe shared with project",
             "is_shared": True,
             "variables": [],
-            "steps": [
-                {"order": 1, "prompt_template": "Show data"}
-            ],
+            "prompt": "Show data",
         })
 
         recipe = Recipe.objects.get(id=result["recipe_id"])
