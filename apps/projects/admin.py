@@ -137,6 +137,7 @@ class ProjectAdmin(admin.ModelAdmin):
     def regenerate_data_dictionary(self, request, queryset):
         """Admin action to regenerate data dictionaries."""
         from django.contrib import messages
+
         from .services.data_dictionary import DataDictionaryGenerator
 
         success_count = 0

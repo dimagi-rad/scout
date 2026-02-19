@@ -36,8 +36,8 @@ VALID_ARTIFACT_TYPES = frozenset({
 
 
 def create_artifact_tools(
-    project: "Project",
-    user: "User | None",
+    project: Project,
+    user: User | None,
     conversation_id: str | None = None
 ) -> list:
     """

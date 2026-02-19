@@ -26,7 +26,6 @@ from apps.agents.graph.nodes import (
     check_result_node,
     diagnose_and_retry_node,
 )
-from apps.agents.graph.state import AgentState
 from apps.chat.stream import _sse, _tool_content_to_str, langgraph_to_ui_stream
 from apps.projects.models import (
     DatabaseConnection,
@@ -34,7 +33,6 @@ from apps.projects.models import (
     ProjectMembership,
     ProjectRole,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -588,7 +586,9 @@ class TestSSEStreamFormat:
                     events.append(json.loads(line[6:]))
 
         tool_output = next(e for e in events if e["type"] == "tool-output-available")
-        assert len(tool_output["output"]) == 2000
+        assert tool_output["output"].startswith("x" * 2000)
+        assert "truncated" in tool_output["output"]
+        assert "5000 chars total" in tool_output["output"]
 
     @pytest.mark.asyncio
     async def test_duplicate_tool_events_deduplicated(self):
@@ -1065,7 +1065,7 @@ class TestEndToEndStreaming:
             assert response.status_code == 200
 
             # Consume the stream to ensure the view fully executes
-            events = await _collect_sse_events(response)
+            await _collect_sse_events(response)
 
             # Verify thread was created
             thread = await Thread.objects.filter(id=thread_id).afirst()

@@ -32,7 +32,6 @@ import django
 django.setup()
 
 import psycopg2
-from django.db import transaction
 
 from apps.projects.models import Project
 

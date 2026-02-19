@@ -3,13 +3,13 @@ Comprehensive tests for Phase 3 (Frontend & Artifacts) of the Scout data agent p
 
 Tests artifact models, views, access control, versioning, sharing, and artifact tools.
 """
-import json
 import uuid
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.test import Client
 from django.utils import timezone
 
@@ -618,7 +618,6 @@ class TestArtifactTools:
         update_artifact_tool = tools[1]
 
         original_version = artifact.version
-        original_code = artifact.code
         new_code = "export default function Chart() { return <div>Updated Chart</div>; }"
 
         # Create a mock ArtifactVersion class to avoid import error
@@ -875,14 +874,14 @@ class TestSharedArtifactAccessControl:
 
     def test_multiple_share_links_for_same_artifact(self, user, artifact):
         """Test that multiple share links can be created for the same artifact."""
-        public_share = SharedArtifact.objects.create(
+        SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
             access_level="public",
         )
 
-        project_share = SharedArtifact.objects.create(
+        SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
@@ -903,7 +902,7 @@ class TestSharedArtifactAccessControl:
         )
 
         # Creating another share with same token should fail
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             SharedArtifact.objects.create(
                 artifact=artifact,
                 created_by=user,

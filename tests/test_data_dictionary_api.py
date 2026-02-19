@@ -10,12 +10,11 @@ Covers:
 import uuid
 
 import pytest
-from django.test import override_settings
+from django.db import IntegrityError
 from rest_framework.test import APIClient
 
 from apps.knowledge.models import TableKnowledge
 from apps.projects.models import Project, ProjectMembership, ProjectRole
-
 
 # ---------------------------------------------------------------------------
 # Sample data dictionary stored on a project (mimics RefreshSchemaView output)
@@ -595,7 +594,7 @@ class TestTableKnowledgeModel:
             description="First",
             updated_by=user,
         )
-        with pytest.raises(Exception):  # IntegrityError
+        with pytest.raises(IntegrityError):
             TableKnowledge.objects.create(
                 project=project,
                 table_name="public.users",

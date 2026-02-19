@@ -38,7 +38,7 @@ VALID_CATEGORIES = frozenset({
 })
 
 
-def create_save_learning_tool(project: "Project", user: "User"):
+def create_save_learning_tool(project: Project, user: User):
     """
     Create a tool for saving agent learnings.
 

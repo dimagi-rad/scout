@@ -41,8 +41,8 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             project = Project.objects.get(slug=options["project_slug"])
-        except Project.DoesNotExist:
-            raise CommandError(f"Project with slug '{options['project_slug']}' not found")
+        except Project.DoesNotExist as err:
+            raise CommandError(f"Project with slug '{options['project_slug']}' not found") from err
 
         knowledge_dir = Path(options["dir"])
         if not knowledge_dir.exists():

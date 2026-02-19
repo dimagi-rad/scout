@@ -56,9 +56,9 @@ DEFAULT_TEMPERATURE = 0
 
 
 def build_agent_graph(
-    project: "Project",
-    user: "User | None" = None,
-    checkpointer: "BaseCheckpointSaver | None" = None,
+    project: Project,
+    user: User | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
 ):
@@ -245,7 +245,7 @@ def build_agent_graph(
     return compiled
 
 
-def _build_tools(project: "Project", user: "User | None", mcp_tools: list) -> list:
+def _build_tools(project: Project, user: User | None, mcp_tools: list) -> list:
     """
     Build the tool list for the agent.
 
@@ -287,7 +287,7 @@ def _build_tools(project: "Project", user: "User | None", mcp_tools: list) -> li
     return tools
 
 
-def _build_system_prompt(project: "Project") -> str:
+def _build_system_prompt(project: Project) -> str:
     """
     Assemble the complete system prompt from multiple sources.
 

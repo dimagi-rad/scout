@@ -186,10 +186,10 @@ class AddMemberSerializer(serializers.Serializer):
         try:
             user = User.objects.get(email=value)
             self._user = user
-        except User.DoesNotExist:
+        except User.DoesNotExist as err:
             raise serializers.ValidationError(
                 f"No user found with email: {value}"
-            )
+            ) from err
         return value
 
     def validate(self, attrs):

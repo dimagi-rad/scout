@@ -17,6 +17,7 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2LoginView,
 )
 
+
 class CommCareOAuth2Adapter(OAuth2Adapter):
     """
     OAuth2 adapter for CommCare HQ.

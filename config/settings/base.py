@@ -4,8 +4,9 @@ Django base settings for Scout data agent platform.
 Settings common to all environments. Environment-specific settings
 override these in development.py, production.py, and test.py.
 """
-import environ
 from pathlib import Path
+
+import environ
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent

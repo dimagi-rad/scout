@@ -4,8 +4,8 @@ Tests for the DataDictionaryGenerator service.
 Note: These tests require a PostgreSQL database connection.
 For CI, consider using pytest-postgresql or a test database.
 """
+
 import pytest
-from unittest.mock import MagicMock, patch
 
 from apps.projects.services.data_dictionary import DataDictionaryGenerator
 
@@ -187,8 +187,8 @@ class TestDataDictionaryGeneratorIntegration:
     def real_project(self, db, user):
         """Create a project pointing to a real test database."""
         import os
-        from apps.projects.models import DatabaseConnection
-        from apps.projects.models import Project
+
+        from apps.projects.models import DatabaseConnection, Project
 
         db_url = os.environ.get("TEST_DATABASE_URL")
         if not db_url:

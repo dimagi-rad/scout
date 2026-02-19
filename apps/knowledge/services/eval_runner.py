@@ -296,7 +296,7 @@ class EvalRunner:
             )
             return False, details
 
-        for i, (exp_row, act_row) in enumerate(zip(expected_data, actual_data)):
+        for i, (exp_row, act_row) in enumerate(zip(expected_data, actual_data, strict=False)):
             if not isinstance(exp_row, (list, tuple)) or not isinstance(
                 act_row, (list, tuple)
             ):
@@ -312,7 +312,7 @@ class EvalRunner:
                 )
                 continue
 
-            for j, (exp_val, act_val) in enumerate(zip(exp_row, act_row)):
+            for j, (exp_val, act_val) in enumerate(zip(exp_row, act_row, strict=False)):
                 if not self._values_match(exp_val, act_val, tolerance):
                     details["mismatches"].append(
                         f"Row {i}, Col {j}: expected {exp_val}, got {act_val}"

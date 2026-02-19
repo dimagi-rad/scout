@@ -7,7 +7,7 @@ with filtering, search, and inline editing capabilities.
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import AccessLevel, Artifact, ArtifactType, SharedArtifact
+from .models import Artifact, SharedArtifact
 
 
 class SharedArtifactInline(admin.TabularInline):

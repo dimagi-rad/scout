@@ -32,7 +32,7 @@ VALID_VARIABLE_TYPES = frozenset({
 })
 
 
-def create_recipe_tool(project: "Project", user: "User | None"):
+def create_recipe_tool(project: Project, user: User | None):
     """
     Factory function to create a recipe saving tool for a specific project.
 

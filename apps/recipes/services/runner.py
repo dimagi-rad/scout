@@ -62,8 +62,8 @@ class RecipeRunner:
         self,
         recipe: Recipe,
         variable_values: dict[str, Any],
-        user: "User",
-        graph: "CompiledStateGraph | None" = None,
+        user: User,
+        graph: CompiledStateGraph | None = None,
     ) -> None:
         self.recipe = recipe
         self.variable_values = variable_values.copy()
@@ -92,7 +92,7 @@ class RecipeRunner:
                 if "default" in var_def:
                     self.variable_values[var_name] = var_def["default"]
 
-    def _build_graph(self) -> "CompiledStateGraph":
+    def _build_graph(self) -> CompiledStateGraph:
         """Build or return the agent graph for execution."""
         if self._provided_graph is not None:
             return self._provided_graph

@@ -10,7 +10,6 @@ from django.conf import settings
 from django.core.validators import RegexValidator
 from django.db import models
 
-
 # Validator for database schema names to prevent SQL injection
 schema_validator = RegexValidator(
     regex=r'^[a-zA-Z_][a-zA-Z0-9_]*$',

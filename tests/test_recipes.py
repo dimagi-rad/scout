@@ -3,15 +3,14 @@ Comprehensive tests for Phase 4 (Recipes) of the Scout data agent platform.
 
 Tests recipe CRUD, variable substitution, recipe runner, and save_as_recipe tool.
 """
-import json
-from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.utils import timezone
 
-from apps.projects.models import Project, ProjectMembership, ProjectRole
+from apps.projects.models import Project
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
 
 User = get_user_model()
@@ -335,13 +334,13 @@ class TestRecipeStepModel:
 
     def test_recipe_step_ordering(self, recipe):
         """Test that recipe steps are ordered by recipe and order."""
-        step1 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=1, prompt_template="Step 1"
         )
-        step2 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=2, prompt_template="Step 2"
         )
-        step3 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=3, prompt_template="Step 3"
         )
 
@@ -356,15 +355,15 @@ class TestRecipeStepModel:
         RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
 
         # Creating another step with same order should fail
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Duplicate")
 
     def test_recipe_cascade_delete_steps(self, recipe):
         """Test that deleting a recipe deletes its steps."""
-        step1 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=1, prompt_template="Step 1"
         )
-        step2 = RecipeStep.objects.create(
+        RecipeStep.objects.create(
             recipe=recipe, order=2, prompt_template="Step 2"
         )
 
@@ -611,7 +610,7 @@ class TestRecipeRunner:
         # Invalid values (missing required variable)
         invalid_values = {"region": "North", "limit": 10}
 
-        runner = RecipeRunner(recipe, invalid_values, user)
+        RecipeRunner(recipe, invalid_values, user)
 
         # start_date is missing - should raise validation error
         errors = recipe.validate_variable_values(invalid_values)

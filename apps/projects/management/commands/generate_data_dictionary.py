@@ -53,7 +53,7 @@ class Command(BaseCommand):
 
             try:
                 if options["dry_run"]:
-                    dictionary = generator.generate()
+                    generator.generate()
                     self.stdout.write(generator.render_for_prompt())
                     # Don't save in dry run mode - but generate() already saved, so undo
                     project.refresh_from_db()
