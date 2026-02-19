@@ -72,9 +72,10 @@ For React artifacts, follow these patterns:
 
 **Component Structure:**
 ```jsx
-// Always use a default export
 export default function MyChart({ data }) {
-  // data prop contains the JSON data you pass to the artifact
+  // data keys match the "name" fields from source_queries
+  // e.g. data.monthly_revenue is an array of row objects
+  const rows = data.monthly_revenue || [];
 
   return (
     <div className="p-4">
@@ -89,83 +90,92 @@ export default function MyChart({ data }) {
 - Use inline styles for dynamic values
 - Keep visualizations responsive with relative widths
 
-### Example React Artifact with Recharts
+### Live Data via source_queries (IMPORTANT)
 
-```jsx
+Artifacts fetch live data at render time. You MUST provide `source_queries` with
+the SQL queries that produce the data your component needs. Do NOT embed query
+result rows in the `data` parameter -- the system executes the queries against
+the project database every time the artifact is viewed, so data is always fresh.
+
+Each source query is a dict with "name" and "sql" keys:
+```python
+source_queries=[
+    {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"},
+    {"name": "top_products", "sql": "SELECT p.name, SUM(oi.quantity) AS units_sold FROM order_items oi JOIN products p ON oi.product_id = p.id GROUP BY 1 ORDER BY 2 DESC LIMIT 10"},
+]
+```
+
+The component receives `data.monthly_revenue` (array of row objects with column-name
+keys) and `data.top_products`. If a query returns exactly one row, it is provided as
+a single object instead of an array.
+
+### Example: React Artifact with Live Queries
+
+```python
+create_artifact(
+    title="Monthly Revenue vs Target",
+    artifact_type="react",
+    code='''
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 
 export default function RevenueChart({ data }) {
-  // data = [{ month: "Jan", revenue: 4000, target: 4500 }, ...]
+  const rows = data.monthly_revenue || [];
 
   return (
     <div className="w-full h-96 p-4">
-      <h2 className="text-xl font-semibold mb-4">Monthly Revenue vs Target</h2>
+      <h2 className="text-xl font-semibold mb-4">Monthly Revenue</h2>
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+        <LineChart data={rows} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="month" />
           <YAxis />
-          <Tooltip formatter={(value) => `$${value.toLocaleString()}`} />
+          <Tooltip formatter={(value) => `$${Number(value).toLocaleString()}`} />
           <Legend />
-          <Line
-            type="monotone"
-            dataKey="revenue"
-            stroke="#8884d8"
-            strokeWidth={2}
-            name="Revenue"
-          />
-          <Line
-            type="monotone"
-            dataKey="target"
-            stroke="#82ca9d"
-            strokeDasharray="5 5"
-            name="Target"
-          />
+          <Line type="monotone" dataKey="revenue" stroke="#8884d8" strokeWidth={2} name="Revenue" />
         </LineChart>
       </ResponsiveContainer>
     </div>
   );
 }
+    ''',
+    source_queries=[
+        {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at)::date AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"}
+    ]
+)
 ```
 
 ### Data Best Practices
 
-1. **Query data first, then visualize**: Always execute SQL to get the data, then create the artifact with that data.
+1. **Always provide source_queries**: For any data-driven artifact, pass the SQL
+   queries that produce the data. This is how the artifact gets live data.
 
-2. **Pass data via the `data` parameter**: Keep your React code clean by passing data separately:
-   ```python
-   create_artifact(
-       title="Sales by Region",
-       artifact_type="react",
-       code="...",  # Component code
-       data=[{"region": "North", "sales": 1000}, ...],  # Query results
-       source_queries=["SELECT region, SUM(amount) as sales FROM orders GROUP BY region"]
-   )
-   ```
+2. **Name queries to match component expectations**: The query "name" becomes the
+   key on the data prop. Pick clear, descriptive names.
 
-3. **Transform data for visualization**: Reshape SQL results to match what the chart expects:
-   - Recharts expects an array of objects with consistent keys
-   - Ensure numeric fields are numbers, not strings
-   - Format dates appropriately
+3. **Handle missing/empty data gracefully**: Always default with `|| []` or `|| {}`
+   so the component renders a meaningful empty state rather than crashing.
 
-4. **Include source queries**: Always pass `source_queries` so users can verify the data source.
+4. **Use the `data` parameter only for static config**: Things like color palettes,
+   thresholds, or labels that are not query results. Query results come from
+   source_queries automatically.
 
-5. **Handle empty data**: Your React component should handle cases where data is empty or null.
+5. **Keep queries focused**: One query per logical dataset. A dashboard with KPIs,
+   a trend chart, and a top-N list should have three separate named queries.
 
 ### Updating Artifacts
 
 When a user asks to modify an existing artifact:
 1. Use `update_artifact` with the artifact_id from the original creation
 2. Provide the complete new code (not a diff)
-3. Optionally update the data if the underlying query changed
+3. Optionally update source_queries if the underlying queries changed
 
 Example:
 ```python
 update_artifact(
     artifact_id="abc-123-...",
     code="... updated component code ...",
-    data=[...],  # Updated data if needed
-    title="Updated Title"  # Optional new title
+    source_queries=[{"name": "revenue", "sql": "SELECT ..."}],
+    title="Updated Title"
 )
 ```
 """

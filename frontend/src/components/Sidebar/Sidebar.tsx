@@ -5,6 +5,7 @@ import {
   BookOpen,
   ChefHat,
   Database,
+  LayoutDashboard,
   Settings,
   LogOut,
   Plus,
@@ -82,6 +83,7 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="space-y-1 p-4">
         <NavItem to="/" icon={MessageSquare} label="Chat" />
+        <NavItem to="/artifacts" icon={LayoutDashboard} label="Artifacts" />
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />

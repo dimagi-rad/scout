@@ -290,6 +290,7 @@ export function ChatPanel() {
         {messages.map((msg: UIMessage) => (
           <ChatMessage key={msg.id} message={msg} />
         ))}
+        {isStreaming && <ThinkingIndicator />}
         {error && (
           <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-4 py-2">
             {error.message}
@@ -329,6 +330,31 @@ export function ChatPanel() {
           )}
         </form>
       </div>
+    </div>
+  )
+}
+
+function ThinkingIndicator() {
+  return (
+    <div className="flex items-start gap-3 py-2" data-testid="thinking-indicator">
+      <div className="flex items-center gap-1.5 rounded-lg bg-muted px-4 py-3">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="block h-2 w-2 rounded-full bg-muted-foreground/60"
+            style={{
+              animation: "thinking-dot 1.4s ease-in-out infinite",
+              animationDelay: `${i * 0.2}s`,
+            }}
+          />
+        ))}
+      </div>
+      <style>{`
+        @keyframes thinking-dot {
+          0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+          40% { opacity: 1; transform: scale(1); }
+        }
+      `}</style>
     </div>
   )
 }

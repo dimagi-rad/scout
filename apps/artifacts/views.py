@@ -2,20 +2,27 @@
 Artifact views for Scout data agent platform.
 
 Provides views for rendering artifacts in a sandboxed iframe,
-fetching artifact data via API, and serving shared artifacts.
+fetching artifact data via API, executing live queries, and serving shared artifacts.
 """
 import json
+import logging
 import secrets
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.projects.models import ProjectMembership
+from apps.projects.services.db_manager import get_pool_manager
 
 from .models import AccessLevel, Artifact, SharedArtifact
 from .services.export import ArtifactExporter
+
+logger = logging.getLogger(__name__)
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
@@ -34,7 +41,7 @@ def generate_csp_with_nonce(nonce: str) -> str:
         "style-src 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src data: blob:; "
         "font-src https://cdn.jsdelivr.net; "
-        "connect-src https://cdn.jsdelivr.net;"
+        "connect-src 'self' https://cdn.jsdelivr.net;"
     )
 
 
@@ -80,6 +87,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Lodash for data manipulation -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/lodash@4/lodash.min.js"></script>
+
+    <!-- Lucide icons (referenced by agent-generated React code) -->
+    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 
     <!-- Marked for Markdown rendering -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
@@ -190,19 +200,76 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
             container: null,
             currentArtifact: null,
 
-            init() {
+            async init() {
                 this.container = document.getElementById('artifact-container');
-                // Read artifact data embedded in the page by the server
                 const dataEl = document.getElementById('artifact-data');
-                if (dataEl) {
-                    try {
-                        const artifact = JSON.parse(dataEl.textContent);
-                        this.render(artifact);
-                    } catch (error) {
-                        this.showError('Parse Error', 'Failed to parse embedded artifact data: ' + error.message);
-                    }
-                } else {
+                if (!dataEl) {
                     this.showError('Initialization Error', 'No artifact data found in page.');
+                    return;
+                }
+
+                let artifact;
+                try {
+                    artifact = JSON.parse(dataEl.textContent);
+                } catch (error) {
+                    this.showError('Parse Error', 'Failed to parse embedded artifact data: ' + error.message);
+                    return;
+                }
+
+                // If the artifact has live queries, fetch fresh data from the server
+                if (artifact.has_live_queries) {
+                    this.showLoading('Querying database...');
+                    try {
+                        const resp = await fetch('/api/artifacts/' + artifact.id + '/query-data/', {
+                            credentials: 'include',
+                        });
+                        if (!resp.ok) {
+                            const err = await resp.json().catch(() => ({}));
+                            throw new Error(err.error || 'Query failed with status ' + resp.status);
+                        }
+                        const queryData = await resp.json();
+                        artifact.data = this.mergeQueryResults(queryData, artifact.data || {});
+                        // Expose raw query info for parent frame (Data tab)
+                        artifact._queryResults = queryData;
+                        window.parent.postMessage({
+                            type: 'artifact-query-data',
+                            artifactId: artifact.id,
+                            queryData: queryData,
+                        }, '*');
+                    } catch (error) {
+                        this.showError('Data Fetch Error', error.message);
+                        return;
+                    }
+                }
+
+                this.render(artifact);
+            },
+
+            mergeQueryResults(queryData, staticData) {
+                const queries = queryData.queries || [];
+                if (queries.length === 0) return staticData;
+
+                const merged = { ...staticData };
+                for (const q of queries) {
+                    if (q.error) continue;
+                    // Key by query name so the component can access data.kpis, data.monthly, etc.
+                    const rows = (q.rows || []).map(row => {
+                        const obj = {};
+                        (q.columns || []).forEach((col, i) => { obj[col] = row[i]; });
+                        return obj;
+                    });
+                    // If only one row, expose as object; otherwise as array
+                    merged[q.name] = rows.length === 1 ? rows[0] : rows;
+                }
+                return merged;
+            },
+
+            showLoading(message) {
+                const loading = document.getElementById('loading');
+                if (loading) {
+                    loading.style.display = 'flex';
+                    const span = loading.querySelector('span');
+                    if (span) span.textContent = message || 'Loading...';
                 }
             },
 
@@ -288,6 +355,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         'd3',
                         '_',
                         'data',
+                        'lucide',
                         `
                         const { useState, useEffect, useRef, useMemo, useCallback, memo, Fragment } = React;
                         const {
@@ -298,6 +366,38 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             PolarGrid, PolarAngleAxis, PolarRadiusAxis,
                             Treemap, Sankey, FunnelChart, Funnel
                         } = Recharts;
+
+                        // Lucide icon helper: creates a React component from a lucide icon name
+                        function _lucideIcon(name) {
+                            return function LucideIcon(props) {
+                                const ref = React.useRef(null);
+                                React.useEffect(() => {
+                                    if (ref.current && lucide && lucide[name]) {
+                                        const svg = lucide.createElement(lucide[name]);
+                                        ref.current.innerHTML = '';
+                                        ref.current.appendChild(svg);
+                                        const svgEl = ref.current.querySelector('svg');
+                                        if (svgEl) {
+                                            if (props.size) { svgEl.setAttribute('width', props.size); svgEl.setAttribute('height', props.size); }
+                                            if (props.style && props.style.color) svgEl.setAttribute('stroke', props.style.color);
+                                            if (props.className) svgEl.setAttribute('class', props.className);
+                                        }
+                                    }
+                                }, []);
+                                return React.createElement('span', { ref: ref, style: { display: 'inline-flex', ...props.style } });
+                            };
+                        }
+                        const TrendingUp = _lucideIcon('TrendingUp');
+                        const TrendingDown = _lucideIcon('TrendingDown');
+                        const ShoppingCart = _lucideIcon('ShoppingCart');
+                        const DollarSign = _lucideIcon('DollarSign');
+                        const Users = _lucideIcon('Users');
+                        const Package = _lucideIcon('Package');
+                        const BarChart3 = _lucideIcon('BarChart3');
+                        const Activity = _lucideIcon('Activity');
+                        const ArrowUp = _lucideIcon('ArrowUp');
+                        const ArrowDown = _lucideIcon('ArrowDown');
+                        const Star = _lucideIcon('Star');
 
                         ${transformed}
 
@@ -320,12 +420,30 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         Recharts,
                         d3,
                         _,
-                        data || {}
+                        data || {},
+                        typeof lucide !== 'undefined' ? lucide : {}
                     );
 
                     if (Component) {
                         const root = ReactDOM.createRoot(reactRoot);
-                        root.render(React.createElement(Component, { data: data || {} }));
+                        // Wrap in error boundary to catch render-time crashes
+                        class _ErrorBoundary extends React.Component {
+                            constructor(props) { super(props); this.state = { error: null }; }
+                            static getDerivedStateFromError(error) { return { error }; }
+                            render() {
+                                if (this.state.error) {
+                                    return React.createElement('div', { className: 'error-state' },
+                                        React.createElement('div', { className: 'error-title' }, 'Render Error'),
+                                        React.createElement('div', { className: 'error-message' }, this.state.error.message),
+                                        React.createElement('div', { className: 'error-details' }, this.state.error.stack)
+                                    );
+                                }
+                                return this.props.children;
+                            }
+                        }
+                        root.render(React.createElement(_ErrorBoundary, null,
+                            React.createElement(Component, { data: data || {} })
+                        ));
                     } else {
                         this.showError('Component Not Found', 'Could not find a valid React component to render. Make sure your code exports a component or defines App, Component, Chart, or Visualization.');
                     }
@@ -490,9 +608,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
         // Initialize when DOM is ready
         if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => ArtifactRenderer.init());
+            document.addEventListener('DOMContentLoaded', () => ArtifactRenderer.init().catch(console.error));
         } else {
-            ArtifactRenderer.init();
+            ArtifactRenderer.init().catch(console.error);
         }
     </script>
 </body>
@@ -526,13 +644,16 @@ class ArtifactSandboxView(View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
+        has_live_queries = bool(artifact.source_queries)
+
         # Serialize artifact data for embedding in the template
         artifact_json = json.dumps({
             "id": str(artifact.id),
             "title": artifact.title,
             "type": artifact.artifact_type,
             "code": artifact.code,
-            "data": artifact.data,
+            "data": artifact.data if not has_live_queries else {},
+            "has_live_queries": has_live_queries,
             "version": artifact.version,
         })
         # Escape </script> in JSON to prevent breaking out of the script tag
@@ -589,8 +710,142 @@ class ArtifactDataView(View):
             "type": artifact.artifact_type,
             "code": artifact.code,
             "data": artifact.data,
+            "source_queries": artifact.source_queries,
             "version": artifact.version,
         }
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce psycopg2 result values to JSON-serializable types."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+class ArtifactQueryDataView(View):
+    """
+    Execute an artifact's stored SQL queries against the project database
+    and return fresh results. This enables artifacts to display live data
+    rather than stale snapshots.
+
+    Each query in ``artifact.source_queries`` is executed with the project's
+    connection pool, respecting row limits and statement timeouts.
+
+    Response shape::
+
+        {
+            "queries": [
+                {"name": "kpis", "sql": "SELECT ...", "columns": [...], "rows": [...], "row_count": 5},
+                ...
+            ],
+            "static_data": { ... }   // artifact.data, for non-query config
+        }
+    """
+
+    def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+        artifact = get_object_or_404(
+            Artifact.objects.select_related("project", "project__database_connection"),
+            pk=artifact_id,
+        )
+
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project=artifact.project
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+        source_queries = artifact.source_queries or []
+        if not source_queries:
+            return JsonResponse({
+                "queries": [],
+                "static_data": artifact.data or {},
+            })
+
+        project = artifact.project
+        results = []
+
+        for entry in source_queries:
+            if isinstance(entry, dict):
+                name = entry.get("name", f"query_{len(results)}")
+                sql = entry.get("sql", "")
+            else:
+                name = f"query_{len(results)}"
+                sql = str(entry)
+
+            if not sql.strip():
+                results.append({"name": name, "sql": sql, "error": "Empty query"})
+                continue
+
+            try:
+                result = self._execute_query(project, sql)
+                results.append({"name": name, "sql": sql, **result})
+            except Exception as e:
+                logger.exception(
+                    "Artifact query failed [artifact=%s, query=%s]", artifact_id, name
+                )
+                results.append({
+                    "name": name,
+                    "sql": sql,
+                    "columns": [],
+                    "rows": [],
+                    "row_count": 0,
+                    "error": str(e),
+                })
+
+        return JsonResponse({
+            "queries": results,
+            "static_data": artifact.data or {},
+        })
+
+    @staticmethod
+    def _execute_query(project, sql: str) -> dict[str, Any]:
+        from psycopg2 import sql as psql
+
+        pool_mgr = get_pool_manager()
+        timeout = project.max_query_timeout_seconds
+        max_rows = project.max_rows_per_query
+
+        with pool_mgr.get_connection(project) as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    psql.SQL("SET search_path TO {}").format(
+                        psql.Identifier(project.db_schema)
+                    )
+                )
+                cursor.execute("SET statement_timeout TO %s", (f"{timeout}s",))
+                cursor.execute(sql)
+
+                columns: list[str] = []
+                rows: list[list[Any]] = []
+
+                if cursor.description:
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = [
+                        [_json_safe(cell) for cell in row]
+                        for row in cursor.fetchmany(max_rows)
+                    ]
+
+                return {
+                    "columns": columns,
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "truncated": cursor.rowcount > max_rows if cursor.rowcount >= 0 else False,
+                }
+            finally:
+                cursor.close()
 
 
 class SharedArtifactView(View):
@@ -778,3 +1033,105 @@ class ArtifactExportView(View):
             )
 
         return JsonResponse({"error": "Export failed"}, status=500)
+
+
+class ProjectArtifactListView(View):
+    """
+    List artifacts belonging to a project.
+
+    GET /api/projects/<project_id>/artifacts/
+    Optional query params: ?search=<title substring>
+    """
+
+    def get(self, request: HttpRequest, project_id: str) -> JsonResponse:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project_id=project_id
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+        qs = Artifact.objects.filter(project_id=project_id).order_by("-created_at")
+
+        search = request.GET.get("search", "").strip()
+        if search:
+            qs = qs.filter(title__icontains=search)
+
+        artifacts = list(
+            qs.values(
+                "id", "title", "description", "artifact_type",
+                "version", "source_queries", "created_at", "updated_at",
+            )[:200]
+        )
+
+        for a in artifacts:
+            a["id"] = str(a["id"])
+            a["has_live_queries"] = bool(a.pop("source_queries", None))
+            a["created_at"] = a["created_at"].isoformat() if a["created_at"] else None
+            a["updated_at"] = a["updated_at"].isoformat() if a["updated_at"] else None
+
+        return JsonResponse({"results": artifacts})
+
+
+class ProjectArtifactDetailView(View):
+    """
+    Detail operations on a single artifact.
+
+    PATCH /api/projects/<project_id>/artifacts/<artifact_id>/  -- update title/description
+    DELETE /api/projects/<project_id>/artifacts/<artifact_id>/ -- delete
+    """
+
+    def _check_access(self, request: HttpRequest, project_id: str) -> JsonResponse | None:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+        if not request.user.is_superuser:
+            has_access = ProjectMembership.objects.filter(
+                user=request.user, project_id=project_id
+            ).exists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+        return None
+
+    def patch(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
+        error_resp = self._check_access(request, project_id)
+        if error_resp:
+            return error_resp
+
+        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
+
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        allowed_fields = {"title", "description"}
+        update_fields = []
+
+        for field in allowed_fields:
+            if field in body:
+                setattr(artifact, field, str(body[field]).strip())
+                update_fields.append(field)
+
+        if not update_fields:
+            return JsonResponse({"error": "No valid fields to update"}, status=400)
+
+        update_fields.append("updated_at")
+        artifact.save(update_fields=update_fields)
+
+        return JsonResponse({
+            "id": str(artifact.id),
+            "title": artifact.title,
+            "description": artifact.description,
+        })
+
+    def delete(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
+        error_resp = self._check_access(request, project_id)
+        if error_resp:
+            return error_resp
+
+        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
+        artifact.delete()
+        return JsonResponse({"status": "deleted"}, status=200)
