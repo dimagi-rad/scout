@@ -30,7 +30,7 @@ class CreateArtifactInput(BaseModel):
     code: str
     description: str = ""
     data: dict | None = None
-    source_queries: list[str] | None = Field(default=None)
+    source_queries: list[dict[str, str]] | None = Field(default=None)
 
 
 class UpdateArtifactInput(BaseModel):
@@ -38,6 +38,7 @@ class UpdateArtifactInput(BaseModel):
     code: str
     title: str | None = None
     data: dict | None = None
+    source_queries: list[dict[str, str]] | None = Field(default=None)
 
 
 # Valid artifact types that can be created
@@ -80,12 +81,7 @@ def create_artifact_tools(
 
     @tool(args_schema=CreateArtifactInput)
     def create_artifact(
-        title: str,
-        artifact_type: str,
-        code: str,
-        description: str = "",
-        data: dict | None = None,
-        source_queries: list[dict[str, str]] | None = None,
+        title, artifact_type, code, description="", data=None, source_queries=None
     ) -> dict[str, Any]:
         """
         Create a new interactive artifact (visualization, chart, or content).
@@ -268,11 +264,7 @@ def create_artifact_tools(
 
     @tool(args_schema=UpdateArtifactInput)
     def update_artifact(
-        artifact_id: str,
-        code: str,
-        title: str | None = None,
-        data: dict | None = None,
-        source_queries: list[dict[str, str]] | None = None,
+        artifact_id, code, title=None, data=None, source_queries=None
     ) -> dict[str, Any]:
         """
         Update an existing artifact by creating a new version.
