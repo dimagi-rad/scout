@@ -3,6 +3,7 @@ Comprehensive tests for Phase 3 (Frontend & Artifacts) of the Scout data agent p
 
 Tests artifact models, views, access control, versioning, sharing, and artifact tools.
 """
+
 import uuid
 from datetime import timedelta
 
@@ -470,9 +471,7 @@ class TestSharedArtifactView:
         assert data["code"] == shared_artifact.artifact.code
         assert data["data"] == shared_artifact.artifact.data
 
-    def test_project_share_requires_membership(
-        self, user, other_user, artifact, client
-    ):
+    def test_project_share_requires_membership(self, user, other_user, artifact, client):
         """Test project-level share requires project membership."""
         # Create project-level share
         project_share = SharedArtifact.objects.create(
@@ -501,9 +500,7 @@ class TestSharedArtifactView:
         response = client.get(f"/api/artifacts/shared/{project_share.share_token}/")
         assert response.status_code == 200
 
-    def test_specific_share_requires_allowed_user(
-        self, user, other_user, artifact, client
-    ):
+    def test_specific_share_requires_allowed_user(self, user, other_user, artifact, client):
         """Test specific-level share requires user to be in allowed_users."""
         # Create specific-level share
         specific_share = SharedArtifact.objects.create(
@@ -581,14 +578,16 @@ class TestArtifactTools:
         tools = create_artifact_tools(project, user)
         create_artifact_tool = tools[0]
 
-        result = create_artifact_tool.invoke({
-            "title": "Revenue Chart",
-            "artifact_type": "react",
-            "code": "export default function Chart() { return <div>Chart</div>; }",
-            "description": "Monthly revenue visualization",
-            "data": {"revenue": [1000, 2000, 3000]},
-            "source_queries": ["SELECT month, revenue FROM sales"],
-        })
+        result = create_artifact_tool.invoke(
+            {
+                "title": "Revenue Chart",
+                "artifact_type": "react",
+                "code": "export default function Chart() { return <div>Chart</div>; }",
+                "description": "Monthly revenue visualization",
+                "data": {"revenue": [1000, 2000, 3000]},
+                "source_queries": [{"name": "revenue", "sql": "SELECT month, revenue FROM sales"}],
+            }
+        )
 
         assert result["status"] == "created"
         assert "artifact_id" in result
@@ -603,7 +602,9 @@ class TestArtifactTools:
         assert artifact.artifact_type == "react"
         assert artifact.code == "export default function Chart() { return <div>Chart</div>; }"
         assert artifact.data["revenue"] == [1000, 2000, 3000]
-        assert artifact.data["_source_queries"] == ["SELECT month, revenue FROM sales"]
+        assert artifact.source_queries == [
+            {"name": "revenue", "sql": "SELECT month, revenue FROM sales"}
+        ]
         assert artifact.version == 1
         assert artifact.parent_artifact is None
 
@@ -617,12 +618,14 @@ class TestArtifactTools:
         original_version = artifact.version
         new_code = "export default function Chart() { return <div>Updated Chart</div>; }"
 
-        result = update_artifact_tool.invoke({
-            "artifact_id": str(artifact.id),
-            "code": new_code,
-            "title": "Updated Chart Title",
-            "data": {"rows": [{"x": 2, "y": 4}]},
-        })
+        result = update_artifact_tool.invoke(
+            {
+                "artifact_id": str(artifact.id),
+                "code": new_code,
+                "title": "Updated Chart Title",
+                "data": {"rows": [{"x": 2, "y": 4}]},
+            }
+        )
 
         assert result["status"] == "updated"
         assert "artifact_id" in result
@@ -645,19 +648,23 @@ class TestArtifactTools:
         original_version = artifact.version
 
         # First update - creates new artifact from original
-        result1 = update_artifact_tool.invoke({
-            "artifact_id": str(artifact.id),
-            "code": "export default function Chart() { return <div>Version 2</div>; }",
-        })
+        result1 = update_artifact_tool.invoke(
+            {
+                "artifact_id": str(artifact.id),
+                "code": "export default function Chart() { return <div>Version 2</div>; }",
+            }
+        )
 
         assert result1["status"] == "updated"
         assert result1["version"] == original_version + 1
 
         # Second update - creates new artifact from the v2 artifact
-        result2 = update_artifact_tool.invoke({
-            "artifact_id": result1["artifact_id"],
-            "code": "export default function Chart() { return <div>Version 3</div>; }",
-        })
+        result2 = update_artifact_tool.invoke(
+            {
+                "artifact_id": result1["artifact_id"],
+                "code": "export default function Chart() { return <div>Version 3</div>; }",
+            }
+        )
 
         assert result2["status"] == "updated"
         assert result2["version"] == original_version + 2
@@ -751,7 +758,9 @@ class TestSharedArtifactAccessControl:
         assert shared.can_access(user) is True
         assert shared.can_access(other_user) is True
 
-    def test_project_access_requires_membership(self, user, other_user, artifact, project_membership):
+    def test_project_access_requires_membership(
+        self, user, other_user, artifact, project_membership
+    ):
         """Test that project-level access requires project membership."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
@@ -962,9 +971,7 @@ class TestSharedArtifactViewAccessControl:
         response = client.get(f"/api/artifacts/shared/{shared.share_token}/")
         assert response.status_code == 200
 
-    def test_access_specific_share_requires_allowed_user(
-        self, client, user, other_user, artifact
-    ):
+    def test_access_specific_share_requires_allowed_user(self, client, user, other_user, artifact):
         """Test that specific share requires user in allowed_users."""
         third_user = User.objects.create_user(
             email="third@example.com",
@@ -1017,9 +1024,7 @@ class TestSharedArtifactViewAccessControl:
 
         assert response.status_code == 404
 
-    def test_view_count_incremented_on_successful_access(
-        self, client, user, artifact
-    ):
+    def test_view_count_incremented_on_successful_access(self, client, user, artifact):
         """Test that view_count is incremented on each successful access."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
@@ -1039,9 +1044,7 @@ class TestSharedArtifactViewAccessControl:
         shared.refresh_from_db()
         assert shared.view_count == initial_count + 2
 
-    def test_view_count_not_incremented_on_failed_access(
-        self, client, user, other_user, artifact
-    ):
+    def test_view_count_not_incremented_on_failed_access(self, client, user, other_user, artifact):
         """Test that view_count is not incremented when access is denied."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
