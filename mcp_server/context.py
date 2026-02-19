@@ -72,3 +72,64 @@ async def load_project_context(project_id: str) -> ProjectContext:
         raise ValueError(f"Database connection for project '{project.name}' is not active")
 
     return ProjectContext.from_project(project)
+
+
+async def load_tenant_context(tenant_id: str) -> ProjectContext:
+    """Load a ProjectContext for a tenant from the managed database.
+
+    Uses the tenant_id (domain name) to find the TenantSchema and builds
+    a ProjectContext pointing at the managed DB with the tenant's schema.
+
+    Raises ValueError if the tenant schema is not found or not active.
+    """
+    from urllib.parse import urlparse
+
+    from asgiref.sync import sync_to_async
+    from django.conf import settings
+
+    from apps.projects.models import SchemaState, TenantSchema
+
+    ts = await TenantSchema.objects.filter(
+        tenant_membership__tenant_id=tenant_id,
+        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+    ).afirst()
+
+    if ts is None:
+        raise ValueError(
+            f"No active schema for tenant '{tenant_id}'. "
+            f"Run materialization first to load data."
+        )
+
+    # Parse MANAGED_DATABASE_URL into connection params
+    url = settings.MANAGED_DATABASE_URL
+    if not url:
+        raise ValueError("MANAGED_DATABASE_URL is not configured")
+
+    connection_params = await sync_to_async(_parse_db_url)(url, ts.schema_name)
+
+    return ProjectContext(
+        project_id=f"tenant:{tenant_id}",
+        project_name=tenant_id,
+        db_schema=ts.schema_name,
+        allowed_tables=[],
+        excluded_tables=[],
+        max_rows_per_query=500,
+        max_query_timeout_seconds=30,
+        readonly_role="",
+        connection_params=connection_params,
+    )
+
+
+def _parse_db_url(url: str, schema: str) -> dict:
+    """Parse a database URL into psycopg2 connection params."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 5432,
+        "dbname": parsed.path.lstrip("/") or "scout",
+        "user": parsed.username or "",
+        "password": parsed.password or "",
+        "options": f"-c search_path={schema},public -c statement_timeout=30000",
+    }

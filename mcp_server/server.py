@@ -25,7 +25,7 @@ import sys
 
 from mcp.server.fastmcp import FastMCP
 
-from mcp_server.context import load_project_context
+from mcp_server.context import load_tenant_context
 from mcp_server.envelope import (
     NOT_FOUND,
     VALIDATION_ERROR,
@@ -39,6 +39,58 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("scout")
 
 
+# --- Tenant metadata helpers ---
+# These query information_schema directly, bypassing the Project-based
+# metadata service. Used for tenant contexts where there's no Project.
+
+
+async def _tenant_list_tables(ctx) -> list[dict]:
+    """List tables in a tenant schema via information_schema."""
+    from mcp_server.services.query import execute_query
+
+    result = await execute_query(
+        ctx,
+        f"SELECT table_name, table_type FROM information_schema.tables "
+        f"WHERE table_schema = '{ctx.db_schema}' ORDER BY table_name",
+    )
+    if not result.get("success", True) and "error" in result:
+        return []
+
+    tables = []
+    for row in result.get("rows", []):
+        tables.append({
+            "name": row[0],
+            "type": "view" if row[1] == "VIEW" else "table",
+            "description": "",
+        })
+    return tables
+
+
+async def _tenant_describe_table(ctx, table_name: str) -> dict | None:
+    """Describe a table in a tenant schema via information_schema."""
+    from mcp_server.services.query import execute_query
+
+    result = await execute_query(
+        ctx,
+        f"SELECT column_name, data_type, is_nullable, column_default "
+        f"FROM information_schema.columns "
+        f"WHERE table_schema = '{ctx.db_schema}' AND table_name = '{table_name}' "
+        f"ORDER BY ordinal_position",
+    )
+    if not result.get("rows"):
+        return None
+
+    columns = []
+    for row in result.get("rows", []):
+        columns.append({
+            "name": row[0],
+            "type": row[1],
+            "nullable": row[2] == "YES",
+            "default": row[3],
+        })
+    return {"name": table_name, "columns": columns}
+
+
 # --- Tools ---
 
 
@@ -46,22 +98,19 @@ mcp = FastMCP("scout")
 async def list_tables(tenant_id: str) -> dict:
     """List all tables and views in the tenant's database schema.
 
-    Returns table names, types (table/view), approximate row counts,
-    and descriptions.
+    Returns table names, types (table/view), and descriptions.
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
     """
     async with tool_context("list_tables", tenant_id) as tc:
         try:
-            ctx = await load_project_context(tenant_id)
+            ctx = await load_tenant_context(tenant_id)
         except ValueError as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        from mcp_server.services import metadata
-
-        tables = await metadata.list_tables(ctx.project_id)
+        tables = await _tenant_list_tables(ctx)
         tc["result"] = success_response(
             {"tables": tables},
             tenant_id=tenant_id,
@@ -75,30 +124,23 @@ async def list_tables(tenant_id: str) -> dict:
 async def describe_table(tenant_id: str, table_name: str) -> dict:
     """Get detailed metadata for a specific table.
 
-    Returns columns (name, type, nullable, default), primary keys,
-    foreign key relationships, indexes, and semantic descriptions
-    if available.
+    Returns columns (name, type, nullable, default).
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
-        table_name: Name of the table to describe (case-insensitive).
+        table_name: Name of the table to describe.
     """
     async with tool_context("describe_table", tenant_id, table_name=table_name) as tc:
         try:
-            ctx = await load_project_context(tenant_id)
+            ctx = await load_tenant_context(tenant_id)
         except ValueError as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        from mcp_server.services import metadata
-
-        table = await metadata.describe_table(ctx.project_id, table_name)
+        table = await _tenant_describe_table(ctx, table_name)
         if table is None:
-            suggestions = await metadata.suggest_tables(ctx.project_id, table_name)
             tc["result"] = error_response(
-                NOT_FOUND,
-                f"Table '{table_name}' not found",
-                detail=f"Did you mean: {', '.join(suggestions)}" if suggestions else None,
+                NOT_FOUND, f"Table '{table_name}' not found in schema '{ctx.db_schema}'"
             )
             return tc["result"]
 
@@ -115,24 +157,27 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
 async def get_metadata(tenant_id: str) -> dict:
     """Get a complete metadata snapshot for the tenant's database.
 
-    Returns all tables, columns, relationships, and semantic layer
-    information in a single call.
+    Returns all tables with their columns.
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
     """
     async with tool_context("get_metadata", tenant_id) as tc:
         try:
-            ctx = await load_project_context(tenant_id)
+            ctx = await load_tenant_context(tenant_id)
         except ValueError as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        from mcp_server.services import metadata
+        tables_list = await _tenant_list_tables(ctx)
+        tables = {}
+        for t in tables_list:
+            detail = await _tenant_describe_table(ctx, t["name"])
+            if detail:
+                tables[t["name"]] = detail
 
-        snapshot = await metadata.get_metadata(ctx.project_id)
         tc["result"] = success_response(
-            snapshot,
+            {"schema": ctx.db_schema, "table_count": len(tables), "tables": tables},
             tenant_id=tenant_id,
             schema=ctx.db_schema,
             timing_ms=tc["timer"].elapsed_ms,
@@ -153,7 +198,7 @@ async def query(tenant_id: str, sql: str) -> dict:
     """
     async with tool_context("query", tenant_id, sql=sql) as tc:
         try:
-            ctx = await load_project_context(tenant_id)
+            ctx = await load_tenant_context(tenant_id)
         except ValueError as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -215,7 +260,9 @@ async def run_materialization(tenant_id: str, pipeline: str = "commcare_sync") -
 
         token_obj = await SocialToken.objects.filter(
             account__user=tm.user,
-            account__provider="commcare",
+            account__provider__startswith="commcare",
+        ).exclude(
+            account__provider__startswith="commcare_connect",
         ).afirst()
         if not token_obj:
             tc["result"] = error_response(
