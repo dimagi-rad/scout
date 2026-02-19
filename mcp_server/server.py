@@ -235,7 +235,9 @@ async def query(tenant_id: str, sql: str) -> dict:
 
 
 @mcp.tool()
-async def run_materialization(tenant_id: str, pipeline: str = "commcare_sync") -> dict:
+async def run_materialization(
+    tenant_id: str, tenant_membership_id: str = "", pipeline: str = "commcare_sync",
+) -> dict:
     """Materialize data from CommCare into the tenant's schema.
 
     Loads case data from the CommCare API and writes it to the tenant's
@@ -243,6 +245,7 @@ async def run_materialization(tenant_id: str, pipeline: str = "commcare_sync") -
 
     Args:
         tenant_id: The tenant identifier (CommCare domain name).
+        tenant_membership_id: UUID of the specific TenantMembership to use.
         pipeline: Pipeline to run (default: commcare_sync).
     """
     from mcp_server.envelope import INTERNAL_ERROR
@@ -251,16 +254,15 @@ async def run_materialization(tenant_id: str, pipeline: str = "commcare_sync") -
         from apps.users.models import TenantMembership
 
         try:
-            tm = await TenantMembership.objects.aget(tenant_id=tenant_id, provider="commcare")
+            qs = TenantMembership.objects.select_related("user")
+            if tenant_membership_id:
+                tm = await qs.aget(id=tenant_membership_id)
+            else:
+                tm = await qs.aget(
+                    tenant_id=tenant_id, provider="commcare",
+                )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
-            return tc["result"]
-        except TenantMembership.MultipleObjectsReturned:
-            tc["result"] = error_response(
-                VALIDATION_ERROR,
-                f"Multiple memberships found for tenant '{tenant_id}'. "
-                f"Contact an administrator to resolve the duplicate.",
-            )
             return tc["result"]
 
         # Get OAuth token from the user's social account

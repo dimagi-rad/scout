@@ -61,15 +61,16 @@ DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 
 
-def _llm_tool_schemas(tools: list, hidden_param: str) -> list:
-    """Build tool definitions for the LLM with a parameter hidden from the schema.
+def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
+    """Build tool definitions for the LLM with parameters hidden from the schema.
 
-    MCP tools require a context ID (tenant_id / project_id) but the LLM shouldn't
-    provide it — it's injected from state.  We give the LLM schemas that omit
-    that parameter so it can't hallucinate a wrong value.
+    MCP tools require context IDs (tenant_id, tenant_membership_id, etc.) but
+    the LLM shouldn't provide them — they're injected from state.  We give the
+    LLM schemas that omit those parameters so it can't hallucinate wrong values.
 
     Non-MCP tools are returned unchanged.
     """
+    hidden = set(hidden_params)
     result: list = []
     for tool in tools:
         if tool.name not in MCP_TOOL_NAMES:
@@ -78,13 +79,14 @@ def _llm_tool_schemas(tools: list, hidden_param: str) -> list:
 
         schema = tool.get_input_schema().model_json_schema()
         props = schema.get("properties", {})
-        if hidden_param not in props:
+        to_hide = hidden & set(props)
+        if not to_hide:
             result.append(tool)
             continue
 
         # Build a trimmed schema dict for bind_tools
-        trimmed_props = {k: v for k, v in props.items() if k != hidden_param}
-        trimmed_required = [r for r in schema.get("required", []) if r != hidden_param]
+        trimmed_props = {k: v for k, v in props.items() if k not in to_hide}
+        trimmed_required = [r for r in schema.get("required", []) if r not in to_hide]
         result.append({
             "type": "function",
             "function": {
@@ -102,28 +104,28 @@ def _llm_tool_schemas(tools: list, hidden_param: str) -> list:
 
 def _make_injecting_tool_node(
     base_tool_node: ToolNode,
-    inject_key: str,
-    state_field: str,
+    injections: dict[str, str],
 ) -> Any:
-    """Create a graph node that injects a state value into MCP tool call args.
+    """Create a graph node that injects state values into MCP tool call args.
 
     Before the ToolNode executes, this node copies the last AI message and
-    injects ``state[state_field]`` as ``inject_key`` into every MCP tool call's
-    args. This ensures the MCP server always receives the correct context ID
-    regardless of what the LLM generated.
+    injects values from the agent state into every MCP tool call's args.
+    ``injections`` maps tool-arg-name → state-field-name.  This ensures the
+    MCP server always receives the correct context IDs regardless of what the
+    LLM generated.
     """
 
     async def injecting_node(state: AgentState) -> dict[str, Any]:
         messages = list(state["messages"])
         last_msg = messages[-1]
-        inject_value = state.get(state_field, "")
 
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             modified_msg = copy.copy(last_msg)
             modified_calls = []
             for tc in last_msg.tool_calls:
                 if tc["name"] in MCP_TOOL_NAMES:
-                    tc = {**tc, "args": {**tc["args"], inject_key: inject_value}}
+                    extra = {k: state.get(v, "") for k, v in injections.items()}
+                    tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
             messages = messages[:-1] + [modified_msg]
@@ -162,14 +164,17 @@ def build_agent_graph(
     logger.debug("Created %d tools for %s", len(tools), context_label)
 
     # --- Determine context ID injection ---
-    # MCP tools require tenant_id or project_id; we inject it from state
+    # MCP tools require tenant_id or project_id; we inject from state
     # so the LLM doesn't need to (and can't hallucinate) the value.
+    # Maps: tool_arg_name -> state_field_name
     if tenant_membership and not project:
-        inject_key = "tenant_id"
-        state_field = "tenant_id"
+        injections = {
+            "tenant_id": "tenant_id",
+            "tenant_membership_id": "tenant_membership_id",
+        }
     else:
-        inject_key = "project_id"
-        state_field = "project_id"
+        injections = {"project_id": "project_id"}
+    hidden_params = list(injections.keys())
 
     # --- Build LLM with tools ---
     llm_model = project.llm_model if project else "claude-sonnet-4-5-20250929"
@@ -178,8 +183,8 @@ def build_agent_graph(
         max_tokens=DEFAULT_MAX_TOKENS,
         temperature=DEFAULT_TEMPERATURE,
     )
-    # Give the LLM tool schemas without the context ID parameter
-    llm_tool_schemas = _llm_tool_schemas(tools, hidden_param=inject_key)
+    # Give the LLM tool schemas without the injected parameters
+    llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
@@ -191,7 +196,7 @@ def build_agent_graph(
 
     # --- Create tool node with context ID injection ---
     base_tool_node = ToolNode(tools)
-    tool_node = _make_injecting_tool_node(base_tool_node, inject_key, state_field)
+    tool_node = _make_injecting_tool_node(base_tool_node, injections)
 
     # --- Define graph nodes ---
 

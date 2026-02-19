@@ -490,6 +490,7 @@ async def chat_view(request):
         "messages": [HumanMessage(content=user_content)],
         "tenant_id": tenant_membership.tenant_id,
         "tenant_name": tenant_membership.tenant_name,
+        "tenant_membership_id": str(tenant_membership.id),
         "user_id": str(user.id),
         "user_role": "analyst",
         "needs_correction": False,

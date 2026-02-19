@@ -167,6 +167,7 @@ class AgentState(TypedDict):
     # Tenant context - scopes all data access
     tenant_id: str
     tenant_name: str
+    tenant_membership_id: str
 
     # User context - for permissions and audit
     user_id: str
