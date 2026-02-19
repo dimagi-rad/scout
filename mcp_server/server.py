@@ -48,12 +48,13 @@ mcp = FastMCP("scout")
 
 async def _tenant_list_tables(ctx) -> list[dict]:
     """List tables in a tenant schema via information_schema."""
-    from mcp_server.services.query import execute_query
+    from mcp_server.services.query import execute_internal_query
 
-    result = await execute_query(
+    result = await execute_internal_query(
         ctx,
-        f"SELECT table_name, table_type FROM information_schema.tables "
-        f"WHERE table_schema = '{ctx.db_schema}' ORDER BY table_name",
+        "SELECT table_name, table_type FROM information_schema.tables "
+        "WHERE table_schema = %s ORDER BY table_name",
+        (ctx.db_schema,),
     )
     if not result.get("success", True) and "error" in result:
         return []
@@ -70,14 +71,15 @@ async def _tenant_list_tables(ctx) -> list[dict]:
 
 async def _tenant_describe_table(ctx, table_name: str) -> dict | None:
     """Describe a table in a tenant schema via information_schema."""
-    from mcp_server.services.query import execute_query
+    from mcp_server.services.query import execute_internal_query
 
-    result = await execute_query(
+    result = await execute_internal_query(
         ctx,
-        f"SELECT column_name, data_type, is_nullable, column_default "
-        f"FROM information_schema.columns "
-        f"WHERE table_schema = '{ctx.db_schema}' AND table_name = '{table_name}' "
-        f"ORDER BY ordinal_position",
+        "SELECT column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s "
+        "ORDER BY ordinal_position",
+        (ctx.db_schema, table_name),
     )
     if not result.get("rows"):
         return None

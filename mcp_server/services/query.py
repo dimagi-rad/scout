@@ -78,6 +78,40 @@ def _execute_sync(ctx: ProjectContext, sql: str, timeout_seconds: int) -> dict[s
             cursor.close()
 
 
+def _execute_sync_parameterized(
+    ctx: ProjectContext, sql: str, params: tuple, timeout_seconds: int
+) -> dict[str, Any]:
+    """Run a parameterized SQL query synchronously. No validation or LIMIT injection."""
+    from psycopg2 import sql as psql
+
+    pool_mgr = get_pool_manager()
+    project_shim = _ProjectShim(ctx)
+
+    with pool_mgr.get_connection(project_shim) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.db_schema))
+            )
+            cursor.execute("SET statement_timeout TO %s", (f"{timeout_seconds}s",))
+            cursor.execute(sql, params)
+
+            columns: list[str] = []
+            rows: list[list[Any]] = []
+
+            if cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                rows = [list(row) for row in cursor.fetchall()]
+
+            return {
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+            }
+        finally:
+            cursor.close()
+
+
 class _ProjectShim:
     """Minimal stand-in for a Project model, used by ConnectionPoolManager."""
 
@@ -88,6 +122,24 @@ class _ProjectShim:
 
     def get_connection_params(self) -> dict[str, Any]:
         return self._connection_params
+
+
+async def execute_internal_query(
+    ctx: ProjectContext, sql: str, params: tuple = ()
+) -> dict[str, Any]:
+    """Execute a trusted internal query, bypassing SQL validation.
+
+    Use this for metadata queries (information_schema, pg_catalog) that are
+    constructed by server code, NOT for user-submitted SQL.
+    """
+    try:
+        return await sync_to_async(_execute_sync_parameterized)(
+            ctx, sql, params, ctx.max_query_timeout_seconds
+        )
+    except Exception as e:
+        code, message = _classify_error(e)
+        logger.error("Internal query error: %s", message, exc_info=True)
+        return error_response(code, message)
 
 
 async def execute_query(ctx: ProjectContext, sql: str) -> dict[str, Any]:
