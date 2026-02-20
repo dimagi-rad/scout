@@ -51,6 +51,7 @@ class CommCareProvider(OAuth2Provider):
     name = "CommCare"
     account_class = CommCareAccount
     oauth2_adapter_class = CommCareOAuth2Adapter
+    pkce_enabled_default = True  # CommCare HQ requires PKCE
 
     def get_default_scope(self) -> list[str]:
         """Return the default OAuth scopes to request."""
