@@ -12,6 +12,8 @@ from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
 
+from apps.users.models import TenantCredential, TenantMembership
+
 User = get_user_model()
 
 
@@ -750,6 +752,7 @@ class TestSignup:
 
     def test_signup_duplicate_email_returns_400(self, client, db):
         from django.contrib.auth import get_user_model
+
         User = get_user_model()
         User.objects.create_user(email="existing@example.com", password="pass")
 
@@ -767,9 +770,6 @@ class TestSignup:
             content_type="application/json",
         )
         assert response.status_code == 400
-
-
-from apps.users.models import TenantMembership, TenantCredential
 
 
 class TestMeOnboardingComplete:

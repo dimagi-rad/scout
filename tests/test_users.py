@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.auth import get_user_model
-from apps.users.models import TenantMembership, TenantCredential
+
+from apps.users.models import TenantCredential, TenantMembership
 
 User = get_user_model()
 
@@ -44,6 +45,7 @@ class TestTenantCredential:
             credential_type=TenantCredential.OAUTH,
         )
         from django.db import IntegrityError
+
         with pytest.raises(IntegrityError):
             TenantCredential.objects.create(
                 tenant_membership=membership,
@@ -55,6 +57,7 @@ class TestResolveCommcareDomains:
     def test_creates_tenant_credential_oauth(self, user, db):
         """resolve_commcare_domains must create TenantCredential(type=oauth) for each membership."""
         from unittest.mock import patch
+
         from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [
@@ -76,6 +79,7 @@ class TestResolveCommcareDomains:
     def test_idempotent_on_re_resolve(self, user, db):
         """Calling resolve twice does not create duplicate TenantCredentials."""
         from unittest.mock import patch
+
         from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [{"domain_name": "domain-a", "project_name": "Domain A"}]
@@ -86,9 +90,7 @@ class TestResolveCommcareDomains:
             resolve_commcare_domains(user, "fake-token")
             resolve_commcare_domains(user, "fake-token")
 
-        assert TenantCredential.objects.filter(
-            tenant_membership__user=user
-        ).count() == 1
+        assert TenantCredential.objects.filter(tenant_membership__user=user).count() == 1
 
 
 class TestTenantCredentialEndpoints:
@@ -109,6 +111,7 @@ class TestTenantCredentialEndpoints:
         assert "membership_id" in data
 
         from apps.users.models import TenantCredential, TenantMembership
+
         tm = TenantMembership.objects.get(id=data["membership_id"])
         assert tm.provider == "commcare"
         assert tm.tenant_id == "my-domain"
@@ -130,16 +133,17 @@ class TestTenantCredentialEndpoints:
             content_type="application/json",
         )
         from apps.users.models import TenantCredential
-        cred = TenantCredential.objects.get(
-            tenant_membership__tenant_id="secure-domain"
-        )
+
+        cred = TenantCredential.objects.get(tenant_membership__tenant_id="secure-domain")
         assert plaintext not in cred.encrypted_credential
         # Verify round-trip decryption works
         from apps.users.adapters import decrypt_credential
+
         assert decrypt_credential(cred.encrypted_credential) == plaintext
 
     def test_get_lists_credentials(self, client, db, user):
         from apps.users.models import TenantCredential, TenantMembership
+
         tm = TenantMembership.objects.create(
             user=user, provider="commcare", tenant_id="d1", tenant_name="D1"
         )
@@ -156,6 +160,7 @@ class TestTenantCredentialEndpoints:
 
     def test_delete_removes_credential_and_membership(self, client, db, user):
         from apps.users.models import TenantCredential, TenantMembership
+
         tm = TenantMembership.objects.create(
             user=user, provider="commcare", tenant_id="d2", tenant_name="D2"
         )
@@ -168,5 +173,7 @@ class TestTenantCredentialEndpoints:
         assert not TenantMembership.objects.filter(id=tm.id).exists()
 
     def test_unauthenticated_returns_401(self, client, db):
-        resp = client.post("/api/auth/tenant-credentials/", data={}, content_type="application/json")
+        resp = client.post(
+            "/api/auth/tenant-credentials/", data={}, content_type="application/json"
+        )
         assert resp.status_code == 401

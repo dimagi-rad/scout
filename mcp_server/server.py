@@ -279,14 +279,16 @@ async def run_materialization(
         from apps.users.models import TenantCredential
 
         try:
-            cred_obj = await TenantCredential.objects.select_related(
-                "tenant_membership"
-            ).aget(tenant_membership=tm)
+            cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
+                tenant_membership=tm
+            )
         except TenantCredential.DoesNotExist:
             tc["result"] = error_response(
                 "AUTH_TOKEN_MISSING", "No credential configured for this tenant"
             )
             return tc["result"]
+
+        from asgiref.sync import sync_to_async
 
         if cred_obj.credential_type == TenantCredential.API_KEY:
             from apps.users.adapters import decrypt_credential
@@ -310,15 +312,11 @@ async def run_materialization(
                 .afirst()
             )
             if not token_obj:
-                tc["result"] = error_response(
-                    "AUTH_TOKEN_MISSING", "No CommCare OAuth token found"
-                )
+                tc["result"] = error_response("AUTH_TOKEN_MISSING", "No CommCare OAuth token found")
                 return tc["result"]
             credential = {"type": "oauth", "value": token_obj.token}
 
         # Run materialization (sync, wrapped in sync_to_async)
-        from asgiref.sync import sync_to_async
-
         from mcp_server.loaders.commcare_cases import CommCareAuthError
         from mcp_server.services.materializer import run_commcare_sync
 
