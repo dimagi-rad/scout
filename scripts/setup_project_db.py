@@ -110,10 +110,12 @@ def setup_project_role(project: Project, dry_run: bool = False) -> dict:
 
     # If schema is not public, revoke public schema access
     if schema != "public":
-        statements.extend([
-            f"REVOKE ALL ON SCHEMA public FROM {role_name};",
-            f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {role_name};",
-        ])
+        statements.extend(
+            [
+                f"REVOKE ALL ON SCHEMA public FROM {role_name};",
+                f"REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {role_name};",
+            ]
+        )
 
     results = {
         "project": project.slug,

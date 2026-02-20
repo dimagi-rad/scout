@@ -71,9 +71,7 @@ async def get_mcp_client() -> MultiServerMCPClient:
         except Exception:
             _consecutive_failures += 1
             _last_failure_time = time.monotonic()
-            logger.error(
-                "MCP client creation failed (attempt %d)", _consecutive_failures
-            )
+            logger.error("MCP client creation failed (attempt %d)", _consecutive_failures)
             raise
 
 
@@ -101,9 +99,7 @@ async def get_mcp_tools() -> list:
         _last_failure_time = time.monotonic()
         # Reset client so next attempt creates a fresh one
         _mcp_client = None
-        logger.error(
-            "MCP tool loading failed (attempt %d)", _consecutive_failures
-        )
+        logger.error("MCP tool loading failed (attempt %d)", _consecutive_failures)
         raise
 
 

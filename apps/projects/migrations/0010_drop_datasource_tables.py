@@ -4,11 +4,11 @@ Drop unused datasource tables and clean up django_migrations.
 The DatabaseConnection table is preserved (now owned by projects app).
 All other datasources tables are dropped.
 """
+
 from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("projects", "0008_require_database_connection"),
     ]

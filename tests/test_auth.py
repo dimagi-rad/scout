@@ -3,6 +3,7 @@ Comprehensive tests for Phase 4 (Auth) of the Scout data agent platform.
 
 Tests OAuth integration with django-allauth, custom providers, and header-based auth.
 """
+
 from unittest.mock import Mock, patch
 
 import pytest
@@ -27,7 +28,7 @@ def site(db):
         defaults={
             "domain": "testserver",
             "name": "Test Server",
-        }
+        },
     )
     return site
 
@@ -334,9 +335,7 @@ class TestHeaderAuthCallback:
         }
 
         # Look up user by email from header
-        authenticated_user = User.objects.filter(
-            email=headers["X-Forwarded-Email"]
-        ).first()
+        authenticated_user = User.objects.filter(email=headers["X-Forwarded-Email"]).first()
 
         assert authenticated_user is not None
         assert authenticated_user.id == user.id
@@ -357,8 +356,12 @@ class TestHeaderAuthCallback:
         # Create user from headers
         new_user = User.objects.create_user(
             email=headers["X-Forwarded-Email"],
-            first_name=headers.get("X-Forwarded-Name", "").split()[0] if headers.get("X-Forwarded-Name") else "",
-            last_name=" ".join(headers.get("X-Forwarded-Name", "").split()[1:]) if headers.get("X-Forwarded-Name") else "",
+            first_name=headers.get("X-Forwarded-Name", "").split()[0]
+            if headers.get("X-Forwarded-Name")
+            else "",
+            last_name=" ".join(headers.get("X-Forwarded-Name", "").split()[1:])
+            if headers.get("X-Forwarded-Name")
+            else "",
         )
 
         assert new_user.email == headers["X-Forwarded-Email"]
@@ -371,9 +374,11 @@ class TestHeaderAuthCallback:
             # Missing X-Forwarded-Email
         }
 
-        authenticated_user = User.objects.filter(
-            email=headers.get("X-Forwarded-Email")
-        ).first() if headers.get("X-Forwarded-Email") else None
+        authenticated_user = (
+            User.objects.filter(email=headers.get("X-Forwarded-Email")).first()
+            if headers.get("X-Forwarded-Email")
+            else None
+        )
 
         assert authenticated_user is None
 
@@ -400,7 +405,9 @@ class TestChainlitAuthIntegration:
     """Tests for Chainlit authentication callback integration."""
 
     @patch("allauth.socialaccount.models.SocialAccount.objects")
-    def test_oauth_callback_lookup_by_token(self, mock_social_account_objects, user, social_account):
+    def test_oauth_callback_lookup_by_token(
+        self, mock_social_account_objects, user, social_account
+    ):
         """Test OAuth callback looks up user by provider token/uid."""
         # Mock the SocialAccount query
         mock_social_account_objects.filter.return_value.first.return_value = social_account

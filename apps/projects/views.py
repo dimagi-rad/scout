@@ -1,6 +1,7 @@
 """
 Views for projects app.
 """
+
 from django.http import JsonResponse
 
 

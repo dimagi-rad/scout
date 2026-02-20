@@ -6,20 +6,25 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('artifacts', '0001_initial'),
+        ("artifacts", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='artifact',
-            name='version',
-            field=models.IntegerField(default=1, help_text='Version number of this artifact.', validators=[django.core.validators.MinValueValidator(1)]),
+            model_name="artifact",
+            name="version",
+            field=models.IntegerField(
+                default=1,
+                help_text="Version number of this artifact.",
+                validators=[django.core.validators.MinValueValidator(1)],
+            ),
         ),
         migrations.AddIndex(
-            model_name='sharedartifact',
-            index=models.Index(fields=['artifact', '-created_at'], name='artifacts_s_artifac_fe4956_idx'),
+            model_name="sharedartifact",
+            index=models.Index(
+                fields=["artifact", "-created_at"], name="artifacts_s_artifac_fe4956_idx"
+            ),
         ),
     ]

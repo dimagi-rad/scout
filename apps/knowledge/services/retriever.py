@@ -67,9 +67,7 @@ class KnowledgeRetriever:
 
     def _format_table_knowledge(self) -> str:
         """Format table knowledge with column notes and data quality notes."""
-        tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by(
-            "table_name"
-        )
+        tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by("table_name")
 
         if not tables.exists():
             return ""

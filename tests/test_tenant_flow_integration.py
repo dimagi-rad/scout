@@ -15,10 +15,12 @@ class TestTenantChatFlow:
 
         response = client.post(
             "/api/chat/",
-            data=json.dumps({
-                "messages": [{"role": "user", "content": "Hello"}],
-                "data": {"tenantId": str(tenant_membership.id), "threadId": "test-thread"},
-            }),
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "data": {"tenantId": str(tenant_membership.id), "threadId": "test-thread"},
+                }
+            ),
             content_type="application/json",
         )
 
@@ -38,10 +40,12 @@ class TestTenantChatFlow:
 
         response = client.post(
             "/api/chat/",
-            data=json.dumps({
-                "messages": [{"role": "user", "content": "Hello"}],
-                "data": {"threadId": "test-thread"},
-            }),
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "data": {"threadId": "test-thread"},
+                }
+            ),
             content_type="application/json",
         )
 
@@ -56,13 +60,15 @@ class TestTenantChatFlow:
 
         response = client.post(
             "/api/chat/",
-            data=json.dumps({
-                "messages": [{"role": "user", "content": "Hello"}],
-                "data": {
-                    "tenantId": "00000000-0000-0000-0000-000000000000",
-                    "threadId": "test-thread",
-                },
-            }),
+            data=json.dumps(
+                {
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "data": {
+                        "tenantId": "00000000-0000-0000-0000-000000000000",
+                        "threadId": "test-thread",
+                    },
+                }
+            ),
             content_type="application/json",
         )
 
@@ -73,9 +79,7 @@ class TestTenantChatFlow:
         client = Client()
         client.force_login(user)
 
-        response = client.get(
-            f"/api/chat/threads/?tenant_id={tenant_membership.id}"
-        )
+        response = client.get(f"/api/chat/threads/?tenant_id={tenant_membership.id}")
 
         assert response.status_code == 200
         assert isinstance(response.json(), list)

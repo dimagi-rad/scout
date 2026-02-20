@@ -388,9 +388,7 @@ class TestArtifactDataView:
 
         assert response.status_code == 404
 
-    def test_artifact_data_requires_workspace_membership(
-        self, db, user, client
-    ):
+    def test_artifact_data_requires_workspace_membership(self, db, user, client):
         """Test that artifact access requires workspace membership."""
         from apps.projects.models import TenantWorkspace
 
@@ -730,9 +728,7 @@ class TestSharedArtifactAccessControl:
         assert shared.can_access(user) is True
         assert shared.can_access(other_user) is True
 
-    def test_tenant_access_requires_membership(
-        self, user, other_user, artifact, tenant_membership
-    ):
+    def test_tenant_access_requires_membership(self, user, other_user, artifact, tenant_membership):
         """Test that tenant-level access requires tenant membership."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,

@@ -4,32 +4,31 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0004_alter_project_db_schema_and_more'),
+        ("projects", "0004_alter_project_db_schema_and_more"),
     ]
 
     operations = [
         migrations.RemoveIndex(
-            model_name='conversationlog',
-            name='projects_co_project_fcd6af_idx',
+            model_name="conversationlog",
+            name="projects_co_project_fcd6af_idx",
         ),
         migrations.RemoveIndex(
-            model_name='savedquery',
-            name='projects_sa_project_c0fd2d_idx',
+            model_name="savedquery",
+            name="projects_sa_project_c0fd2d_idx",
         ),
         migrations.RemoveField(
-            model_name='savedquery',
-            name='created_by',
+            model_name="savedquery",
+            name="created_by",
         ),
         migrations.RemoveField(
-            model_name='savedquery',
-            name='project',
+            model_name="savedquery",
+            name="project",
         ),
         migrations.DeleteModel(
-            name='ConversationLog',
+            name="ConversationLog",
         ),
         migrations.DeleteModel(
-            name='SavedQuery',
+            name="SavedQuery",
         ),
     ]

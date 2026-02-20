@@ -5,6 +5,7 @@ After a user authenticates, this service queries the provider's API
 to discover which tenants (domains/organizations) the user belongs to,
 and stores them as TenantMembership records.
 """
+
 from __future__ import annotations
 
 import logging

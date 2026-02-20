@@ -8,85 +8,199 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
-        ('projects', '0002_initial'),
+        ("projects", "0002_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Recipe',
+            name="Recipe",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('name', models.CharField(max_length=255)),
-                ('description', models.TextField(blank=True)),
-                ('variables', models.JSONField(blank=True, default=list, help_text='List of variable definitions for the recipe.')),
-                ('is_shared', models.BooleanField(default=False, help_text='If true, all project members can view and run this recipe.')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('created_by', models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='created_recipes', to=settings.AUTH_USER_MODEL)),
-                ('project', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='recipes', to='projects.project')),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("name", models.CharField(max_length=255)),
+                ("description", models.TextField(blank=True)),
+                (
+                    "variables",
+                    models.JSONField(
+                        blank=True,
+                        default=list,
+                        help_text="List of variable definitions for the recipe.",
+                    ),
+                ),
+                (
+                    "is_shared",
+                    models.BooleanField(
+                        default=False,
+                        help_text="If true, all project members can view and run this recipe.",
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="created_recipes",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "project",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="recipes",
+                        to="projects.project",
+                    ),
+                ),
             ],
             options={
-                'ordering': ['-updated_at'],
+                "ordering": ["-updated_at"],
             },
         ),
         migrations.CreateModel(
-            name='RecipeRun',
+            name="RecipeRun",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('status', models.CharField(choices=[('pending', 'Pending'), ('running', 'Running'), ('completed', 'Completed'), ('failed', 'Failed')], default='pending', max_length=20)),
-                ('variable_values', models.JSONField(default=dict, help_text='Actual variable values used for this run.')),
-                ('step_results', models.JSONField(blank=True, default=list, help_text='Results from each step execution.')),
-                ('started_at', models.DateTimeField(blank=True, null=True)),
-                ('completed_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('recipe', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='runs', to='recipes.recipe')),
-                ('run_by', models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='recipe_runs', to=settings.AUTH_USER_MODEL)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("pending", "Pending"),
+                            ("running", "Running"),
+                            ("completed", "Completed"),
+                            ("failed", "Failed"),
+                        ],
+                        default="pending",
+                        max_length=20,
+                    ),
+                ),
+                (
+                    "variable_values",
+                    models.JSONField(
+                        default=dict, help_text="Actual variable values used for this run."
+                    ),
+                ),
+                (
+                    "step_results",
+                    models.JSONField(
+                        blank=True, default=list, help_text="Results from each step execution."
+                    ),
+                ),
+                ("started_at", models.DateTimeField(blank=True, null=True)),
+                ("completed_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "recipe",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="runs",
+                        to="recipes.recipe",
+                    ),
+                ),
+                (
+                    "run_by",
+                    models.ForeignKey(
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="recipe_runs",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
             ],
             options={
-                'ordering': ['-created_at'],
+                "ordering": ["-created_at"],
             },
         ),
         migrations.CreateModel(
-            name='RecipeStep',
+            name="RecipeStep",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('order', models.PositiveIntegerField(help_text='Execution order of this step (starting from 1).')),
-                ('prompt_template', models.TextField(help_text='Prompt template with {{variable}} placeholders.')),
-                ('expected_tool', models.CharField(blank=True, help_text="Optional: expected tool the agent should use (e.g., 'execute_sql').", max_length=100)),
-                ('description', models.TextField(blank=True, help_text='Optional description of what this step accomplishes.')),
-                ('recipe', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='steps', to='recipes.recipe')),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "order",
+                    models.PositiveIntegerField(
+                        help_text="Execution order of this step (starting from 1)."
+                    ),
+                ),
+                (
+                    "prompt_template",
+                    models.TextField(help_text="Prompt template with {{variable}} placeholders."),
+                ),
+                (
+                    "expected_tool",
+                    models.CharField(
+                        blank=True,
+                        help_text="Optional: expected tool the agent should use (e.g., 'execute_sql').",
+                        max_length=100,
+                    ),
+                ),
+                (
+                    "description",
+                    models.TextField(
+                        blank=True, help_text="Optional description of what this step accomplishes."
+                    ),
+                ),
+                (
+                    "recipe",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="steps",
+                        to="recipes.recipe",
+                    ),
+                ),
             ],
             options={
-                'ordering': ['recipe', 'order'],
+                "ordering": ["recipe", "order"],
             },
         ),
         migrations.AddIndex(
-            model_name='recipe',
-            index=models.Index(fields=['project', 'is_shared'], name='recipes_rec_project_d5eb45_idx'),
+            model_name="recipe",
+            index=models.Index(
+                fields=["project", "is_shared"], name="recipes_rec_project_d5eb45_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='recipe',
-            index=models.Index(fields=['project', 'created_by'], name='recipes_rec_project_3ed35c_idx'),
+            model_name="recipe",
+            index=models.Index(
+                fields=["project", "created_by"], name="recipes_rec_project_3ed35c_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='reciperun',
-            index=models.Index(fields=['recipe', '-created_at'], name='recipes_rec_recipe__692d15_idx'),
+            model_name="reciperun",
+            index=models.Index(
+                fields=["recipe", "-created_at"], name="recipes_rec_recipe__692d15_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='reciperun',
-            index=models.Index(fields=['run_by', '-created_at'], name='recipes_rec_run_by__25687d_idx'),
+            model_name="reciperun",
+            index=models.Index(
+                fields=["run_by", "-created_at"], name="recipes_rec_run_by__25687d_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='reciperun',
-            index=models.Index(fields=['status'], name='recipes_rec_status_26aa34_idx'),
+            model_name="reciperun",
+            index=models.Index(fields=["status"], name="recipes_rec_status_26aa34_idx"),
         ),
         migrations.AlterUniqueTogether(
-            name='recipestep',
-            unique_together={('recipe', 'order')},
+            name="recipestep",
+            unique_together={("recipe", "order")},
         ),
     ]

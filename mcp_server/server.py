@@ -61,11 +61,13 @@ async def _tenant_list_tables(ctx) -> list[dict]:
 
     tables = []
     for row in result.get("rows", []):
-        tables.append({
-            "name": row[0],
-            "type": "view" if row[1] == "VIEW" else "table",
-            "description": "",
-        })
+        tables.append(
+            {
+                "name": row[0],
+                "type": "view" if row[1] == "VIEW" else "table",
+                "description": "",
+            }
+        )
     return tables
 
 
@@ -86,12 +88,14 @@ async def _tenant_describe_table(ctx, table_name: str) -> dict | None:
 
     columns = []
     for row in result.get("rows", []):
-        columns.append({
-            "name": row[0],
-            "type": row[1],
-            "nullable": row[2] == "YES",
-            "default": row[3],
-        })
+        columns.append(
+            {
+                "name": row[0],
+                "type": row[1],
+                "nullable": row[2] == "YES",
+                "default": row[3],
+            }
+        )
     return {"name": table_name, "columns": columns}
 
 
@@ -239,7 +243,9 @@ async def query(tenant_id: str, sql: str) -> dict:
 
 @mcp.tool()
 async def run_materialization(
-    tenant_id: str, tenant_membership_id: str = "", pipeline: str = "commcare_sync",
+    tenant_id: str,
+    tenant_membership_id: str = "",
+    pipeline: str = "commcare_sync",
 ) -> dict:
     """Materialize data from CommCare into the tenant's schema.
 
@@ -262,7 +268,8 @@ async def run_materialization(
                 tm = await qs.aget(id=tenant_membership_id)
             else:
                 tm = await qs.aget(
-                    tenant_id=tenant_id, provider="commcare",
+                    tenant_id=tenant_id,
+                    provider="commcare",
                 )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
@@ -271,16 +278,18 @@ async def run_materialization(
         # Get OAuth token from the user's social account
         from allauth.socialaccount.models import SocialToken
 
-        token_obj = await SocialToken.objects.filter(
-            account__user=tm.user,
-            account__provider__startswith="commcare",
-        ).exclude(
-            account__provider__startswith="commcare_connect",
-        ).afirst()
-        if not token_obj:
-            tc["result"] = error_response(
-                "AUTH_TOKEN_MISSING", "No CommCare OAuth token found"
+        token_obj = (
+            await SocialToken.objects.filter(
+                account__user=tm.user,
+                account__provider__startswith="commcare",
             )
+            .exclude(
+                account__provider__startswith="commcare_connect",
+            )
+            .afirst()
+        )
+        if not token_obj:
+            tc["result"] = error_response("AUTH_TOKEN_MISSING", "No CommCare OAuth token found")
             return tc["result"]
 
         # Run materialization (sync, wrapped in sync_to_async)
@@ -300,9 +309,7 @@ async def run_materialization(
             return tc["result"]
         except Exception as e:
             logger.exception("Materialization failed for tenant %s", tenant_id)
-            tc["result"] = error_response(
-                INTERNAL_ERROR, f"Materialization failed: {e}"
-            )
+            tc["result"] = error_response(INTERNAL_ERROR, f"Materialization failed: {e}")
             return tc["result"]
 
         tc["result"] = success_response(
@@ -365,10 +372,15 @@ def _run_with_reload(args: argparse.Namespace) -> None:
 
     watch_dirs = ["mcp_server", "apps"]
     cmd = [
-        sys.executable, "-m", "mcp_server",
-        "--transport", args.transport,
-        "--host", args.host,
-        "--port", str(args.port),
+        sys.executable,
+        "-m",
+        "mcp_server",
+        "--transport",
+        args.transport,
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
     ]
     if args.verbose:
         cmd.append("--verbose")
@@ -403,7 +415,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8100, help="HTTP port (default: 8100)")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument(
-        "--reload", action="store_true",
+        "--reload",
+        action="store_true",
         help="Auto-reload on code changes (development only)",
     )
 

@@ -6,26 +6,48 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0011_tenantschema_materializationrun'),
+        ("projects", "0011_tenantschema_materializationrun"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='TenantWorkspace',
+            name="TenantWorkspace",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('tenant_id', models.CharField(help_text='Domain name (CommCare) or organization ID. One workspace per tenant.', max_length=255, unique=True)),
-                ('tenant_name', models.CharField(max_length=255)),
-                ('system_prompt', models.TextField(blank=True, help_text='Tenant-specific system prompt. Merged with the base agent prompt.')),
-                ('data_dictionary', models.JSONField(blank=True, help_text='Auto-generated schema documentation.', null=True)),
-                ('data_dictionary_generated_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "tenant_id",
+                    models.CharField(
+                        help_text="Domain name (CommCare) or organization ID. One workspace per tenant.",
+                        max_length=255,
+                        unique=True,
+                    ),
+                ),
+                ("tenant_name", models.CharField(max_length=255)),
+                (
+                    "system_prompt",
+                    models.TextField(
+                        blank=True,
+                        help_text="Tenant-specific system prompt. Merged with the base agent prompt.",
+                    ),
+                ),
+                (
+                    "data_dictionary",
+                    models.JSONField(
+                        blank=True, help_text="Auto-generated schema documentation.", null=True
+                    ),
+                ),
+                ("data_dictionary_generated_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'ordering': ['tenant_name'],
+                "ordering": ["tenant_name"],
             },
         ),
     ]

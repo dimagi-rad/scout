@@ -26,16 +26,18 @@ logger = logging.getLogger(__name__)
 
 
 # Valid categories for agent learnings
-VALID_CATEGORIES = frozenset({
-    "type_mismatch",
-    "filter_required",
-    "join_pattern",
-    "aggregation",
-    "naming",
-    "data_quality",
-    "business_logic",
-    "other",
-})
+VALID_CATEGORIES = frozenset(
+    {
+        "type_mismatch",
+        "filter_required",
+        "join_pattern",
+        "aggregation",
+        "naming",
+        "data_quality",
+        "business_logic",
+        "other",
+    }
+)
 
 
 def create_save_learning_tool(workspace: TenantWorkspace, user: User):
@@ -140,7 +142,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
             return {
                 "status": "error",
                 "message": "Description is too short. Please provide a detailed, "
-                          "actionable description of at least 20 characters.",
+                "actionable description of at least 20 characters.",
                 "learning_id": None,
                 "tables_affected": [],
             }
@@ -149,7 +151,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
             return {
                 "status": "error",
                 "message": f"Invalid category '{category}'. Must be one of: "
-                          f"{', '.join(sorted(VALID_CATEGORIES))}",
+                f"{', '.join(sorted(VALID_CATEGORIES))}",
                 "learning_id": None,
                 "tables_affected": [],
             }
@@ -198,7 +200,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
             return {
                 "status": "updated",
                 "message": f"This learning already exists. Increased confidence to "
-                          f"{existing.confidence_score:.0%}.",
+                f"{existing.confidence_score:.0%}.",
                 "learning_id": str(existing.id),
                 "tables_affected": existing.applies_to_tables,
             }
@@ -229,8 +231,8 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
             return {
                 "status": "saved",
                 "message": f"Learning saved successfully. This correction will be "
-                          f"automatically applied to future queries involving: "
-                          f"{', '.join(tables)}.",
+                f"automatically applied to future queries involving: "
+                f"{', '.join(tables)}.",
                 "learning_id": str(learning.id),
                 "tables_affected": tables,
             }

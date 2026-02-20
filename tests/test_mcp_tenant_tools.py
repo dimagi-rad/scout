@@ -5,11 +5,11 @@ These tools query information_schema via execute_internal_query, bypassing
 the SQL validator. Tests verify the full chain from tool handler through
 to the parameterized query execution.
 """
+
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from django.test import override_settings
-
 import pytest
+from django.test import override_settings
 
 from mcp_server.context import QueryContext
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
@@ -86,10 +86,7 @@ class TestExecuteInternalQuery:
         mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
 
         # This SQL references information_schema — the validator blocked it before.
-        sql = (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = %s"
-        )
+        sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = %s"
         result = await execute_internal_query(tenant_context, sql, ("test_domain",))
 
         assert "error" not in result
@@ -377,9 +374,10 @@ class TestListTablesTool:
     async def test_success(self, tenant_id, tenant_context):
         from mcp_server.server import list_tables
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx, patch(
-            PATCH_INTERNAL_QUERY, new_callable=AsyncMock
-        ) as mock_query:
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+        ):
             mock_ctx.return_value = tenant_context
             mock_query.return_value = {
                 "columns": ["table_name", "table_type"],
@@ -409,9 +407,10 @@ class TestListTablesTool:
     async def test_empty_schema_returns_empty_tables(self, tenant_id, tenant_context):
         from mcp_server.server import list_tables
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx, patch(
-            PATCH_INTERNAL_QUERY, new_callable=AsyncMock
-        ) as mock_query:
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+        ):
             mock_ctx.return_value = tenant_context
             mock_query.return_value = {
                 "columns": ["table_name", "table_type"],
@@ -436,9 +435,10 @@ class TestDescribeTableTool:
     async def test_success(self, tenant_id, tenant_context):
         from mcp_server.server import describe_table
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx, patch(
-            PATCH_INTERNAL_QUERY, new_callable=AsyncMock
-        ) as mock_query:
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+        ):
             mock_ctx.return_value = tenant_context
             mock_query.return_value = {
                 "columns": ["column_name", "data_type", "is_nullable", "column_default"],
@@ -455,9 +455,10 @@ class TestDescribeTableTool:
     async def test_table_not_found(self, tenant_id, tenant_context):
         from mcp_server.server import describe_table
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx, patch(
-            PATCH_INTERNAL_QUERY, new_callable=AsyncMock
-        ) as mock_query:
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+        ):
             mock_ctx.return_value = tenant_context
             mock_query.return_value = {
                 "columns": ["column_name", "data_type", "is_nullable", "column_default"],
@@ -509,9 +510,10 @@ class TestGetMetadataTool:
             },
         ]
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx, patch(
-            PATCH_INTERNAL_QUERY, new_callable=AsyncMock
-        ) as mock_query:
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+        ):
             mock_ctx.return_value = tenant_context
             mock_query.side_effect = query_results
 

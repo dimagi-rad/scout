@@ -167,6 +167,7 @@ class RecipeRunner:
                 if msg.name in ("create_artifact", "update_artifact"):
                     try:
                         import json
+
                         content = msg.content
                         if isinstance(content, str):
                             result = json.loads(content)
@@ -211,7 +212,9 @@ class RecipeRunner:
                 "messages": [HumanMessage(content=prompt)],
                 "tenant_id": workspace.tenant_id if workspace else "",
                 "tenant_name": workspace.tenant_name if workspace else "",
-                "tenant_membership_id": str(self._tenant_membership.id) if self._tenant_membership else "",
+                "tenant_membership_id": str(self._tenant_membership.id)
+                if self._tenant_membership
+                else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
                 "needs_correction": False,
@@ -296,7 +299,9 @@ class RecipeRunner:
                 "messages": [HumanMessage(content=prompt)],
                 "tenant_id": workspace.tenant_id if workspace else "",
                 "tenant_name": workspace.tenant_name if workspace else "",
-                "tenant_membership_id": str(self._tenant_membership.id) if self._tenant_membership else "",
+                "tenant_membership_id": str(self._tenant_membership.id)
+                if self._tenant_membership
+                else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
                 "needs_correction": False,

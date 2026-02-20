@@ -4,25 +4,26 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('chat', '0001_initial'),
+        ("chat", "0001_initial"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='thread',
-            name='is_public',
+            model_name="thread",
+            name="is_public",
             field=models.BooleanField(default=False),
         ),
         migrations.AddField(
-            model_name='thread',
-            name='is_shared',
+            model_name="thread",
+            name="is_shared",
             field=models.BooleanField(default=False),
         ),
         migrations.AddField(
-            model_name='thread',
-            name='share_token',
-            field=models.CharField(blank=True, db_index=True, max_length=64, null=True, unique=True),
+            model_name="thread",
+            name="share_token",
+            field=models.CharField(
+                blank=True, db_index=True, max_length=64, null=True, unique=True
+            ),
         ),
     ]

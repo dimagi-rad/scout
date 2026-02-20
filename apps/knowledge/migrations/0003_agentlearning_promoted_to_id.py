@@ -4,15 +4,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('knowledge', '0002_initial'),
+        ("knowledge", "0002_initial"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='agentlearning',
-            name='promoted_to_id',
-            field=models.UUIDField(blank=True, help_text='UUID of the promoted BusinessRule or VerifiedQuery.', null=True),
+            model_name="agentlearning",
+            name="promoted_to_id",
+            field=models.UUIDField(
+                blank=True,
+                help_text="UUID of the promoted BusinessRule or VerifiedQuery.",
+                null=True,
+            ),
         ),
     ]

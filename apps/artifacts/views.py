@@ -4,6 +4,7 @@ Artifact views for Scout data agent platform.
 Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, executing live queries, and serving shared artifacts.
 """
+
 import json
 import logging
 import secrets
@@ -646,21 +647,23 @@ class ArtifactSandboxView(View):
         has_live_queries = bool(artifact.source_queries)
 
         # Serialize artifact data for embedding in the template
-        artifact_json = json.dumps({
-            "id": str(artifact.id),
-            "title": artifact.title,
-            "type": artifact.artifact_type,
-            "code": artifact.code,
-            "data": artifact.data if not has_live_queries else {},
-            "has_live_queries": has_live_queries,
-            "version": artifact.version,
-        })
+        artifact_json = json.dumps(
+            {
+                "id": str(artifact.id),
+                "title": artifact.title,
+                "type": artifact.artifact_type,
+                "code": artifact.code,
+                "data": artifact.data if not has_live_queries else {},
+                "has_live_queries": has_live_queries,
+                "version": artifact.version,
+            }
+        )
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
 
         # Inject the nonce and artifact data into the template
-        html_content = SANDBOX_HTML_TEMPLATE.replace('{{CSP_NONCE}}', csp_nonce)
-        html_content = html_content.replace('{{ARTIFACT_DATA}}', artifact_json)
+        html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
+        html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
@@ -683,10 +686,7 @@ class ArtifactDataView(View):
 
         # Check access via workspace membership
         if not request.user.is_authenticated:
-            return JsonResponse(
-                {"error": "Authentication required"},
-                status=401
-            )
+            return JsonResponse({"error": "Authentication required"}, status=401)
 
         if not request.user.is_superuser and artifact.workspace_id:
             from apps.users.models import TenantMembership
@@ -744,10 +744,12 @@ class ArtifactQueryDataView(View):
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        return JsonResponse({
-            "queries": [],
-            "static_data": artifact.data or {},
-        })
+        return JsonResponse(
+            {
+                "queries": [],
+                "static_data": artifact.data or {},
+            }
+        )
 
 
 class SharedArtifactView(View):
@@ -765,15 +767,12 @@ class SharedArtifactView(View):
         """Fetch shared artifact data (read-only, no state changes)."""
         share = get_object_or_404(
             SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
-            share_token=share_token
+            share_token=share_token,
         )
 
         # Check if share is expired
         if share.is_expired:
-            return JsonResponse(
-                {"error": "This share link has expired."},
-                status=403
-            )
+            return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level
         if share.access_level == AccessLevel.PUBLIC:
@@ -783,8 +782,7 @@ class SharedArtifactView(View):
             # Workspace-level access requires authentication and tenant membership
             if not request.user.is_authenticated:
                 return JsonResponse(
-                    {"error": "Authentication required to access this artifact."},
-                    status=401
+                    {"error": "Authentication required to access this artifact."}, status=401
                 )
             workspace = share.artifact.workspace
             if workspace:
@@ -801,27 +799,27 @@ class SharedArtifactView(View):
             # Specific user access requires authentication and being in allowed_users
             if not request.user.is_authenticated:
                 return JsonResponse(
-                    {"error": "Authentication required to access this artifact."},
-                    status=401
+                    {"error": "Authentication required to access this artifact."}, status=401
                 )
             if not share.allowed_users.filter(pk=request.user.pk).exists():
                 return JsonResponse(
-                    {"error": "You do not have permission to access this artifact."},
-                    status=403
+                    {"error": "You do not have permission to access this artifact."}, status=403
                 )
 
         # Return artifact data (no state changes on GET)
         artifact = share.artifact
-        return JsonResponse({
-            "id": str(artifact.id),
-            "title": artifact.title,
-            "type": artifact.artifact_type,
-            "code": artifact.code,
-            "data": artifact.data,
-            "version": artifact.version,
-            "access_level": share.access_level,
-            "view_count": share.view_count,
-        })
+        return JsonResponse(
+            {
+                "id": str(artifact.id),
+                "title": artifact.title,
+                "type": artifact.artifact_type,
+                "code": artifact.code,
+                "data": artifact.data,
+                "version": artifact.version,
+                "access_level": share.access_level,
+                "view_count": share.view_count,
+            }
+        )
 
     def post(self, request: HttpRequest, share_token: str) -> JsonResponse:
         """
@@ -832,25 +830,19 @@ class SharedArtifactView(View):
         """
         share = get_object_or_404(
             SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
-            share_token=share_token
+            share_token=share_token,
         )
 
         # Check if share is expired
         if share.is_expired:
-            return JsonResponse(
-                {"error": "This share link has expired."},
-                status=403
-            )
+            return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level (same checks as GET)
         if share.access_level == AccessLevel.PUBLIC:
             pass
         elif share.access_level == AccessLevel.TENANT:
             if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required."},
-                    status=401
-                )
+                return JsonResponse({"error": "Authentication required."}, status=401)
             workspace = share.artifact.workspace
             if workspace:
                 from apps.users.models import TenantMembership
@@ -864,23 +856,19 @@ class SharedArtifactView(View):
                     )
         elif share.access_level == AccessLevel.SPECIFIC:
             if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required."},
-                    status=401
-                )
+                return JsonResponse({"error": "Authentication required."}, status=401)
             if not share.allowed_users.filter(pk=request.user.pk).exists():
-                return JsonResponse(
-                    {"error": "You do not have permission."},
-                    status=403
-                )
+                return JsonResponse({"error": "You do not have permission."}, status=403)
 
         # Record the view
         share.increment_view_count()
 
-        return JsonResponse({
-            "status": "ok",
-            "view_count": share.view_count,
-        })
+        return JsonResponse(
+            {
+                "status": "ok",
+                "view_count": share.view_count,
+            }
+        )
 
 
 class ArtifactExportView(View):
@@ -906,10 +894,7 @@ class ArtifactExportView(View):
 
         # Check access via workspace membership
         if not request.user.is_authenticated:
-            return JsonResponse(
-                {"error": "Authentication required"},
-                status=401
-            )
+            return JsonResponse({"error": "Authentication required"}, status=401)
 
         if not request.user.is_superuser and artifact.workspace_id:
             from apps.users.models import TenantMembership
@@ -927,7 +912,7 @@ class ArtifactExportView(View):
         if format not in ("html", "png", "pdf"):
             return JsonResponse(
                 {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
-                status=400
+                status=400,
             )
 
         exporter = ArtifactExporter(artifact)
@@ -943,8 +928,10 @@ class ArtifactExportView(View):
         # In production, this would use async views or background tasks
         if format in ("png", "pdf"):
             return JsonResponse(
-                {"error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."},
-                status=501
+                {
+                    "error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."
+                },
+                status=501,
             )
 
         return JsonResponse({"error": "Export failed"}, status=500)

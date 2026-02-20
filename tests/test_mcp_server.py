@@ -121,9 +121,7 @@ class TestExecuteQuery:
 
     @pytest.mark.asyncio
     async def test_dangerous_function_rejected(self, project_context):
-        result = await execute_query(
-            project_context, "SELECT pg_read_file('/etc/passwd')"
-        )
+        result = await execute_query(project_context, "SELECT pg_read_file('/etc/passwd')")
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
         assert "not allowed" in result["error"]["message"].lower()

@@ -4,44 +4,43 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('artifacts', '0003_rescope_to_workspace'),
-        ('chat', '0004_rescope_to_workspace'),
-        ('knowledge', '0006_rescope_to_workspace'),
-        ('projects', '0012_add_tenant_workspace'),
-        ('recipes', '0005_rescope_to_workspace'),
+        ("artifacts", "0003_rescope_to_workspace"),
+        ("chat", "0004_rescope_to_workspace"),
+        ("knowledge", "0006_rescope_to_workspace"),
+        ("projects", "0012_add_tenant_workspace"),
+        ("recipes", "0005_rescope_to_workspace"),
     ]
 
     operations = [
         migrations.RemoveField(
-            model_name='project',
-            name='database_connection',
+            model_name="project",
+            name="database_connection",
         ),
         migrations.RemoveField(
-            model_name='project',
-            name='created_by',
+            model_name="project",
+            name="created_by",
         ),
         # Clear unique_together BEFORE removing the project field
         migrations.AlterUniqueTogether(
-            name='projectmembership',
+            name="projectmembership",
             unique_together=set(),
         ),
         migrations.RemoveField(
-            model_name='projectmembership',
-            name='project',
+            model_name="projectmembership",
+            name="project",
         ),
         migrations.RemoveField(
-            model_name='projectmembership',
-            name='user',
+            model_name="projectmembership",
+            name="user",
         ),
         migrations.DeleteModel(
-            name='DatabaseConnection',
+            name="DatabaseConnection",
         ),
         migrations.DeleteModel(
-            name='Project',
+            name="Project",
         ),
         migrations.DeleteModel(
-            name='ProjectMembership',
+            name="ProjectMembership",
         ),
     ]

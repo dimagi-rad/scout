@@ -4,6 +4,7 @@ API views for recipe management.
 Provides a public endpoint for accessing shared recipe runs.
 Project-scoped recipe CRUD views have been removed (replaced by workspace-scoped APIs).
 """
+
 from django.shortcuts import get_object_or_404
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import JSONRenderer

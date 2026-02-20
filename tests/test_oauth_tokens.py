@@ -19,6 +19,7 @@ class TestTokenStorageSettings:
         """allauth should be configured to persist OAuth tokens."""
         assert settings.SOCIALACCOUNT_STORE_TOKENS is True
 
+
 TEST_FERNET_KEY = Fernet.generate_key().decode()
 
 
@@ -28,6 +29,7 @@ class TestTokenEncryptionAdapter:
     @pytest.fixture
     def adapter(self):
         from apps.users.adapters import EncryptingSocialAccountAdapter
+
         return EncryptingSocialAccountAdapter()
 
     @patch.object(settings, "DB_CREDENTIAL_KEY", TEST_FERNET_KEY)
@@ -64,6 +66,7 @@ class TestCommCareConnectProvider:
     def test_provider_registered(self):
         """CommCare Connect provider should be discoverable by allauth."""
         from allauth.socialaccount import providers
+
         registry = providers.registry
         provider_cls = registry.get_class("commcare_connect")
         assert provider_cls is not None
@@ -152,11 +155,13 @@ class TestTokenRefresh:
 
         mock_post.return_value = MagicMock(
             status_code=200,
-            json=MagicMock(return_value={
-                "access_token": "new_access_token",
-                "refresh_token": "new_refresh_token",
-                "expires_in": 3600,
-            }),
+            json=MagicMock(
+                return_value={
+                    "access_token": "new_access_token",
+                    "refresh_token": "new_refresh_token",
+                    "expires_in": 3600,
+                }
+            ),
         )
         mock_post.return_value.raise_for_status = MagicMock()
 

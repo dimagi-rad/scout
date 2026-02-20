@@ -5,22 +5,33 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('chat', '0002_add_thread_sharing_fields'),
-        ('projects', '0011_tenantschema_materializationrun'),
-        ('users', '0003_tenantmembership'),
+        ("chat", "0002_add_thread_sharing_fields"),
+        ("projects", "0011_tenantschema_materializationrun"),
+        ("users", "0003_tenantmembership"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='thread',
-            name='tenant_membership',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='threads', to='users.tenantmembership'),
+            model_name="thread",
+            name="tenant_membership",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="threads",
+                to="users.tenantmembership",
+            ),
         ),
         migrations.AlterField(
-            model_name='thread',
-            name='project',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='threads', to='projects.project'),
+            model_name="thread",
+            name="project",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="threads",
+                to="projects.project",
+            ),
         ),
     ]

@@ -6,141 +6,372 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='AgentLearning',
+            name="AgentLearning",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('description', models.TextField(help_text='Plain English description of the learning. This is what gets injected into the prompt.')),
-                ('category', models.CharField(choices=[('type_mismatch', 'Column type mismatch'), ('filter_required', 'Missing required filter'), ('join_pattern', 'Correct join pattern'), ('aggregation', 'Aggregation gotcha'), ('naming', 'Column/table naming convention'), ('data_quality', 'Data quality issue'), ('business_logic', 'Business logic correction'), ('other', 'Other')], default='other', max_length=50)),
-                ('applies_to_tables', models.JSONField(default=list, help_text='Tables this learning applies to.')),
-                ('original_error', models.TextField(blank=True, help_text='The error message or suspicious result.')),
-                ('original_sql', models.TextField(blank=True, help_text='The SQL that failed.')),
-                ('corrected_sql', models.TextField(blank=True, help_text='The SQL that worked.')),
-                ('confidence_score', models.FloatField(default=0.5, help_text='0-1 score. Increases when the learning is confirmed useful, decreases if contradicted.')),
-                ('times_applied', models.IntegerField(default=0, help_text='How many times this learning has been used.')),
-                ('is_active', models.BooleanField(default=True)),
-                ('promoted_to', models.CharField(blank=True, choices=[('business_rule', 'Business Rule'), ('verified_query', 'Verified Query')], max_length=50)),
-                ('discovered_in_conversation', models.CharField(blank=True, max_length=255)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "description",
+                    models.TextField(
+                        help_text="Plain English description of the learning. This is what gets injected into the prompt."
+                    ),
+                ),
+                (
+                    "category",
+                    models.CharField(
+                        choices=[
+                            ("type_mismatch", "Column type mismatch"),
+                            ("filter_required", "Missing required filter"),
+                            ("join_pattern", "Correct join pattern"),
+                            ("aggregation", "Aggregation gotcha"),
+                            ("naming", "Column/table naming convention"),
+                            ("data_quality", "Data quality issue"),
+                            ("business_logic", "Business logic correction"),
+                            ("other", "Other"),
+                        ],
+                        default="other",
+                        max_length=50,
+                    ),
+                ),
+                (
+                    "applies_to_tables",
+                    models.JSONField(default=list, help_text="Tables this learning applies to."),
+                ),
+                (
+                    "original_error",
+                    models.TextField(
+                        blank=True, help_text="The error message or suspicious result."
+                    ),
+                ),
+                ("original_sql", models.TextField(blank=True, help_text="The SQL that failed.")),
+                ("corrected_sql", models.TextField(blank=True, help_text="The SQL that worked.")),
+                (
+                    "confidence_score",
+                    models.FloatField(
+                        default=0.5,
+                        help_text="0-1 score. Increases when the learning is confirmed useful, decreases if contradicted.",
+                    ),
+                ),
+                (
+                    "times_applied",
+                    models.IntegerField(
+                        default=0, help_text="How many times this learning has been used."
+                    ),
+                ),
+                ("is_active", models.BooleanField(default=True)),
+                (
+                    "promoted_to",
+                    models.CharField(
+                        blank=True,
+                        choices=[
+                            ("business_rule", "Business Rule"),
+                            ("verified_query", "Verified Query"),
+                        ],
+                        max_length=50,
+                    ),
+                ),
+                ("discovered_in_conversation", models.CharField(blank=True, max_length=255)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
             options={
-                'ordering': ['-confidence_score', '-times_applied'],
+                "ordering": ["-confidence_score", "-times_applied"],
             },
         ),
         migrations.CreateModel(
-            name='BusinessRule',
+            name="BusinessRule",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('title', models.CharField(max_length=255)),
-                ('description', models.TextField()),
-                ('applies_to_tables', models.JSONField(blank=True, default=list)),
-                ('applies_to_metrics', models.JSONField(blank=True, default=list)),
-                ('tags', models.JSONField(blank=True, default=list)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("title", models.CharField(max_length=255)),
+                ("description", models.TextField()),
+                ("applies_to_tables", models.JSONField(blank=True, default=list)),
+                ("applies_to_metrics", models.JSONField(blank=True, default=list)),
+                ("tags", models.JSONField(blank=True, default=list)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'ordering': ['title'],
+                "ordering": ["title"],
             },
         ),
         migrations.CreateModel(
-            name='CanonicalMetric',
+            name="CanonicalMetric",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('name', models.CharField(help_text='Metric name. E.g. "MRR", "DAU", "Churn Rate"', max_length=255)),
-                ('definition', models.TextField(help_text="Plain English definition. E.g. 'Sum of active subscription amounts, excluding trials.'")),
-                ('sql_template', models.TextField(help_text='The canonical SQL for computing this metric. May include {{date_range}} or other variables.')),
-                ('unit', models.CharField(blank=True, help_text='E.g. "USD", "users", "percentage"', max_length=50)),
-                ('owner', models.CharField(blank=True, help_text='Who owns the definition of this metric.', max_length=255)),
-                ('caveats', models.JSONField(default=list, help_text='Known limitations. E.g. ["Excludes enterprise contracts billed annually"]')),
-                ('tags', models.JSONField(blank=True, default=list, help_text='E.g. ["finance", "growth", "product"]')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "name",
+                    models.CharField(
+                        help_text='Metric name. E.g. "MRR", "DAU", "Churn Rate"', max_length=255
+                    ),
+                ),
+                (
+                    "definition",
+                    models.TextField(
+                        help_text="Plain English definition. E.g. 'Sum of active subscription amounts, excluding trials.'"
+                    ),
+                ),
+                (
+                    "sql_template",
+                    models.TextField(
+                        help_text="The canonical SQL for computing this metric. May include {{date_range}} or other variables."
+                    ),
+                ),
+                (
+                    "unit",
+                    models.CharField(
+                        blank=True, help_text='E.g. "USD", "users", "percentage"', max_length=50
+                    ),
+                ),
+                (
+                    "owner",
+                    models.CharField(
+                        blank=True,
+                        help_text="Who owns the definition of this metric.",
+                        max_length=255,
+                    ),
+                ),
+                (
+                    "caveats",
+                    models.JSONField(
+                        default=list,
+                        help_text='Known limitations. E.g. ["Excludes enterprise contracts billed annually"]',
+                    ),
+                ),
+                (
+                    "tags",
+                    models.JSONField(
+                        blank=True, default=list, help_text='E.g. ["finance", "growth", "product"]'
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'ordering': ['name'],
+                "ordering": ["name"],
             },
         ),
         migrations.CreateModel(
-            name='EvalRun',
+            name="EvalRun",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('model_used', models.CharField(max_length=100)),
-                ('knowledge_snapshot', models.JSONField(default=dict, help_text='Snapshot of knowledge state at eval time (counts, last modified).')),
-                ('total_queries', models.IntegerField(default=0)),
-                ('passed', models.IntegerField(default=0)),
-                ('failed', models.IntegerField(default=0)),
-                ('errored', models.IntegerField(default=0)),
-                ('accuracy', models.FloatField(default=0.0)),
-                ('results', models.JSONField(default=list, help_text='List of {golden_query_id, passed, expected, actual, error, latency_ms}')),
-                ('started_at', models.DateTimeField(auto_now_add=True)),
-                ('completed_at', models.DateTimeField(null=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("model_used", models.CharField(max_length=100)),
+                (
+                    "knowledge_snapshot",
+                    models.JSONField(
+                        default=dict,
+                        help_text="Snapshot of knowledge state at eval time (counts, last modified).",
+                    ),
+                ),
+                ("total_queries", models.IntegerField(default=0)),
+                ("passed", models.IntegerField(default=0)),
+                ("failed", models.IntegerField(default=0)),
+                ("errored", models.IntegerField(default=0)),
+                ("accuracy", models.FloatField(default=0.0)),
+                (
+                    "results",
+                    models.JSONField(
+                        default=list,
+                        help_text="List of {golden_query_id, passed, expected, actual, error, latency_ms}",
+                    ),
+                ),
+                ("started_at", models.DateTimeField(auto_now_add=True)),
+                ("completed_at", models.DateTimeField(null=True)),
             ],
             options={
-                'ordering': ['-started_at'],
+                "ordering": ["-started_at"],
             },
         ),
         migrations.CreateModel(
-            name='GoldenQuery',
+            name="GoldenQuery",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('question', models.TextField(help_text='The natural language question to ask the agent.')),
-                ('expected_sql', models.TextField(blank=True, help_text='Optional: the expected SQL (for structural comparison).')),
-                ('expected_result', models.JSONField(help_text='The expected result. Can be exact values, ranges, or patterns.')),
-                ('comparison_mode', models.CharField(choices=[('exact', 'Exact match on values'), ('approximate', 'Values within tolerance'), ('row_count', 'Correct number of rows'), ('contains', 'Result contains expected values'), ('structure', 'Correct columns and types')], default='exact', max_length=20)),
-                ('tolerance', models.FloatField(default=0.01, help_text='For approximate comparison: relative tolerance (0.01 = 1%).')),
-                ('difficulty', models.CharField(choices=[('easy', 'Easy'), ('medium', 'Medium'), ('hard', 'Hard')], default='medium', max_length=20)),
-                ('tags', models.JSONField(blank=True, default=list)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "question",
+                    models.TextField(help_text="The natural language question to ask the agent."),
+                ),
+                (
+                    "expected_sql",
+                    models.TextField(
+                        blank=True,
+                        help_text="Optional: the expected SQL (for structural comparison).",
+                    ),
+                ),
+                (
+                    "expected_result",
+                    models.JSONField(
+                        help_text="The expected result. Can be exact values, ranges, or patterns."
+                    ),
+                ),
+                (
+                    "comparison_mode",
+                    models.CharField(
+                        choices=[
+                            ("exact", "Exact match on values"),
+                            ("approximate", "Values within tolerance"),
+                            ("row_count", "Correct number of rows"),
+                            ("contains", "Result contains expected values"),
+                            ("structure", "Correct columns and types"),
+                        ],
+                        default="exact",
+                        max_length=20,
+                    ),
+                ),
+                (
+                    "tolerance",
+                    models.FloatField(
+                        default=0.01,
+                        help_text="For approximate comparison: relative tolerance (0.01 = 1%).",
+                    ),
+                ),
+                (
+                    "difficulty",
+                    models.CharField(
+                        choices=[("easy", "Easy"), ("medium", "Medium"), ("hard", "Hard")],
+                        default="medium",
+                        max_length=20,
+                    ),
+                ),
+                ("tags", models.JSONField(blank=True, default=list)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
             options={
-                'verbose_name_plural': 'Golden queries',
-                'ordering': ['difficulty', 'question'],
+                "verbose_name_plural": "Golden queries",
+                "ordering": ["difficulty", "question"],
             },
         ),
         migrations.CreateModel(
-            name='TableKnowledge',
+            name="TableKnowledge",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('table_name', models.CharField(max_length=255)),
-                ('description', models.TextField(help_text='Human-written description of what this table represents and when to use it.')),
-                ('use_cases', models.JSONField(default=list, help_text='What questions this table helps answer. E.g. ["Revenue reporting", "User retention analysis"]')),
-                ('data_quality_notes', models.JSONField(default=list, help_text='Known quirks. E.g. ["created_at is UTC", "amount is in cents not dollars"]')),
-                ('owner', models.CharField(blank=True, help_text="Team or person responsible for this table's data quality.", max_length=255)),
-                ('refresh_frequency', models.CharField(blank=True, help_text='How often this data updates. E.g. "hourly", "daily at 3am UTC", "real-time"', max_length=100)),
-                ('related_tables', models.JSONField(default=list, help_text='Tables commonly joined with this one. E.g. [{"table": "users", "join_hint": "orders.user_id = users.id"}]')),
-                ('column_notes', models.JSONField(default=dict, help_text='Per-column notes. E.g. {"status": "Values: active, churned, trial"}')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("table_name", models.CharField(max_length=255)),
+                (
+                    "description",
+                    models.TextField(
+                        help_text="Human-written description of what this table represents and when to use it."
+                    ),
+                ),
+                (
+                    "use_cases",
+                    models.JSONField(
+                        default=list,
+                        help_text='What questions this table helps answer. E.g. ["Revenue reporting", "User retention analysis"]',
+                    ),
+                ),
+                (
+                    "data_quality_notes",
+                    models.JSONField(
+                        default=list,
+                        help_text='Known quirks. E.g. ["created_at is UTC", "amount is in cents not dollars"]',
+                    ),
+                ),
+                (
+                    "owner",
+                    models.CharField(
+                        blank=True,
+                        help_text="Team or person responsible for this table's data quality.",
+                        max_length=255,
+                    ),
+                ),
+                (
+                    "refresh_frequency",
+                    models.CharField(
+                        blank=True,
+                        help_text='How often this data updates. E.g. "hourly", "daily at 3am UTC", "real-time"',
+                        max_length=100,
+                    ),
+                ),
+                (
+                    "related_tables",
+                    models.JSONField(
+                        default=list,
+                        help_text='Tables commonly joined with this one. E.g. [{"table": "users", "join_hint": "orders.user_id = users.id"}]',
+                    ),
+                ),
+                (
+                    "column_notes",
+                    models.JSONField(
+                        default=dict,
+                        help_text='Per-column notes. E.g. {"status": "Values: active, churned, trial"}',
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'verbose_name_plural': 'Table knowledge',
-                'ordering': ['table_name'],
+                "verbose_name_plural": "Table knowledge",
+                "ordering": ["table_name"],
             },
         ),
         migrations.CreateModel(
-            name='VerifiedQuery',
+            name="VerifiedQuery",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('name', models.CharField(help_text='Short name for this query pattern.', max_length=255)),
-                ('description', models.TextField(help_text='What question does this query answer? Written in natural language.')),
-                ('sql', models.TextField(help_text='The verified SQL query.')),
-                ('tags', models.JSONField(blank=True, default=list)),
-                ('tables_used', models.JSONField(default=list, help_text='List of table names this query uses.')),
-                ('verified_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "name",
+                    models.CharField(
+                        help_text="Short name for this query pattern.", max_length=255
+                    ),
+                ),
+                (
+                    "description",
+                    models.TextField(
+                        help_text="What question does this query answer? Written in natural language."
+                    ),
+                ),
+                ("sql", models.TextField(help_text="The verified SQL query.")),
+                ("tags", models.JSONField(blank=True, default=list)),
+                (
+                    "tables_used",
+                    models.JSONField(
+                        default=list, help_text="List of table names this query uses."
+                    ),
+                ),
+                ("verified_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'verbose_name_plural': 'Verified queries',
-                'ordering': ['name'],
+                "verbose_name_plural": "Verified queries",
+                "ordering": ["name"],
             },
         ),
     ]

@@ -1,4 +1,5 @@
 """API views for knowledge management."""
+
 import io
 import logging
 import zipfile
@@ -99,17 +100,19 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
 
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
 
-        return Response({
-            "results": paginated_items,
-            "pagination": {
-                "page": page,
-                "page_size": page_size,
-                "total_count": total_count,
-                "total_pages": total_pages,
-                "has_next": page < total_pages,
-                "has_previous": page > 1,
-            },
-        })
+        return Response(
+            {
+                "results": paginated_items,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_previous": page > 1,
+                },
+            }
+        )
 
     def post(self, request, project_id):
         project = self.get_project(project_id)
@@ -121,7 +124,9 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         item_type = request.data.get("type")
         if not item_type or item_type not in KNOWLEDGE_TYPES:
             return Response(
-                {"error": f"Invalid or missing type. Must be one of: {', '.join(KNOWLEDGE_TYPES.keys())}"},
+                {
+                    "error": f"Invalid or missing type. Must be one of: {', '.join(KNOWLEDGE_TYPES.keys())}"
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

@@ -1,4 +1,4 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
@@ -16,9 +16,7 @@ class TestCommCareCaseLoader:
             ],
         }
 
-        with patch(
-            "mcp_server.loaders.commcare_cases.requests.get", return_value=mock_response
-        ):
+        with patch("mcp_server.loaders.commcare_cases.requests.get", return_value=mock_response):
             loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
             cases = loader.load()
 
@@ -41,9 +39,7 @@ class TestCommCareCaseLoader:
             "cases": [{"case_id": "3"}],
         }
 
-        with patch(
-            "mcp_server.loaders.commcare_cases.requests.get", side_effect=[page1, page2]
-        ):
+        with patch("mcp_server.loaders.commcare_cases.requests.get", side_effect=[page1, page2]):
             loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
             cases = loader.load()
 

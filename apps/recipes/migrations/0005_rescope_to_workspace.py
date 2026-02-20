@@ -6,37 +6,46 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0012_add_tenant_workspace'),
-        ('recipes', '0004_migrate_steps_to_prompt'),
+        ("projects", "0012_add_tenant_workspace"),
+        ("recipes", "0004_migrate_steps_to_prompt"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.RemoveIndex(
-            model_name='recipe',
-            name='recipes_rec_project_d5eb45_idx',
+            model_name="recipe",
+            name="recipes_rec_project_d5eb45_idx",
         ),
         migrations.RemoveIndex(
-            model_name='recipe',
-            name='recipes_rec_project_3ed35c_idx',
+            model_name="recipe",
+            name="recipes_rec_project_3ed35c_idx",
         ),
         migrations.RemoveField(
-            model_name='recipe',
-            name='project',
+            model_name="recipe",
+            name="project",
         ),
         migrations.AddField(
-            model_name='recipe',
-            name='workspace',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='recipes', to='projects.tenantworkspace'),
+            model_name="recipe",
+            name="workspace",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="recipes",
+                to="projects.tenantworkspace",
+            ),
         ),
         migrations.AddIndex(
-            model_name='recipe',
-            index=models.Index(fields=['workspace', 'is_shared'], name='recipes_rec_workspa_943bef_idx'),
+            model_name="recipe",
+            index=models.Index(
+                fields=["workspace", "is_shared"], name="recipes_rec_workspa_943bef_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='recipe',
-            index=models.Index(fields=['workspace', 'created_by'], name='recipes_rec_workspa_212272_idx'),
+            model_name="recipe",
+            index=models.Index(
+                fields=["workspace", "created_by"], name="recipes_rec_workspa_212272_idx"
+            ),
         ),
     ]

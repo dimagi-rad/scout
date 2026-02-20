@@ -53,8 +53,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
 
     if ts is None:
         raise ValueError(
-            f"No active schema for tenant '{tenant_id}'. "
-            f"Run materialization first to load data."
+            f"No active schema for tenant '{tenant_id}'. Run materialization first to load data."
         )
 
     url = settings.MANAGED_DATABASE_URL

@@ -66,9 +66,7 @@ def get_database_url() -> str:
         engine = db_config.get("ENGINE", "")
 
         if "postgresql" not in engine.lower() and "postgres" not in engine.lower():
-            raise ValueError(
-                f"Django default database is not PostgreSQL: {engine}"
-            )
+            raise ValueError(f"Django default database is not PostgreSQL: {engine}")
 
         host = db_config.get("HOST", "localhost")
         port = db_config.get("PORT", 5432)

@@ -3,6 +3,7 @@ API views for artifact sharing functionality.
 
 Provides endpoints for creating, listing, and revoking share links for artifacts.
 """
+
 from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -114,9 +115,11 @@ class ListSharesView(ArtifactSharePermissionMixin, APIView):
         if not has_permission:
             return error_response
 
-        shares = SharedArtifact.objects.prefetch_related("allowed_users").filter(
-            artifact=artifact
-        ).order_by("-created_at")
+        shares = (
+            SharedArtifact.objects.prefetch_related("allowed_users")
+            .filter(artifact=artifact)
+            .order_by("-created_at")
+        )
         serializer = SharedArtifactListSerializer(shares, many=True)
 
         return Response(serializer.data)

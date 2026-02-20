@@ -6,34 +6,51 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('artifacts', '0002_alter_artifact_version_and_more'),
-        ('projects', '0012_add_tenant_workspace'),
+        ("artifacts", "0002_alter_artifact_version_and_more"),
+        ("projects", "0012_add_tenant_workspace"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.RemoveIndex(
-            model_name='artifact',
-            name='artifacts_a_project_16361b_idx',
+            model_name="artifact",
+            name="artifacts_a_project_16361b_idx",
         ),
         migrations.RemoveField(
-            model_name='artifact',
-            name='project',
+            model_name="artifact",
+            name="project",
         ),
         migrations.AddField(
-            model_name='artifact',
-            name='workspace',
-            field=models.ForeignKey(blank=True, help_text='The tenant workspace this artifact belongs to.', null=True, on_delete=django.db.models.deletion.CASCADE, related_name='artifacts', to='projects.tenantworkspace'),
+            model_name="artifact",
+            name="workspace",
+            field=models.ForeignKey(
+                blank=True,
+                help_text="The tenant workspace this artifact belongs to.",
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="artifacts",
+                to="projects.tenantworkspace",
+            ),
         ),
         migrations.AlterField(
-            model_name='sharedartifact',
-            name='access_level',
-            field=models.CharField(choices=[('public', 'Public (anyone with link)'), ('tenant', 'Tenant Members Only'), ('specific', 'Specific Users Only')], default='tenant', help_text='Who can access this shared artifact.', max_length=20),
+            model_name="sharedartifact",
+            name="access_level",
+            field=models.CharField(
+                choices=[
+                    ("public", "Public (anyone with link)"),
+                    ("tenant", "Tenant Members Only"),
+                    ("specific", "Specific Users Only"),
+                ],
+                default="tenant",
+                help_text="Who can access this shared artifact.",
+                max_length=20,
+            ),
         ),
         migrations.AddIndex(
-            model_name='artifact',
-            index=models.Index(fields=['workspace', '-created_at'], name='artifacts_a_workspa_a5ce68_idx'),
+            model_name="artifact",
+            index=models.Index(
+                fields=["workspace", "-created_at"], name="artifacts_a_workspa_a5ce68_idx"
+            ),
         ),
     ]

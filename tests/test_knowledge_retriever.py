@@ -9,7 +9,6 @@ Tests cover:
 - Full assembly with all knowledge types
 - Retrieval filtering and prioritization
 """
-import pytest
 
 from apps.knowledge.models import (
     AgentLearning,

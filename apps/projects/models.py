@@ -3,6 +3,7 @@ Core models for Scout data agent platform.
 
 Defines TenantWorkspace, TenantSchema, and MaterializationRun models.
 """
+
 import uuid
 
 from django.db import models

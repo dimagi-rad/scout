@@ -7,7 +7,6 @@ from .views import CommCareConnectOAuth2Adapter
 
 
 class CommCareConnectAccount(ProviderAccount):
-
     def get_avatar_url(self) -> str | None:
         return None
 

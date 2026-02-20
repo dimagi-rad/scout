@@ -1,4 +1,5 @@
 """Admin configuration for Knowledge models."""
+
 from django.contrib import admin
 
 from .models import (

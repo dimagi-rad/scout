@@ -1,4 +1,5 @@
 """Utility functions for knowledge import/export."""
+
 import yaml
 
 
@@ -26,7 +27,7 @@ def parse_frontmatter(text: str) -> tuple[str, list[str], str]:
     # Find closing ---
     end_idx = text.index("---", 3)
     frontmatter_str = text[3:end_idx].strip()
-    body = text[end_idx + 3:].strip()
+    body = text[end_idx + 3 :].strip()
 
     meta = yaml.safe_load(frontmatter_str) or {}
     title = meta.get("title", "")

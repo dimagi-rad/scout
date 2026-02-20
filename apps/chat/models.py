@@ -24,9 +24,7 @@ class Thread(models.Model):
     title = models.CharField(max_length=200, default="New chat")
     is_shared = models.BooleanField(default=False)
     is_public = models.BooleanField(default=False)
-    share_token = models.CharField(
-        max_length=64, unique=True, null=True, blank=True, db_index=True
-    )
+    share_token = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

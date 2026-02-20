@@ -7,6 +7,7 @@ Tests cover:
 - Revoking share links
 - Permission checks (creator vs other users)
 """
+
 import uuid
 from datetime import timedelta
 
@@ -109,10 +110,13 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
 
         expires_at = timezone.now() + timedelta(days=7)
         url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
-        response = self.client.post(url, {
-            "access_level": "public",
-            "expires_at": expires_at.isoformat(),
-        })
+        response = self.client.post(
+            url,
+            {
+                "access_level": "public",
+                "expires_at": expires_at.isoformat(),
+            },
+        )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertFalse(response.data["is_expired"])
@@ -123,10 +127,13 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
 
         expires_at = timezone.now() - timedelta(days=1)
         url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
-        response = self.client.post(url, {
-            "access_level": "public",
-            "expires_at": expires_at.isoformat(),
-        })
+        response = self.client.post(
+            url,
+            {
+                "access_level": "public",
+                "expires_at": expires_at.isoformat(),
+            },
+        )
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
@@ -145,10 +152,13 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         self.client.force_authenticate(user=self.creator)
 
         url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
-        response = self.client.post(url, {
-            "access_level": "specific",
-            "allowed_users": [self.other_user.id],
-        })
+        response = self.client.post(
+            url,
+            {
+                "access_level": "specific",
+                "allowed_users": [self.other_user.id],
+            },
+        )
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertEqual(response.data["access_level"], "specific")
@@ -263,10 +273,13 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         """Artifact creator can revoke share links."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:revoke_share", kwargs={
-            "artifact_id": self.artifact.id,
-            "share_token": self.share.share_token,
-        })
+        url = reverse(
+            "artifacts:revoke_share",
+            kwargs={
+                "artifact_id": self.artifact.id,
+                "share_token": self.share.share_token,
+            },
+        )
         response = self.client.delete(url)
 
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
@@ -276,10 +289,13 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         """Non-creator users cannot revoke share links."""
         self.client.force_authenticate(user=self.other_user)
 
-        url = reverse("artifacts:revoke_share", kwargs={
-            "artifact_id": self.artifact.id,
-            "share_token": self.share.share_token,
-        })
+        url = reverse(
+            "artifacts:revoke_share",
+            kwargs={
+                "artifact_id": self.artifact.id,
+                "share_token": self.share.share_token,
+            },
+        )
         response = self.client.delete(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -289,10 +305,13 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         """Regular users who are not the creator cannot revoke share links."""
         self.client.force_authenticate(user=self.regular_user)
 
-        url = reverse("artifacts:revoke_share", kwargs={
-            "artifact_id": self.artifact.id,
-            "share_token": self.share.share_token,
-        })
+        url = reverse(
+            "artifacts:revoke_share",
+            kwargs={
+                "artifact_id": self.artifact.id,
+                "share_token": self.share.share_token,
+            },
+        )
         response = self.client.delete(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -300,10 +319,13 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
 
     def test_revoke_share_unauthenticated(self):
         """Unauthenticated users cannot revoke share links."""
-        url = reverse("artifacts:revoke_share", kwargs={
-            "artifact_id": self.artifact.id,
-            "share_token": self.share.share_token,
-        })
+        url = reverse(
+            "artifacts:revoke_share",
+            kwargs={
+                "artifact_id": self.artifact.id,
+                "share_token": self.share.share_token,
+            },
+        )
         response = self.client.delete(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -312,10 +334,13 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         """Revoking nonexistent share returns 404."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:revoke_share", kwargs={
-            "artifact_id": self.artifact.id,
-            "share_token": "nonexistent-token",
-        })
+        url = reverse(
+            "artifacts:revoke_share",
+            kwargs={
+                "artifact_id": self.artifact.id,
+                "share_token": "nonexistent-token",
+            },
+        )
         response = self.client.delete(url)
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

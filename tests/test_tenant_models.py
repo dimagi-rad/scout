@@ -20,7 +20,7 @@ class TestTenantMembership:
         TenantMembership.objects.create(
             user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
         )
-        with pytest.raises(Exception):  # IntegrityError
+        with pytest.raises(Exception):  # noqa: B017 - IntegrityError varies by DB backend
             TenantMembership.objects.create(
                 user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
             )

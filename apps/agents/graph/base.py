@@ -328,9 +328,7 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
     return tools
 
 
-def _build_system_prompt(
-    workspace: TenantWorkspace, tenant_membership: TenantMembership
-) -> str:
+def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMembership) -> str:
     """
     Assemble the complete system prompt for a tenant workspace.
 

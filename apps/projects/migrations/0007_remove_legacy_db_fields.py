@@ -4,6 +4,7 @@ Remove legacy database connection fields from Project.
 Migrates any projects that still use inline credentials to a DatabaseConnection,
 then removes the legacy fields.
 """
+
 from django.db import migrations
 
 
@@ -32,7 +33,6 @@ def migrate_legacy_credentials(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     # Each operation needs its own transaction because the RunPython data
     # migration creates pending trigger events that block subsequent
     # ALTER TABLE statements on the same table.

@@ -6,20 +6,30 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0003_project_is_active_project_readonly_role'),
+        ("projects", "0003_project_is_active_project_readonly_role"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='project',
-            name='db_schema',
-            field=models.CharField(default='public', max_length=255, validators=[django.core.validators.RegexValidator(message='Invalid schema name format. Must start with a letter or underscore, and contain only letters, numbers, and underscores.', regex='^[a-zA-Z_][a-zA-Z0-9_]*$')]),
+            model_name="project",
+            name="db_schema",
+            field=models.CharField(
+                default="public",
+                max_length=255,
+                validators=[
+                    django.core.validators.RegexValidator(
+                        message="Invalid schema name format. Must start with a letter or underscore, and contain only letters, numbers, and underscores.",
+                        regex="^[a-zA-Z_][a-zA-Z0-9_]*$",
+                    )
+                ],
+            ),
         ),
         migrations.AddIndex(
-            model_name='savedquery',
-            index=models.Index(fields=['project', '-updated_at'], name='projects_sa_project_c0fd2d_idx'),
+            model_name="savedquery",
+            index=models.Index(
+                fields=["project", "-updated_at"], name="projects_sa_project_c0fd2d_idx"
+            ),
         ),
     ]

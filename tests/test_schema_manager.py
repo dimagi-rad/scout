@@ -1,8 +1,9 @@
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from apps.projects.services.schema_manager import SchemaManager
+import pytest
+
 from apps.projects.models import TenantSchema
+from apps.projects.services.schema_manager import SchemaManager
 
 
 @pytest.mark.django_db
@@ -41,6 +42,6 @@ class TestSchemaManager:
 
         with patch("apps.projects.services.schema_manager.get_managed_db_connection"):
             mgr = SchemaManager()
-            ts = mgr.provision(tenant_membership)
+            mgr.provision(tenant_membership)
 
         assert TenantSchema.objects.count() == 1  # no duplicate

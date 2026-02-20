@@ -4,6 +4,7 @@ Django admin configuration for Artifact models.
 Provides admin interfaces for managing Artifacts and SharedArtifacts
 with filtering, search, and inline editing capabilities.
 """
+
 from django.contrib import admin
 from django.utils.html import format_html
 

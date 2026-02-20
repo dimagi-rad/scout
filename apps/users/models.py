@@ -3,6 +3,7 @@ Custom User model for Scout data agent platform.
 
 Extends Django's AbstractUser with additional fields for the platform.
 """
+
 import uuid
 
 from django.conf import settings

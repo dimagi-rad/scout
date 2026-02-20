@@ -100,9 +100,7 @@ def _execute_sync_parameterized(
             cursor.close()
 
 
-async def execute_internal_query(
-    ctx: QueryContext, sql: str, params: tuple = ()
-) -> dict[str, Any]:
+async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:
     """Execute a trusted internal query, bypassing SQL validation."""
     try:
         return await sync_to_async(_execute_sync_parameterized)(
@@ -137,7 +135,9 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
             truncated = True
 
     try:
-        result = await sync_to_async(_execute_sync)(ctx, sql_executed, ctx.max_query_timeout_seconds)
+        result = await sync_to_async(_execute_sync)(
+            ctx, sql_executed, ctx.max_query_timeout_seconds
+        )
     except Exception as e:
         code, message = _classify_error(e)
         logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
@@ -167,7 +167,10 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, psycopg2.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
-            return CONNECTION_ERROR, "Database authentication failed. Please contact an administrator."
+            return (
+                CONNECTION_ERROR,
+                "Database authentication failed. Please contact an administrator.",
+            )
         if "could not connect" in msg.lower():
             return CONNECTION_ERROR, "Could not connect to the database. Please try again later."
         if "does not exist" in msg.lower():

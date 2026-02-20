@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-
 def reset_retry_on_new_message(state: AgentState) -> dict[str, Any]:
     """
     Reset retry count and correction context when a new user message arrives.
@@ -87,14 +86,20 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
     messages = state.get("messages", [])
 
     if not messages:
-        return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
+        return {
+            "needs_correction": False,
+            "correction_context": {"failed_sql": "", "tables_accessed": []},
+        }
 
     # Look at the most recent messages to find tool results
     last_message = messages[-1]
 
     # If the last message is not a ToolMessage, nothing to check
     if not isinstance(last_message, ToolMessage):
-        return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
+        return {
+            "needs_correction": False,
+            "correction_context": {"failed_sql": "", "tables_accessed": []},
+        }
 
     # Parse the tool result content
     content = last_message.content
@@ -118,7 +123,10 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
                         "tables_accessed": [],
                     },
                 }
-            return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
+            return {
+                "needs_correction": False,
+                "correction_context": {"failed_sql": "", "tables_accessed": []},
+            }
 
         # Check for error in the result (supports both formats)
         if isinstance(result, dict):
@@ -158,7 +166,10 @@ def check_result_node(state: AgentState) -> dict[str, Any]:
             }
 
     # No errors detected
-    return {"needs_correction": False, "correction_context": {"failed_sql": "", "tables_accessed": []}}
+    return {
+        "needs_correction": False,
+        "correction_context": {"failed_sql": "", "tables_accessed": []},
+    }
 
 
 def diagnose_and_retry_node(state: AgentState) -> dict[str, Any]:
@@ -413,38 +424,32 @@ def _get_error_guidance(error_type: str) -> str:
 - Verify SQL keywords are spelled correctly
 - Ensure string literals use single quotes, not double quotes
 - Check that table aliases are used consistently""",
-
         "column_not_found": """**Column Not Found Guidance:**
 - Use the describe_table tool to see the exact column names
 - Column names are case-sensitive in some contexts
 - Check if you're using the correct table alias
 - Look for typos in the column name""",
-
         "table_not_found": """**Table Not Found Guidance:**
 - Check the data dictionary for the correct table name
 - Table names are usually lowercase in PostgreSQL
 - Verify you're not referencing a table from another schema
 - The table might have an underscore where you used a hyphen (or vice versa)""",
-
         "permission": """**Permission Error Guidance:**
 - You can only run SELECT queries
 - You cannot access tables outside the project's schema
 - System tables (pg_catalog, information_schema) are not accessible
 - Some tables may be explicitly excluded from this project""",
-
         "timeout": """**Timeout Error Guidance:**
 - The query took too long to execute
 - Add more specific WHERE conditions to reduce the data scanned
 - Consider using LIMIT to sample the data first
 - Avoid SELECT * on large tables; select only needed columns
 - Break complex queries into smaller steps""",
-
         "type_mismatch": """**Type Mismatch Guidance:**
 - Check the column types in the data dictionary
 - Use explicit casts when comparing different types: column::type
 - Common issues: comparing text to integers, timestamp formats
 - NULL comparisons need IS NULL, not = NULL""",
-
         "execution": """**General Error Guidance:**
 - Read the error message carefully for hints
 - Check the data dictionary for correct names and types
@@ -453,7 +458,6 @@ def _get_error_guidance(error_type: str) -> str:
     }
 
     return guidance_map.get(error_type, guidance_map["execution"])
-
 
 
 __all__ = [

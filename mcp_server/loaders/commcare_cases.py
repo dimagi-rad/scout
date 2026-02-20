@@ -1,4 +1,5 @@
 """CommCare case loader — fetches case data from the CommCare HQ Case API v2."""
+
 from __future__ import annotations
 
 import logging

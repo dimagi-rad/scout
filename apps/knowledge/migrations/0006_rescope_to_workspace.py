@@ -6,78 +6,98 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('knowledge', '0005_simplify_knowledge'),
-        ('projects', '0012_add_tenant_workspace'),
+        ("knowledge", "0005_simplify_knowledge"),
+        ("projects", "0012_add_tenant_workspace"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.RemoveField(
-            model_name='evalrun',
-            name='project',
+            model_name="evalrun",
+            name="project",
         ),
         migrations.RemoveField(
-            model_name='evalrun',
-            name='triggered_by',
+            model_name="evalrun",
+            name="triggered_by",
         ),
         migrations.RemoveField(
-            model_name='goldenquery',
-            name='created_by',
+            model_name="goldenquery",
+            name="created_by",
         ),
         migrations.RemoveField(
-            model_name='goldenquery',
-            name='project',
+            model_name="goldenquery",
+            name="project",
         ),
         migrations.RemoveIndex(
-            model_name='agentlearning',
-            name='knowledge_a_project_ab61e4_idx',
+            model_name="agentlearning",
+            name="knowledge_a_project_ab61e4_idx",
         ),
         migrations.RemoveField(
-            model_name='agentlearning',
-            name='project',
+            model_name="agentlearning",
+            name="project",
         ),
         migrations.RemoveField(
-            model_name='knowledgeentry',
-            name='project',
+            model_name="knowledgeentry",
+            name="project",
         ),
         # Clear old unique_together BEFORE removing project field
         migrations.AlterUniqueTogether(
-            name='tableknowledge',
+            name="tableknowledge",
             unique_together=set(),
         ),
         migrations.RemoveField(
-            model_name='tableknowledge',
-            name='project',
+            model_name="tableknowledge",
+            name="project",
         ),
         migrations.AddField(
-            model_name='agentlearning',
-            name='workspace',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='learnings', to='projects.tenantworkspace'),
+            model_name="agentlearning",
+            name="workspace",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="learnings",
+                to="projects.tenantworkspace",
+            ),
         ),
         migrations.AddField(
-            model_name='knowledgeentry',
-            name='workspace',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='knowledge_entries', to='projects.tenantworkspace'),
+            model_name="knowledgeentry",
+            name="workspace",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="knowledge_entries",
+                to="projects.tenantworkspace",
+            ),
         ),
         migrations.AddField(
-            model_name='tableknowledge',
-            name='workspace',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.CASCADE, related_name='table_knowledge', to='projects.tenantworkspace'),
+            model_name="tableknowledge",
+            name="workspace",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="table_knowledge",
+                to="projects.tenantworkspace",
+            ),
         ),
         migrations.AlterUniqueTogether(
-            name='tableknowledge',
-            unique_together={('workspace', 'table_name')},
+            name="tableknowledge",
+            unique_together={("workspace", "table_name")},
         ),
         migrations.AddIndex(
-            model_name='agentlearning',
-            index=models.Index(fields=['workspace', 'is_active', '-confidence_score'], name='knowledge_a_workspa_d30ff5_idx'),
+            model_name="agentlearning",
+            index=models.Index(
+                fields=["workspace", "is_active", "-confidence_score"],
+                name="knowledge_a_workspa_d30ff5_idx",
+            ),
         ),
         migrations.DeleteModel(
-            name='EvalRun',
+            name="EvalRun",
         ),
         migrations.DeleteModel(
-            name='GoldenQuery',
+            name="GoldenQuery",
         ),
     ]

@@ -6,6 +6,7 @@ Provides semantic knowledge beyond the auto-generated data dictionary:
 - KnowledgeEntry: General-purpose knowledge (title + markdown + tags)
 - AgentLearning: Agent-discovered corrections
 """
+
 import uuid
 
 from django.conf import settings
@@ -27,8 +28,11 @@ class TableKnowledge(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace", on_delete=models.CASCADE, related_name="table_knowledge",
-        null=True, blank=True,
+        "projects.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="table_knowledge",
+        null=True,
+        blank=True,
     )
 
     table_name = models.CharField(max_length=255)
@@ -66,9 +70,7 @@ class TableKnowledge(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    updated_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
-    )
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
         unique_together = ["workspace", "table_name"]
@@ -90,8 +92,11 @@ class KnowledgeEntry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace", on_delete=models.CASCADE, related_name="knowledge_entries",
-        null=True, blank=True,
+        "projects.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="knowledge_entries",
+        null=True,
+        blank=True,
     )
 
     title = models.CharField(max_length=255)
@@ -100,9 +105,7 @@ class KnowledgeEntry(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
-    )
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
         ordering = ["-updated_at"]
@@ -134,8 +137,11 @@ class AgentLearning(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace", on_delete=models.CASCADE, related_name="learnings",
-        null=True, blank=True,
+        "projects.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="learnings",
+        null=True,
+        blank=True,
     )
 
     # What the agent learned
@@ -147,9 +153,7 @@ class AgentLearning(models.Model):
         choices=CATEGORY_CHOICES,
         default="other",
     )
-    applies_to_tables = models.JSONField(
-        default=list, help_text="Tables this learning applies to."
-    )
+    applies_to_tables = models.JSONField(default=list, help_text="Tables this learning applies to.")
 
     # Evidence: what triggered this learning
     original_error = models.TextField(

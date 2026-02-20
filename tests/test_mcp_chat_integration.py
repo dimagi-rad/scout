@@ -48,6 +48,7 @@ def auth_async_client(async_client, user):
     """
     # Disconnect update_last_login signal to avoid cross-transaction save
     from django.contrib.auth.models import update_last_login
+
     user_logged_in.disconnect(update_last_login)
     try:
         async_client.force_login(user)
@@ -153,10 +154,12 @@ class TestChatEndpointValidation:
         """Empty message content should return 400."""
         response = await auth_async_client.post(
             "/api/chat/",
-            data=json.dumps({
-                "messages": [{"content": ""}],
-                "data": {"tenantId": str(tenant_membership.id)},
-            }),
+            data=json.dumps(
+                {
+                    "messages": [{"content": ""}],
+                    "data": {"tenantId": str(tenant_membership.id)},
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -169,10 +172,12 @@ class TestChatEndpointValidation:
         """Whitespace-only message should return 400."""
         response = await auth_async_client.post(
             "/api/chat/",
-            data=json.dumps({
-                "messages": [{"content": "   \n\t  "}],
-                "data": {"tenantId": str(tenant_membership.id)},
-            }),
+            data=json.dumps(
+                {
+                    "messages": [{"content": "   \n\t  "}],
+                    "data": {"tenantId": str(tenant_membership.id)},
+                }
+            ),
             content_type="application/json",
         )
         assert response.status_code == 400
@@ -231,12 +236,14 @@ class TestChatEndpointValidation:
     @pytest.mark.django_db(transaction=True)
     async def test_v6_parts_format_accepted(self, auth_async_client, tenant_membership):
         """AI SDK v6 parts format should be accepted."""
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             # Mock the agent to return a simple text response
@@ -288,19 +295,19 @@ class TestMCPToolLoading:
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
-    async def test_mcp_tools_success_proceeds_to_agent(
-        self, auth_async_client, tenant_membership
-    ):
+    async def test_mcp_tools_success_proceeds_to_agent(self, auth_async_client, tenant_membership):
         """When get_mcp_tools() succeeds, the agent should be built with those tools."""
         mock_tool = MagicMock()
         mock_tool.name = "query"
 
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = [mock_tool]
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             mock_agent = AsyncMock()
@@ -324,8 +331,9 @@ class TestMCPToolLoading:
             # Verify MCP tools were passed to build_agent_graph
             mock_build.assert_called_once()
             call_kwargs = mock_build.call_args
-            assert call_kwargs.kwargs.get("mcp_tools") == [mock_tool] or \
-                   (len(call_kwargs.args) > 3 and call_kwargs.args[3] == [mock_tool])
+            assert call_kwargs.kwargs.get("mcp_tools") == [mock_tool] or (
+                len(call_kwargs.args) > 3 and call_kwargs.args[3] == [mock_tool]
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -560,7 +568,9 @@ class TestSSEStreamFormat:
         types = [e["type"] for e in events]
 
         # Should have error message
-        error_deltas = [e for e in events if e["type"] == "text-delta" and "error" in e.get("delta", "").lower()]
+        error_deltas = [
+            e for e in events if e["type"] == "text-delta" and "error" in e.get("delta", "").lower()
+        ]
         assert len(error_deltas) > 0
 
         # Should still finish cleanly
@@ -680,13 +690,15 @@ class TestMCPErrorCorrection:
 
     def test_mcp_query_error_triggers_correction(self):
         """MCP query error envelope should trigger needs_correction."""
-        state = self._make_tool_state({
-            "success": False,
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "Only SELECT statements are allowed",
-            },
-        })
+        state = self._make_tool_state(
+            {
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Only SELECT statements are allowed",
+                },
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert "Only SELECT" in result["correction_context"]["error_message"]
@@ -694,72 +706,83 @@ class TestMCPErrorCorrection:
 
     def test_mcp_not_found_error_triggers_correction(self):
         """MCP NOT_FOUND error should trigger correction with table_not_found type."""
-        state = self._make_tool_state({
-            "success": False,
-            "error": {
-                "code": "NOT_FOUND",
-                "message": "Table 'usr' not found",
-                "detail": "Did you mean: users, user_roles",
+        state = self._make_tool_state(
+            {
+                "success": False,
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "Table 'usr' not found",
+                    "detail": "Did you mean: users, user_roles",
+                },
             },
-        }, tool_name="describe_table")
+            tool_name="describe_table",
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert result["correction_context"]["error_type"] == "table_not_found"
 
     def test_mcp_timeout_error_classified_correctly(self):
         """MCP QUERY_TIMEOUT should be classified as 'timeout'."""
-        state = self._make_tool_state({
-            "success": False,
-            "error": {
-                "code": "QUERY_TIMEOUT",
-                "message": "Query timed out after 30 seconds",
-            },
-        })
+        state = self._make_tool_state(
+            {
+                "success": False,
+                "error": {
+                    "code": "QUERY_TIMEOUT",
+                    "message": "Query timed out after 30 seconds",
+                },
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert result["correction_context"]["error_type"] == "timeout"
 
     def test_mcp_connection_error_triggers_correction(self):
         """MCP CONNECTION_ERROR should trigger correction."""
-        state = self._make_tool_state({
-            "success": False,
-            "error": {
-                "code": "CONNECTION_ERROR",
-                "message": "could not connect to server",
-            },
-        })
+        state = self._make_tool_state(
+            {
+                "success": False,
+                "error": {
+                    "code": "CONNECTION_ERROR",
+                    "message": "could not connect to server",
+                },
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
 
     def test_mcp_success_no_correction(self):
         """MCP success envelope should not trigger correction."""
-        state = self._make_tool_state({
-            "success": True,
-            "data": {
-                "columns": ["id", "name"],
-                "rows": [[1, "Alice"]],
-                "row_count": 1,
-            },
-            "project_id": "abc",
-            "schema": "public",
-        })
+        state = self._make_tool_state(
+            {
+                "success": True,
+                "data": {
+                    "columns": ["id", "name"],
+                    "rows": [[1, "Alice"]],
+                    "row_count": 1,
+                },
+                "project_id": "abc",
+                "schema": "public",
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is False
 
     def test_mcp_success_with_warnings_no_correction(self):
         """MCP success with warnings should not trigger correction."""
-        state = self._make_tool_state({
-            "success": True,
-            "data": {
-                "columns": ["id"],
-                "rows": [[i] for i in range(500)],
-                "row_count": 500,
-                "truncated": True,
-            },
-            "warnings": ["Results truncated to 500 rows"],
-            "project_id": "abc",
-            "schema": "public",
-        })
+        state = self._make_tool_state(
+            {
+                "success": True,
+                "data": {
+                    "columns": ["id"],
+                    "rows": [[i] for i in range(500)],
+                    "row_count": 500,
+                    "truncated": True,
+                },
+                "warnings": ["Results truncated to 500 rows"],
+                "project_id": "abc",
+                "schema": "public",
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is False
 
@@ -813,7 +836,7 @@ class TestMCPErrorCorrection:
         assert _classify_error("column 'usr_id' does not exist") == "column_not_found"
 
     def test_error_classification_table_not_found(self):
-        assert _classify_error("relation \"nonexistent\" does not exist") == "table_not_found"
+        assert _classify_error('relation "nonexistent" does not exist') == "table_not_found"
 
     def test_error_classification_permission(self):
         assert _classify_error("permission denied for table users") == "permission"
@@ -853,12 +876,14 @@ class TestEndToEndStreaming:
     @pytest.mark.django_db(transaction=True)
     async def test_full_text_response_stream(self, auth_async_client, tenant_membership):
         """Full path: chat request → text SSE stream."""
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             mock_agent = AsyncMock()
@@ -893,12 +918,14 @@ class TestEndToEndStreaming:
     @pytest.mark.django_db(transaction=True)
     async def test_full_tool_call_stream(self, auth_async_client, tenant_membership):
         """Full path: chat request → tool call → tool result → text → SSE stream."""
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             mock_agent = AsyncMock()
@@ -911,10 +938,12 @@ class TestEndToEndStreaming:
                     "name": "list_tables",
                     "data": {
                         "output": ToolMessage(
-                            content=json.dumps({
-                                "success": True,
-                                "data": {"tables": [{"name": "users", "type": "table"}]},
-                            }),
+                            content=json.dumps(
+                                {
+                                    "success": True,
+                                    "data": {"tables": [{"name": "users", "type": "table"}]},
+                                }
+                            ),
                             tool_call_id="call-abc",
                             name="list_tables",
                         ),
@@ -951,12 +980,14 @@ class TestEndToEndStreaming:
 
         thread_id = str(uuid.uuid4())
 
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             mock_agent = AsyncMock()
@@ -990,12 +1021,14 @@ class TestEndToEndStreaming:
     @pytest.mark.django_db(transaction=True)
     async def test_agent_build_failure_returns_500(self, auth_async_client, tenant_membership):
         """If agent build fails, should return 500."""
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
             mock_build.side_effect = RuntimeError("Agent build failed")
 
@@ -1014,12 +1047,14 @@ class TestEndToEndStreaming:
         """If first checkpointer fails, should retry with force_new=True."""
         call_count = 0
 
-        with patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp, \
-             patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp, \
-             patch("apps.chat.views.build_agent_graph") as mock_build:
-
+        with (
+            patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
+            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.build_agent_graph") as mock_build,
+        ):
             mock_mcp.return_value = []
             from langgraph.checkpoint.memory import MemorySaver
+
             mock_cp.return_value = MemorySaver()
 
             def build_side_effect(*args, **kwargs):

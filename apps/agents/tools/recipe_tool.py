@@ -23,13 +23,15 @@ logger = logging.getLogger(__name__)
 
 
 # Valid variable types for recipe variables
-VALID_VARIABLE_TYPES = frozenset({
-    "string",
-    "number",
-    "date",
-    "boolean",
-    "select",
-})
+VALID_VARIABLE_TYPES = frozenset(
+    {
+        "string",
+        "number",
+        "date",
+        "boolean",
+        "select",
+    }
+)
 
 
 def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
@@ -124,7 +126,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
                     "name": name,
                     "status": "error",
                     "variable_names": [],
-                    "message": f"Variable {i+1} must be a dictionary.",
+                    "message": f"Variable {i + 1} must be a dictionary.",
                 }
 
             var_name = var.get("name")
@@ -137,7 +139,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
                     "name": name,
                     "status": "error",
                     "variable_names": [],
-                    "message": f"Variable {i+1} is missing 'name' field.",
+                    "message": f"Variable {i + 1} is missing 'name' field.",
                 }
 
             if not var_type:

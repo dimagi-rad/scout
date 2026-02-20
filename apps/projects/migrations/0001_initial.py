@@ -6,77 +6,133 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='ConversationLog',
+            name="ConversationLog",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('thread_id', models.CharField(db_index=True, max_length=255)),
-                ('messages', models.JSONField(default=list)),
-                ('queries_executed', models.JSONField(default=list)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("thread_id", models.CharField(db_index=True, max_length=255)),
+                ("messages", models.JSONField(default=list)),
+                ("queries_executed", models.JSONField(default=list)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'ordering': ['-updated_at'],
+                "ordering": ["-updated_at"],
             },
         ),
         migrations.CreateModel(
-            name='Project',
+            name="Project",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('name', models.CharField(max_length=255)),
-                ('slug', models.SlugField(unique=True)),
-                ('description', models.TextField(blank=True)),
-                ('db_host', models.CharField(max_length=255)),
-                ('db_port', models.IntegerField(default=5432)),
-                ('db_name', models.CharField(max_length=255)),
-                ('db_schema', models.CharField(default='public', max_length=255)),
-                ('_db_user', models.BinaryField(db_column='db_user')),
-                ('_db_password', models.BinaryField(db_column='db_password')),
-                ('allowed_tables', models.JSONField(blank=True, default=list)),
-                ('excluded_tables', models.JSONField(blank=True, default=list)),
-                ('system_prompt', models.TextField(blank=True, help_text='Project-specific system prompt. Merged with the base agent prompt.')),
-                ('max_rows_per_query', models.IntegerField(default=500, help_text='Maximum rows the SQL tool will return per query.')),
-                ('max_query_timeout_seconds', models.IntegerField(default=30, help_text='Query execution timeout.')),
-                ('llm_model', models.CharField(default='claude-sonnet-4-5-20250929', help_text='LLM model identifier for the agent.', max_length=100)),
-                ('data_dictionary', models.JSONField(blank=True, help_text='Auto-generated schema documentation. Regenerated via management command.', null=True)),
-                ('data_dictionary_generated_at', models.DateTimeField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("name", models.CharField(max_length=255)),
+                ("slug", models.SlugField(unique=True)),
+                ("description", models.TextField(blank=True)),
+                ("db_host", models.CharField(max_length=255)),
+                ("db_port", models.IntegerField(default=5432)),
+                ("db_name", models.CharField(max_length=255)),
+                ("db_schema", models.CharField(default="public", max_length=255)),
+                ("_db_user", models.BinaryField(db_column="db_user")),
+                ("_db_password", models.BinaryField(db_column="db_password")),
+                ("allowed_tables", models.JSONField(blank=True, default=list)),
+                ("excluded_tables", models.JSONField(blank=True, default=list)),
+                (
+                    "system_prompt",
+                    models.TextField(
+                        blank=True,
+                        help_text="Project-specific system prompt. Merged with the base agent prompt.",
+                    ),
+                ),
+                (
+                    "max_rows_per_query",
+                    models.IntegerField(
+                        default=500, help_text="Maximum rows the SQL tool will return per query."
+                    ),
+                ),
+                (
+                    "max_query_timeout_seconds",
+                    models.IntegerField(default=30, help_text="Query execution timeout."),
+                ),
+                (
+                    "llm_model",
+                    models.CharField(
+                        default="claude-sonnet-4-5-20250929",
+                        help_text="LLM model identifier for the agent.",
+                        max_length=100,
+                    ),
+                ),
+                (
+                    "data_dictionary",
+                    models.JSONField(
+                        blank=True,
+                        help_text="Auto-generated schema documentation. Regenerated via management command.",
+                        null=True,
+                    ),
+                ),
+                ("data_dictionary_generated_at", models.DateTimeField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'ordering': ['name'],
+                "ordering": ["name"],
             },
         ),
         migrations.CreateModel(
-            name='ProjectMembership',
+            name="ProjectMembership",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('role', models.CharField(choices=[('viewer', 'Viewer'), ('analyst', 'Analyst'), ('admin', 'Admin')], default='viewer', max_length=20)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "role",
+                    models.CharField(
+                        choices=[("viewer", "Viewer"), ("analyst", "Analyst"), ("admin", "Admin")],
+                        default="viewer",
+                        max_length=20,
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
         ),
         migrations.CreateModel(
-            name='SavedQuery',
+            name="SavedQuery",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('name', models.CharField(max_length=255)),
-                ('description', models.TextField(blank=True)),
-                ('sql', models.TextField()),
-                ('is_shared', models.BooleanField(default=False, help_text='Visible to all project members')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                ("name", models.CharField(max_length=255)),
+                ("description", models.TextField(blank=True)),
+                ("sql", models.TextField()),
+                (
+                    "is_shared",
+                    models.BooleanField(default=False, help_text="Visible to all project members"),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
-                'verbose_name_plural': 'Saved queries',
-                'ordering': ['-updated_at'],
+                "verbose_name_plural": "Saved queries",
+                "ordering": ["-updated_at"],
             },
         ),
     ]

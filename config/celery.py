@@ -3,6 +3,7 @@ Celery configuration for Scout.
 
 This module configures Celery for background task processing.
 """
+
 import os
 
 from celery import Celery

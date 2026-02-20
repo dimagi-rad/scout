@@ -1,4 +1,5 @@
 """URL configuration for auth endpoints."""
+
 from django.urls import path
 
 from apps.chat.views import (

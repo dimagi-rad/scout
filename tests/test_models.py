@@ -1,5 +1,5 @@
 """Tests for core models."""
-import pytest
+
 from django.contrib.auth import get_user_model
 
 from apps.knowledge.models import (

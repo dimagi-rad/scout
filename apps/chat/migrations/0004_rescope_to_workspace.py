@@ -5,24 +5,26 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('chat', '0003_thread_tenant_membership_alter_thread_project'),
-        ('users', '0003_tenantmembership'),
+        ("chat", "0003_thread_tenant_membership_alter_thread_project"),
+        ("users", "0003_tenantmembership"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.RemoveIndex(
-            model_name='thread',
-            name='chat_thread_proj_user_updated',
+            model_name="thread",
+            name="chat_thread_proj_user_updated",
         ),
         migrations.RemoveField(
-            model_name='thread',
-            name='project',
+            model_name="thread",
+            name="project",
         ),
         migrations.AddIndex(
-            model_name='thread',
-            index=models.Index(fields=['tenant_membership', 'user', '-updated_at'], name='chat_thread_tm_user_updated'),
+            model_name="thread",
+            index=models.Index(
+                fields=["tenant_membership", "user", "-updated_at"],
+                name="chat_thread_tm_user_updated",
+            ),
         ),
     ]

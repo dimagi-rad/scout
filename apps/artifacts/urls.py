@@ -3,6 +3,7 @@ URL configuration for artifacts app.
 
 Included at /api/artifacts/ in the main URL configuration.
 """
+
 from django.urls import path
 
 from .api.views import CreateShareView, ListSharesView, RevokeShareView

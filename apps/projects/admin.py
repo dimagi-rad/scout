@@ -1,6 +1,7 @@
 """
 Admin configuration for projects app.
 """
+
 from django.contrib import admin
 
 from .models import MaterializationRun, TenantSchema, TenantWorkspace

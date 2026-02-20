@@ -10,6 +10,7 @@ Tests cover security-critical functionality:
 - LIMIT injection and capping
 - Table filtering
 """
+
 import pytest
 
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
@@ -201,7 +202,9 @@ class TestSchemaEnforcement:
         assert statement is not None
 
         # But joining analytics with some other schema should be rejected
-        sql_rejected = "SELECT * FROM analytics.users u JOIN other_schema.orders o ON u.id = o.user_id"
+        sql_rejected = (
+            "SELECT * FROM analytics.users u JOIN other_schema.orders o ON u.id = o.user_id"
+        )
         with pytest.raises(SQLValidationError, match="(?i)schema"):
             validator.validate(sql_rejected)
 

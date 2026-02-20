@@ -4,6 +4,7 @@ Recipe models for the Scout data agent platform.
 Defines Recipe, RecipeStep, and RecipeRun models for creating and executing
 reusable conversation workflows with variable substitution.
 """
+
 import secrets
 import uuid
 
@@ -159,9 +160,7 @@ class Recipe(models.Model):
             if var_type == "select":
                 options = var_def.get("options", [])
                 if options and value not in options:
-                    errors.append(
-                        f"Invalid value for {var_name}: must be one of {options}"
-                    )
+                    errors.append(f"Invalid value for {var_name}: must be one of {options}")
             elif var_type == "number":
                 try:
                     float(value)

@@ -4,6 +4,7 @@ Django base settings for Scout data agent platform.
 Settings common to all environments. Environment-specific settings
 override these in development.py, production.py, and test.py.
 """
+
 from pathlib import Path
 
 import environ
@@ -258,15 +259,15 @@ MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
 CSRF_COOKIE_NAME = "csrftoken_scout"
 CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
-CSRF_TRUSTED_ORIGINS = env.list(
-    "CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"]
-)
+CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
 SESSION_COOKIE_NAME = "sessionid_scout"
 
 
 # Celery configuration
 CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL or "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND", default=REDIS_URL or "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = env(
+    "CELERY_RESULT_BACKEND", default=REDIS_URL or "redis://localhost:6379/0"
+)
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"

@@ -1,5 +1,6 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
 from apps.users.services.tenant_resolution import resolve_commcare_domains
 
@@ -63,5 +64,5 @@ class TestResolveCommcareDomains:
             "apps.users.services.tenant_resolution.requests.get",
             return_value=mock_response,
         ):
-            with pytest.raises(Exception):
+            with pytest.raises(Exception):  # noqa: B017
                 resolve_commcare_domains(user, "fake-token")

@@ -3,6 +3,7 @@ Schema Manager for the Scout-managed database.
 
 Creates and tears down tenant-scoped PostgreSQL schemas.
 """
+
 from __future__ import annotations
 
 import logging

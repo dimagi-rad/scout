@@ -103,6 +103,7 @@ def _record_attempt(username: str, success: bool) -> None:
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
+
 @ensure_csrf_cookie
 @require_GET
 def csrf_view(request):
@@ -116,12 +117,14 @@ def me_view(request):
     if not request.user.is_authenticated:
         return JsonResponse({"error": "Not authenticated"}, status=401)
     user = request.user
-    return JsonResponse({
-        "id": str(user.id),
-        "email": user.email,
-        "name": user.get_full_name(),
-        "is_staff": user.is_staff,
-    })
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+        }
+    )
 
 
 @require_POST
@@ -149,12 +152,14 @@ def login_view(request):
     _record_attempt(email, True)
     login(request, user)
 
-    return JsonResponse({
-        "id": str(user.id),
-        "email": user.email,
-        "name": user.get_full_name(),
-        "is_staff": user.is_staff,
-    })
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+        }
+    )
 
 
 @require_POST
@@ -183,29 +188,29 @@ def disconnect_provider_view(request, provider_id):
     with transaction.atomic():
         # SocialAccount.provider may store provider_id (e.g. "commcare_prod")
         # rather than the provider class id (e.g. "commcare"), so check both.
-        account = SocialAccount.objects.select_for_update().filter(
-            user=request.user, provider=provider_id
-        ).first()
+        account = (
+            SocialAccount.objects.select_for_update()
+            .filter(user=request.user, provider=provider_id)
+            .first()
+        )
         if not account:
             # Try matching via SocialApp.provider_id
             app_provider_ids = list(
-                SocialApp.objects.filter(provider=provider_id).values_list(
-                    "provider_id", flat=True
-                )
+                SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
             )
             if app_provider_ids:
-                account = SocialAccount.objects.select_for_update().filter(
-                    user=request.user, provider__in=app_provider_ids
-                ).first()
+                account = (
+                    SocialAccount.objects.select_for_update()
+                    .filter(user=request.user, provider__in=app_provider_ids)
+                    .first()
+                )
         if not account:
             return JsonResponse({"error": "Not connected"}, status=404)
 
         # Guard: must keep at least one login method
         has_password = request.user.has_usable_password()
         other_socials = (
-            SocialAccount.objects.filter(user=request.user)
-            .exclude(provider=provider_id)
-            .exists()
+            SocialAccount.objects.filter(user=request.user).exclude(provider=provider_id).exists()
         )
         if not has_password and not other_socials:
             return JsonResponse(
@@ -226,9 +231,7 @@ def providers_view(request):
     connected_providers = set()
     if request.user.is_authenticated:
         connected_providers = set(
-            SocialAccount.objects.filter(user=request.user).values_list(
-                "provider", flat=True
-            )
+            SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
         )
 
     providers = []
@@ -242,8 +245,7 @@ def providers_view(request):
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
             # not the provider class id (e.g. "commcare"), so check both.
             entry["connected"] = (
-                app.provider in connected_providers
-                or app.provider_id in connected_providers
+                app.provider in connected_providers or app.provider_id in connected_providers
             )
         providers.append(entry)
 
@@ -253,6 +255,7 @@ def providers_view(request):
 # ---------------------------------------------------------------------------
 # Helpers to safely access request.user from an async context
 # ---------------------------------------------------------------------------
+
 
 @sync_to_async
 def _get_user_if_authenticated(request):
@@ -272,7 +275,11 @@ def _upsert_thread(thread_id, user, title, *, tenant_membership):
     Thread.objects.update_or_create(
         id=thread_id,
         defaults={"user": user, "tenant_membership": tenant_membership},
-        create_defaults={"user": user, "title": title[:200], "tenant_membership": tenant_membership},
+        create_defaults={
+            "user": user,
+            "title": title[:200],
+            "tenant_membership": tenant_membership,
+        },
     )
 
 
@@ -289,9 +296,7 @@ def _get_thread(thread_id, user):
 def _get_public_thread(share_token):
     """Load a public thread by share token."""
     try:
-        return Thread.objects.select_related("user").get(
-            share_token=share_token, is_public=True
-        )
+        return Thread.objects.select_related("user").get(share_token=share_token, is_public=True)
     except Thread.DoesNotExist:
         return None
 
@@ -394,28 +399,28 @@ async def chat_view(request):
     user_content = last_msg.get("content", "")
     if not user_content:
         parts = last_msg.get("parts", [])
-        user_content = " ".join(
-            p.get("text", "") for p in parts if p.get("type") == "text"
-        )
+        user_content = " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
     if not user_content or not user_content.strip():
         return JsonResponse({"error": "Empty message"}, status=400)
     if len(user_content) > MAX_MESSAGE_LENGTH:
-        return JsonResponse({"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400)
+        return JsonResponse(
+            {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
+        )
 
     # Validate tenant membership
     from apps.users.models import TenantMembership
 
     try:
-        tenant_membership = await TenantMembership.objects.aget(
-            id=tenant_id, user=user
-        )
+        tenant_membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
     try:
         await _upsert_thread(
-            thread_id, user, user_content,
+            thread_id,
+            user,
+            user_content,
             tenant_membership=tenant_membership,
         )
     except Exception:
@@ -457,7 +462,9 @@ async def chat_view(request):
         except Exception as e:
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
             logger.exception("Failed to build agent [ref=%s]", error_ref)
-            return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
+            return JsonResponse(
+                {"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500
+            )
 
     # Build LangGraph input state
     from langchain_core.messages import HumanMessage
@@ -493,6 +500,7 @@ async def chat_view(request):
 # Thread list & messages endpoints
 # ---------------------------------------------------------------------------
 
+
 def _langchain_messages_to_ui(lc_messages) -> list[dict]:
     """Convert LangChain BaseMessages to AI SDK v6 UIMessage format."""
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -507,11 +515,13 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
     for msg in lc_messages:
         if isinstance(msg, HumanMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            ui_messages.append({
-                "id": msg.id or uuid.uuid4().hex,
-                "role": "user",
-                "parts": [{"type": "text", "text": content}],
-            })
+            ui_messages.append(
+                {
+                    "id": msg.id or uuid.uuid4().hex,
+                    "role": "user",
+                    "parts": [{"type": "text", "text": content}],
+                }
+            )
         elif isinstance(msg, AIMessage):
             parts: list[dict] = []
 
@@ -540,16 +550,20 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 if tr:
-                    tool_part["output"] = tr.content if isinstance(tr.content, str) else str(tr.content)
+                    tool_part["output"] = (
+                        tr.content if isinstance(tr.content, str) else str(tr.content)
+                    )
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
 
             if parts:
-                ui_messages.append({
-                    "id": msg.id or uuid.uuid4().hex,
-                    "role": "assistant",
-                    "parts": parts,
-                })
+                ui_messages.append(
+                    {
+                        "id": msg.id or uuid.uuid4().hex,
+                        "role": "assistant",
+                        "parts": parts,
+                    }
+                )
 
     return ui_messages
 
@@ -620,6 +634,7 @@ async def thread_messages_view(request, thread_id):
 # Thread sharing endpoints
 # ---------------------------------------------------------------------------
 
+
 async def thread_share_view(request, thread_id):
     """
     GET  /api/chat/threads/<thread_id>/share/  — get sharing settings
@@ -634,12 +649,14 @@ async def thread_share_view(request, thread_id):
         return JsonResponse({"error": "Thread not found"}, status=404)
 
     if request.method == "GET":
-        return JsonResponse({
-            "id": str(thread.id),
-            "is_shared": thread.is_shared,
-            "is_public": thread.is_public,
-            "share_token": thread.share_token,
-        })
+        return JsonResponse(
+            {
+                "id": str(thread.id),
+                "is_shared": thread.is_shared,
+                "is_public": thread.is_public,
+                "share_token": thread.share_token,
+            }
+        )
 
     if request.method == "PATCH":
         try:
@@ -689,12 +706,14 @@ async def public_thread_view(request, share_token):
     # Load associated artifacts
     artifacts = await _get_thread_artifacts(thread.id)
 
-    return JsonResponse({
-        "thread": {
-            "id": str(thread.id),
-            "title": thread.title,
-            "created_at": thread.created_at.isoformat(),
-        },
-        "messages": messages,
-        "artifacts": artifacts,
-    })
+    return JsonResponse(
+        {
+            "thread": {
+                "id": str(thread.id),
+                "title": thread.title,
+                "created_at": thread.created_at.isoformat(),
+            },
+            "messages": messages,
+            "artifacts": artifacts,
+        }
+    )

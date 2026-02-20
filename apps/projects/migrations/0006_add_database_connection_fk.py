@@ -5,35 +5,40 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0009_own_databaseconnection'),
+        ("projects", "0009_own_databaseconnection"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='project',
-            name='database_connection',
-            field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='projects', to='projects.databaseconnection'),
+            model_name="project",
+            name="database_connection",
+            field=models.ForeignKey(
+                blank=True,
+                null=True,
+                on_delete=django.db.models.deletion.PROTECT,
+                related_name="projects",
+                to="projects.databaseconnection",
+            ),
         ),
         migrations.AlterField(
-            model_name='project',
-            name='_db_password',
-            field=models.BinaryField(blank=True, db_column='db_password', null=True),
+            model_name="project",
+            name="_db_password",
+            field=models.BinaryField(blank=True, db_column="db_password", null=True),
         ),
         migrations.AlterField(
-            model_name='project',
-            name='_db_user',
-            field=models.BinaryField(blank=True, db_column='db_user', null=True),
+            model_name="project",
+            name="_db_user",
+            field=models.BinaryField(blank=True, db_column="db_user", null=True),
         ),
         migrations.AlterField(
-            model_name='project',
-            name='db_host',
+            model_name="project",
+            name="db_host",
             field=models.CharField(blank=True, max_length=255),
         ),
         migrations.AlterField(
-            model_name='project',
-            name='db_name',
+            model_name="project",
+            name="db_name",
             field=models.CharField(blank=True, max_length=255),
         ),
     ]

@@ -5,6 +5,7 @@ Loads CommCare case data via the Case API v2 and writes it to raw tables
 in the tenant's schema.  No DBT transforms — the raw table IS the
 queryable table for now.
 """
+
 from __future__ import annotations
 
 import json
