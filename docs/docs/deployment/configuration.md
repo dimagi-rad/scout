@@ -19,7 +19,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 |----------|---------|-------------|
 | `DJANGO_DEBUG` | `True` | Enable debug mode. Set to `False` in production. |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated list of allowed host headers. |
-| `DJANGO_SETTINGS_MODULE` | -- | Settings module to use. Options: `config.settings.development`, `config.settings.production`, `config.settings.test` |
+| `DJANGO_SETTINGS_MODULE` | `config.settings.development` | Settings module to use. Options: `config.settings.development`, `config.settings.production`, `config.settings.test` |
 
 ### Security
 
@@ -39,6 +39,14 @@ Scout is configured via environment variables, typically set in a `.env` file in
 |----------|---------|-------------|
 | `MCP_SERVER_URL` | `http://localhost:8100/mcp` | URL of the MCP server for tool-based data access. |
 
+### Managed database
+
+The managed database stores materialized CommCare case data. Each CommCare domain gets its own PostgreSQL schema.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MANAGED_DATABASE_URL` | (falls back to `DATABASE_URL`) | PostgreSQL connection URL for materialized case data. In development, omit this and Scout uses the main app database with per-domain schema isolation. |
+
 ### Rate limiting
 
 | Variable | Default | Description |
@@ -53,16 +61,6 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | `ANTHROPIC_API_KEY` | (empty) | Anthropic API key. Required for the agent to function. |
 
 The default LLM model (`claude-sonnet-4-5-20250929`) can be overridden per-project in the project settings.
-
-### Header-based authentication
-
-For deployments behind a reverse proxy that handles authentication (e.g., OAuth2 Proxy):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AUTH_USER_ID_HEADER` | (empty) | HTTP header containing the authenticated user ID. |
-| `AUTH_USER_EMAIL_HEADER` | (empty) | HTTP header containing the authenticated user email. |
-| `AUTH_USER_NAME_HEADER` | (empty) | HTTP header containing the authenticated user name. |
 
 ## Frontend environment
 

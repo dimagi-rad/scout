@@ -7,6 +7,7 @@
 - Redis
 - Node.js 18+ or [Bun](https://bun.sh/)
 - [uv](https://docs.astral.sh/uv/) -- fast Python package manager
+- [direnv](https://direnv.net/) (optional, recommended) -- auto-loads `.env` and activates the virtualenv on `cd`. Run `direnv allow` once after cloning.
 
 ## Backend setup
 
@@ -50,9 +51,7 @@ uv run manage.py createsuperuser
 Start the ASGI development server:
 
 ```bash
-DJANGO_SETTINGS_MODULE=config.settings.development \
-  uv run uvicorn config.asgi:application \
-  --host 127.0.0.1 --port 8000 --reload
+uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload
 ```
 
 ## Frontend setup
@@ -66,6 +65,16 @@ bun dev
 ```
 
 The frontend dev server starts on `http://localhost:5173` and proxies `/api/*` requests to the backend on port 8000.
+
+## Running all dev servers at once
+
+Instead of managing three terminals, use [honcho](https://honcho.readthedocs.io/) to start Django, the MCP server, and Vite together with a single command:
+
+```bash
+uv run honcho -f Procfile.dev start
+```
+
+Each process is color-coded and labeled in the output. Ctrl+C stops all three.
 
 ## Docker setup
 
