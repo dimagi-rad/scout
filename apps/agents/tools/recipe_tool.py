@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from apps.projects.models import Project
+    from apps.projects.models import TenantWorkspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -32,31 +32,20 @@ VALID_VARIABLE_TYPES = frozenset({
 })
 
 
-def create_recipe_tool(project: Project, user: User | None):
+def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
     """
-    Factory function to create a recipe saving tool for a specific project.
+    Factory function to create a recipe saving tool for a specific workspace.
 
     The returned tool allows the agent to save a prompt template as a reusable
     recipe with variable substitution support.
 
     Args:
-        project: The Project model instance for scoping recipes.
+        workspace: The TenantWorkspace model instance for scoping recipes.
         user: The User model instance who triggered the conversation.
               Used to track recipe ownership.
 
     Returns:
         A LangChain tool function that saves recipes.
-
-    Example:
-        >>> from apps.projects.models import Project
-        >>> project = Project.objects.get(slug="analytics")
-        >>> recipe_tool = create_recipe_tool(project, user)
-        >>> result = recipe_tool.invoke({
-        ...     "name": "Monthly Sales Report",
-        ...     "description": "Generate a monthly sales summary",
-        ...     "variables": [...],
-        ...     "prompt": "Show me sales for {{region}} between {{start_date}} and {{end_date}}"
-        ... })
     """
 
     @tool
@@ -92,7 +81,7 @@ def create_recipe_tool(project: Project, user: User | None):
                 markdown-formatted instruction that will be sent to the agent when
                 the recipe is run. Use {{variable_name}} syntax for parameterized values.
 
-            is_shared: If True, all project members can view and run this recipe.
+            is_shared: If True, all workspace members can view and run this recipe.
                 Default is False (only the creator can see it).
 
         Returns:
@@ -102,41 +91,6 @@ def create_recipe_tool(project: Project, user: User | None):
             - status: "created" on success, "error" on failure
             - variable_names: List of variable names defined
             - message: Success or error message
-
-        Example:
-            >>> save_as_recipe(
-            ...     name="Regional Sales Summary",
-            ...     description="Generates a sales summary for a specific region and time period",
-            ...     variables=[
-            ...         {
-            ...             "name": "region",
-            ...             "type": "select",
-            ...             "label": "Sales Region",
-            ...             "options": ["North", "South", "East", "West"]
-            ...         },
-            ...         {
-            ...             "name": "start_date",
-            ...             "type": "date",
-            ...             "label": "Start Date",
-            ...             "default": "2024-01-01"
-            ...         },
-            ...         {
-            ...             "name": "limit",
-            ...             "type": "number",
-            ...             "label": "Top N Results",
-            ...             "default": 10
-            ...         }
-            ...     ],
-            ...     prompt="Show me total sales for the {{region}} region between {{start_date}} and {{end_date}}.\\n\\nThen show me the top {{limit}} products by revenue.",
-            ...     is_shared=True
-            ... )
-            {
-                "recipe_id": "123e4567-e89b-12d3-a456-426614174000",
-                "name": "Regional Sales Summary",
-                "status": "created",
-                "variable_names": ["region", "start_date", "end_date", "limit"],
-                "message": "Recipe 'Regional Sales Summary' created successfully."
-            }
         """
         # Import here to avoid circular imports
         from apps.recipes.models import Recipe
@@ -254,7 +208,7 @@ def create_recipe_tool(project: Project, user: User | None):
         # Create the recipe
         try:
             recipe = Recipe.objects.create(
-                project=project,
+                workspace=workspace,
                 name=name.strip(),
                 description=description.strip() if description else "",
                 prompt=prompt.strip(),
@@ -264,9 +218,9 @@ def create_recipe_tool(project: Project, user: User | None):
             )
 
             logger.info(
-                "Created recipe %s for project %s",
+                "Created recipe %s for workspace %s",
                 recipe.id,
-                project.slug,
+                workspace.tenant_id,
             )
 
             return {
@@ -279,8 +233,8 @@ def create_recipe_tool(project: Project, user: User | None):
 
         except Exception as e:
             logger.exception(
-                "Failed to create recipe for project %s: %s",
-                project.slug,
+                "Failed to create recipe for workspace %s: %s",
+                workspace.tenant_id,
                 str(e),
             )
             return {

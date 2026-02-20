@@ -18,7 +18,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from apps.projects.models import Project
+    from apps.projects.models import TenantWorkspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -54,29 +54,23 @@ VALID_ARTIFACT_TYPES = frozenset(
 
 
 def create_artifact_tools(
-    project: "Project", user: "User | None", conversation_id: str | None = None
+    workspace: "TenantWorkspace", user: "User | None", conversation_id: str | None = None
 ) -> list:
     """
-    Factory function to create artifact creation tools for a specific project.
+    Factory function to create artifact creation tools for a specific workspace.
 
     Creates two tools:
     1. create_artifact: Create a new artifact with code and optional data
     2. update_artifact: Create a new version of an existing artifact
 
     Args:
-        project: The Project model instance for scoping artifacts.
+        workspace: The TenantWorkspace model instance for scoping artifacts.
         user: The User model instance who triggered the conversation.
               Used to track artifact ownership.
         conversation_id: The conversation/thread ID for tracking artifact provenance.
 
     Returns:
         A list of LangChain tool functions [create_artifact, update_artifact].
-
-    Example:
-        >>> from apps.projects.models import Project
-        >>> project = Project.objects.get(slug="analytics")
-        >>> tools = create_artifact_tools(project, user, conversation_id="thread-123")
-        >>> create_tool, update_tool = tools
     """
 
     @tool(args_schema=CreateArtifactInput)
@@ -132,7 +126,7 @@ def create_artifact_tools(
             source_queries: List of named SQL queries that provide live data
                 to the artifact. Each entry is a dict with "name" and "sql"
                 keys. The queries are executed at render time against the
-                project database, and results are passed to the component
+                workspace database, and results are passed to the component
                 under data[name].
 
                 Example:
@@ -152,30 +146,6 @@ def create_artifact_tools(
             - type: The artifact type
             - render_url: URL path to render the artifact
             - message: Success or error message
-
-        Example:
-            >>> create_artifact(
-            ...     title="Monthly Active Users",
-            ...     artifact_type="react",
-            ...     code='''
-            ...     export default function Chart({ data }) {
-            ...       const rows = data.monthly_users || [];
-            ...       return (
-            ...         <ResponsiveContainer width="100%" height={300}>
-            ...           <LineChart data={rows}>
-            ...             <XAxis dataKey="month" />
-            ...             <YAxis />
-            ...             <Tooltip />
-            ...             <Line type="monotone" dataKey="users" stroke="#8884d8" />
-            ...           </LineChart>
-            ...         </ResponsiveContainer>
-            ...       );
-            ...     }
-            ...     ''',
-            ...     source_queries=[
-            ...         {"name": "monthly_users", "sql": "SELECT month, count(*) as users FROM ..."}
-            ...     ]
-            ... )
         """
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
@@ -216,7 +186,7 @@ def create_artifact_tools(
 
         try:
             artifact = Artifact.objects.create(
-                project=project,
+                workspace=workspace,
                 created_by=user,
                 title=title.strip(),
                 description=description.strip() if description else "",
@@ -229,9 +199,9 @@ def create_artifact_tools(
             )
 
             logger.info(
-                "Created artifact %s for project %s: %s",
+                "Created artifact %s for workspace %s: %s",
                 artifact.id,
-                project.slug,
+                workspace.tenant_id,
                 title,
             )
 
@@ -249,8 +219,8 @@ def create_artifact_tools(
 
         except Exception as e:
             logger.exception(
-                "Failed to create artifact for project %s: %s",
-                project.slug,
+                "Failed to create artifact for workspace %s: %s",
+                workspace.tenant_id,
                 str(e),
             )
             return {
@@ -295,17 +265,6 @@ def create_artifact_tools(
             - title: The artifact title
             - render_url: URL path to render the new version
             - message: Success or error message
-
-        Example:
-            >>> update_artifact(
-            ...     artifact_id="123e4567-e89b-12d3-a456-426614174000",
-            ...     code='''
-            ...     // Updated chart with better styling
-            ...     import { LineChart, Line, XAxis, YAxis } from "recharts";
-            ...     export default function Chart({ data }) { ... }
-            ...     ''',
-            ...     data=[{"month": "Jan", "users": 1250}, ...]  # Updated data
-            ... )
         """
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
@@ -325,7 +284,7 @@ def create_artifact_tools(
         try:
             # Find the existing artifact
             try:
-                original = Artifact.objects.get(id=artifact_id, project=project)
+                original = Artifact.objects.get(id=artifact_id, workspace=workspace)
             except Artifact.DoesNotExist:
                 return {
                     "artifact_id": None,
@@ -334,7 +293,7 @@ def create_artifact_tools(
                     "version": None,
                     "title": None,
                     "render_url": None,
-                    "message": f"Artifact with ID '{artifact_id}' not found in this project.",
+                    "message": f"Artifact with ID '{artifact_id}' not found in this workspace.",
                 }
 
             # Create a new version linked to the original
@@ -353,11 +312,11 @@ def create_artifact_tools(
             new_artifact = original.create_new_version(**updates)
 
             logger.info(
-                "Created artifact version %s (v%d) from %s for project %s",
+                "Created artifact version %s (v%d) from %s for workspace %s",
                 new_artifact.id,
                 new_artifact.version,
                 original.id,
-                project.slug,
+                workspace.tenant_id,
             )
 
             # Build render URL
@@ -375,9 +334,9 @@ def create_artifact_tools(
 
         except Exception as e:
             logger.exception(
-                "Failed to update artifact %s for project %s: %s",
+                "Failed to update artifact %s for workspace %s: %s",
                 artifact_id,
-                project.slug,
+                workspace.tenant_id,
                 str(e),
             )
             return {
