@@ -27,7 +27,6 @@ urlpatterns = [
     # PATCH /api/artifacts/<uuid>/
     # DELETE /api/artifacts/<uuid>/
     path("<uuid:artifact_id>/", ArtifactDetailView.as_view(), name="detail"),
-
     # Sandbox view - serves the HTML template for rendering artifacts in an iframe
     # Full URL: /api/artifacts/<uuid>/sandbox/
     path(

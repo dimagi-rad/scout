@@ -41,7 +41,9 @@ def _resolve_workspace(request):
     from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
 
-    membership = TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    membership = (
+        TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    )
     if not membership:
         return None, Response(
             {"error": "No tenant selected. Please select a domain first."},
@@ -189,7 +191,9 @@ class KnowledgeDetailView(APIView):
 
         item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
-            return Response({"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
+            )
 
         serializer = serializer_class(item)
         return Response(serializer.data)
@@ -201,7 +205,9 @@ class KnowledgeDetailView(APIView):
 
         item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
-            return Response({"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
+            )
 
         serializer = serializer_class(
             item,
@@ -222,7 +228,9 @@ class KnowledgeDetailView(APIView):
 
         item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
-            return Response({"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
+            )
 
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)

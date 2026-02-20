@@ -883,7 +883,9 @@ class ArtifactListView(View):
         from apps.projects.models import TenantWorkspace
         from apps.users.models import TenantMembership
 
-        membership = TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+        membership = (
+            TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+        )
         if not membership:
             return JsonResponse({"results": []})
 
@@ -897,7 +899,9 @@ class ArtifactListView(View):
         search = request.GET.get("search", "").strip()
         queryset = Artifact.objects.filter(workspace=workspace)
         if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
+            queryset = queryset.filter(
+                Q(title__icontains=search) | Q(description__icontains=search)
+            )
 
         results = [
             {
@@ -953,7 +957,9 @@ class ArtifactDetailView(View):
         if update_fields:
             update_fields.append("updated_at")
             artifact.save(update_fields=update_fields)
-        return JsonResponse({"id": str(artifact.id), "title": artifact.title, "description": artifact.description})
+        return JsonResponse(
+            {"id": str(artifact.id), "title": artifact.title, "description": artifact.description}
+        )
 
     def delete(self, request: HttpRequest, artifact_id: str) -> HttpResponse:
         artifact, err = self._get_artifact_with_access(request, artifact_id)

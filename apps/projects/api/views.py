@@ -17,7 +17,9 @@ def _resolve_workspace(request):
     from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
 
-    membership = TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    membership = (
+        TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    )
     if not membership:
         return None, Response(
             {"error": "No tenant selected. Please select a domain first."},
@@ -37,7 +39,9 @@ def _serialize_annotation(tk):
     return {
         "description": tk.description,
         "use_cases": "\n".join(use_cases) if isinstance(use_cases, list) else (use_cases or ""),
-        "data_quality_notes": "\n".join(data_quality_notes) if isinstance(data_quality_notes, list) else (data_quality_notes or ""),
+        "data_quality_notes": "\n".join(data_quality_notes)
+        if isinstance(data_quality_notes, list)
+        else (data_quality_notes or ""),
         "refresh_frequency": tk.refresh_frequency,
         "owner": tk.owner,
         "related_tables": tk.related_tables or [],
@@ -82,10 +86,12 @@ class DataDictionaryView(APIView):
                 enriched["annotation"] = annotation
             enriched_tables[qualified_name] = enriched
 
-        return Response({
-            "tables": enriched_tables,
-            "generated_at": generated_at.isoformat() if generated_at else None,
-        })
+        return Response(
+            {
+                "tables": enriched_tables,
+                "generated_at": generated_at.isoformat() if generated_at else None,
+            }
+        )
 
 
 class RefreshSchemaView(APIView):

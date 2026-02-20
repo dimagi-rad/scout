@@ -30,7 +30,9 @@ def _resolve_workspace(request):
     from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
 
-    membership = TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    membership = (
+        TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+    )
     if not membership:
         return None, Response(
             {"error": "No tenant selected. Please select a domain first."},
