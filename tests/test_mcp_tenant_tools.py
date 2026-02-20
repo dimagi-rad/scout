@@ -233,7 +233,7 @@ class TestTenantListTables:
         assert tables[0] == {"name": "cases", "type": "table", "description": ""}
         assert tables[1] == {"name": "my_view", "type": "view", "description": ""}
 
-    async def test_returns_empty_list_on_error(self, tenant_context):
+    async def test_raises_on_error(self, tenant_context):
         from mcp_server.server import _tenant_list_tables
 
         with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
@@ -242,9 +242,8 @@ class TestTenantListTables:
                 "error": {"code": "CONNECTION_ERROR", "message": "fail"},
             }
 
-            tables = await _tenant_list_tables(tenant_context)
-
-        assert tables == []
+            with pytest.raises(RuntimeError, match="fail"):
+                await _tenant_list_tables(tenant_context)
 
     async def test_returns_empty_list_when_no_tables(self, tenant_context):
         from mcp_server.server import _tenant_list_tables

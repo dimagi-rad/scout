@@ -46,8 +46,16 @@ def resolve_commcare_domains(user, access_token: str) -> list[TenantMembership]:
     return memberships
 
 
+class CommCareAuthError(Exception):
+    """Raised when CommCare returns a 401/403 during domain resolution."""
+
+
 def _fetch_all_domains(access_token: str) -> list[dict]:
-    """Paginate through the CommCare user_domains API."""
+    """Paginate through the CommCare user_domains API.
+
+    Raises CommCareAuthError on 401/403 so callers can distinguish an
+    expired token from a generic server error.
+    """
     results = []
     url = COMMCARE_DOMAIN_API
     while url:
@@ -56,8 +64,17 @@ def _fetch_all_domains(access_token: str) -> list[dict]:
             headers={"Authorization": f"Bearer {access_token}"},
             timeout=30,
         )
+        if resp.status_code in (401, 403):
+            raise CommCareAuthError(
+                f"CommCare returned {resp.status_code} — access token may have expired"
+            )
         resp.raise_for_status()
         data = resp.json()
         results.extend(data.get("objects", []))
-        url = data.get("meta", {}).get("next")
+        next_url = data.get("meta", {}).get("next")
+        # Only follow next URLs that point to the same host (SSRF protection)
+        if next_url and next_url.startswith(COMMCARE_DOMAIN_API.split("/api/")[0]):
+            url = next_url
+        else:
+            url = None
     return results

@@ -47,7 +47,12 @@ mcp = FastMCP("scout")
 
 
 async def _tenant_list_tables(ctx) -> list[dict]:
-    """List tables in a tenant schema via information_schema."""
+    """List tables in a tenant schema via information_schema.
+
+    Raises RuntimeError if the database query fails, so callers can
+    return a proper error response rather than silently reporting an
+    empty table list.
+    """
     from mcp_server.services.query import execute_internal_query
 
     result = await execute_internal_query(
@@ -57,7 +62,8 @@ async def _tenant_list_tables(ctx) -> list[dict]:
         (ctx.schema_name,),
     )
     if not result.get("success", True) and "error" in result:
-        return []
+        msg = result["error"].get("message", "Database query failed")
+        raise RuntimeError(msg)
 
     tables = []
     for row in result.get("rows", []):
@@ -114,11 +120,14 @@ async def list_tables(tenant_id: str) -> dict:
     async with tool_context("list_tables", tenant_id) as tc:
         try:
             ctx = await load_tenant_context(tenant_id)
+            tables = await _tenant_list_tables(ctx)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
+        except RuntimeError as e:
+            tc["result"] = error_response("INTERNAL_ERROR", str(e))
+            return tc["result"]
 
-        tables = await _tenant_list_tables(ctx)
         tc["result"] = success_response(
             {"tables": tables},
             tenant_id=tenant_id,
@@ -173,11 +182,14 @@ async def get_metadata(tenant_id: str) -> dict:
     async with tool_context("get_metadata", tenant_id) as tc:
         try:
             ctx = await load_tenant_context(tenant_id)
+            tables_list = await _tenant_list_tables(ctx)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
+        except RuntimeError as e:
+            tc["result"] = error_response("INTERNAL_ERROR", str(e))
+            return tc["result"]
 
-        tables_list = await _tenant_list_tables(ctx)
         tables = {}
         for t in tables_list:
             detail = await _tenant_describe_table(ctx, t["name"])
@@ -265,7 +277,9 @@ async def run_materialization(
         try:
             qs = TenantMembership.objects.select_related("user")
             if tenant_membership_id:
-                tm = await qs.aget(id=tenant_membership_id)
+                # Scope to tenant_id so a caller cannot use an arbitrary membership UUID
+                # to trigger materialization with a different user's credentials.
+                tm = await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
             else:
                 tm = await qs.aget(
                     tenant_id=tenant_id,
@@ -296,6 +310,11 @@ async def run_materialization(
             try:
                 decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
             except Exception:
+                logger.exception(
+                    "Failed to decrypt API key for tenant %s membership %s",
+                    tenant_id,
+                    cred_obj.id,
+                )
                 tc["result"] = error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
                 return tc["result"]
             credential = {"type": "api_key", "value": decrypted}

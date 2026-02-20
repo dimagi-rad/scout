@@ -34,11 +34,17 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         return f.encrypt(plaintext.encode()).decode()
 
     def decrypt_token(self, ciphertext: str) -> str:
-        """Decrypt a token string. Returns empty string for empty input."""
+        """Decrypt a token string. Returns empty string for empty or unreadable input."""
         if not ciphertext:
             return ""
+        from cryptography.fernet import InvalidToken
+
         f = self._get_fernet()
-        return f.decrypt(ciphertext.encode()).decode()
+        try:
+            return f.decrypt(ciphertext.encode()).decode()
+        except InvalidToken:
+            logger.error("Failed to decrypt OAuth token — possible key rotation or data corruption")
+            return ""
 
     def serialize_instance(self, instance):
         """Encrypt token fields before serialization (storage)."""

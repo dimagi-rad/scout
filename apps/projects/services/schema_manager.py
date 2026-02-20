@@ -30,9 +30,18 @@ class SchemaManager:
     """Creates and manages tenant schemas in the managed database."""
 
     def provision(self, tenant_membership) -> TenantSchema:
-        """Get or create a schema for the tenant."""
+        """Get or create a schema for the tenant.
+
+        Checks for an existing active schema by schema_name (not just by
+        tenant_membership) so that multiple users in the same CommCare domain
+        share one schema rather than colliding on the unique constraint.
+        """
+        from django.db import IntegrityError
+
+        schema_name = self._sanitize_schema_name(tenant_membership.tenant_id)
+
         existing = TenantSchema.objects.filter(
-            tenant_membership=tenant_membership,
+            schema_name=schema_name,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
         ).first()
 
@@ -40,24 +49,37 @@ class SchemaManager:
             existing.save(update_fields=["last_accessed_at"])  # touch
             return existing
 
-        schema_name = self._sanitize_schema_name(tenant_membership.tenant_id)
-
-        ts = TenantSchema.objects.create(
-            tenant_membership=tenant_membership,
-            schema_name=schema_name,
-            state=SchemaState.PROVISIONING,
-        )
-
-        conn = get_managed_db_connection()
         try:
-            cursor = conn.cursor()
-            cursor.execute(
-                f"CREATE SCHEMA IF NOT EXISTS "
-                f"{psycopg2.extensions.quote_ident(schema_name, cursor)}"
+            ts = TenantSchema.objects.create(
+                tenant_membership=tenant_membership,
+                schema_name=schema_name,
+                state=SchemaState.PROVISIONING,
             )
-            cursor.close()
-        finally:
-            conn.close()
+        except IntegrityError:
+            # Race condition: another process created the record between our
+            # filter and create. Re-fetch and return it.
+            ts = TenantSchema.objects.get(schema_name=schema_name)
+            if ts.state in (SchemaState.ACTIVE, SchemaState.MATERIALIZING):
+                return ts
+            # Fall through: record exists but isn't active yet; let this
+            # caller attempt the CREATE SCHEMA (IF NOT EXISTS is safe).
+
+        try:
+            conn = get_managed_db_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"CREATE SCHEMA IF NOT EXISTS "
+                    f"{psycopg2.extensions.quote_ident(schema_name, cursor)}"
+                )
+                cursor.close()
+            finally:
+                conn.close()
+        except Exception:
+            # Clean up the PROVISIONING record so the next attempt can retry
+            # rather than hitting the unique constraint.
+            ts.delete()
+            raise
 
         ts.state = SchemaState.ACTIVE
         ts.save(update_fields=["state"])

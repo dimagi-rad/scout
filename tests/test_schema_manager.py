@@ -34,14 +34,16 @@ class TestSchemaManager:
         assert any("CREATE SCHEMA" in c for c in calls)
 
     def test_provision_returns_existing(self, tenant_membership):
+        mgr = SchemaManager()
+        schema_name = mgr._sanitize_schema_name(tenant_membership.tenant_id)
         TenantSchema.objects.create(
             tenant_membership=tenant_membership,
-            schema_name=tenant_membership.tenant_id,
+            schema_name=schema_name,
             state="active",
         )
 
-        with patch("apps.projects.services.schema_manager.get_managed_db_connection"):
-            mgr = SchemaManager()
-            mgr.provision(tenant_membership)
+        # No DB connection should be needed when an active schema is found
+        ts = mgr.provision(tenant_membership)
 
         assert TenantSchema.objects.count() == 1  # no duplicate
+        assert ts.schema_name == schema_name

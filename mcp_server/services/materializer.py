@@ -44,8 +44,12 @@ def run_commcare_sync(tenant_membership, credential: dict[str, str]) -> dict:
     if not cases:
         return {"status": "completed", "rows_loaded": 0, "schema": schema_name}
 
-    # 3. Write to managed DB
+    # 3. Write to managed DB inside an explicit transaction so a mid-run
+    #    failure leaves the table intact rather than half-populated.
+    from apps.projects.models import MaterializationRun
+
     conn = get_managed_db_connection()
+    conn.autocommit = False  # override autocommit for transactional write
     try:
         cursor = conn.cursor()
         schema_id = psql.Identifier(schema_name)
@@ -115,13 +119,23 @@ def run_commcare_sync(tenant_membership, credential: dict[str, str]) -> dict:
                 ),
             )
 
+        conn.commit()
         cursor.close()
+    except Exception:
+        conn.rollback()
+        # Record the failure for the audit trail
+        MaterializationRun.objects.create(
+            tenant_schema=tenant_schema,
+            pipeline="commcare_sync",
+            state="failed",
+            completed_at=datetime.now(UTC),
+            result={"error": "Database write failed", "table": "cases"},
+        )
+        raise
     finally:
         conn.close()
 
     # 4. Update materialization record
-    from apps.projects.models import MaterializationRun
-
     run = MaterializationRun.objects.create(
         tenant_schema=tenant_schema,
         pipeline="commcare_sync",

@@ -73,7 +73,14 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
 
 def _parse_db_url(url: str, schema: str) -> dict:
     """Parse a database URL into psycopg2 connection params."""
+    import re
     from urllib.parse import urlparse
+
+    # Defensive validation: schema_name must only contain safe characters before
+    # embedding in the options string. _sanitize_schema_name already guarantees
+    # this, but we re-check here as defence-in-depth.
+    if not re.match(r"^[a-z][a-z0-9_]*$", schema):
+        raise ValueError(f"Invalid schema name: {schema!r}")
 
     parsed = urlparse(url)
     return {

@@ -71,10 +71,22 @@ async def _ensure_checkpointer(*, force_new: bool = False):
         await _checkpointer.setup()
         logger.info("PostgreSQL checkpointer initialized")
     except Exception as e:
-        from langgraph.checkpoint.memory import MemorySaver
+        from django.conf import settings
 
-        logger.warning("PostgreSQL checkpointer unavailable, using MemorySaver: %s", e)
-        _checkpointer = MemorySaver()
+        if settings.DEBUG:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            logger.warning(
+                "PostgreSQL checkpointer unavailable, using MemorySaver (DEBUG only): %s", e
+            )
+            _checkpointer = MemorySaver()
+        else:
+            logger.error(
+                "PostgreSQL checkpointer failed in production — conversation history unavailable: %s",
+                e,
+                exc_info=True,
+            )
+            raise
 
     return _checkpointer
 
@@ -196,10 +208,23 @@ def signup_view(request):
 
     UserModel = get_user_model()
 
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError as _ValidationError
+    from django.db import IntegrityError
+
+    try:
+        validate_password(password)
+    except _ValidationError as e:
+        return JsonResponse({"error": "; ".join(e.messages)}, status=400)
+
     if UserModel.objects.filter(email=email).exists():
         return JsonResponse({"error": "An account with this email already exists"}, status=400)
 
-    user = UserModel.objects.create_user(email=email, password=password)
+    try:
+        user = UserModel.objects.create_user(email=email, password=password)
+    except IntegrityError:
+        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
 
     return JsonResponse(

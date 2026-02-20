@@ -81,7 +81,10 @@ async def tenant_select_view(request):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    body = json.loads(request.body)
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
     tenant_membership_id = body.get("tenant_id")
 
     try:

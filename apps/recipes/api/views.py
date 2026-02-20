@@ -27,11 +27,15 @@ logger = logging.getLogger(__name__)
 
 def _resolve_workspace(request):
     """Resolve the active TenantWorkspace for the authenticated user."""
+    from django.db.models import F
+
     from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
 
     membership = (
-        TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+        TenantMembership.objects.filter(user=request.user)
+        .order_by(F("last_selected_at").desc(nulls_last=True))
+        .first()
     )
     if not membership:
         return None, Response(
