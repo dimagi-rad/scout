@@ -31,6 +31,7 @@ A self-hosted platform for deploying AI agents that can query project-specific P
 - Redis
 - Node.js 18+ or Bun
 - [uv](https://docs.astral.sh/uv/) (Python package manager)
+- [direnv](https://direnv.net/) (optional, recommended) — automatically loads `.env` and activates the uv virtualenv when you `cd` into the project. Run `direnv allow` once after cloning.
 
 ### Backend
 
@@ -52,7 +53,7 @@ uv run manage.py collectstatic --noinput
 uv run manage.py createsuperuser
 
 # Start the backend (ASGI)
-DJANGO_SETTINGS_MODULE=config.settings.development uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload
+uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload
 ```
 
 ### Frontend
