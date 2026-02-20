@@ -20,8 +20,12 @@ from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 logger = logging.getLogger(__name__)
 
 
-def run_commcare_sync(tenant_membership, access_token: str) -> dict:
+def run_commcare_sync(tenant_membership, credential: dict[str, str]) -> dict:
     """Load CommCare cases into the tenant's schema.
+
+    Args:
+        tenant_membership: The TenantMembership to sync.
+        credential: Dict with "type" and "value" keys for auth.
 
     Returns a summary dict with row counts and status.
     """
@@ -33,7 +37,7 @@ def run_commcare_sync(tenant_membership, access_token: str) -> dict:
     # 2. Load cases from CommCare (v2 API)
     loader = CommCareCaseLoader(
         domain=tenant_membership.tenant_id,
-        access_token=access_token,
+        credential=credential,
     )
     cases = loader.load()
 

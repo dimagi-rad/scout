@@ -250,3 +250,44 @@ class TestAuthTokenExpiredCode:
         from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
         assert AUTH_TOKEN_EXPIRED == "AUTH_TOKEN_EXPIRED"
+
+
+class TestCommCareCaseLoaderAuth:
+    def test_uses_bearer_header_for_oauth(self, requests_mock):
+        from mcp_server.loaders.commcare_cases import CommCareCaseLoader
+        requests_mock.get(
+            "https://www.commcarehq.org/a/test-domain/api/case/v2/",
+            json={"cases": [], "next": None},
+        )
+        loader = CommCareCaseLoader(
+            domain="test-domain",
+            credential={"type": "oauth", "value": "mytoken"},
+        )
+        loader.load()
+        assert requests_mock.last_request.headers["Authorization"] == "Bearer mytoken"
+
+    def test_uses_apikey_header_for_api_key(self, requests_mock):
+        from mcp_server.loaders.commcare_cases import CommCareCaseLoader
+        requests_mock.get(
+            "https://www.commcarehq.org/a/test-domain/api/case/v2/",
+            json={"cases": [], "next": None},
+        )
+        loader = CommCareCaseLoader(
+            domain="test-domain",
+            credential={"type": "api_key", "value": "user@example.com:abc123"},
+        )
+        loader.load()
+        assert requests_mock.last_request.headers["Authorization"] == "ApiKey user@example.com:abc123"
+
+    def test_raises_auth_error_on_401(self, requests_mock):
+        from mcp_server.loaders.commcare_cases import CommCareAuthError, CommCareCaseLoader
+        requests_mock.get(
+            "https://www.commcarehq.org/a/test-domain/api/case/v2/",
+            status_code=401,
+        )
+        loader = CommCareCaseLoader(
+            domain="test-domain",
+            credential={"type": "api_key", "value": "user:key"},
+        )
+        with pytest.raises(CommCareAuthError):
+            loader.load()

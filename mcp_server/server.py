@@ -275,22 +275,46 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
 
-        # Get OAuth token from the user's social account
-        from allauth.socialaccount.models import SocialToken
+        # Get credential from TenantCredential (supports both OAuth and API key)
+        from apps.users.models import TenantCredential
 
-        token_obj = (
-            await SocialToken.objects.filter(
-                account__user=tm.user,
-                account__provider__startswith="commcare",
+        try:
+            cred_obj = await TenantCredential.objects.select_related(
+                "tenant_membership"
+            ).aget(tenant_membership=tm)
+        except TenantCredential.DoesNotExist:
+            tc["result"] = error_response(
+                "AUTH_TOKEN_MISSING", "No credential configured for this tenant"
             )
-            .exclude(
-                account__provider__startswith="commcare_connect",
-            )
-            .afirst()
-        )
-        if not token_obj:
-            tc["result"] = error_response("AUTH_TOKEN_MISSING", "No CommCare OAuth token found")
             return tc["result"]
+
+        if cred_obj.credential_type == TenantCredential.API_KEY:
+            from apps.users.adapters import decrypt_credential
+
+            try:
+                decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
+            except Exception:
+                tc["result"] = error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
+                return tc["result"]
+            credential = {"type": "api_key", "value": decrypted}
+        else:
+            # OAuth: retrieve from allauth SocialToken
+            from allauth.socialaccount.models import SocialToken
+
+            token_obj = (
+                await SocialToken.objects.filter(
+                    account__user=tm.user,
+                    account__provider__startswith="commcare",
+                )
+                .exclude(account__provider__startswith="commcare_connect")
+                .afirst()
+            )
+            if not token_obj:
+                tc["result"] = error_response(
+                    "AUTH_TOKEN_MISSING", "No CommCare OAuth token found"
+                )
+                return tc["result"]
+            credential = {"type": "oauth", "value": token_obj.token}
 
         # Run materialization (sync, wrapped in sync_to_async)
         from asgiref.sync import sync_to_async
@@ -299,7 +323,7 @@ async def run_materialization(
         from mcp_server.services.materializer import run_commcare_sync
 
         try:
-            result = await sync_to_async(run_commcare_sync)(tm, token_obj.token)
+            result = await sync_to_async(run_commcare_sync)(tm, credential)
         except CommCareAuthError as e:
             logger.warning("CommCare auth failed for tenant %s: %s", tenant_id, e)
             tc["result"] = error_response(
