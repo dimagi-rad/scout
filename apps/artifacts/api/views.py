@@ -10,7 +10,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.artifacts.models import Artifact, SharedArtifact
-from apps.projects.models import ProjectMembership, ProjectRole
 
 from .serializers import (
     CreateShareSerializer,
@@ -29,7 +28,7 @@ class ArtifactSharePermissionMixin:
     def get_artifact(self, artifact_id):
         """Retrieve the artifact and check it exists."""
         return get_object_or_404(
-            Artifact.objects.select_related("project", "created_by"),
+            Artifact.objects.select_related("created_by"),
             pk=artifact_id,
         )
 
@@ -48,18 +47,9 @@ class ArtifactSharePermissionMixin:
         if artifact.created_by_id == request.user.id:
             return True, None
 
-        # Check if user is a project admin
-        membership = ProjectMembership.objects.filter(
-            user=request.user,
-            project=artifact.project,
-        ).first()
-
-        if membership and membership.role == ProjectRole.ADMIN:
-            return True, None
-
         # No permission
         return False, Response(
-            {"error": "You must be the artifact creator or a project admin to manage share links."},
+            {"error": "You must be the artifact creator to manage share links."},
             status=status.HTTP_403_FORBIDDEN,
         )
 
