@@ -6,96 +6,140 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
-        ('knowledge', '0001_initial'),
-        ('projects', '0001_initial'),
+        ("knowledge", "0001_initial"),
+        ("projects", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='agentlearning',
-            name='discovered_by_user',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="agentlearning",
+            name="discovered_by_user",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='agentlearning',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='learnings', to='projects.project'),
+            model_name="agentlearning",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="learnings",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='businessrule',
-            name='created_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="businessrule",
+            name="created_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='businessrule',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='business_rules', to='projects.project'),
+            model_name="businessrule",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="business_rules",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='canonicalmetric',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='canonical_metrics', to='projects.project'),
+            model_name="canonicalmetric",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="canonical_metrics",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='canonicalmetric',
-            name='updated_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="canonicalmetric",
+            name="updated_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='evalrun',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='eval_runs', to='projects.project'),
+            model_name="evalrun",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="eval_runs",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='evalrun',
-            name='triggered_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="evalrun",
+            name="triggered_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='goldenquery',
-            name='created_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="goldenquery",
+            name="created_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='goldenquery',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='golden_queries', to='projects.project'),
+            model_name="goldenquery",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="golden_queries",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='tableknowledge',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='table_knowledge', to='projects.project'),
+            model_name="tableknowledge",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="table_knowledge",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='tableknowledge',
-            name='updated_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="tableknowledge",
+            name="updated_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddField(
-            model_name='verifiedquery',
-            name='project',
-            field=models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='verified_queries', to='projects.project'),
+            model_name="verifiedquery",
+            name="project",
+            field=models.ForeignKey(
+                on_delete=django.db.models.deletion.CASCADE,
+                related_name="verified_queries",
+                to="projects.project",
+            ),
         ),
         migrations.AddField(
-            model_name='verifiedquery',
-            name='verified_by',
-            field=models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL),
+            model_name="verifiedquery",
+            name="verified_by",
+            field=models.ForeignKey(
+                null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL
+            ),
         ),
         migrations.AddIndex(
-            model_name='agentlearning',
-            index=models.Index(fields=['project', 'is_active', '-confidence_score'], name='knowledge_a_project_ab61e4_idx'),
+            model_name="agentlearning",
+            index=models.Index(
+                fields=["project", "is_active", "-confidence_score"],
+                name="knowledge_a_project_ab61e4_idx",
+            ),
         ),
         migrations.AlterUniqueTogether(
-            name='canonicalmetric',
-            unique_together={('project', 'name')},
+            name="canonicalmetric",
+            unique_together={("project", "name")},
         ),
         migrations.AlterUniqueTogether(
-            name='tableknowledge',
-            unique_together={('project', 'table_name')},
+            name="tableknowledge",
+            unique_together={("project", "table_name")},
         ),
     ]

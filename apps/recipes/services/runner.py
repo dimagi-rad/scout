@@ -72,6 +72,7 @@ class RecipeRunner:
         self._graph: CompiledStateGraph | None = None
         self._run: RecipeRun | None = None
         self._thread_id: str = ""
+        self._tenant_membership = None
 
     def validate_variables(self) -> None:
         """Validate that all required variables are provided."""
@@ -98,8 +99,14 @@ class RecipeRunner:
             return self._provided_graph
 
         if self._graph is None:
+            from apps.users.models import TenantMembership
+
+            self._tenant_membership = TenantMembership.objects.filter(
+                user=self.user,
+                tenant_id=self.recipe.workspace.tenant_id,
+            ).first()
             self._graph = build_agent_graph(
-                project=self.recipe.project,
+                tenant_membership=self._tenant_membership,
                 user=self.user,
                 checkpointer=None,
             )
@@ -160,6 +167,7 @@ class RecipeRunner:
                 if msg.name in ("create_artifact", "update_artifact"):
                     try:
                         import json
+
                         content = msg.content
                         if isinstance(content, str):
                             result = json.loads(content)
@@ -199,10 +207,14 @@ class RecipeRunner:
         }
 
         try:
+            workspace = self.recipe.workspace
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "project_id": str(self.recipe.project.id),
-                "project_name": self.recipe.project.name,
+                "tenant_id": workspace.tenant_id if workspace else "",
+                "tenant_name": workspace.tenant_name if workspace else "",
+                "tenant_membership_id": str(self._tenant_membership.id)
+                if self._tenant_membership
+                else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
                 "needs_correction": False,
@@ -282,10 +294,14 @@ class RecipeRunner:
         }
 
         try:
+            workspace = self.recipe.workspace
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "project_id": str(self.recipe.project.id),
-                "project_name": self.recipe.project.name,
+                "tenant_id": workspace.tenant_id if workspace else "",
+                "tenant_name": workspace.tenant_name if workspace else "",
+                "tenant_membership_id": str(self._tenant_membership.id)
+                if self._tenant_membership
+                else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
                 "needs_correction": False,

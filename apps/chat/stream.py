@@ -165,21 +165,25 @@ async def langgraph_to_ui_stream(
                         input_state.get("project_id", ""),
                     )
 
-                    yield _sse({
-                        "type": "tool-input-available",
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "input": {},
-                    })
+                    yield _sse(
+                        {
+                            "type": "tool-input-available",
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "input": {},
+                        }
+                    )
                     truncated = len(content) > 2000
                     display_content = content[:2000]
                     if truncated:
                         display_content += f"\n\n... (truncated, {len(content)} chars total)"
-                    yield _sse({
-                        "type": "tool-output-available",
-                        "toolCallId": tool_call_id,
-                        "output": display_content,
-                    })
+                    yield _sse(
+                        {
+                            "type": "tool-output-available",
+                            "toolCallId": tool_call_id,
+                            "output": display_content,
+                        }
+                    )
 
     except TimeoutError:
         logger.warning("Agent execution timed out after %ds", AGENT_TIMEOUT_SECONDS)
@@ -188,11 +192,13 @@ async def langgraph_to_ui_stream(
         if not text_started:
             yield _sse({"type": "text-start", "id": text_id})
             text_started = True
-        yield _sse({
-            "type": "text-delta",
-            "id": text_id,
-            "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
-        })
+        yield _sse(
+            {
+                "type": "text-delta",
+                "id": text_id,
+                "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
+            }
+        )
     except Exception:
         logger.exception("Error during agent streaming")
         if reasoning_started:
@@ -200,11 +206,13 @@ async def langgraph_to_ui_stream(
         if not text_started:
             yield _sse({"type": "text-start", "id": text_id})
             text_started = True
-        yield _sse({
-            "type": "text-delta",
-            "id": text_id,
-            "delta": "\n\nAn error occurred while processing your request.",
-        })
+        yield _sse(
+            {
+                "type": "text-delta",
+                "id": text_id,
+                "delta": "\n\nAn error occurred while processing your request.",
+            }
+        )
 
     # Close any open parts
     if reasoning_started:

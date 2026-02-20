@@ -1,4 +1,5 @@
 """URL configuration for knowledge app."""
+
 from django.urls import path
 
 from .api.views import (

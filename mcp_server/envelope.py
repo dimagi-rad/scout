@@ -3,7 +3,7 @@ Response envelope helpers for the MCP server.
 
 Every tool response is wrapped in a consistent envelope:
 
-    Success: {"success": True, "data": {...}, "project_id": "...", ...}
+    Success: {"success": True, "data": {...}, "tenant_id": "...", ...}
     Error:   {"success": False, "error": {"code": "...", "message": "..."}}
 
 Also provides timing, error classification, and structured audit logging.
@@ -34,7 +34,8 @@ AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
 def success_response(
     data: dict[str, Any],
     *,
-    project_id: str,
+    tenant_id: str = "",
+    project_id: str = "",
     schema: str,
     timing_ms: int | None = None,
     warnings: list[str] | None = None,
@@ -43,9 +44,12 @@ def success_response(
     envelope: dict[str, Any] = {
         "success": True,
         "data": data,
-        "project_id": project_id,
         "schema": schema,
     }
+    if tenant_id:
+        envelope["tenant_id"] = tenant_id
+    if project_id:
+        envelope["project_id"] = project_id
     if warnings:
         envelope["warnings"] = warnings
     if timing_ms is not None:
@@ -87,17 +91,15 @@ def scrub_extra_fields(extra: dict[str, Any]) -> dict[str, Any]:
 
 
 @asynccontextmanager
-async def tool_context(tool_name: str, project_id: str, **extra_fields: Any):
+async def tool_context(tool_name: str, context_id: str, **extra_fields: Any):
     """Context manager that times a tool call and logs an audit record.
 
     Yields a dict that the caller can populate with ``result`` or ``error``.
     On exit it emits a structured audit log line.
 
-    Usage::
-
-        async with tool_context("query", project_id, sql=sql) as tc:
-            ...
-            tc["result"] = success_response(...)
+    Args:
+        tool_name: Name of the tool being called.
+        context_id: tenant_id or project_id for logging.
     """
     timer = Timer()
     tc: dict[str, Any] = {"timer": timer}
@@ -106,9 +108,9 @@ async def tool_context(tool_name: str, project_id: str, **extra_fields: Any):
     finally:
         status = "success" if tc.get("result", {}).get("success") else "error"
         audit_logger.info(
-            "tool_call tool=%s project_id=%s status=%s timing_ms=%d %s",
+            "tool_call tool=%s context_id=%s status=%s timing_ms=%d %s",
             tool_name,
-            project_id,
+            context_id,
             status,
             timer.elapsed_ms,
             " ".join(f"{k}={v!r}" for k, v in scrub_extra_fields(extra_fields).items())

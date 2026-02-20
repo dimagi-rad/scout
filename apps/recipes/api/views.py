@@ -1,21 +1,16 @@
 """
 API views for recipe management.
-
-Provides endpoints for CRUD operations on recipes, running recipes,
-and viewing run history.
 """
+
 import logging
 
-from django.shortcuts import get_object_or_404
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.api.permissions import ProjectPermissionMixin
 from apps.recipes.models import Recipe, RecipeRun
-from apps.recipes.services.runner import RecipeRunner, RecipeRunnerError, VariableValidationError
 
 from .serializers import (
     PublicRecipeRunSerializer,
@@ -30,170 +25,157 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
-class RecipePermissionMixin(ProjectPermissionMixin):
-    """Extended permission mixin for recipe operations."""
+def _resolve_workspace(request):
+    """Resolve the active TenantWorkspace for the authenticated user."""
+    from django.db.models import F
 
-    def get_recipe(self, project, recipe_id):
-        """Retrieve a recipe by ID within a project."""
-        return get_object_or_404(
-            Recipe,
-            pk=recipe_id,
-            project=project,
+    from apps.projects.models import TenantWorkspace
+    from apps.users.models import TenantMembership
+
+    membership = (
+        TenantMembership.objects.filter(user=request.user)
+        .order_by(F("last_selected_at").desc(nulls_last=True))
+        .first()
+    )
+    if not membership:
+        return None, Response(
+            {"error": "No tenant selected. Please select a domain first."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
+    workspace, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id=membership.tenant_id,
+        defaults={"tenant_name": membership.tenant_name},
+    )
+    return workspace, None
 
 
-class RecipeListView(RecipePermissionMixin, APIView):
-    """List all recipes for a project."""
+class RecipeListView(APIView):
+    """
+    GET /api/recipes/ - List recipes for the active workspace.
+    """
 
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, project_id):
-        project = self.get_project(project_id)
-
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        recipes = Recipe.objects.filter(project=project).prefetch_related("runs")
+    def get(self, request):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
+        recipes = Recipe.objects.filter(workspace=workspace)
         serializer = RecipeListSerializer(recipes, many=True)
         return Response(serializer.data)
 
 
-class RecipeDetailView(RecipePermissionMixin, APIView):
-    """Retrieve, update, or delete a recipe."""
+class RecipeDetailView(APIView):
+    """
+    GET    /api/recipes/<recipe_id>/ - Retrieve a recipe.
+    PUT    /api/recipes/<recipe_id>/ - Update a recipe.
+    DELETE /api/recipes/<recipe_id>/ - Delete a recipe.
+    """
 
-    permission_classes = [IsAuthenticated]
+    def _get_recipe(self, request, recipe_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return None, err
+        try:
+            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
+        except Recipe.DoesNotExist:
+            return None, Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
+        return recipe, None
 
-    def get(self, request, project_id, recipe_id):
-        project = self.get_project(project_id)
+    def get(self, request, recipe_id):
+        recipe, err = self._get_recipe(request, recipe_id)
+        if err:
+            return err
+        return Response(RecipeDetailSerializer(recipe).data)
 
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
-        serializer = RecipeDetailSerializer(recipe)
-        return Response(serializer.data)
-
-    def put(self, request, project_id, recipe_id):
-        project = self.get_project(project_id)
-
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
-        serializer = RecipeUpdateSerializer(
-            recipe,
-            data=request.data,
-            partial=True,
-        )
-
+    def put(self, request, recipe_id):
+        recipe, err = self._get_recipe(request, recipe_id)
+        if err:
+            return err
+        serializer = RecipeUpdateSerializer(recipe, data=request.data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
         serializer.save()
+        return Response(RecipeDetailSerializer(recipe).data)
 
-        response_serializer = RecipeDetailSerializer(recipe)
-        return Response(response_serializer.data)
-
-    def delete(self, request, project_id, recipe_id):
-        project = self.get_project(project_id)
-
-        is_admin, error_response = self.check_admin_permission(request, project)
-        if not is_admin:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
+    def delete(self, request, recipe_id):
+        recipe, err = self._get_recipe(request, recipe_id)
+        if err:
+            return err
         recipe.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class RecipeRunView(RecipePermissionMixin, APIView):
-    """Run a recipe with provided variable values."""
+class RecipeRunView(APIView):
+    """
+    POST /api/recipes/<recipe_id>/run/ - Execute a recipe with variable values.
+    """
 
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request, project_id, recipe_id):
-        project = self.get_project(project_id)
-
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
+    def post(self, request, recipe_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
+        try:
+            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
+        except Recipe.DoesNotExist:
+            return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = RunRecipeSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        variables = serializer.validated_data.get("variable_values", {})
+        variable_values = serializer.validated_data.get("variable_values", {})
 
         try:
-            runner = RecipeRunner(
-                recipe=recipe,
-                variable_values=variables,
-                user=request.user,
-            )
+            from apps.recipes.services.runner import RecipeRunner
+
+            runner = RecipeRunner(recipe=recipe, variable_values=variable_values, user=request.user)
             run = runner.execute()
-        except VariableValidationError as e:
-            return Response(
-                {"error": "Variable validation failed", "details": e.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        except RecipeRunnerError as e:
-            logger.exception("Recipe execution error for %s: %s", recipe.name, e)
-            return Response(
-                {"error": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        except Exception as e:
+            logger.exception("Error running recipe %s", recipe_id)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        serializer = RecipeRunSerializer(run)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(RecipeRunSerializer(run).data, status=status.HTTP_201_CREATED)
 
 
-class RecipeRunHistoryView(RecipePermissionMixin, APIView):
-    """List run history for a recipe."""
+class RecipeRunListView(APIView):
+    """
+    GET /api/recipes/<recipe_id>/runs/ - List runs for a recipe.
+    """
 
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, project_id, recipe_id):
-        project = self.get_project(project_id)
-
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
+    def get(self, request, recipe_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
+        try:
+            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
+        except Recipe.DoesNotExist:
+            return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
         runs = RecipeRun.objects.filter(recipe=recipe).order_by("-created_at")
-
-        serializer = RecipeRunSerializer(runs, many=True)
-        return Response(serializer.data)
+        return Response(RecipeRunSerializer(runs, many=True).data)
 
 
-class RecipeRunUpdateView(RecipePermissionMixin, APIView):
-    """Update sharing settings on a recipe run."""
+class RecipeRunDetailView(APIView):
+    """
+    PATCH /api/recipes/<recipe_id>/runs/<run_id>/ - Update run sharing settings.
+    """
 
-    permission_classes = [IsAuthenticated]
-
-    def patch(self, request, project_id, recipe_id, run_id):
-        project = self.get_project(project_id)
-
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
-
-        recipe = self.get_recipe(project, recipe_id)
-        run = get_object_or_404(RecipeRun, pk=run_id, recipe=recipe)
+    def patch(self, request, recipe_id, run_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
+        try:
+            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
+        except Recipe.DoesNotExist:
+            return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            run = RecipeRun.objects.get(pk=run_id, recipe=recipe)
+        except RecipeRun.DoesNotExist:
+            return Response({"error": "Run not found."}, status=status.HTTP_404_NOT_FOUND)
 
         serializer = RecipeRunUpdateSerializer(run, data=request.data, partial=True)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
         serializer.save()
-
-        response_serializer = RecipeRunSerializer(run)
-        return Response(response_serializer.data)
+        return Response(RecipeRunSerializer(run).data)
 
 
 class PublicRecipeRunView(APIView):
@@ -204,6 +186,8 @@ class PublicRecipeRunView(APIView):
     renderer_classes = [JSONRenderer]
 
     def get(self, request, share_token):
+        from django.shortcuts import get_object_or_404
+
         run = get_object_or_404(
             RecipeRun,
             share_token=share_token,

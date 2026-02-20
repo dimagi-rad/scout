@@ -1,299 +1,190 @@
 """
-API views for project management.
-
-Provides endpoints for CRUD operations on projects and member management.
+API views for data dictionary and workspace schema management.
 """
+
 import logging
 
-from django.shortcuts import get_object_or_404
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.models import Project, ProjectMembership, ProjectRole
-from apps.users.models import User
-
-from .serializers import (
-    AddMemberSerializer,
-    ProjectDetailSerializer,
-    ProjectListSerializer,
-    ProjectMemberSerializer,
-)
-
 logger = logging.getLogger(__name__)
 
 
-class ProjectPermissionMixin:
-    """
-    Mixin providing permission checking for project operations.
+def _resolve_workspace(request):
+    """Resolve the active TenantWorkspace for the authenticated user."""
+    from django.db.models import F
 
-    Provides methods to check if a user has access to a project
-    and if they have admin permissions.
-    """
+    from apps.projects.models import TenantWorkspace
+    from apps.users.models import TenantMembership
 
-    def get_project(self, project_id):
-        """Retrieve a project by ID."""
-        return get_object_or_404(
-            Project.objects.prefetch_related("memberships"),
-            pk=project_id,
+    membership = (
+        TenantMembership.objects.filter(user=request.user)
+        .order_by(F("last_selected_at").desc(nulls_last=True))
+        .first()
+    )
+    if not membership:
+        return None, Response(
+            {"error": "No tenant selected. Please select a domain first."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
-
-    def get_user_membership(self, user, project):
-        """Get the user's membership in a project, if any."""
-        if user.is_superuser:
-            return None  # Superusers have implicit access
-        return ProjectMembership.objects.filter(
-            user=user,
-            project=project,
-        ).first()
-
-    def check_project_access(self, request, project):
-        """
-        Check if the user has any access to the project.
-
-        Returns:
-            tuple: (has_access: bool, error_response: Response or None)
-        """
-        if request.user.is_superuser:
-            return True, None
-
-        membership = self.get_user_membership(request.user, project)
-        if membership:
-            return True, None
-
-        return False, Response(
-            {"error": "You do not have access to this project."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
-    def check_admin_permission(self, request, project):
-        """
-        Check if the user has admin permission for the project.
-
-        Returns:
-            tuple: (is_admin: bool, error_response: Response or None)
-        """
-        if request.user.is_superuser:
-            return True, None
-
-        membership = self.get_user_membership(request.user, project)
-        if membership and membership.role == ProjectRole.ADMIN:
-            return True, None
-
-        return False, Response(
-            {"error": "You must be a project admin to perform this action."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
+    workspace, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id=membership.tenant_id,
+        defaults={"tenant_name": membership.tenant_name},
+    )
+    return workspace, None
 
 
-class ProjectListCreateView(APIView):
+def _serialize_annotation(tk):
+    """Serialize a TableKnowledge instance to the frontend annotation shape."""
+    use_cases = tk.use_cases
+    data_quality_notes = tk.data_quality_notes
+    return {
+        "description": tk.description,
+        "use_cases": "\n".join(use_cases) if isinstance(use_cases, list) else (use_cases or ""),
+        "data_quality_notes": "\n".join(data_quality_notes)
+        if isinstance(data_quality_notes, list)
+        else (data_quality_notes or ""),
+        "refresh_frequency": tk.refresh_frequency,
+        "owner": tk.owner,
+        "related_tables": tk.related_tables or [],
+        "column_notes": tk.column_notes or {},
+    }
+
+
+def _get_annotation(workspace, table_name):
+    """Return serialized TableKnowledge annotation for a table, or None."""
+    from apps.knowledge.models import TableKnowledge
+
+    try:
+        tk = TableKnowledge.objects.get(workspace=workspace, table_name=table_name)
+        return _serialize_annotation(tk)
+    except TableKnowledge.DoesNotExist:
+        return None
+
+
+class DataDictionaryView(APIView):
     """
-    List all projects the user has access to, or create a new project.
+    GET /api/data-dictionary/
 
-    GET /api/projects/
-        Returns list of projects where user is a member (or all for superusers).
-
-    POST /api/projects/
-        Creates a new project. The creator becomes an admin member.
+    Returns the workspace's data dictionary merged with TableKnowledge annotations.
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        """List all projects accessible to the user."""
-        if request.user.is_superuser:
-            projects = Project.objects.all()
-        else:
-            project_ids = ProjectMembership.objects.filter(
-                user=request.user
-            ).values_list("project_id", flat=True)
-            projects = Project.objects.filter(id__in=project_ids)
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        projects = projects.prefetch_related("memberships").order_by("name")
-        serializer = ProjectListSerializer(
-            projects,
-            many=True,
-            context={"request": request},
+        raw_dict = workspace.data_dictionary or {}
+        tables = raw_dict.get("tables", {})
+        generated_at = workspace.data_dictionary_generated_at
+
+        enriched_tables = {}
+        for qualified_name, table_data in tables.items():
+            annotation = _get_annotation(workspace, qualified_name)
+            enriched = dict(table_data)
+            if annotation:
+                enriched["annotation"] = annotation
+            enriched_tables[qualified_name] = enriched
+
+        return Response(
+            {
+                "tables": enriched_tables,
+                "generated_at": generated_at.isoformat() if generated_at else None,
+            }
         )
-        return Response(serializer.data)
+
+
+class RefreshSchemaView(APIView):
+    """
+    POST /api/refresh-schema/
+
+    Triggers a schema refresh for the active workspace.
+    """
+
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        """Create a new project."""
-        serializer = ProjectDetailSerializer(
-            data=request.data,
-            context={"request": request},
-        )
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        project = serializer.save()
-
-        # Return the created project
-        response_serializer = ProjectDetailSerializer(
-            project,
-            context={"request": request},
-        )
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        # Schema refresh is handled by the MCP server during agent interactions.
+        # This endpoint acknowledges the request; future work can trigger an explicit refresh.
+        return Response({"status": "ok"})
 
 
-class ProjectDetailView(ProjectPermissionMixin, APIView):
+class TableDetailView(APIView):
     """
-    Retrieve, update, or delete a project.
-
-    GET /api/projects/{project_id}/
-        Returns project details. Requires membership.
-
-    PUT /api/projects/{project_id}/
-        Updates project. Requires admin role.
-
-    DELETE /api/projects/{project_id}/
-        Deletes project. Requires admin role.
+    GET /api/data-dictionary/tables/<qualified_name>/
+    PUT /api/data-dictionary/tables/<qualified_name>/
     """
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, project_id):
-        """Retrieve a project by ID."""
-        project = self.get_project(project_id)
+    def _get_table_data(self, workspace, qualified_name):
+        raw_dict = workspace.data_dictionary or {}
+        return raw_dict.get("tables", {}).get(qualified_name)
 
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
+    def get(self, request, qualified_name):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        serializer = ProjectDetailSerializer(
-            project,
-            context={"request": request},
+        table_data = self._get_table_data(workspace, qualified_name)
+        if table_data is None:
+            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        annotation = _get_annotation(workspace, qualified_name)
+        response_data = dict(table_data)
+        response_data["qualified_name"] = qualified_name
+        if annotation:
+            response_data["annotation"] = annotation
+
+        return Response(response_data)
+
+    def put(self, request, qualified_name):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
+
+        table_data = self._get_table_data(workspace, qualified_name)
+        if table_data is None:
+            return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.knowledge.models import TableKnowledge
+
+        data = request.data
+
+        # Convert string fields to list for storage in JSONField
+        def _to_list(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str) and value.strip():
+                return [line for line in value.splitlines() if line.strip()]
+            return []
+
+        related_tables = data.get("related_tables", [])
+        if isinstance(related_tables, str):
+            related_tables = [t.strip() for t in related_tables.split(",") if t.strip()]
+
+        tk, _ = TableKnowledge.objects.get_or_create(
+            workspace=workspace,
+            table_name=qualified_name,
+            defaults={"description": "", "updated_by": request.user},
         )
-        return Response(serializer.data)
+        tk.description = data.get("description", tk.description)
+        tk.use_cases = _to_list(data.get("use_cases", ""))
+        tk.data_quality_notes = _to_list(data.get("data_quality_notes", ""))
+        tk.refresh_frequency = data.get("refresh_frequency", tk.refresh_frequency)
+        tk.owner = data.get("owner", tk.owner)
+        tk.related_tables = related_tables
+        column_notes = data.get("column_notes", {})
+        tk.column_notes = column_notes if isinstance(column_notes, dict) else {}
+        tk.updated_by = request.user
+        tk.save()
 
-    def put(self, request, project_id):
-        """Update a project."""
-        project = self.get_project(project_id)
-
-        is_admin, error_response = self.check_admin_permission(request, project)
-        if not is_admin:
-            return error_response
-
-        serializer = ProjectDetailSerializer(
-            project,
-            data=request.data,
-            partial=True,
-            context={"request": request},
-        )
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        serializer.save()
-        return Response(serializer.data)
-
-    def delete(self, request, project_id):
-        """Delete a project."""
-        project = self.get_project(project_id)
-
-        is_admin, error_response = self.check_admin_permission(request, project)
-        if not is_admin:
-            return error_response
-
-        project.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-class ProjectMembersView(ProjectPermissionMixin, APIView):
-    """
-    List project members or add a new member.
-
-    GET /api/projects/{project_id}/members/
-        Returns list of project members. Requires membership.
-
-    POST /api/projects/{project_id}/members/
-        Adds a new member. Requires admin role.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, project_id):
-        """List all members of a project."""
-        project = self.get_project(project_id)
-
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        memberships = ProjectMembership.objects.filter(
-            project=project
-        ).select_related("user").order_by("created_at")
-
-        serializer = ProjectMemberSerializer(memberships, many=True)
-        return Response(serializer.data)
-
-    def post(self, request, project_id):
-        """Add a new member to the project."""
-        project = self.get_project(project_id)
-
-        is_admin, error_response = self.check_admin_permission(request, project)
-        if not is_admin:
-            return error_response
-
-        serializer = AddMemberSerializer(
-            data=request.data,
-            context={"project": project, "request": request},
-        )
-
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        membership = serializer.save()
-
-        # Return the created membership
-        response_serializer = ProjectMemberSerializer(membership)
-        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
-
-
-class ProjectMemberDetailView(ProjectPermissionMixin, APIView):
-    """
-    Remove a member from a project.
-
-    DELETE /api/projects/{project_id}/members/{user_id}/
-        Removes a member. Requires admin role.
-        Admins cannot remove themselves if they are the last admin.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def delete(self, request, project_id, user_id):
-        """Remove a member from the project."""
-        project = self.get_project(project_id)
-
-        is_admin, error_response = self.check_admin_permission(request, project)
-        if not is_admin:
-            return error_response
-
-        # Get the target user
-        target_user = get_object_or_404(User, pk=user_id)
-
-        # Get the membership to delete
-        membership = get_object_or_404(
-            ProjectMembership,
-            project=project,
-            user=target_user,
-        )
-
-        # Prevent removing the last admin
-        if membership.role == ProjectRole.ADMIN:
-            admin_count = ProjectMembership.objects.filter(
-                project=project,
-                role=ProjectRole.ADMIN,
-            ).count()
-            if admin_count <= 1:
-                return Response(
-                    {"error": "Cannot remove the last admin from the project."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        membership.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-
+        return Response(_serialize_annotation(tk))

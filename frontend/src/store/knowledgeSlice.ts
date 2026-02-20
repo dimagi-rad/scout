@@ -78,12 +78,12 @@ export interface KnowledgeSlice {
   knowledgeFilter: KnowledgeType | null
   knowledgeSearch: string
   knowledgeActions: {
-    fetchKnowledge: (projectId: string, options?: { type?: KnowledgeType; search?: string; page?: number; pageSize?: number }) => Promise<void>
-    createKnowledge: (projectId: string, data: Partial<KnowledgeItem> & { type: KnowledgeType }) => Promise<KnowledgeItem>
-    updateKnowledge: (projectId: string, id: string, data: Partial<KnowledgeItem>) => Promise<KnowledgeItem>
-    deleteKnowledge: (projectId: string, id: string) => Promise<void>
-    exportKnowledge: (projectId: string) => Promise<void>
-    importKnowledge: (projectId: string, file: File) => Promise<void>
+    fetchKnowledge: (options?: { type?: KnowledgeType; search?: string; page?: number; pageSize?: number }) => Promise<void>
+    createKnowledge: (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => Promise<KnowledgeItem>
+    updateKnowledge: (id: string, data: Partial<KnowledgeItem>) => Promise<KnowledgeItem>
+    deleteKnowledge: (id: string) => Promise<void>
+    exportKnowledge: () => Promise<void>
+    importKnowledge: (file: File) => Promise<void>
     setFilter: (type: KnowledgeType | null) => void
     setSearch: (search: string) => void
   }
@@ -97,7 +97,7 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
   knowledgeFilter: null,
   knowledgeSearch: "",
   knowledgeActions: {
-    fetchKnowledge: async (projectId: string, options?: { type?: KnowledgeType; search?: string; page?: number; pageSize?: number }) => {
+    fetchKnowledge: async (options?) => {
       set({ knowledgeStatus: "loading", knowledgeError: null })
       try {
         const params = new URLSearchParams()
@@ -106,7 +106,7 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
         if (options?.page) params.set("page", String(options.page))
         if (options?.pageSize) params.set("page_size", String(options.pageSize))
         const queryString = params.toString()
-        const url = `/api/projects/${projectId}/knowledge/${queryString ? `?${queryString}` : ""}`
+        const url = `/api/knowledge/${queryString ? `?${queryString}` : ""}`
         const response = await api.get<PaginatedKnowledgeResponse>(url)
         set({
           knowledgeItems: response.results,
@@ -123,28 +123,28 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
       }
     },
 
-    createKnowledge: async (projectId: string, data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
-      const item = await api.post<KnowledgeItem>(`/api/projects/${projectId}/knowledge/`, data)
+    createKnowledge: async (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
+      const item = await api.post<KnowledgeItem>(`/api/knowledge/`, data)
       const items = get().knowledgeItems
       set({ knowledgeItems: [item, ...items] })
       return item
     },
 
-    updateKnowledge: async (projectId: string, id: string, data: Partial<KnowledgeItem>) => {
-      const item = await api.put<KnowledgeItem>(`/api/projects/${projectId}/knowledge/${id}/`, data)
+    updateKnowledge: async (id: string, data: Partial<KnowledgeItem>) => {
+      const item = await api.put<KnowledgeItem>(`/api/knowledge/${id}/`, data)
       const items = get().knowledgeItems.map((i) => (i.id === id ? item : i))
       set({ knowledgeItems: items })
       return item
     },
 
-    deleteKnowledge: async (projectId: string, id: string) => {
-      await api.delete<void>(`/api/projects/${projectId}/knowledge/${id}/`)
+    deleteKnowledge: async (id: string) => {
+      await api.delete<void>(`/api/knowledge/${id}/`)
       const items = get().knowledgeItems.filter((i) => i.id !== id)
       set({ knowledgeItems: items })
     },
 
-    exportKnowledge: async (projectId: string) => {
-      const blob = await api.getBlob(`/api/projects/${projectId}/knowledge/export/`)
+    exportKnowledge: async () => {
+      const blob = await api.getBlob(`/api/knowledge/export/`)
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
@@ -155,12 +155,12 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
       URL.revokeObjectURL(url)
     },
 
-    importKnowledge: async (projectId: string, file: File) => {
+    importKnowledge: async (file: File) => {
       const formData = new FormData()
       formData.append("file", file)
-      await api.upload(`/api/projects/${projectId}/knowledge/import/`, formData)
+      await api.upload(`/api/knowledge/import/`, formData)
       // Re-fetch to get updated list
-      await get().knowledgeActions.fetchKnowledge(projectId)
+      await get().knowledgeActions.fetchKnowledge()
     },
 
     setFilter: (type: KnowledgeType | null) => {

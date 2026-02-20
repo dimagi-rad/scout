@@ -4,6 +4,7 @@ Artifact views for Scout data agent platform.
 Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, executing live queries, and serving shared artifacts.
 """
+
 import json
 import logging
 import secrets
@@ -15,9 +16,6 @@ from uuid import UUID
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
-
-from apps.projects.models import ProjectMembership
-from apps.projects.services.db_manager import get_pool_manager
 
 from .models import AccessLevel, Artifact, SharedArtifact
 from .services.export import ArtifactExporter
@@ -633,10 +631,12 @@ class ArtifactSandboxView(View):
         if not request.user.is_authenticated:
             return HttpResponse("Authentication required", status=401)
 
-        # Check project membership (unless superuser)
-        if not request.user.is_superuser:
-            has_access = ProjectMembership.objects.filter(
-                user=request.user, project=artifact.project
+        # Check workspace membership (unless superuser)
+        if not request.user.is_superuser and artifact.workspace_id:
+            from apps.users.models import TenantMembership
+
+            has_access = TenantMembership.objects.filter(
+                user=request.user, tenant_id=artifact.workspace.tenant_id
             ).exists()
             if not has_access:
                 return HttpResponse("Access denied", status=403)
@@ -647,21 +647,23 @@ class ArtifactSandboxView(View):
         has_live_queries = bool(artifact.source_queries)
 
         # Serialize artifact data for embedding in the template
-        artifact_json = json.dumps({
-            "id": str(artifact.id),
-            "title": artifact.title,
-            "type": artifact.artifact_type,
-            "code": artifact.code,
-            "data": artifact.data if not has_live_queries else {},
-            "has_live_queries": has_live_queries,
-            "version": artifact.version,
-        })
+        artifact_json = json.dumps(
+            {
+                "id": str(artifact.id),
+                "title": artifact.title,
+                "type": artifact.artifact_type,
+                "code": artifact.code,
+                "data": artifact.data if not has_live_queries else {},
+                "has_live_queries": has_live_queries,
+                "version": artifact.version,
+            }
+        )
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
 
         # Inject the nonce and artifact data into the template
-        html_content = SANDBOX_HTML_TEMPLATE.replace('{{CSP_NONCE}}', csp_nonce)
-        html_content = html_content.replace('{{ARTIFACT_DATA}}', artifact_json)
+        html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
+        html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")
         response["Content-Security-Policy"] = generate_csp_with_nonce(csp_nonce)
@@ -682,23 +684,21 @@ class ArtifactDataView(View):
         """Fetch artifact data for rendering."""
         artifact = get_object_or_404(Artifact, pk=artifact_id)
 
-        # Check access via project membership
+        # Check access via workspace membership
         if not request.user.is_authenticated:
-            return JsonResponse(
-                {"error": "Authentication required"},
-                status=401
-            )
+            return JsonResponse({"error": "Authentication required"}, status=401)
 
-        has_access = ProjectMembership.objects.filter(
-            user=request.user,
-            project=artifact.project
-        ).exists()
+        if not request.user.is_superuser and artifact.workspace_id:
+            from apps.users.models import TenantMembership
 
-        if not has_access and not request.user.is_superuser:
-            return JsonResponse(
-                {"error": "Access denied. You are not a member of this project."},
-                status=403
-            )
+            has_access = TenantMembership.objects.filter(
+                user=request.user, tenant_id=artifact.workspace.tenant_id
+            ).exists()
+            if not has_access:
+                return JsonResponse(
+                    {"error": "Access denied. You are not a member of this workspace."},
+                    status=403,
+                )
 
         return JsonResponse(self._serialize_artifact(artifact))
 
@@ -732,120 +732,24 @@ def _json_safe(value: Any) -> Any:
 
 class ArtifactQueryDataView(View):
     """
-    Execute an artifact's stored SQL queries against the project database
-    and return fresh results. This enables artifacts to display live data
-    rather than stale snapshots.
+    Returns static data for an artifact's stored queries.
 
-    Each query in ``artifact.source_queries`` is executed with the project's
-    connection pool, respecting row limits and statement timeouts.
-
-    Response shape::
-
-        {
-            "queries": [
-                {"name": "kpis", "sql": "SELECT ...", "columns": [...], "rows": [...], "row_count": 5},
-                ...
-            ],
-            "static_data": { ... }   // artifact.data, for non-query config
-        }
+    Live query execution against project databases is no longer supported
+    now that the platform uses MCP server-based data access.
     """
 
     def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
-        artifact = get_object_or_404(
-            Artifact.objects.select_related("project", "project__database_connection"),
-            pk=artifact_id,
-        )
+        artifact = get_object_or_404(Artifact, pk=artifact_id)
 
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        if not request.user.is_superuser:
-            has_access = ProjectMembership.objects.filter(
-                user=request.user, project=artifact.project
-            ).exists()
-            if not has_access:
-                return JsonResponse({"error": "Access denied"}, status=403)
-
-        source_queries = artifact.source_queries or []
-        if not source_queries:
-            return JsonResponse({
+        return JsonResponse(
+            {
                 "queries": [],
                 "static_data": artifact.data or {},
-            })
-
-        project = artifact.project
-        results = []
-
-        for entry in source_queries:
-            if isinstance(entry, dict):
-                name = entry.get("name", f"query_{len(results)}")
-                sql = entry.get("sql", "")
-            else:
-                name = f"query_{len(results)}"
-                sql = str(entry)
-
-            if not sql.strip():
-                results.append({"name": name, "sql": sql, "error": "Empty query"})
-                continue
-
-            try:
-                result = self._execute_query(project, sql)
-                results.append({"name": name, "sql": sql, **result})
-            except Exception as e:
-                logger.exception(
-                    "Artifact query failed [artifact=%s, query=%s]", artifact_id, name
-                )
-                results.append({
-                    "name": name,
-                    "sql": sql,
-                    "columns": [],
-                    "rows": [],
-                    "row_count": 0,
-                    "error": str(e),
-                })
-
-        return JsonResponse({
-            "queries": results,
-            "static_data": artifact.data or {},
-        })
-
-    @staticmethod
-    def _execute_query(project, sql: str) -> dict[str, Any]:
-        from psycopg2 import sql as psql
-
-        pool_mgr = get_pool_manager()
-        timeout = project.max_query_timeout_seconds
-        max_rows = project.max_rows_per_query
-
-        with pool_mgr.get_connection(project) as conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    psql.SQL("SET search_path TO {}").format(
-                        psql.Identifier(project.db_schema)
-                    )
-                )
-                cursor.execute("SET statement_timeout TO %s", (f"{timeout}s",))
-                cursor.execute(sql)
-
-                columns: list[str] = []
-                rows: list[list[Any]] = []
-
-                if cursor.description:
-                    columns = [desc[0] for desc in cursor.description]
-                    rows = [
-                        [_json_safe(cell) for cell in row]
-                        for row in cursor.fetchmany(max_rows)
-                    ]
-
-                return {
-                    "columns": columns,
-                    "rows": rows,
-                    "row_count": len(rows),
-                    "truncated": cursor.rowcount > max_rows if cursor.rowcount >= 0 else False,
-                }
-            finally:
-                cursor.close()
+            }
+        )
 
 
 class SharedArtifactView(View):
@@ -862,58 +766,60 @@ class SharedArtifactView(View):
     def get(self, request: HttpRequest, share_token: str) -> JsonResponse:
         """Fetch shared artifact data (read-only, no state changes)."""
         share = get_object_or_404(
-            SharedArtifact.objects.select_related("artifact", "artifact__project"),
-            share_token=share_token
+            SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
+            share_token=share_token,
         )
 
         # Check if share is expired
         if share.is_expired:
-            return JsonResponse(
-                {"error": "This share link has expired."},
-                status=403
-            )
+            return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level
         if share.access_level == AccessLevel.PUBLIC:
             # Public links are accessible to anyone
             pass
-        elif share.access_level == AccessLevel.PROJECT:
-            # Project-level access requires authentication and project membership
+        elif share.access_level == AccessLevel.TENANT:
+            # Workspace-level access requires authentication and tenant membership
             if not request.user.is_authenticated:
                 return JsonResponse(
-                    {"error": "Authentication required to access this artifact."},
-                    status=401
+                    {"error": "Authentication required to access this artifact."}, status=401
                 )
-            if not share.artifact.project.memberships.filter(user=request.user).exists():
-                return JsonResponse(
-                    {"error": "You must be a project member to access this artifact."},
-                    status=403
-                )
+            workspace = share.artifact.workspace
+            if workspace:
+                from apps.users.models import TenantMembership
+
+                if not TenantMembership.objects.filter(
+                    user=request.user, tenant_id=workspace.tenant_id
+                ).exists():
+                    return JsonResponse(
+                        {"error": "You must be a workspace member to access this artifact."},
+                        status=403,
+                    )
         elif share.access_level == AccessLevel.SPECIFIC:
             # Specific user access requires authentication and being in allowed_users
             if not request.user.is_authenticated:
                 return JsonResponse(
-                    {"error": "Authentication required to access this artifact."},
-                    status=401
+                    {"error": "Authentication required to access this artifact."}, status=401
                 )
             if not share.allowed_users.filter(pk=request.user.pk).exists():
                 return JsonResponse(
-                    {"error": "You do not have permission to access this artifact."},
-                    status=403
+                    {"error": "You do not have permission to access this artifact."}, status=403
                 )
 
         # Return artifact data (no state changes on GET)
         artifact = share.artifact
-        return JsonResponse({
-            "id": str(artifact.id),
-            "title": artifact.title,
-            "type": artifact.artifact_type,
-            "code": artifact.code,
-            "data": artifact.data,
-            "version": artifact.version,
-            "access_level": share.access_level,
-            "view_count": share.view_count,
-        })
+        return JsonResponse(
+            {
+                "id": str(artifact.id),
+                "title": artifact.title,
+                "type": artifact.artifact_type,
+                "code": artifact.code,
+                "data": artifact.data,
+                "version": artifact.version,
+                "access_level": share.access_level,
+                "view_count": share.view_count,
+            }
+        )
 
     def post(self, request: HttpRequest, share_token: str) -> JsonResponse:
         """
@@ -923,50 +829,144 @@ class SharedArtifactView(View):
         loading and displaying the artifact to the user.
         """
         share = get_object_or_404(
-            SharedArtifact.objects.select_related("artifact", "artifact__project"),
-            share_token=share_token
+            SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
+            share_token=share_token,
         )
 
         # Check if share is expired
         if share.is_expired:
-            return JsonResponse(
-                {"error": "This share link has expired."},
-                status=403
-            )
+            return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level (same checks as GET)
         if share.access_level == AccessLevel.PUBLIC:
             pass
-        elif share.access_level == AccessLevel.PROJECT:
+        elif share.access_level == AccessLevel.TENANT:
             if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required."},
-                    status=401
-                )
-            if not share.artifact.project.memberships.filter(user=request.user).exists():
-                return JsonResponse(
-                    {"error": "You must be a project member."},
-                    status=403
-                )
+                return JsonResponse({"error": "Authentication required."}, status=401)
+            workspace = share.artifact.workspace
+            if workspace:
+                from apps.users.models import TenantMembership
+
+                if not TenantMembership.objects.filter(
+                    user=request.user, tenant_id=workspace.tenant_id
+                ).exists():
+                    return JsonResponse(
+                        {"error": "You must be a workspace member."},
+                        status=403,
+                    )
         elif share.access_level == AccessLevel.SPECIFIC:
             if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required."},
-                    status=401
-                )
+                return JsonResponse({"error": "Authentication required."}, status=401)
             if not share.allowed_users.filter(pk=request.user.pk).exists():
-                return JsonResponse(
-                    {"error": "You do not have permission."},
-                    status=403
-                )
+                return JsonResponse({"error": "You do not have permission."}, status=403)
 
         # Record the view
         share.increment_view_count()
 
-        return JsonResponse({
-            "status": "ok",
-            "view_count": share.view_count,
-        })
+        return JsonResponse(
+            {
+                "status": "ok",
+                "view_count": share.view_count,
+            }
+        )
+
+
+class ArtifactListView(View):
+    """
+    GET /api/artifacts/ - List artifacts for the active workspace.
+    """
+
+    def get(self, request: HttpRequest) -> JsonResponse:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
+
+        membership = (
+            TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
+        )
+        if not membership:
+            return JsonResponse({"results": []})
+
+        workspace, _ = TenantWorkspace.objects.get_or_create(
+            tenant_id=membership.tenant_id,
+            defaults={"tenant_name": membership.tenant_name},
+        )
+
+        from django.db.models import Q
+
+        search = request.GET.get("search", "").strip()
+        queryset = Artifact.objects.filter(workspace=workspace)
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search) | Q(description__icontains=search)
+            )
+
+        results = [
+            {
+                "id": str(a.id),
+                "title": a.title,
+                "description": a.description,
+                "artifact_type": a.artifact_type,
+                "version": a.version,
+                "has_live_queries": bool(a.source_queries),
+                "created_at": a.created_at.isoformat(),
+                "updated_at": a.updated_at.isoformat(),
+            }
+            for a in queryset
+        ]
+        return JsonResponse({"results": results})
+
+
+class ArtifactDetailView(View):
+    """
+    PATCH /api/artifacts/<artifact_id>/ - Update title/description.
+    DELETE /api/artifacts/<artifact_id>/ - Delete artifact.
+    """
+
+    def _get_artifact_with_access(self, request: HttpRequest, artifact_id: str):
+        artifact = get_object_or_404(Artifact, pk=artifact_id)
+        if not request.user.is_authenticated:
+            return None, JsonResponse({"error": "Authentication required"}, status=401)
+        if not request.user.is_superuser and artifact.workspace_id:
+            from apps.users.models import TenantMembership
+
+            has_access = TenantMembership.objects.filter(
+                user=request.user, tenant_id=artifact.workspace.tenant_id
+            ).exists()
+            if not has_access:
+                return None, JsonResponse({"error": "Access denied"}, status=403)
+        return artifact, None
+
+    def patch(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+        artifact, err = self._get_artifact_with_access(request, artifact_id)
+        if err:
+            return err
+        try:
+            data = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        update_fields = []
+        if "title" in data:
+            artifact.title = data["title"]
+            update_fields.append("title")
+        if "description" in data:
+            artifact.description = data["description"]
+            update_fields.append("description")
+        if update_fields:
+            update_fields.append("updated_at")
+            artifact.save(update_fields=update_fields)
+        return JsonResponse(
+            {"id": str(artifact.id), "title": artifact.title, "description": artifact.description}
+        )
+
+    def delete(self, request: HttpRequest, artifact_id: str) -> HttpResponse:
+        artifact, err = self._get_artifact_with_access(request, artifact_id)
+        if err:
+            return err
+        artifact.delete()
+        return HttpResponse(status=204)
 
 
 class ArtifactExportView(View):
@@ -990,29 +990,27 @@ class ArtifactExportView(View):
         """
         artifact = get_object_or_404(Artifact, pk=artifact_id)
 
-        # Check access via project membership
+        # Check access via workspace membership
         if not request.user.is_authenticated:
-            return JsonResponse(
-                {"error": "Authentication required"},
-                status=401
-            )
+            return JsonResponse({"error": "Authentication required"}, status=401)
 
-        has_access = ProjectMembership.objects.filter(
-            user=request.user,
-            project=artifact.project
-        ).exists()
+        if not request.user.is_superuser and artifact.workspace_id:
+            from apps.users.models import TenantMembership
 
-        if not has_access and not request.user.is_superuser:
-            return JsonResponse(
-                {"error": "Access denied. You are not a member of this project."},
-                status=403
-            )
+            has_access = TenantMembership.objects.filter(
+                user=request.user, tenant_id=artifact.workspace.tenant_id
+            ).exists()
+            if not has_access:
+                return JsonResponse(
+                    {"error": "Access denied. You are not a member of this workspace."},
+                    status=403,
+                )
 
         # Validate format
         if format not in ("html", "png", "pdf"):
             return JsonResponse(
                 {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
-                status=400
+                status=400,
             )
 
         exporter = ArtifactExporter(artifact)
@@ -1028,110 +1026,10 @@ class ArtifactExportView(View):
         # In production, this would use async views or background tasks
         if format in ("png", "pdf"):
             return JsonResponse(
-                {"error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."},
-                status=501
+                {
+                    "error": f"{format.upper()} export requires an async endpoint. Use /api/artifacts/{artifact_id}/export/{format}/ with async support."
+                },
+                status=501,
             )
 
         return JsonResponse({"error": "Export failed"}, status=500)
-
-
-class ProjectArtifactListView(View):
-    """
-    List artifacts belonging to a project.
-
-    GET /api/projects/<project_id>/artifacts/
-    Optional query params: ?search=<title substring>
-    """
-
-    def get(self, request: HttpRequest, project_id: str) -> JsonResponse:
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
-
-        if not request.user.is_superuser:
-            has_access = ProjectMembership.objects.filter(
-                user=request.user, project_id=project_id
-            ).exists()
-            if not has_access:
-                return JsonResponse({"error": "Access denied"}, status=403)
-
-        qs = Artifact.objects.filter(project_id=project_id).order_by("-created_at")
-
-        search = request.GET.get("search", "").strip()
-        if search:
-            qs = qs.filter(title__icontains=search)
-
-        artifacts = list(
-            qs.values(
-                "id", "title", "description", "artifact_type",
-                "version", "source_queries", "created_at", "updated_at",
-            )[:200]
-        )
-
-        for a in artifacts:
-            a["id"] = str(a["id"])
-            a["has_live_queries"] = bool(a.pop("source_queries", None))
-            a["created_at"] = a["created_at"].isoformat() if a["created_at"] else None
-            a["updated_at"] = a["updated_at"].isoformat() if a["updated_at"] else None
-
-        return JsonResponse({"results": artifacts})
-
-
-class ProjectArtifactDetailView(View):
-    """
-    Detail operations on a single artifact.
-
-    PATCH /api/projects/<project_id>/artifacts/<artifact_id>/  -- update title/description
-    DELETE /api/projects/<project_id>/artifacts/<artifact_id>/ -- delete
-    """
-
-    def _check_access(self, request: HttpRequest, project_id: str) -> JsonResponse | None:
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
-        if not request.user.is_superuser:
-            has_access = ProjectMembership.objects.filter(
-                user=request.user, project_id=project_id
-            ).exists()
-            if not has_access:
-                return JsonResponse({"error": "Access denied"}, status=403)
-        return None
-
-    def patch(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
-        error_resp = self._check_access(request, project_id)
-        if error_resp:
-            return error_resp
-
-        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
-
-        try:
-            body = json.loads(request.body)
-        except (json.JSONDecodeError, ValueError):
-            return JsonResponse({"error": "Invalid JSON"}, status=400)
-
-        allowed_fields = {"title", "description"}
-        update_fields = []
-
-        for field in allowed_fields:
-            if field in body:
-                setattr(artifact, field, str(body[field]).strip())
-                update_fields.append(field)
-
-        if not update_fields:
-            return JsonResponse({"error": "No valid fields to update"}, status=400)
-
-        update_fields.append("updated_at")
-        artifact.save(update_fields=update_fields)
-
-        return JsonResponse({
-            "id": str(artifact.id),
-            "title": artifact.title,
-            "description": artifact.description,
-        })
-
-    def delete(self, request: HttpRequest, project_id: str, artifact_id: str) -> JsonResponse:
-        error_resp = self._check_access(request, project_id)
-        if error_resp:
-            return error_resp
-
-        artifact = get_object_or_404(Artifact, pk=artifact_id, project_id=project_id)
-        artifact.delete()
-        return JsonResponse({"status": "deleted"}, status=200)

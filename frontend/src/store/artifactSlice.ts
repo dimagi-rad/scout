@@ -26,9 +26,9 @@ export interface ArtifactSlice {
   artifactsError: string | null
   artifactSearch: string
   artifactActions: {
-    fetchArtifacts: (projectId: string, options?: { search?: string }) => Promise<void>
-    updateArtifact: (projectId: string, artifactId: string, data: { title?: string; description?: string }) => Promise<void>
-    deleteArtifact: (projectId: string, artifactId: string) => Promise<void>
+    fetchArtifacts: (options?: { search?: string }) => Promise<void>
+    updateArtifact: (artifactId: string, data: { title?: string; description?: string }) => Promise<void>
+    deleteArtifact: (artifactId: string) => Promise<void>
     setArtifactSearch: (search: string) => void
   }
 }
@@ -39,13 +39,13 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
   artifactsError: null,
   artifactSearch: "",
   artifactActions: {
-    fetchArtifacts: async (projectId, options) => {
+    fetchArtifacts: async (options) => {
       set({ artifactsStatus: "loading", artifactsError: null })
       try {
         const params = new URLSearchParams()
         if (options?.search) params.set("search", options.search)
         const qs = params.toString()
-        const url = `/api/projects/${projectId}/artifacts/${qs ? `?${qs}` : ""}`
+        const url = `/api/artifacts/${qs ? `?${qs}` : ""}`
         const response = await api.get<ArtifactListResponse>(url)
         set({
           artifacts: response.results,
@@ -59,9 +59,9 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
         })
       }
     },
-    updateArtifact: async (projectId, artifactId, data) => {
+    updateArtifact: async (artifactId, data) => {
       const updated = await api.patch<{ id: string; title: string; description: string }>(
-        `/api/projects/${projectId}/artifacts/${artifactId}/`,
+        `/api/artifacts/${artifactId}/`,
         data,
       )
       set((state) => ({
@@ -70,8 +70,8 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
         ),
       }))
     },
-    deleteArtifact: async (projectId, artifactId) => {
-      await api.delete(`/api/projects/${projectId}/artifacts/${artifactId}/`)
+    deleteArtifact: async (artifactId) => {
+      await api.delete(`/api/artifacts/${artifactId}/`)
       set((state) => ({
         artifacts: state.artifacts.filter((a) => a.id !== artifactId),
       }))

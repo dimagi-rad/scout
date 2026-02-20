@@ -4,20 +4,23 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('projects', '0002_initial'),
+        ("projects", "0002_initial"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='project',
-            name='is_active',
+            model_name="project",
+            name="is_active",
             field=models.BooleanField(default=True),
         ),
         migrations.AddField(
-            model_name='project',
-            name='readonly_role',
-            field=models.CharField(blank=True, help_text='PostgreSQL role name for read-only access to project database.', max_length=100),
+            model_name="project",
+            name="readonly_role",
+            field=models.CharField(
+                blank=True,
+                help_text="PostgreSQL role name for read-only access to project database.",
+                max_length=100,
+            ),
         ),
     ]

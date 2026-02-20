@@ -22,7 +22,6 @@ export function KnowledgePage() {
   const navigate = useNavigate()
   const importInputRef = useRef<HTMLInputElement>(null)
 
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
   const knowledgeItems = useAppStore((s) => s.knowledgeItems)
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const knowledgeFilter = useAppStore((s) => s.knowledgeFilter)
@@ -46,13 +45,11 @@ export function KnowledgePage() {
   const isNew = location.pathname.endsWith("/new")
 
   useEffect(() => {
-    if (activeProjectId) {
-      fetchKnowledge(activeProjectId, {
-        type: knowledgeFilter ?? undefined,
-        search: knowledgeSearch || undefined,
-      })
-    }
-  }, [activeProjectId, knowledgeFilter, knowledgeSearch, fetchKnowledge])
+    fetchKnowledge({
+      type: knowledgeFilter ?? undefined,
+      search: knowledgeSearch || undefined,
+    })
+  }, [knowledgeFilter, knowledgeSearch, fetchKnowledge])
 
   useEffect(() => {
     if (isNew) {
@@ -102,21 +99,19 @@ export function KnowledgePage() {
   }
 
   const handleSave = async (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
-    if (!activeProjectId) return
-
     if (editItem) {
-      await updateKnowledge(activeProjectId, editItem.id, data)
+      await updateKnowledge(editItem.id, data)
     } else {
-      await createKnowledge(activeProjectId, data)
+      await createKnowledge(data)
     }
   }
 
   const handleConfirmDelete = async () => {
-    if (!activeProjectId || !deleteItem || isDeleting) return
+    if (!deleteItem || isDeleting) return
 
     setIsDeleting(true)
     try {
-      await deleteKnowledge(activeProjectId, deleteItem.id)
+      await deleteKnowledge(deleteItem.id)
       setDeleteItem(null)
     } finally {
       setIsDeleting(false)
@@ -124,28 +119,17 @@ export function KnowledgePage() {
   }
 
   const handleExport = async () => {
-    if (!activeProjectId) return
-    await exportKnowledge(activeProjectId)
+    await exportKnowledge()
   }
 
   const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!activeProjectId || !e.target.files?.[0]) return
-    await importKnowledge(activeProjectId, e.target.files[0])
+    if (!e.target.files?.[0]) return
+    await importKnowledge(e.target.files[0])
     // Reset input so same file can be re-imported
     e.target.value = ""
   }
 
   const filteredItems = knowledgeItems
-
-  if (!activeProjectId) {
-    return (
-      <div className="container mx-auto py-8">
-        <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-muted-foreground">Please select a project first</p>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className="container mx-auto py-8">

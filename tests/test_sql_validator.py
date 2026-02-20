@@ -10,6 +10,7 @@ Tests cover security-critical functionality:
 - LIMIT injection and capping
 - Table filtering
 """
+
 import pytest
 
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
@@ -201,7 +202,9 @@ class TestSchemaEnforcement:
         assert statement is not None
 
         # But joining analytics with some other schema should be rejected
-        sql_rejected = "SELECT * FROM analytics.users u JOIN other_schema.orders o ON u.id = o.user_id"
+        sql_rejected = (
+            "SELECT * FROM analytics.users u JOIN other_schema.orders o ON u.id = o.user_id"
+        )
         with pytest.raises(SQLValidationError, match="(?i)schema"):
             validator.validate(sql_rejected)
 
@@ -413,102 +416,6 @@ class TestLimitInjection:
 
         # LIMIT should be on outer query
         assert "LIMIT" in result.upper()
-
-
-class TestTableFiltering:
-    """Test allowed and excluded table filtering."""
-
-    def test_allow_specific_tables(self):
-        """Test that only allowed tables are permitted."""
-        validator = SQLValidator(
-            schema="public",
-            allowed_tables=["users", "orders"]
-        )
-
-        # Allowed tables should work
-        statement = validator.validate("SELECT * FROM users")
-        assert statement is not None
-
-        statement = validator.validate("SELECT * FROM orders")
-        assert statement is not None
-
-    def test_reject_non_allowed_tables(self):
-        """Test that non-allowed tables are rejected."""
-        validator = SQLValidator(
-            schema="public",
-            allowed_tables=["users", "orders"]
-        )
-
-        with pytest.raises(SQLValidationError, match="(?i)not permitted"):
-            validator.validate("SELECT * FROM payments")
-
-    def test_exclude_specific_tables(self):
-        """Test that excluded tables are rejected."""
-        validator = SQLValidator(
-            schema="public",
-            excluded_tables=["sensitive_data", "admin_logs"]
-        )
-
-        # Normal tables should work
-        statement = validator.validate("SELECT * FROM users")
-        assert statement is not None
-
-        # Excluded tables should be rejected
-        with pytest.raises(SQLValidationError, match="(?i)not permitted"):
-            validator.validate("SELECT * FROM sensitive_data")
-
-        with pytest.raises(SQLValidationError, match="(?i)not permitted"):
-            validator.validate("SELECT * FROM admin_logs")
-
-    def test_allowed_and_excluded_together(self):
-        """Test that allowed_tables takes precedence over excluded_tables."""
-        validator = SQLValidator(
-            schema="public",
-            allowed_tables=["users", "orders", "products"],
-            excluded_tables=["orders"]  # This should be ignored since allowed_tables is set
-        )
-
-        # When allowed_tables is set, excluded_tables is typically ignored
-        # or we could make excluded_tables further filter allowed_tables
-        # For this test, let's assume allowed_tables takes full precedence
-        statement = validator.validate("SELECT * FROM users")
-        assert statement is not None
-
-    def test_join_with_filtered_tables(self):
-        """Test joins respect table filtering."""
-        validator = SQLValidator(
-            schema="public",
-            allowed_tables=["users", "orders"]
-        )
-
-        # Join between allowed tables should work
-        sql = "SELECT * FROM users u JOIN orders o ON u.id = o.user_id"
-        statement = validator.validate(sql)
-        assert statement is not None
-        tables = validator.get_tables_accessed(statement)
-        assert set(tables) == {"users", "orders"}
-
-        # Join with non-allowed table should fail
-        sql = "SELECT * FROM users u JOIN payments p ON u.id = p.user_id"
-        with pytest.raises(SQLValidationError, match="(?i)not permitted"):
-            validator.validate(sql)
-
-    def test_subquery_with_filtered_tables(self):
-        """Test subqueries respect table filtering."""
-        validator = SQLValidator(
-            schema="public",
-            allowed_tables=["users", "orders"]
-        )
-
-        # Subquery with allowed tables should work
-        sql = "SELECT * FROM users WHERE id IN (SELECT user_id FROM orders)"
-        statement = validator.validate(sql)
-        assert statement is not None
-
-        # Subquery with non-allowed table should fail
-        sql = "SELECT * FROM users WHERE id IN (SELECT user_id FROM payments)"
-        with pytest.raises(SQLValidationError, match="(?i)not permitted"):
-            validator.validate(sql)
 
 
 class TestEdgeCases:

@@ -1,6 +1,7 @@
 """
 Django production settings for Scout data agent platform.
 """
+
 import environ
 
 env = environ.Env()

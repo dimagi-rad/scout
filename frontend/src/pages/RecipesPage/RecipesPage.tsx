@@ -21,7 +21,6 @@ export function RecipesPage() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
   const navigate = useNavigate()
 
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
   const recipes = useAppStore((s) => s.recipes)
   const recipeStatus = useAppStore((s) => s.recipeStatus)
   const currentRecipe = useAppStore((s) => s.currentRecipe)
@@ -40,20 +39,18 @@ export function RecipesPage() {
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
 
-  // Fetch recipes list on mount and when project changes
+  // Fetch recipes list on mount
   useEffect(() => {
-    if (activeProjectId) {
-      fetchRecipes(activeProjectId)
-    }
-  }, [activeProjectId, fetchRecipes])
+    fetchRecipes()
+  }, [fetchRecipes])
 
   // Fetch specific recipe when viewing detail
   useEffect(() => {
-    if (activeProjectId && id) {
-      fetchRecipe(activeProjectId, id)
-      fetchRuns(activeProjectId, id)
+    if (id) {
+      fetchRecipe(id)
+      fetchRuns(id)
     }
-  }, [activeProjectId, id, fetchRecipe, fetchRuns])
+  }, [id, fetchRecipe, fetchRuns])
 
   const handleView = useCallback(
     (recipe: Recipe) => {
@@ -68,10 +65,8 @@ export function RecipesPage() {
 
   const handleRun = useCallback(
     async (recipe: Recipe) => {
-      if (!activeProjectId) return
-      // Fetch full recipe details (list view doesn't include prompt/variables)
       try {
-        const full = await fetchRecipe(activeProjectId, recipe.id)
+        const full = await fetchRecipe(recipe.id)
         setRunnerRecipe(full)
         setRunnerOpen(true)
       } catch {
@@ -79,7 +74,7 @@ export function RecipesPage() {
         setRunnerOpen(true)
       }
     },
-    [activeProjectId, fetchRecipe]
+    [fetchRecipe]
   )
 
   const handleRunFromDetail = useCallback(() => {
@@ -105,41 +100,41 @@ export function RecipesPage() {
   }, [])
 
   const handleConfirmDelete = useCallback(async () => {
-    if (!activeProjectId || !deleteDialogRecipe) return
+    if (!deleteDialogRecipe) return
 
-    await deleteRecipe(activeProjectId, deleteDialogRecipe.id)
+    await deleteRecipe(deleteDialogRecipe.id)
     setDeleteDialogRecipe(null)
 
     // If we're on the detail page of the deleted recipe, go back to list
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
-  }, [activeProjectId, deleteDialogRecipe, deleteRecipe, id, navigate])
+  }, [deleteDialogRecipe, deleteRecipe, id, navigate])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {
-      if (!activeProjectId || !currentRecipe) return
-      await updateRecipe(activeProjectId, currentRecipe.id, data)
+      if (!currentRecipe) return
+      await updateRecipe(currentRecipe.id, data)
     },
-    [activeProjectId, currentRecipe, updateRecipe]
+    [currentRecipe, updateRecipe]
   )
 
   const handleUpdateRun = useCallback(
     async (runId: string, data: { is_shared?: boolean; is_public?: boolean }) => {
-      if (!activeProjectId || !currentRecipe) return
-      await updateRecipeRun(activeProjectId, currentRecipe.id, runId, data)
+      if (!currentRecipe) return
+      await updateRecipeRun(currentRecipe.id, runId, data)
     },
-    [activeProjectId, currentRecipe, updateRecipeRun]
+    [currentRecipe, updateRecipeRun]
   )
 
   const handleExecuteRun = useCallback(
     async (variables: Record<string, string>) => {
-      if (!activeProjectId || !runnerRecipe) {
-        throw new Error("No project or recipe selected")
+      if (!runnerRecipe) {
+        throw new Error("No recipe selected")
       }
-      return await runRecipe(activeProjectId, runnerRecipe.id, variables)
+      return await runRecipe(runnerRecipe.id, variables)
     },
-    [activeProjectId, runnerRecipe, runRecipe]
+    [runnerRecipe, runRecipe]
   )
 
   const handleRunComplete = useCallback(
@@ -148,16 +143,6 @@ export function RecipesPage() {
     },
     [navigate],
   )
-
-  if (!activeProjectId) {
-    return (
-      <div className="container mx-auto py-8">
-        <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-muted-foreground">Please select a project first</p>
-        </div>
-      </div>
-    )
-  }
 
   // Show run detail view if we have both recipe ID and run ID
   if (id && runId && currentRecipe) {
@@ -261,6 +246,7 @@ export function RecipesPage() {
         onOpenChange={setRunnerOpen}
         recipe={runnerRecipe}
         onRun={handleExecuteRun}
+        onRunComplete={handleRunComplete}
       />
 
       {/* Delete Confirmation Dialog */}

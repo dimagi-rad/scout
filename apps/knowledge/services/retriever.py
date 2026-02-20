@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 
 if TYPE_CHECKING:
-    from apps.projects.models import Project
+    from apps.projects.models import TenantWorkspace
 
 
 class KnowledgeRetriever:
@@ -27,8 +27,8 @@ class KnowledgeRetriever:
 
     MAX_AGENT_LEARNINGS = 20
 
-    def __init__(self, project: Project) -> None:
-        self.project = project
+    def __init__(self, workspace: TenantWorkspace) -> None:
+        self.workspace = workspace
 
     def retrieve(self, user_question: str = "") -> str:
         """Retrieve and format all relevant knowledge as markdown."""
@@ -50,7 +50,7 @@ class KnowledgeRetriever:
 
     def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
-        entries = KnowledgeEntry.objects.filter(project=self.project).order_by("title")
+        entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title")
 
         if not entries.exists():
             return ""
@@ -67,9 +67,7 @@ class KnowledgeRetriever:
 
     def _format_table_knowledge(self) -> str:
         """Format table knowledge with column notes and data quality notes."""
-        tables = TableKnowledge.objects.filter(project=self.project).order_by(
-            "table_name"
-        )
+        tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by("table_name")
 
         if not tables.exists():
             return ""
@@ -117,7 +115,7 @@ class KnowledgeRetriever:
     def _format_agent_learnings(self) -> str:
         """Format active agent learnings as a bullet list."""
         learnings = AgentLearning.objects.filter(
-            project=self.project,
+            workspace=self.workspace,
             is_active=True,
         ).order_by("-confidence_score", "-times_applied")[: self.MAX_AGENT_LEARNINGS]
 

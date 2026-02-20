@@ -1,6 +1,6 @@
 # Getting started
 
-This section walks you through installing Scout, creating your first project, and having your first conversation with the data agent.
+This section walks you through installing Scout and connecting it to your CommCare data.
 
 ## Prerequisites
 
@@ -14,5 +14,5 @@ This section walks you through installing Scout, creating your first project, an
 ## Steps
 
 1. **[Installation](installation.md)** -- Install dependencies and start the backend and frontend servers.
-2. **[Create your first project](first-project.md)** -- Connect a database, configure table access, and invite team members.
+2. **[Testing CommCare integration in development](dev-testing.md)** -- Connect a CommCare domain using an API key or OAuth flow, then run materialization.
 3. **[Start your first conversation](first-conversation.md)** -- Ask a question and explore the results.

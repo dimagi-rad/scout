@@ -3,6 +3,7 @@ Serializers for artifact sharing API.
 
 Provides serializers for creating and listing shared artifact links.
 """
+
 import secrets
 
 from django.utils import timezone
@@ -23,7 +24,7 @@ class CreateShareSerializer(serializers.Serializer):
 
     access_level = serializers.ChoiceField(
         choices=AccessLevel.choices,
-        default=AccessLevel.PROJECT,
+        default=AccessLevel.TENANT,
         help_text="Access level for the share link.",
     )
     allowed_users = serializers.ListField(
@@ -50,9 +51,11 @@ class CreateShareSerializer(serializers.Serializer):
         allowed_users = attrs.get("allowed_users", [])
 
         if access_level == AccessLevel.SPECIFIC and not allowed_users:
-            raise serializers.ValidationError({
-                "allowed_users": "At least one user must be specified for 'specific' access level."
-            })
+            raise serializers.ValidationError(
+                {
+                    "allowed_users": "At least one user must be specified for 'specific' access level."
+                }
+            )
 
         return attrs
 
@@ -71,7 +74,7 @@ class CreateShareSerializer(serializers.Serializer):
             artifact=artifact,
             created_by=request.user,
             share_token=share_token,
-            access_level=validated_data.get("access_level", AccessLevel.PROJECT),
+            access_level=validated_data.get("access_level", AccessLevel.TENANT),
             expires_at=validated_data.get("expires_at"),
         )
 

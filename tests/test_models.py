@@ -1,19 +1,11 @@
 """Tests for core models."""
-import pytest
+
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
 
 from apps.knowledge.models import (
     AgentLearning,
-    GoldenQuery,
     KnowledgeEntry,
     TableKnowledge,
-)
-from apps.projects.models import (
-    DatabaseConnection,
-    Project,
-    ProjectMembership,
-    ProjectRole,
 )
 
 User = get_user_model()
@@ -48,102 +40,12 @@ class TestUserModel:
         assert user.get_full_name() == "noname@example.com"
 
 
-class TestProjectModel:
-    """Tests for the Project model."""
-
-    def test_create_project(self, db_connection, user):
-        project = Project.objects.create(
-            name="Test Project",
-            slug="test-project",
-            database_connection=db_connection,
-            created_by=user,
-        )
-
-        assert project.name == "Test Project"
-        assert project.slug == "test-project"
-        assert str(project) == "Test Project"
-
-    def test_get_connection_params(self, db, user):
-        conn = DatabaseConnection(
-            name="Params Test Connection",
-            db_host="dbhost.example.com",
-            db_port=5433,
-            db_name="mydb",
-            created_by=user,
-        )
-        conn.db_user = "dbuser"
-        conn.db_password = "dbpass"
-        conn.save()
-
-        project = Project.objects.create(
-            name="Connection Test",
-            slug="conn-test",
-            database_connection=conn,
-            db_schema="analytics",
-            max_query_timeout_seconds=60,
-            created_by=user,
-        )
-
-        params = project.get_connection_params()
-
-        assert params["host"] == "dbhost.example.com"
-        assert params["port"] == 5433
-        assert params["dbname"] == "mydb"
-        assert params["user"] == "dbuser"
-        assert params["password"] == "dbpass"
-        assert "search_path=analytics,public" in params["options"]
-        assert "statement_timeout=60000" in params["options"]
-
-
-class TestProjectMembership:
-    """Tests for ProjectMembership model."""
-
-    def test_create_membership(self, db_connection, user):
-        project = Project.objects.create(
-            name="Team Project",
-            slug="team-project",
-            database_connection=db_connection,
-            created_by=user,
-        )
-
-        membership = ProjectMembership.objects.create(
-            user=user,
-            project=project,
-            role=ProjectRole.ANALYST,
-        )
-
-        assert membership.role == ProjectRole.ANALYST
-        assert str(membership) == f"{user} - {project} (analyst)"
-
-    def test_unique_membership(self, db_connection, user):
-        project = Project.objects.create(
-            name="Unique Test",
-            slug="unique-test",
-            database_connection=db_connection,
-            created_by=user,
-        )
-
-        ProjectMembership.objects.create(user=user, project=project)
-
-        with pytest.raises(IntegrityError):
-            ProjectMembership.objects.create(user=user, project=project)
-
-
 class TestKnowledgeModels:
     """Tests for Knowledge layer models."""
 
-    @pytest.fixture
-    def project(self, db_connection, user):
-        return Project.objects.create(
-            name="Knowledge Test",
-            slug="knowledge-test",
-            database_connection=db_connection,
-            created_by=user,
-        )
-
-    def test_table_knowledge(self, project, user):
+    def test_table_knowledge(self, workspace, user):
         tk = TableKnowledge.objects.create(
-            project=project,
+            workspace=workspace,
             table_name="orders",
             description="Customer orders table",
             use_cases=["Revenue reporting", "Order analysis"],
@@ -154,11 +56,11 @@ class TestKnowledgeModels:
 
         assert tk.table_name == "orders"
         assert "Revenue reporting" in tk.use_cases
-        assert str(tk) == "orders (Knowledge Test)"
+        assert str(tk) == f"orders ({workspace.tenant_name})"
 
-    def test_knowledge_entry(self, project, user):
+    def test_knowledge_entry(self, workspace, user):
         entry = KnowledgeEntry.objects.create(
-            project=project,
+            workspace=workspace,
             title="MRR",
             content="Monthly Recurring Revenue from active subscriptions\n\n```sql\nSELECT SUM(amount) FROM subscriptions WHERE status = 'active'\n```",
             tags=["metric", "finance"],
@@ -167,11 +69,11 @@ class TestKnowledgeModels:
 
         assert entry.title == "MRR"
         assert "metric" in entry.tags
-        assert str(entry) == "MRR (Knowledge Test)"
+        assert str(entry) == f"MRR ({workspace.tenant_name})"
 
-    def test_agent_learning(self, project, user):
+    def test_agent_learning(self, workspace, user):
         learning = AgentLearning.objects.create(
-            project=project,
+            workspace=workspace,
             description="Amount column is in cents, not dollars. Divide by 100.",
             category="type_mismatch",
             applies_to_tables=["orders"],
@@ -184,17 +86,3 @@ class TestKnowledgeModels:
         assert learning.category == "type_mismatch"
         assert learning.is_active
         assert learning.confidence_score == 0.5
-
-    def test_golden_query(self, project, user):
-        gq = GoldenQuery.objects.create(
-            project=project,
-            question="What is the total revenue for January 2024?",
-            expected_sql="SELECT SUM(amount) FROM orders WHERE date >= '2024-01-01' AND date < '2024-02-01'",
-            expected_result={"total": 50000},
-            comparison_mode="exact",
-            difficulty="easy",
-            created_by=user,
-        )
-
-        assert gq.difficulty == "easy"
-        assert gq.comparison_mode == "exact"

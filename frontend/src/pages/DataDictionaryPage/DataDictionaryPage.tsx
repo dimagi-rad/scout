@@ -6,7 +6,6 @@ import { SchemaTree } from "./SchemaTree"
 import { TableDetail } from "./TableDetail"
 
 export function DataDictionaryPage() {
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
   const dataDictionary = useAppStore((s) => s.dataDictionary)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
   const selectedTable = useAppStore((s) => s.selectedTable)
@@ -15,46 +14,25 @@ export function DataDictionaryPage() {
 
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  // Fetch dictionary on mount or when project changes
+  // Fetch dictionary on mount
   useEffect(() => {
-    if (activeProjectId) {
-      fetchDictionary(activeProjectId)
-    }
+    fetchDictionary()
     return () => {
       clearDictionary()
     }
-  }, [activeProjectId, fetchDictionary, clearDictionary])
+  }, [fetchDictionary, clearDictionary])
 
   const handleSelectTable = async (schema: string, table: string) => {
-    if (activeProjectId) {
-      await fetchTable(activeProjectId, schema, table)
-    }
+    await fetchTable(schema, table)
   }
 
   const handleRefresh = async () => {
-    if (activeProjectId) {
-      setIsRefreshing(true)
-      try {
-        await refreshSchema(activeProjectId)
-      } finally {
-        setIsRefreshing(false)
-      }
+    setIsRefreshing(true)
+    try {
+      await refreshSchema()
+    } finally {
+      setIsRefreshing(false)
     }
-  }
-
-  // No project selected
-  if (!activeProjectId) {
-    return (
-      <div className="flex h-full items-center justify-center">
-        <div className="text-center">
-          <Database className="mx-auto h-12 w-12 text-muted-foreground" />
-          <h2 className="mt-4 text-lg font-medium">No project selected</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            Select a project to view its data dictionary
-          </p>
-        </div>
-      </div>
-    )
   }
 
   // Loading state
@@ -81,7 +59,7 @@ export function DataDictionaryPage() {
           <p className="mt-2 text-sm text-muted-foreground">
             There was an error loading the data dictionary
           </p>
-          <Button onClick={() => fetchDictionary(activeProjectId)} className="mt-4">
+          <Button onClick={() => fetchDictionary()} className="mt-4">
             Try Again
           </Button>
         </div>
@@ -124,7 +102,7 @@ export function DataDictionaryPage() {
       {/* Right Panel - Table Detail */}
       <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
         {selectedTable ? (
-          <TableDetail projectId={activeProjectId} table={selectedTable} />
+          <TableDetail table={selectedTable} />
         ) : (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">

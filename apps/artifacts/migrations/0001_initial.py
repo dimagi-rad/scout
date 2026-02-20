@@ -8,64 +8,205 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
-        ('projects', '0002_initial'),
+        ("projects", "0002_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Artifact',
+            name="Artifact",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('title', models.CharField(help_text='Display title for the artifact.', max_length=500)),
-                ('description', models.TextField(blank=True, help_text='Optional description of what this artifact does or shows.')),
-                ('artifact_type', models.CharField(choices=[('react', 'React Component'), ('html', 'HTML Document'), ('markdown', 'Markdown Document'), ('plotly', 'Plotly Chart'), ('svg', 'SVG Graphic')], help_text='The type of artifact (react, html, markdown, plotly, svg).', max_length=20)),
-                ('code', models.TextField(help_text='Source code for the artifact.')),
-                ('data', models.JSONField(blank=True, default=dict, help_text='Structured data for the artifact (e.g., chart data, configuration).')),
-                ('version', models.IntegerField(default=1, help_text='Version number of this artifact.')),
-                ('conversation_id', models.CharField(db_index=True, help_text='Thread ID of the conversation that created this artifact.', max_length=255)),
-                ('source_queries', models.JSONField(blank=True, default=list, help_text='SQL queries that generated the data for this artifact.')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('created_by', models.ForeignKey(help_text='User who created this artifact.', on_delete=django.db.models.deletion.CASCADE, related_name='artifacts', to=settings.AUTH_USER_MODEL)),
-                ('parent_artifact', models.ForeignKey(blank=True, help_text='Previous version of this artifact for version tracking.', null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='child_versions', to='artifacts.artifact')),
-                ('project', models.ForeignKey(help_text='The project this artifact belongs to.', on_delete=django.db.models.deletion.CASCADE, related_name='artifacts', to='projects.project')),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "title",
+                    models.CharField(help_text="Display title for the artifact.", max_length=500),
+                ),
+                (
+                    "description",
+                    models.TextField(
+                        blank=True,
+                        help_text="Optional description of what this artifact does or shows.",
+                    ),
+                ),
+                (
+                    "artifact_type",
+                    models.CharField(
+                        choices=[
+                            ("react", "React Component"),
+                            ("html", "HTML Document"),
+                            ("markdown", "Markdown Document"),
+                            ("plotly", "Plotly Chart"),
+                            ("svg", "SVG Graphic"),
+                        ],
+                        help_text="The type of artifact (react, html, markdown, plotly, svg).",
+                        max_length=20,
+                    ),
+                ),
+                ("code", models.TextField(help_text="Source code for the artifact.")),
+                (
+                    "data",
+                    models.JSONField(
+                        blank=True,
+                        default=dict,
+                        help_text="Structured data for the artifact (e.g., chart data, configuration).",
+                    ),
+                ),
+                (
+                    "version",
+                    models.IntegerField(default=1, help_text="Version number of this artifact."),
+                ),
+                (
+                    "conversation_id",
+                    models.CharField(
+                        db_index=True,
+                        help_text="Thread ID of the conversation that created this artifact.",
+                        max_length=255,
+                    ),
+                ),
+                (
+                    "source_queries",
+                    models.JSONField(
+                        blank=True,
+                        default=list,
+                        help_text="SQL queries that generated the data for this artifact.",
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        help_text="User who created this artifact.",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="artifacts",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "parent_artifact",
+                    models.ForeignKey(
+                        blank=True,
+                        help_text="Previous version of this artifact for version tracking.",
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="child_versions",
+                        to="artifacts.artifact",
+                    ),
+                ),
+                (
+                    "project",
+                    models.ForeignKey(
+                        help_text="The project this artifact belongs to.",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="artifacts",
+                        to="projects.project",
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'Artifact',
-                'verbose_name_plural': 'Artifacts',
-                'ordering': ['-created_at'],
+                "verbose_name": "Artifact",
+                "verbose_name_plural": "Artifacts",
+                "ordering": ["-created_at"],
             },
         ),
         migrations.CreateModel(
-            name='SharedArtifact',
+            name="SharedArtifact",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('share_token', models.CharField(db_index=True, help_text='Unique token for the share URL.', max_length=64, unique=True)),
-                ('access_level', models.CharField(choices=[('public', 'Public (anyone with link)'), ('project', 'Project Members Only'), ('specific', 'Specific Users Only')], default='project', help_text='Who can access this shared artifact.', max_length=20)),
-                ('expires_at', models.DateTimeField(blank=True, help_text='When this share link expires. Null means no expiration.', null=True)),
-                ('view_count', models.IntegerField(default=0, help_text='Number of times this shared artifact has been viewed.')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('allowed_users', models.ManyToManyField(blank=True, help_text="Users allowed to access when access_level is 'specific'.", related_name='accessible_shared_artifacts', to=settings.AUTH_USER_MODEL)),
-                ('artifact', models.ForeignKey(help_text='The artifact being shared.', on_delete=django.db.models.deletion.CASCADE, related_name='shares', to='artifacts.artifact')),
-                ('created_by', models.ForeignKey(help_text='User who created this share link.', on_delete=django.db.models.deletion.CASCADE, related_name='shared_artifacts', to=settings.AUTH_USER_MODEL)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "share_token",
+                    models.CharField(
+                        db_index=True,
+                        help_text="Unique token for the share URL.",
+                        max_length=64,
+                        unique=True,
+                    ),
+                ),
+                (
+                    "access_level",
+                    models.CharField(
+                        choices=[
+                            ("public", "Public (anyone with link)"),
+                            ("project", "Project Members Only"),
+                            ("specific", "Specific Users Only"),
+                        ],
+                        default="project",
+                        help_text="Who can access this shared artifact.",
+                        max_length=20,
+                    ),
+                ),
+                (
+                    "expires_at",
+                    models.DateTimeField(
+                        blank=True,
+                        help_text="When this share link expires. Null means no expiration.",
+                        null=True,
+                    ),
+                ),
+                (
+                    "view_count",
+                    models.IntegerField(
+                        default=0, help_text="Number of times this shared artifact has been viewed."
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "allowed_users",
+                    models.ManyToManyField(
+                        blank=True,
+                        help_text="Users allowed to access when access_level is 'specific'.",
+                        related_name="accessible_shared_artifacts",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "artifact",
+                    models.ForeignKey(
+                        help_text="The artifact being shared.",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="shares",
+                        to="artifacts.artifact",
+                    ),
+                ),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        help_text="User who created this share link.",
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="shared_artifacts",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
             ],
             options={
-                'verbose_name': 'Shared Artifact',
-                'verbose_name_plural': 'Shared Artifacts',
-                'ordering': ['-created_at'],
+                "verbose_name": "Shared Artifact",
+                "verbose_name_plural": "Shared Artifacts",
+                "ordering": ["-created_at"],
             },
         ),
         migrations.AddIndex(
-            model_name='artifact',
-            index=models.Index(fields=['project', '-created_at'], name='artifacts_a_project_16361b_idx'),
+            model_name="artifact",
+            index=models.Index(
+                fields=["project", "-created_at"], name="artifacts_a_project_16361b_idx"
+            ),
         ),
         migrations.AddIndex(
-            model_name='artifact',
-            index=models.Index(fields=['created_by', '-created_at'], name='artifacts_a_created_49dabc_idx'),
+            model_name="artifact",
+            index=models.Index(
+                fields=["created_by", "-created_at"], name="artifacts_a_created_49dabc_idx"
+            ),
         ),
     ]

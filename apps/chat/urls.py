@@ -1,4 +1,5 @@
 """URL configuration for chat app (streaming endpoint + thread history)."""
+
 from django.urls import path
 
 from apps.chat.views import (

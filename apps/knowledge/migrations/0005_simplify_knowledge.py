@@ -2,6 +2,7 @@
 Simplify knowledge system: replace CanonicalMetric, VerifiedQuery, BusinessRule
 with a single KnowledgeEntry model. Remove promoted_to fields from AgentLearning.
 """
+
 import uuid
 
 import django.db.models.deletion
@@ -88,7 +89,6 @@ def migrate_data_forward(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
         ("knowledge", "0004_alter_agentlearning_confidence_score"),
@@ -99,14 +99,36 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="KnowledgeEntry",
             fields=[
-                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
                 ("title", models.CharField(max_length=255)),
-                ("content", models.TextField(help_text="Markdown content for this knowledge entry.")),
+                (
+                    "content",
+                    models.TextField(help_text="Markdown content for this knowledge entry."),
+                ),
                 ("tags", models.JSONField(blank=True, default=list)),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
                 ("updated_at", models.DateTimeField(auto_now=True)),
-                ("created_by", models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, to=settings.AUTH_USER_MODEL)),
-                ("project", models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name="knowledge_entries", to="projects.project")),
+                (
+                    "created_by",
+                    models.ForeignKey(
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "project",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="knowledge_entries",
+                        to="projects.project",
+                    ),
+                ),
             ],
             options={
                 "ordering": ["-updated_at"],

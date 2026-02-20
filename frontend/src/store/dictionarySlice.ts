@@ -87,11 +87,10 @@ export interface DictionarySlice {
   dictionaryError: string | null
   selectedTable: TableDetail | null
   dictionaryActions: {
-    fetchDictionary: (projectId: string) => Promise<void>
-    refreshSchema: (projectId: string) => Promise<void>
-    fetchTable: (projectId: string, schema: string, table: string) => Promise<void>
+    fetchDictionary: () => Promise<void>
+    refreshSchema: () => Promise<void>
+    fetchTable: (schema: string, table: string) => Promise<void>
     updateAnnotations: (
-      projectId: string,
       schema: string,
       table: string,
       annotations: Partial<TableAnnotations>
@@ -147,11 +146,11 @@ export const createDictionarySlice: StateCreator<
   dictionaryError: null,
   selectedTable: null,
   dictionaryActions: {
-    fetchDictionary: async (projectId: string) => {
+    fetchDictionary: async () => {
       set({ dictionaryStatus: "loading", dictionaryError: null })
       try {
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/projects/${projectId}/data-dictionary/`
+          `/api/data-dictionary/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -163,13 +162,13 @@ export const createDictionarySlice: StateCreator<
       }
     },
 
-    refreshSchema: async (projectId: string) => {
+    refreshSchema: async () => {
       set({ dictionaryStatus: "loading", dictionaryError: null })
       try {
-        await api.post(`/api/projects/${projectId}/refresh-schema/`)
+        await api.post(`/api/refresh-schema/`)
         // Re-fetch the full dictionary after refresh
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/projects/${projectId}/data-dictionary/`
+          `/api/data-dictionary/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -181,9 +180,9 @@ export const createDictionarySlice: StateCreator<
       }
     },
 
-    fetchTable: async (projectId: string, schema: string, table: string) => {
+    fetchTable: async (schema: string, table: string) => {
       const raw = await api.get<BackendTableDetailResponse>(
-        `/api/projects/${projectId}/data-dictionary/tables/${schema}.${table}/`
+        `/api/data-dictionary/tables/${schema}.${table}/`
       )
       const data: TableDetail = {
         schema: raw.schema,
@@ -210,13 +209,12 @@ export const createDictionarySlice: StateCreator<
     },
 
     updateAnnotations: async (
-      projectId: string,
       schema: string,
       table: string,
       annotations: Partial<TableAnnotations>
     ) => {
       const updated = await api.put<TableAnnotations>(
-        `/api/projects/${projectId}/data-dictionary/tables/${schema}.${table}/`,
+        `/api/data-dictionary/tables/${schema}.${table}/`,
         annotations
       )
       // Update selected table

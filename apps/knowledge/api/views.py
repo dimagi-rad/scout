@@ -1,4 +1,5 @@
 """API views for knowledge management."""
+
 import io
 import logging
 import zipfile
@@ -13,7 +14,6 @@ from rest_framework.views import APIView
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
-from apps.projects.api.permissions import ProjectPermissionMixin
 
 from .serializers import AgentLearningSerializer, KnowledgeEntrySerializer
 
@@ -36,20 +36,42 @@ KNOWLEDGE_TYPES = {
 }
 
 
-class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
+def _resolve_workspace(request):
+    """Resolve the active TenantWorkspace for the authenticated user."""
+    from django.db.models import F
+
+    from apps.projects.models import TenantWorkspace
+    from apps.users.models import TenantMembership
+
+    membership = (
+        TenantMembership.objects.filter(user=request.user)
+        .order_by(F("last_selected_at").desc(nulls_last=True))
+        .first()
+    )
+    if not membership:
+        return None, Response(
+            {"error": "No tenant selected. Please select a domain first."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    workspace, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id=membership.tenant_id,
+        defaults={"tenant_name": membership.tenant_name},
+    )
+    return workspace, None
+
+
+class KnowledgeListCreateView(APIView):
     """
-    GET  /api/projects/{project_id}/knowledge/
-    POST /api/projects/{project_id}/knowledge/
+    GET  /api/knowledge/
+    POST /api/knowledge/
     """
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, project_id):
-        project = self.get_project(project_id)
-
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
+    def get(self, request):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
         type_filter = request.query_params.get("type")
         search_query = request.query_params.get("search", "").strip()
@@ -79,7 +101,7 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
             model = type_config["model"]
             serializer_class = type_config["serializer"]
 
-            queryset = model.objects.filter(project=project)
+            queryset = model.objects.filter(workspace=workspace)
 
             if search_query:
                 search_q = Q()
@@ -99,29 +121,31 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
 
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
 
-        return Response({
-            "results": paginated_items,
-            "pagination": {
-                "page": page,
-                "page_size": page_size,
-                "total_count": total_count,
-                "total_pages": total_pages,
-                "has_next": page < total_pages,
-                "has_previous": page > 1,
-            },
-        })
+        return Response(
+            {
+                "results": paginated_items,
+                "pagination": {
+                    "page": page,
+                    "page_size": page_size,
+                    "total_count": total_count,
+                    "total_pages": total_pages,
+                    "has_next": page < total_pages,
+                    "has_previous": page > 1,
+                },
+            }
+        )
 
-    def post(self, request, project_id):
-        project = self.get_project(project_id)
-
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
+    def post(self, request):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
         item_type = request.data.get("type")
         if not item_type or item_type not in KNOWLEDGE_TYPES:
             return Response(
-                {"error": f"Invalid or missing type. Must be one of: {', '.join(KNOWLEDGE_TYPES.keys())}"},
+                {
+                    "error": f"Invalid or missing type. Must be one of: {', '.join(KNOWLEDGE_TYPES.keys())}"
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -132,7 +156,7 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        instance = serializer.save(project=project)
+        instance = serializer.save(workspace=workspace)
 
         if item_type == "entry":
             instance.created_by = request.user
@@ -145,54 +169,48 @@ class KnowledgeListCreateView(ProjectPermissionMixin, APIView):
         return Response(response_serializer.data, status=status.HTTP_201_CREATED)
 
 
-class KnowledgeDetailView(ProjectPermissionMixin, APIView):
+class KnowledgeDetailView(APIView):
     """
-    GET    /api/projects/{project_id}/knowledge/{item_id}/
-    PUT    /api/projects/{project_id}/knowledge/{item_id}/
-    DELETE /api/projects/{project_id}/knowledge/{item_id}/
+    GET    /api/knowledge/<item_id>/
+    PUT    /api/knowledge/<item_id>/
+    DELETE /api/knowledge/<item_id>/
     """
 
     permission_classes = [IsAuthenticated]
 
-    def _find_item(self, project, item_id):
+    def _find_item(self, workspace, item_id):
         for type_name, type_config in KNOWLEDGE_TYPES.items():
             model = type_config["model"]
             try:
-                item = model.objects.get(pk=item_id, project=project)
+                item = model.objects.get(pk=item_id, workspace=workspace)
                 return item, type_name, type_config["serializer"]
             except model.DoesNotExist:
                 continue
         return None, None, None
 
-    def get(self, request, project_id, item_id):
-        project = self.get_project(project_id)
+    def get(self, request, item_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        item, type_name, serializer_class = self._find_item(project, item_id)
+        item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
-                {"error": "Knowledge item not found."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
         serializer = serializer_class(item)
         return Response(serializer.data)
 
-    def put(self, request, project_id, item_id):
-        project = self.get_project(project_id)
+    def put(self, request, item_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
-
-        item, type_name, serializer_class = self._find_item(project, item_id)
+        item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
-                {"error": "Knowledge item not found."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
         serializer = serializer_class(
@@ -207,46 +225,40 @@ class KnowledgeDetailView(ProjectPermissionMixin, APIView):
         serializer.save()
         return Response(serializer.data)
 
-    def delete(self, request, project_id, item_id):
-        project = self.get_project(project_id)
+    def delete(self, request, item_id):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
-
-        item, type_name, serializer_class = self._find_item(project, item_id)
+        item, type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
-                {"error": "Knowledge item not found."},
-                status=status.HTTP_404_NOT_FOUND,
+                {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
             )
 
         item.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class KnowledgeExportView(ProjectPermissionMixin, APIView):
+class KnowledgeExportView(APIView):
     """
-    GET /api/projects/{project_id}/knowledge/export/
+    GET /api/knowledge/export/
 
     Export all KnowledgeEntry records as a zip of markdown files with YAML frontmatter.
     """
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, project_id):
-        project = self.get_project(project_id)
+    def get(self, request):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
-        has_access, error_response = self.check_project_access(request, project)
-        if not has_access:
-            return error_response
-
-        entries = KnowledgeEntry.objects.filter(project=project).order_by("title")
+        entries = KnowledgeEntry.objects.filter(workspace=workspace).order_by("title")
 
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for entry in entries:
-                # Sanitize filename
                 safe_title = "".join(
                     c if c.isalnum() or c in " -_" else "_" for c in entry.title
                 ).strip()[:80]
@@ -255,14 +267,15 @@ class KnowledgeExportView(ProjectPermissionMixin, APIView):
                 zf.writestr(filename, content)
 
         buf.seek(0)
+        safe_name = workspace.tenant_id.replace("/", "_")
         response = HttpResponse(buf.read(), content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="knowledge-{project.slug}.zip"'
+        response["Content-Disposition"] = f'attachment; filename="knowledge-{safe_name}.zip"'
         return response
 
 
-class KnowledgeImportView(ProjectPermissionMixin, APIView):
+class KnowledgeImportView(APIView):
     """
-    POST /api/projects/{project_id}/knowledge/import/
+    POST /api/knowledge/import/
 
     Import knowledge entries from a zip of markdown files with YAML frontmatter.
     """
@@ -270,12 +283,10 @@ class KnowledgeImportView(ProjectPermissionMixin, APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser]
 
-    def post(self, request, project_id):
-        project = self.get_project(project_id)
-
-        can_edit, error_response = self.check_edit_permission(request, project)
-        if not can_edit:
-            return error_response
+    def post(self, request):
+        workspace, err = _resolve_workspace(request)
+        if err:
+            return err
 
         uploaded = request.FILES.get("file")
         if not uploaded:
@@ -297,7 +308,7 @@ class KnowledgeImportView(ProjectPermissionMixin, APIView):
                         continue
 
                     _, was_created = KnowledgeEntry.objects.update_or_create(
-                        project=project,
+                        workspace=workspace,
                         title=title,
                         defaults={
                             "content": body,

@@ -14,7 +14,6 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.artifacts.models import Artifact, ArtifactType, SharedArtifact
-from apps.projects.models import Project, ProjectMembership, ProjectRole
 
 User = get_user_model()
 
@@ -22,29 +21,6 @@ User = get_user_model()
 # ============================================================================
 # Fixtures
 # ============================================================================
-
-
-@pytest.fixture
-def project(db_connection, user):
-    """Create a test project."""
-    return Project.objects.create(
-        name="Test Project",
-        slug="test-project",
-        description="A test project",
-        database_connection=db_connection,
-        db_schema="public",
-        created_by=user,
-    )
-
-
-@pytest.fixture
-def project_membership(db, user, project):
-    """Create a project membership for the test user."""
-    return ProjectMembership.objects.create(
-        user=user,
-        project=project,
-        role=ProjectRole.ANALYST,
-    )
 
 
 @pytest.fixture
@@ -59,23 +35,10 @@ def other_user(db):
 
 
 @pytest.fixture
-def other_project(db_connection, other_user):
-    """Create a project for another user."""
-    return Project.objects.create(
-        name="Other Project",
-        slug="other-project",
-        description="Another test project",
-        database_connection=db_connection,
-        db_schema="public",
-        created_by=other_user,
-    )
-
-
-@pytest.fixture
-def artifact(db, user, project):
+def artifact(db, user, workspace):
     """Create a test artifact."""
     return Artifact.objects.create(
-        project=project,
+        workspace=workspace,
         created_by=user,
         title="Test Chart",
         description="A test visualization",
@@ -121,10 +84,10 @@ def authenticated_client(client, user):
 class TestArtifactModel:
     """Tests for the Artifact model."""
 
-    def test_create_artifact(self, user, project):
+    def test_create_artifact(self, user, workspace):
         """Test creating a basic artifact."""
         artifact = Artifact.objects.create(
-            project=project,
+            workspace=workspace,
             created_by=user,
             title="Sales Dashboard",
             description="Q4 sales analysis",
@@ -147,11 +110,11 @@ class TestArtifactModel:
         assert artifact.parent_artifact is None
         assert str(artifact) == "Sales Dashboard (v1)"
 
-    def test_artifact_versioning(self, user, project, artifact):
+    def test_artifact_versioning(self, user, workspace, artifact):
         """Test artifact versioning with parent_artifact relationship."""
         # Create a new version based on the original
         new_version = Artifact.objects.create(
-            project=project,
+            workspace=workspace,
             created_by=user,
             title=artifact.title,
             description="Updated version",
@@ -171,10 +134,10 @@ class TestArtifactModel:
         assert new_version.code != artifact.code
         assert str(new_version) == f"{artifact.title} (v2)"
 
-    def test_content_hash_property(self, user, project):
+    def test_content_hash_property(self, user, workspace):
         """Test content_hash property for deduplication."""
         artifact1 = Artifact.objects.create(
-            project=project,
+            workspace=workspace,
             created_by=user,
             title="Test",
             artifact_type=ArtifactType.HTML,
@@ -185,7 +148,7 @@ class TestArtifactModel:
         )
 
         artifact2 = Artifact.objects.create(
-            project=project,
+            workspace=workspace,
             created_by=user,
             title="Test Copy",
             artifact_type=ArtifactType.HTML,
@@ -200,7 +163,7 @@ class TestArtifactModel:
 
         # Different code should produce different hash
         artifact3 = Artifact.objects.create(
-            project=project,
+            workspace=workspace,
             created_by=user,
             title="Test Different",
             artifact_type=ArtifactType.HTML,
@@ -211,7 +174,7 @@ class TestArtifactModel:
         )
         assert artifact1.content_hash != artifact3.content_hash
 
-    def test_artifact_types(self, user, project):
+    def test_artifact_types(self, user, workspace):
         """Test all artifact types can be created."""
         for artifact_type in [
             ArtifactType.REACT,
@@ -221,7 +184,7 @@ class TestArtifactModel:
             ArtifactType.SVG,
         ]:
             artifact = Artifact.objects.create(
-                project=project,
+                workspace=workspace,
                 created_by=user,
                 title=f"Test {artifact_type}",
                 artifact_type=artifact_type,
@@ -255,17 +218,17 @@ class TestSharedArtifactModel:
             artifact=artifact,
             created_by=user,
             share_token="test_token_456",
-            access_level="project",
+            access_level="tenant",
         )
 
         assert shared.id is not None
         assert shared.artifact == artifact
         assert shared.created_by == user
         assert shared.share_token == "test_token_456"
-        assert shared.access_level == "project"
+        assert shared.access_level == "tenant"
         assert shared.view_count == 0
         assert shared.expires_at is None
-        assert str(shared) == f"Share: {artifact.title} (project)"
+        assert str(shared) == f"Share: {artifact.title} (tenant)"
 
     def test_share_url_property(self, user, artifact):
         """Test share_url property."""
@@ -316,7 +279,7 @@ class TestSharedArtifactModel:
 
     def test_access_levels(self, user, artifact):
         """Test all access levels can be created."""
-        access_levels = ["public", "project", "specific"]
+        access_levels = ["public", "tenant", "specific"]
 
         for level in access_levels:
             shared = SharedArtifact.objects.create(
@@ -352,7 +315,7 @@ class TestSharedArtifactModel:
 class TestArtifactSandboxView:
     """Tests for the ArtifactSandboxView."""
 
-    def test_sandbox_returns_html(self, authenticated_client, artifact, project_membership):
+    def test_sandbox_returns_html(self, authenticated_client, artifact, tenant_membership):
         """Test that sandbox view returns HTML content."""
         response = authenticated_client.get(f"/api/artifacts/{artifact.id}/sandbox/")
 
@@ -366,7 +329,7 @@ class TestArtifactSandboxView:
         assert "React" in content or "react" in content
         assert "root" in content
 
-    def test_sandbox_csp_headers(self, authenticated_client, artifact, project_membership):
+    def test_sandbox_csp_headers(self, authenticated_client, artifact, tenant_membership):
         """Test that CSP headers are set correctly for security."""
         response = authenticated_client.get(f"/api/artifacts/{artifact.id}/sandbox/")
 
@@ -395,9 +358,9 @@ class TestArtifactDataView:
     """Tests for the ArtifactDataView."""
 
     def test_get_artifact_data_authenticated(
-        self, authenticated_client, artifact, project_membership
+        self, authenticated_client, artifact, tenant_membership
     ):
-        """Test authenticated user with project access can get artifact data."""
+        """Test authenticated user with workspace access can get artifact data."""
         response = authenticated_client.get(f"/api/artifacts/{artifact.id}/data/")
 
         assert response.status_code == 200
@@ -425,14 +388,18 @@ class TestArtifactDataView:
 
         assert response.status_code == 404
 
-    def test_artifact_data_requires_project_membership(
-        self, user, other_user, other_project, client
-    ):
-        """Test that artifact access requires project membership."""
-        # Create artifact in other_project
+    def test_artifact_data_requires_workspace_membership(self, db, user, client):
+        """Test that artifact access requires workspace membership."""
+        from apps.projects.models import TenantWorkspace
+
+        # Create artifact in a workspace that user is NOT a member of
+        other_workspace = TenantWorkspace.objects.create(
+            tenant_id="other-domain",
+            tenant_name="Other Domain",
+        )
         other_artifact = Artifact.objects.create(
-            project=other_project,
-            created_by=other_user,
+            workspace=other_workspace,
+            created_by=user,
             title="Other Artifact",
             artifact_type=ArtifactType.HTML,
             code="<div>Other</div>",
@@ -440,7 +407,7 @@ class TestArtifactDataView:
             conversation_id="conv_other",
         )
 
-        # User tries to access artifact from other_project (no membership)
+        # User tries to access artifact from other workspace (no TenantMembership)
         client.force_login(user)
         response = client.get(f"/api/artifacts/{other_artifact.id}/data/")
 
@@ -471,33 +438,36 @@ class TestSharedArtifactView:
         assert data["code"] == shared_artifact.artifact.code
         assert data["data"] == shared_artifact.artifact.data
 
-    def test_project_share_requires_membership(self, user, other_user, artifact, client):
-        """Test project-level share requires project membership."""
-        # Create project-level share
-        project_share = SharedArtifact.objects.create(
+    def test_tenant_share_requires_membership(self, user, other_user, artifact, client, workspace):
+        """Test tenant-level share requires workspace membership."""
+        from apps.users.models import TenantMembership
+
+        # Create tenant-level share
+        tenant_share = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
-            share_token="project_level_token",
-            access_level="project",
+            share_token="tenant_level_token",
+            access_level="tenant",
         )
 
         # Without authentication - should fail
-        response = client.get(f"/api/artifacts/shared/{project_share.share_token}/")
+        response = client.get(f"/api/artifacts/shared/{tenant_share.share_token}/")
         assert response.status_code == 401
 
-        # With authentication but no project membership - should fail
+        # With authentication but no tenant membership - should fail
         client.force_login(other_user)
-        response = client.get(f"/api/artifacts/shared/{project_share.share_token}/")
+        response = client.get(f"/api/artifacts/shared/{tenant_share.share_token}/")
         assert response.status_code == 403
 
-        # With authentication and project membership - should succeed
-        ProjectMembership.objects.create(
+        # With authentication and tenant membership - should succeed
+        TenantMembership.objects.create(
             user=user,
-            project=artifact.project,
-            role=ProjectRole.VIEWER,
+            provider="commcare",
+            tenant_id=workspace.tenant_id,
+            tenant_name=workspace.tenant_name,
         )
         client.force_login(user)
-        response = client.get(f"/api/artifacts/shared/{project_share.share_token}/")
+        response = client.get(f"/api/artifacts/shared/{tenant_share.share_token}/")
         assert response.status_code == 200
 
     def test_specific_share_requires_allowed_user(self, user, other_user, artifact, client):
@@ -571,11 +541,11 @@ class TestSharedArtifactView:
 class TestArtifactTools:
     """Tests for artifact creation and update tools."""
 
-    def test_create_artifact_tool(self, user, project):
+    def test_create_artifact_tool(self, user, workspace):
         """Test create_artifact tool creates an artifact correctly."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
-        tools = create_artifact_tools(project, user)
+        tools = create_artifact_tools(workspace, user)
         create_artifact_tool = tools[0]
 
         result = create_artifact_tool.invoke(
@@ -608,11 +578,11 @@ class TestArtifactTools:
         assert artifact.version == 1
         assert artifact.parent_artifact is None
 
-    def test_update_artifact_tool(self, user, project, artifact, project_membership):
+    def test_update_artifact_tool(self, user, workspace, artifact, tenant_membership):
         """Test update_artifact tool creates a new version of an artifact."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
-        tools = create_artifact_tools(project, user)
+        tools = create_artifact_tools(workspace, user)
         update_artifact_tool = tools[1]
 
         original_version = artifact.version
@@ -638,11 +608,11 @@ class TestArtifactTools:
         assert new_artifact.title == "Updated Chart Title"
         assert new_artifact.data == {"rows": [{"x": 2, "y": 4}]}
 
-    def test_update_creates_new_version(self, user, project, artifact, project_membership):
+    def test_update_creates_new_version(self, user, workspace, artifact, tenant_membership):
         """Test that update_artifact creates new artifacts with incrementing versions."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
-        tools = create_artifact_tools(project, user)
+        tools = create_artifact_tools(workspace, user)
         update_artifact_tool = tools[1]
 
         original_version = artifact.version
@@ -694,16 +664,16 @@ class TestSharedArtifactAccessControl:
         assert shared.view_count == 0
         assert shared.expires_at is None
 
-    def test_create_project_share_link(self, user, artifact):
+    def test_create_tenant_share_link(self, user, artifact):
         """Test creating a project-level share link."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
-            access_level="project",
+            access_level="tenant",
         )
 
-        assert shared.access_level == "project"
+        assert shared.access_level == "tenant"
         assert shared.artifact == artifact
 
     def test_create_specific_share_link(self, user, other_user, artifact):
@@ -758,30 +728,28 @@ class TestSharedArtifactAccessControl:
         assert shared.can_access(user) is True
         assert shared.can_access(other_user) is True
 
-    def test_project_access_requires_membership(
-        self, user, other_user, artifact, project_membership
-    ):
-        """Test that project-level access requires project membership."""
+    def test_tenant_access_requires_membership(self, user, other_user, artifact, tenant_membership):
+        """Test that tenant-level access requires tenant membership."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
-            access_level="project",
+            access_level="tenant",
         )
 
-        # User with membership can access
+        # User with tenant membership can access
         assert shared.can_access(user) is True
 
-        # Other user without membership cannot access
+        # Other user without tenant membership cannot access
         assert shared.can_access(other_user) is False
 
-    def test_project_access_rejects_unauthenticated(self, user, artifact):
+    def test_tenant_access_rejects_unauthenticated(self, user, artifact):
         """Test that project-level access rejects unauthenticated users."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
-            access_level="project",
+            access_level="tenant",
         )
 
         assert shared.can_access(None) is False
@@ -873,7 +841,7 @@ class TestSharedArtifactAccessControl:
             artifact=artifact,
             created_by=user,
             share_token=SharedArtifact.generate_token(),
-            access_level="project",
+            access_level="tenant",
         )
 
         artifact_shares = SharedArtifact.objects.filter(artifact=artifact)
@@ -947,14 +915,14 @@ class TestSharedArtifactViewAccessControl:
         assert data["id"] == str(artifact.id)
 
     def test_access_project_share_requires_membership(
-        self, client, user, other_user, artifact, project_membership
+        self, client, user, other_user, artifact, tenant_membership
     ):
         """Test that project share requires project membership."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
             share_token="project_test_token",
-            access_level="project",
+            access_level="tenant",
         )
 
         # Without auth

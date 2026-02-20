@@ -1,20 +1,9 @@
-import { useEffect } from "react"
 import { Outlet } from "react-router-dom"
-import { useAppStore } from "@/store/store"
 import { Sidebar } from "@/components/Sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
 
 export function AppLayout() {
-  const fetchProjects = useAppStore((s) => s.projectActions.fetchProjects)
-  const projectsStatus = useAppStore((s) => s.projectsStatus)
-
-  useEffect(() => {
-    if (projectsStatus === "idle") {
-      fetchProjects()
-    }
-  }, [fetchProjects, projectsStatus])
-
   return (
     <div className="flex h-screen">
       <Sidebar />

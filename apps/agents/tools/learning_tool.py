@@ -19,26 +19,28 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from apps.projects.models import Project
+    from apps.projects.models import TenantWorkspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
 
 
 # Valid categories for agent learnings
-VALID_CATEGORIES = frozenset({
-    "type_mismatch",
-    "filter_required",
-    "join_pattern",
-    "aggregation",
-    "naming",
-    "data_quality",
-    "business_logic",
-    "other",
-})
+VALID_CATEGORIES = frozenset(
+    {
+        "type_mismatch",
+        "filter_required",
+        "join_pattern",
+        "aggregation",
+        "naming",
+        "data_quality",
+        "business_logic",
+        "other",
+    }
+)
 
 
-def create_save_learning_tool(project: Project, user: User):
+def create_save_learning_tool(workspace: TenantWorkspace, user: User):
     """
     Create a tool for saving agent learnings.
 
@@ -53,7 +55,7 @@ def create_save_learning_tool(project: Project, user: User):
     - Original and corrected SQL (for reference and validation)
 
     Args:
-        project: The Project model instance for scoping the learning.
+        workspace: The TenantWorkspace model instance for scoping the learning.
         user: The User model instance who triggered the conversation
               where the learning was discovered.
 
@@ -61,7 +63,7 @@ def create_save_learning_tool(project: Project, user: User):
         A LangChain tool function that saves learnings.
 
     Example:
-        >>> tool = create_save_learning_tool(project, user)
+        >>> tool = create_save_learning_tool(workspace, user)
         >>> result = tool.invoke({
         ...     "description": "The events.timestamp column stores epoch ms, not a timestamp",
         ...     "category": "type_mismatch",
@@ -140,7 +142,7 @@ def create_save_learning_tool(project: Project, user: User):
             return {
                 "status": "error",
                 "message": "Description is too short. Please provide a detailed, "
-                          "actionable description of at least 20 characters.",
+                "actionable description of at least 20 characters.",
                 "learning_id": None,
                 "tables_affected": [],
             }
@@ -149,7 +151,7 @@ def create_save_learning_tool(project: Project, user: User):
             return {
                 "status": "error",
                 "message": f"Invalid category '{category}'. Must be one of: "
-                          f"{', '.join(sorted(VALID_CATEGORIES))}",
+                f"{', '.join(sorted(VALID_CATEGORIES))}",
                 "learning_id": None,
                 "tables_affected": [],
             }
@@ -162,8 +164,8 @@ def create_save_learning_tool(project: Project, user: User):
                 "tables_affected": [],
             }
 
-        # Validate tables exist in the project's data dictionary
-        dd = project.data_dictionary or {}
+        # Validate tables exist in the workspace's data dictionary
+        dd = workspace.data_dictionary or {}
         known_tables = set(dd.get("tables", {}).keys())
 
         if known_tables:
@@ -178,7 +180,7 @@ def create_save_learning_tool(project: Project, user: User):
 
         # Check for duplicate learnings (same description for same tables)
         existing = AgentLearning.objects.filter(
-            project=project,
+            workspace=workspace,
             is_active=True,
             description__iexact=description.strip(),
         ).first()
@@ -198,7 +200,7 @@ def create_save_learning_tool(project: Project, user: User):
             return {
                 "status": "updated",
                 "message": f"This learning already exists. Increased confidence to "
-                          f"{existing.confidence_score:.0%}.",
+                f"{existing.confidence_score:.0%}.",
                 "learning_id": str(existing.id),
                 "tables_affected": existing.applies_to_tables,
             }
@@ -206,7 +208,7 @@ def create_save_learning_tool(project: Project, user: User):
         # Create the new learning
         try:
             learning = AgentLearning.objects.create(
-                project=project,
+                workspace=workspace,
                 description=description.strip(),
                 category=category,
                 applies_to_tables=tables,
@@ -220,25 +222,25 @@ def create_save_learning_tool(project: Project, user: User):
             )
 
             logger.info(
-                "Created new learning %s for project %s: %s",
+                "Created new learning %s for workspace %s: %s",
                 learning.id,
-                project.slug,
+                workspace.tenant_id,
                 description[:50] + "..." if len(description) > 50 else description,
             )
 
             return {
                 "status": "saved",
                 "message": f"Learning saved successfully. This correction will be "
-                          f"automatically applied to future queries involving: "
-                          f"{', '.join(tables)}.",
+                f"automatically applied to future queries involving: "
+                f"{', '.join(tables)}.",
                 "learning_id": str(learning.id),
                 "tables_affected": tables,
             }
 
         except Exception as e:
             logger.exception(
-                "Failed to save learning for project %s: %s",
-                project.slug,
+                "Failed to save learning for workspace %s: %s",
+                workspace.tenant_id,
                 str(e),
             )
             return {

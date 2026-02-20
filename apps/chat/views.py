@@ -29,7 +29,6 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.agents.memory.checkpointer import get_database_url
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
-from apps.projects.models import ProjectMembership
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +71,22 @@ async def _ensure_checkpointer(*, force_new: bool = False):
         await _checkpointer.setup()
         logger.info("PostgreSQL checkpointer initialized")
     except Exception as e:
-        from langgraph.checkpoint.memory import MemorySaver
+        from django.conf import settings
 
-        logger.warning("PostgreSQL checkpointer unavailable, using MemorySaver: %s", e)
-        _checkpointer = MemorySaver()
+        if settings.DEBUG:
+            from langgraph.checkpoint.memory import MemorySaver
+
+            logger.warning(
+                "PostgreSQL checkpointer unavailable, using MemorySaver (DEBUG only): %s", e
+            )
+            _checkpointer = MemorySaver()
+        else:
+            logger.error(
+                "PostgreSQL checkpointer failed in production — conversation history unavailable: %s",
+                e,
+                exc_info=True,
+            )
+            raise
 
     return _checkpointer
 
@@ -104,6 +115,7 @@ def _record_attempt(username: str, success: bool) -> None:
 # Auth endpoints
 # ---------------------------------------------------------------------------
 
+
 @ensure_csrf_cookie
 @require_GET
 def csrf_view(request):
@@ -117,12 +129,23 @@ def me_view(request):
     if not request.user.is_authenticated:
         return JsonResponse({"error": "Not authenticated"}, status=401)
     user = request.user
-    return JsonResponse({
-        "id": str(user.id),
-        "email": user.email,
-        "name": user.get_full_name(),
-        "is_staff": user.is_staff,
-    })
+
+    from apps.users.models import TenantMembership
+
+    onboarding_complete = TenantMembership.objects.filter(
+        user=user,
+        credential__isnull=False,
+    ).exists()
+
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+            "onboarding_complete": onboarding_complete,
+        }
+    )
 
 
 @require_POST
@@ -150,12 +173,14 @@ def login_view(request):
     _record_attempt(email, True)
     login(request, user)
 
-    return JsonResponse({
-        "id": str(user.id),
-        "email": user.email,
-        "name": user.get_full_name(),
-        "is_staff": user.is_staff,
-    })
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+        }
+    )
 
 
 @require_POST
@@ -163,6 +188,54 @@ def logout_view(request):
     """Logout and clear session."""
     logout(request)
     return JsonResponse({"ok": True})
+
+
+@require_POST
+def signup_view(request):
+    """Create a new account with email and password, then log in."""
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+
+    if not email or not password:
+        return JsonResponse({"error": "Email and password are required"}, status=400)
+
+    from django.contrib.auth import get_user_model
+
+    UserModel = get_user_model()
+
+    from django.contrib.auth.password_validation import validate_password
+    from django.core.exceptions import ValidationError as _ValidationError
+    from django.db import IntegrityError
+
+    try:
+        validate_password(password)
+    except _ValidationError as e:
+        return JsonResponse({"error": "; ".join(e.messages)}, status=400)
+
+    if UserModel.objects.filter(email=email).exists():
+        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+
+    try:
+        user = UserModel.objects.create_user(email=email, password=password)
+    except IntegrityError:
+        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+        },
+        status=201,
+    )
 
 
 PROVIDER_DISPLAY = {
@@ -184,29 +257,29 @@ def disconnect_provider_view(request, provider_id):
     with transaction.atomic():
         # SocialAccount.provider may store provider_id (e.g. "commcare_prod")
         # rather than the provider class id (e.g. "commcare"), so check both.
-        account = SocialAccount.objects.select_for_update().filter(
-            user=request.user, provider=provider_id
-        ).first()
+        account = (
+            SocialAccount.objects.select_for_update()
+            .filter(user=request.user, provider=provider_id)
+            .first()
+        )
         if not account:
             # Try matching via SocialApp.provider_id
             app_provider_ids = list(
-                SocialApp.objects.filter(provider=provider_id).values_list(
-                    "provider_id", flat=True
-                )
+                SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
             )
             if app_provider_ids:
-                account = SocialAccount.objects.select_for_update().filter(
-                    user=request.user, provider__in=app_provider_ids
-                ).first()
+                account = (
+                    SocialAccount.objects.select_for_update()
+                    .filter(user=request.user, provider__in=app_provider_ids)
+                    .first()
+                )
         if not account:
             return JsonResponse({"error": "Not connected"}, status=404)
 
         # Guard: must keep at least one login method
         has_password = request.user.has_usable_password()
         other_socials = (
-            SocialAccount.objects.filter(user=request.user)
-            .exclude(provider=provider_id)
-            .exists()
+            SocialAccount.objects.filter(user=request.user).exclude(provider=provider_id).exists()
         )
         if not has_password and not other_socials:
             return JsonResponse(
@@ -227,9 +300,7 @@ def providers_view(request):
     connected_providers = set()
     if request.user.is_authenticated:
         connected_providers = set(
-            SocialAccount.objects.filter(user=request.user).values_list(
-                "provider", flat=True
-            )
+            SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
         )
 
     providers = []
@@ -243,8 +314,7 @@ def providers_view(request):
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
             # not the provider class id (e.g. "commcare"), so check both.
             entry["connected"] = (
-                app.provider in connected_providers
-                or app.provider_id in connected_providers
+                app.provider in connected_providers or app.provider_id in connected_providers
             )
         providers.append(entry)
 
@@ -255,6 +325,7 @@ def providers_view(request):
 # Helpers to safely access request.user from an async context
 # ---------------------------------------------------------------------------
 
+
 @sync_to_async
 def _get_user_if_authenticated(request):
     """Access request.user (triggers sync session load) from async context."""
@@ -264,30 +335,19 @@ def _get_user_if_authenticated(request):
 
 
 @sync_to_async
-def _get_membership(user, project_id):
-    """Load project membership in a sync context."""
-    try:
-        return ProjectMembership.objects.select_related("project").get(
-            user=user, project_id=project_id
-        )
-    except ProjectMembership.DoesNotExist:
-        return None
-
-
-@sync_to_async
-def _upsert_thread(thread_id, project_id, user, title):
+def _upsert_thread(thread_id, user, title, *, tenant_membership):
     """Create or update a Thread record.
 
     auto_now on updated_at handles the timestamp on every save, so we only
-    need to pass project/user in defaults and title in create_defaults.
+    need to pass tenant_membership/user in defaults and title in create_defaults.
     """
     Thread.objects.update_or_create(
         id=thread_id,
-        defaults={"project_id": project_id, "user": user},
+        defaults={"user": user, "tenant_membership": tenant_membership},
         create_defaults={
-            "project_id": project_id,
             "user": user,
             "title": title[:200],
+            "tenant_membership": tenant_membership,
         },
     )
 
@@ -305,9 +365,7 @@ def _get_thread(thread_id, user):
 def _get_public_thread(share_token):
     """Load a public thread by share token."""
     try:
-        return Thread.objects.select_related("project", "user").get(
-            share_token=share_token, is_public=True
-        )
+        return Thread.objects.select_related("user").get(share_token=share_token, is_public=True)
     except Thread.DoesNotExist:
         return None
 
@@ -348,11 +406,10 @@ def _get_thread_artifacts(thread_id):
 
 
 @sync_to_async
-def _list_threads(project_id, user):
-    """Return recent threads for a project/user."""
-    qs = Thread.objects.filter(
-        project_id=project_id, user=user
-    ).order_by("-updated_at")[:50]
+def _list_threads(user, *, tenant_membership_id):
+    """Return recent threads for a tenant/user."""
+    qs = Thread.objects.filter(user=user, tenant_membership_id=tenant_membership_id)
+    qs = qs.order_by("-updated_at")[:50]
     return [
         {
             "id": str(t.id),
@@ -397,13 +454,13 @@ async def chat_view(request):
 
     messages = body.get("messages", [])
     data = body.get("data", {})
-    project_id = data.get("projectId") or body.get("projectId")
+    tenant_id = data.get("tenantId") or body.get("tenantId")
     thread_id = data.get("threadId") or body.get("threadId") or str(uuid.uuid4())
 
     if not messages:
         return JsonResponse({"error": "messages is required"}, status=400)
-    if not project_id:
-        return JsonResponse({"error": "projectId is required"}, status=400)
+    if not tenant_id:
+        return JsonResponse({"error": "tenantId is required"}, status=400)
 
     # Get the last user message.
     # AI SDK v6 sends {parts: [{type:"text", text:"..."}]} instead of {content: "..."}.
@@ -411,26 +468,30 @@ async def chat_view(request):
     user_content = last_msg.get("content", "")
     if not user_content:
         parts = last_msg.get("parts", [])
-        user_content = " ".join(
-            p.get("text", "") for p in parts if p.get("type") == "text"
-        )
+        user_content = " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
     if not user_content or not user_content.strip():
         return JsonResponse({"error": "Empty message"}, status=400)
     if len(user_content) > MAX_MESSAGE_LENGTH:
-        return JsonResponse({"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400)
+        return JsonResponse(
+            {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
+        )
 
-    # Validate project membership
-    membership = await _get_membership(user, project_id)
-    if membership is None:
-        return JsonResponse({"error": "Project not found or access denied"}, status=403)
+    # Validate tenant membership
+    from apps.users.models import TenantMembership
 
-    project = membership.project
-    if not project.is_active:
-        return JsonResponse({"error": "Project is inactive"}, status=403)
+    try:
+        tenant_membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
+    except TenantMembership.DoesNotExist:
+        return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
     try:
-        await _upsert_thread(thread_id, project_id, user, user_content)
+        await _upsert_thread(
+            thread_id,
+            user,
+            user_content,
+            tenant_membership=tenant_membership,
+        )
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
@@ -449,7 +510,7 @@ async def chat_view(request):
     try:
         checkpointer = await _ensure_checkpointer()
         agent = await sync_to_async(build_agent_graph)(
-            project=project,
+            tenant_membership=tenant_membership,
             user=user,
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
@@ -461,7 +522,7 @@ async def chat_view(request):
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await _ensure_checkpointer(force_new=True)
             agent = await sync_to_async(build_agent_graph)(
-                project=project,
+                tenant_membership=tenant_membership,
                 user=user,
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
@@ -470,17 +531,20 @@ async def chat_view(request):
         except Exception as e:
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
             logger.exception("Failed to build agent [ref=%s]", error_ref)
-            return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
+            return JsonResponse(
+                {"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500
+            )
 
     # Build LangGraph input state
     from langchain_core.messages import HumanMessage
 
     input_state = {
         "messages": [HumanMessage(content=user_content)],
-        "project_id": str(project.id),
-        "project_name": project.name,
+        "tenant_id": tenant_membership.tenant_id,
+        "tenant_name": tenant_membership.tenant_name,
+        "tenant_membership_id": str(tenant_membership.id),
         "user_id": str(user.id),
-        "user_role": membership.role,
+        "user_role": "analyst",
         "needs_correction": False,
         "retry_count": 0,
         "correction_context": {},
@@ -505,6 +569,7 @@ async def chat_view(request):
 # Thread list & messages endpoints
 # ---------------------------------------------------------------------------
 
+
 def _langchain_messages_to_ui(lc_messages) -> list[dict]:
     """Convert LangChain BaseMessages to AI SDK v6 UIMessage format."""
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -519,11 +584,13 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
     for msg in lc_messages:
         if isinstance(msg, HumanMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            ui_messages.append({
-                "id": msg.id or uuid.uuid4().hex,
-                "role": "user",
-                "parts": [{"type": "text", "text": content}],
-            })
+            ui_messages.append(
+                {
+                    "id": msg.id or uuid.uuid4().hex,
+                    "role": "user",
+                    "parts": [{"type": "text", "text": content}],
+                }
+            )
         elif isinstance(msg, AIMessage):
             parts: list[dict] = []
 
@@ -552,25 +619,29 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 if tr:
-                    tool_part["output"] = tr.content if isinstance(tr.content, str) else str(tr.content)
+                    tool_part["output"] = (
+                        tr.content if isinstance(tr.content, str) else str(tr.content)
+                    )
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
 
             if parts:
-                ui_messages.append({
-                    "id": msg.id or uuid.uuid4().hex,
-                    "role": "assistant",
-                    "parts": parts,
-                })
+                ui_messages.append(
+                    {
+                        "id": msg.id or uuid.uuid4().hex,
+                        "role": "assistant",
+                        "parts": parts,
+                    }
+                )
 
     return ui_messages
 
 
 async def thread_list_view(request):
     """
-    GET /api/chat/threads/?project_id=X
+    GET /api/chat/threads/?tenant_id=X
 
-    Returns recent threads for the authenticated user in a project.
+    Returns recent threads for the authenticated user in a tenant.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -579,15 +650,18 @@ async def thread_list_view(request):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    project_id = request.GET.get("project_id")
-    if not project_id:
-        return JsonResponse({"error": "project_id is required"}, status=400)
+    tenant_id = request.GET.get("tenant_id")
+    if not tenant_id:
+        return JsonResponse({"error": "tenant_id is required"}, status=400)
 
-    membership = await _get_membership(user, project_id)
-    if membership is None:
-        return JsonResponse({"error": "Project not found or access denied"}, status=403)
+    from apps.users.models import TenantMembership
 
-    threads = await _list_threads(project_id, user)
+    try:
+        await TenantMembership.objects.aget(id=tenant_id, user=user)
+    except TenantMembership.DoesNotExist:
+        return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
+
+    threads = await _list_threads(user, tenant_membership_id=tenant_id)
     return JsonResponse(threads, safe=False)
 
 
@@ -629,6 +703,7 @@ async def thread_messages_view(request, thread_id):
 # Thread sharing endpoints
 # ---------------------------------------------------------------------------
 
+
 async def thread_share_view(request, thread_id):
     """
     GET  /api/chat/threads/<thread_id>/share/  — get sharing settings
@@ -643,12 +718,14 @@ async def thread_share_view(request, thread_id):
         return JsonResponse({"error": "Thread not found"}, status=404)
 
     if request.method == "GET":
-        return JsonResponse({
-            "id": str(thread.id),
-            "is_shared": thread.is_shared,
-            "is_public": thread.is_public,
-            "share_token": thread.share_token,
-        })
+        return JsonResponse(
+            {
+                "id": str(thread.id),
+                "is_shared": thread.is_shared,
+                "is_public": thread.is_public,
+                "share_token": thread.share_token,
+            }
+        )
 
     if request.method == "PATCH":
         try:
@@ -698,12 +775,14 @@ async def public_thread_view(request, share_token):
     # Load associated artifacts
     artifacts = await _get_thread_artifacts(thread.id)
 
-    return JsonResponse({
-        "thread": {
-            "id": str(thread.id),
-            "title": thread.title,
-            "created_at": thread.created_at.isoformat(),
-        },
-        "messages": messages,
-        "artifacts": artifacts,
-    })
+    return JsonResponse(
+        {
+            "thread": {
+                "id": str(thread.id),
+                "title": thread.title,
+                "created_at": thread.created_at.isoformat(),
+            },
+            "messages": messages,
+            "artifacts": artifacts,
+        }
+    )

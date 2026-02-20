@@ -5,15 +5,21 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('knowledge', '0003_agentlearning_promoted_to_id'),
+        ("knowledge", "0003_agentlearning_promoted_to_id"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='agentlearning',
-            name='confidence_score',
-            field=models.FloatField(default=0.5, help_text='0-1 score. Increases when the learning is confirmed useful, decreases if contradicted.', validators=[django.core.validators.MinValueValidator(0.0), django.core.validators.MaxValueValidator(1.0)]),
+            model_name="agentlearning",
+            name="confidence_score",
+            field=models.FloatField(
+                default=0.5,
+                help_text="0-1 score. Increases when the learning is confirmed useful, decreases if contradicted.",
+                validators=[
+                    django.core.validators.MinValueValidator(0.0),
+                    django.core.validators.MaxValueValidator(1.0),
+                ],
+            ),
         ),
     ]

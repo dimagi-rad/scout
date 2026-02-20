@@ -3,6 +3,10 @@ Custom User model for Scout data agent platform.
 
 Extends Django's AbstractUser with additional fields for the platform.
 """
+
+import uuid
+
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
 
@@ -68,3 +72,76 @@ class User(AbstractUser):
         """Return the first_name plus the last_name, with a space in between."""
         full_name = f"{self.first_name} {self.last_name}".strip()
         return full_name or self.email
+
+
+class TenantMembership(models.Model):
+    """Links users to tenants discovered from OAuth providers."""
+
+    PROVIDER_CHOICES = [
+        ("commcare", "CommCare HQ"),
+        ("commcare_connect", "CommCare Connect"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tenant_memberships",
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    tenant_id = models.CharField(
+        max_length=255,
+        help_text="Domain name (CommCare) or organization ID (Connect)",
+    )
+    tenant_name = models.CharField(
+        max_length=255,
+        help_text="Human-readable tenant name",
+    )
+    last_selected_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["user", "provider", "tenant_id"]
+        ordering = ["-last_selected_at", "tenant_name"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.provider}:{self.tenant_id}"
+
+
+class TenantCredential(models.Model):
+    """Stores credentials for a tenant — either OAuth pointer or encrypted API key.
+
+    For credential_type == OAUTH: encrypted_credential is blank; the actual
+    token lives in allauth's SocialToken and is retrieved from there.
+
+    For credential_type == API_KEY: encrypted_credential holds a Fernet-encrypted
+    opaque string. Format is provider-specific, e.g. "username:apikey" for CommCare.
+    """
+
+    OAUTH = "oauth"
+    API_KEY = "api_key"
+    TYPE_CHOICES = [
+        (OAUTH, "OAuth Token"),
+        (API_KEY, "API Key"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_membership = models.OneToOneField(
+        TenantMembership,
+        on_delete=models.CASCADE,
+        related_name="credential",
+    )
+    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    encrypted_credential = models.CharField(
+        max_length=2000,
+        blank=True,
+        help_text="Fernet-encrypted opaque string. Empty for OAuth type.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.tenant_membership} ({self.credential_type})"

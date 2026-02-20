@@ -15,7 +15,6 @@ import { Badge } from "@/components/ui/badge"
 import type { TableDetail as TableDetailType, TableAnnotations } from "@/store/dictionarySlice"
 
 interface TableDetailProps {
-  projectId: string
   table: TableDetailType
 }
 
@@ -36,7 +35,7 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue
 }
 
-export function TableDetail({ projectId, table }: TableDetailProps) {
+export function TableDetail({ table }: TableDetailProps) {
   const updateAnnotations = useAppStore((s) => s.dictionaryActions.updateAnnotations)
 
   // Local state for form fields
@@ -85,12 +84,11 @@ export function TableDetail({ projectId, table }: TableDetailProps) {
     }
 
     try {
-      await updateAnnotations(projectId, table.schema, table.table, annotations)
+      await updateAnnotations(table.schema, table.table, annotations)
     } catch (error) {
       console.error("Failed to save annotations:", error)
     }
   }, [
-    projectId,
     table.schema,
     table.table,
     tableKey,

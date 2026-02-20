@@ -90,4 +90,5 @@ dev = [
     "factory-boy>=3.3",
     "ruff>=0.5",
     "zensical>=0.0.21",
+    "requests-mock>=1.12.1",
 ]

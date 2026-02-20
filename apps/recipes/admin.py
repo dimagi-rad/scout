@@ -1,6 +1,7 @@
 """
 Admin configuration for Recipe models.
 """
+
 from django.contrib import admin
 from django.utils.html import format_html
 
@@ -22,21 +23,21 @@ class RecipeAdmin(admin.ModelAdmin):
 
     list_display = [
         "name",
-        "project",
+        "workspace",
         "step_count",
         "variable_count",
         "is_shared",
         "created_by",
         "updated_at",
     ]
-    list_filter = ["is_shared", "created_at", "project"]
+    list_filter = ["is_shared", "created_at", "workspace"]
     search_fields = ["name", "description"]
     readonly_fields = ["id", "share_token", "created_at", "updated_at"]
-    autocomplete_fields = ["project", "created_by"]
+    autocomplete_fields = ["created_by"]
     inlines = [RecipeStepInline]
 
     fieldsets = (
-        (None, {"fields": ("id", "name", "description", "project")}),
+        (None, {"fields": ("id", "name", "description", "workspace")}),
         (
             "Variables",
             {
@@ -75,7 +76,7 @@ class RecipeStepAdmin(admin.ModelAdmin):
     """Admin interface for RecipeStep model."""
 
     list_display = ["recipe", "order", "prompt_preview", "expected_tool"]
-    list_filter = ["recipe__project", "expected_tool"]
+    list_filter = ["recipe__workspace", "expected_tool"]
     search_fields = ["prompt_template", "description", "recipe__name"]
     autocomplete_fields = ["recipe"]
     ordering = ["recipe", "order"]
@@ -102,7 +103,7 @@ class RecipeRunAdmin(admin.ModelAdmin):
         "duration_display",
         "created_at",
     ]
-    list_filter = ["status", "is_shared", "is_public", "created_at", "recipe__project"]
+    list_filter = ["status", "is_shared", "is_public", "created_at", "recipe__workspace"]
     search_fields = ["recipe__name", "run_by__email"]
     readonly_fields = [
         "id",

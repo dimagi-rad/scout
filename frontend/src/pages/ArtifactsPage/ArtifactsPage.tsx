@@ -5,7 +5,6 @@ import { ArtifactList } from "./ArtifactList"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 
 export function ArtifactsPage() {
-  const activeProjectId = useAppStore((s) => s.activeProjectId)
   const artifacts = useAppStore((s) => s.artifacts)
   const artifactsStatus = useAppStore((s) => s.artifactsStatus)
   const artifactSearch = useAppStore((s) => s.artifactSearch)
@@ -17,36 +16,22 @@ export function ArtifactsPage() {
   } = useAppStore((s) => s.artifactActions)
 
   useEffect(() => {
-    if (activeProjectId) {
-      fetchArtifacts(activeProjectId, {
-        search: artifactSearch || undefined,
-      })
-    }
-  }, [activeProjectId, artifactSearch, fetchArtifacts])
+    fetchArtifacts({
+      search: artifactSearch || undefined,
+    })
+  }, [artifactSearch, fetchArtifacts])
 
   const handleSearchChange = useCallback((search: string) => {
     setArtifactSearch(search)
   }, [setArtifactSearch])
 
   const handleUpdate = useCallback(async (item: ArtifactSummary, data: { title?: string; description?: string }) => {
-    if (!activeProjectId) return
-    await updateArtifact(activeProjectId, item.id, data)
-  }, [activeProjectId, updateArtifact])
+    await updateArtifact(item.id, data)
+  }, [updateArtifact])
 
   const handleDelete = useCallback(async (item: ArtifactSummary) => {
-    if (!activeProjectId) return
-    await deleteArtifact(activeProjectId, item.id)
-  }, [activeProjectId, deleteArtifact])
-
-  if (!activeProjectId) {
-    return (
-      <div className="container mx-auto py-8">
-        <div className="rounded-lg border border-dashed p-8 text-center">
-          <p className="text-muted-foreground">Please select a project first</p>
-        </div>
-      </div>
-    )
-  }
+    await deleteArtifact(item.id)
+  }, [deleteArtifact])
 
   return (
     <div className="container mx-auto py-8">

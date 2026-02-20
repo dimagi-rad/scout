@@ -1,4 +1,5 @@
 """Serializers for knowledge management API."""
+
 from rest_framework import serializers
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry

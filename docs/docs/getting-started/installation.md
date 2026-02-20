@@ -80,9 +80,9 @@ This starts five services: backend API (port 8000), frontend (port 3000), MCP se
 ## Verify the installation
 
 1. Open `http://localhost:5173` (or `http://localhost:3000` with Docker).
-2. Log in with the superuser account you created.
-3. If you see the project selector, the installation is working.
+2. Log in with the superuser account you created (or sign up for a new account).
+3. If you see the chat interface, the installation is working.
 
 ## Next step
 
-[Create your first project](first-project.md) to connect a database and start querying.
+[Connect a CommCare domain](dev-testing.md) to load case data and start querying.

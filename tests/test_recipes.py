@@ -3,6 +3,7 @@ Comprehensive tests for Phase 4 (Recipes) of the Scout data agent platform.
 
 Tests recipe CRUD, variable substitution, recipe runner, and save_as_recipe tool.
 """
+
 from unittest.mock import Mock, patch
 
 import pytest
@@ -10,7 +11,6 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
 
-from apps.projects.models import Project
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
 
 User = get_user_model()
@@ -22,23 +22,10 @@ User = get_user_model()
 
 
 @pytest.fixture
-def project(db_connection, user):
-    """Create a test project."""
-    return Project.objects.create(
-        name="Test Project",
-        slug="test-project",
-        description="A test project",
-        database_connection=db_connection,
-        db_schema="public",
-        created_by=user,
-    )
-
-
-@pytest.fixture
-def recipe(db, user, project):
+def recipe(db, user, workspace):
     """Create a test recipe with variables."""
     return Recipe.objects.create(
-        project=project,
+        workspace=workspace,
         name="Sales Analysis",
         description="Analyze sales data for a specific region and time period",
         prompt="Show me the top {{limit}} customers in {{region}} region starting from {{start_date}}",
@@ -115,10 +102,10 @@ def recipe_run(db, recipe, user):
 class TestRecipeModel:
     """Tests for the Recipe model CRUD operations."""
 
-    def test_create_recipe(self, user, project):
+    def test_create_recipe(self, user, workspace):
         """Test creating a basic recipe."""
         recipe = Recipe.objects.create(
-            project=project,
+            workspace=workspace,
             name="Customer Report",
             description="Generate customer analysis report",
             variables=[
@@ -140,8 +127,8 @@ class TestRecipeModel:
         assert recipe.variables[0]["name"] == "year"
         assert recipe.is_shared is True
         assert recipe.created_by == user
-        assert recipe.project == project
-        assert str(recipe) == f"Customer Report ({project.name})"
+        assert recipe.workspace == workspace
+        assert str(recipe) == f"Customer Report ({workspace.tenant_name})"
 
     def test_read_recipe(self, recipe):
         """Test reading an existing recipe."""
@@ -150,7 +137,7 @@ class TestRecipeModel:
         assert fetched_recipe.name == recipe.name
         assert fetched_recipe.description == recipe.description
         assert fetched_recipe.variables == recipe.variables
-        assert fetched_recipe.project == recipe.project
+        assert fetched_recipe.workspace == recipe.workspace
 
     def test_update_recipe(self, recipe):
         """Test updating a recipe."""
@@ -171,28 +158,28 @@ class TestRecipeModel:
 
         assert not Recipe.objects.filter(id=recipe_id).exists()
 
-    def test_recipe_ordering(self, user, project):
+    def test_recipe_ordering(self, user, workspace):
         """Test that recipes are ordered by updated_at descending."""
         recipe1 = Recipe.objects.create(
-            project=project,
+            workspace=workspace,
             name="Recipe 1",
             created_by=user,
         )
         recipe2 = Recipe.objects.create(
-            project=project,
+            workspace=workspace,
             name="Recipe 2",
             created_by=user,
         )
 
-        recipes = list(Recipe.objects.filter(project=project))
+        recipes = list(Recipe.objects.filter(workspace=workspace))
         # Most recently updated should be first
         assert recipes[0].id == recipe2.id
         assert recipes[1].id == recipe1.id
 
-    def test_recipe_project_relationship(self, recipe, project):
-        """Test that recipe is properly linked to project."""
-        assert recipe.project == project
-        assert recipe in project.recipes.all()
+    def test_recipe_workspace_relationship(self, recipe, workspace):
+        """Test that recipe is properly linked to workspace."""
+        assert recipe.workspace == workspace
+        assert recipe in workspace.recipes.all()
 
     def test_get_variable_names(self, recipe):
         """Test getting list of variable names from recipe."""
@@ -335,15 +322,9 @@ class TestRecipeStepModel:
 
     def test_recipe_step_ordering(self, recipe):
         """Test that recipe steps are ordered by recipe and order."""
-        RecipeStep.objects.create(
-            recipe=recipe, order=1, prompt_template="Step 1"
-        )
-        RecipeStep.objects.create(
-            recipe=recipe, order=2, prompt_template="Step 2"
-        )
-        RecipeStep.objects.create(
-            recipe=recipe, order=3, prompt_template="Step 3"
-        )
+        RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
+        RecipeStep.objects.create(recipe=recipe, order=2, prompt_template="Step 2")
+        RecipeStep.objects.create(recipe=recipe, order=3, prompt_template="Step 3")
 
         steps = list(recipe.steps.all())
         assert len(steps) == 3
@@ -361,12 +342,8 @@ class TestRecipeStepModel:
 
     def test_recipe_cascade_delete_steps(self, recipe):
         """Test that deleting a recipe deletes its steps."""
-        RecipeStep.objects.create(
-            recipe=recipe, order=1, prompt_template="Step 1"
-        )
-        RecipeStep.objects.create(
-            recipe=recipe, order=2, prompt_template="Step 2"
-        )
+        RecipeStep.objects.create(recipe=recipe, order=1, prompt_template="Step 1")
+        RecipeStep.objects.create(recipe=recipe, order=2, prompt_template="Step 2")
 
         recipe_id = recipe.id
         recipe.delete()
@@ -436,10 +413,12 @@ class TestRecipeStepVariableSubstitution:
             prompt_template="Show {{region}} data",
         )
 
-        rendered = step.render_prompt({
-            "region": "East",
-            "unused_var": "value",
-        })
+        rendered = step.render_prompt(
+            {
+                "region": "East",
+                "unused_var": "value",
+            }
+        )
         assert rendered == "Show East data"
 
     def test_render_prompt_number_variable(self, recipe):
@@ -630,9 +609,7 @@ class TestRecipeRunner:
 
         # Mock the agent graph
         mock_graph = Mock()
-        mock_graph.invoke.return_value = {
-            "messages": [Mock(content="Result", tool_calls=[])]
-        }
+        mock_graph.invoke.return_value = {"messages": [Mock(content="Result", tool_calls=[])]}
         mock_build_graph.return_value = mock_graph
 
         runner = RecipeRunner(recipe, values, user)
@@ -645,9 +622,7 @@ class TestRecipeRunner:
         assert run.run_by == user
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_recipe_runner_executes_prompt(
-        self, mock_build_graph, recipe, user, recipe_step_1
-    ):
+    def test_recipe_runner_executes_prompt(self, mock_build_graph, recipe, user, recipe_step_1):
         """Test that RecipeRunner executes the rendered prompt."""
         from apps.recipes.services.runner import RecipeRunner
 
@@ -729,17 +704,13 @@ class TestRecipeRunner:
         assert "error" in run.step_results[0]
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_recipe_runner_updates_run_status(
-        self, mock_build_graph, recipe, user, recipe_step_1
-    ):
+    def test_recipe_runner_updates_run_status(self, mock_build_graph, recipe, user, recipe_step_1):
         """Test that RecipeRunner updates run status throughout execution."""
         from apps.recipes.services.runner import RecipeRunner
 
         # Mock the agent graph
         mock_graph = Mock()
-        mock_graph.invoke.return_value = {
-            "messages": [Mock(content="Success", tool_calls=[])]
-        }
+        mock_graph.invoke.return_value = {"messages": [Mock(content="Success", tool_calls=[])]}
         mock_build_graph.return_value = mock_graph
 
         values = {
@@ -766,36 +737,38 @@ class TestSaveAsRecipeTool:
     """Tests for the save_as_recipe tool functionality."""
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_tool_exists(self, mock_build_graph, project, user):
+    def test_save_as_recipe_tool_exists(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe tool can be created."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
-        tool = create_recipe_tool(project, user)
+        tool = create_recipe_tool(workspace, user)
 
         assert tool is not None
         assert hasattr(tool, "name")
         assert hasattr(tool, "description")
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_creates_recipe(self, mock_build_graph, project, user):
+    def test_save_as_recipe_creates_recipe(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe tool creates a recipe."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
-        tool = create_recipe_tool(project, user)
+        tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke({
-            "name": "Customer Analysis",
-            "description": "Analyze customer behavior",
-            "variables": [
-                {
-                    "name": "segment",
-                    "type": "select",
-                    "label": "Customer Segment",
-                    "options": ["Premium", "Standard", "Basic"],
-                }
-            ],
-            "prompt": "Show {{segment}} customers",
-        })
+        result = tool.invoke(
+            {
+                "name": "Customer Analysis",
+                "description": "Analyze customer behavior",
+                "variables": [
+                    {
+                        "name": "segment",
+                        "type": "select",
+                        "label": "Customer Segment",
+                        "options": ["Premium", "Standard", "Basic"],
+                    }
+                ],
+                "prompt": "Show {{segment}} customers",
+            }
+        )
 
         assert result["status"] == "created"
         assert "recipe_id" in result
@@ -807,21 +780,23 @@ class TestSaveAsRecipeTool:
         assert recipe.prompt == "Show {{segment}} customers"
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_with_prompt_and_variables(self, mock_build_graph, project, user):
+    def test_save_as_recipe_with_prompt_and_variables(self, mock_build_graph, workspace, user):
         """Test saving recipe with prompt template and variables."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
-        tool = create_recipe_tool(project, user)
+        tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke({
-            "name": "Multi-Variable Analysis",
-            "description": "Analysis with multiple variables",
-            "variables": [
-                {"name": "year", "type": "number", "label": "Year"},
-                {"name": "region", "type": "string", "label": "Region"},
-            ],
-            "prompt": "Get sales for {{year}} in {{region}} and create a visualization",
-        })
+        result = tool.invoke(
+            {
+                "name": "Multi-Variable Analysis",
+                "description": "Analysis with multiple variables",
+                "variables": [
+                    {"name": "year", "type": "number", "label": "Year"},
+                    {"name": "region", "type": "string", "label": "Region"},
+                ],
+                "prompt": "Get sales for {{year}} in {{region}} and create a visualization",
+            }
+        )
 
         assert result["status"] == "created"
         recipe = Recipe.objects.get(id=result["recipe_id"])
@@ -829,22 +804,24 @@ class TestSaveAsRecipeTool:
         assert len(recipe.variables) == 2
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_extracts_variables(self, mock_build_graph, project, user):
+    def test_save_as_recipe_extracts_variables(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe can extract variables from steps."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
-        tool = create_recipe_tool(project, user)
+        tool = create_recipe_tool(workspace, user)
 
         # Agent should identify variables in prompt templates
-        result = tool.invoke({
-            "name": "Variable Extraction Test",
-            "description": "Test variable extraction",
-            "variables": [
-                {"name": "category", "type": "string", "label": "Category"},
-                {"name": "threshold", "type": "number", "label": "Threshold"},
-            ],
-            "prompt": "Show {{category}} with value > {{threshold}}",
-        })
+        result = tool.invoke(
+            {
+                "name": "Variable Extraction Test",
+                "description": "Test variable extraction",
+                "variables": [
+                    {"name": "category", "type": "string", "label": "Category"},
+                    {"name": "threshold", "type": "number", "label": "Threshold"},
+                ],
+                "prompt": "Show {{category}} with value > {{threshold}}",
+            }
+        )
 
         recipe = Recipe.objects.get(id=result["recipe_id"])
         variable_names = recipe.get_variable_names()
@@ -852,19 +829,21 @@ class TestSaveAsRecipeTool:
         assert "threshold" in variable_names
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_sets_sharing(self, mock_build_graph, project, user):
+    def test_save_as_recipe_sets_sharing(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe can set is_shared flag."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
-        tool = create_recipe_tool(project, user)
+        tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke({
-            "name": "Shared Recipe",
-            "description": "Recipe shared with project",
-            "is_shared": True,
-            "variables": [],
-            "prompt": "Show data",
-        })
+        result = tool.invoke(
+            {
+                "name": "Shared Recipe",
+                "description": "Recipe shared with project",
+                "is_shared": True,
+                "variables": [],
+                "prompt": "Show data",
+            }
+        )
 
         recipe = Recipe.objects.get(id=result["recipe_id"])
         assert recipe.is_shared is True

@@ -23,6 +23,7 @@ The graph uses:
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -39,15 +40,25 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.projects.services.data_dictionary import DataDictionaryGenerator
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from apps.projects.models import Project
-    from apps.users.models import User
+    from apps.projects.models import TenantWorkspace
+    from apps.users.models import TenantMembership, User
 
 logger = logging.getLogger(__name__)
+
+# MCP tools that require a context ID (tenant_id) injected from state
+MCP_TOOL_NAMES = frozenset(
+    {
+        "list_tables",
+        "describe_table",
+        "query",
+        "get_metadata",
+        "run_materialization",
+    }
+)
 
 
 # Configuration constants
@@ -55,98 +66,139 @@ DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 
 
+def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
+    """Build tool definitions for the LLM with parameters hidden from the schema.
+
+    MCP tools require context IDs (tenant_id, tenant_membership_id, etc.) but
+    the LLM shouldn't provide them — they're injected from state.  We give the
+    LLM schemas that omit those parameters so it can't hallucinate wrong values.
+
+    Non-MCP tools are returned unchanged.
+    """
+    hidden = set(hidden_params)
+    result: list = []
+    for tool in tools:
+        if tool.name not in MCP_TOOL_NAMES:
+            result.append(tool)
+            continue
+
+        schema = tool.get_input_schema().model_json_schema()
+        props = schema.get("properties", {})
+        to_hide = hidden & set(props)
+        if not to_hide:
+            result.append(tool)
+            continue
+
+        # Build a trimmed schema dict for bind_tools
+        trimmed_props = {k: v for k, v in props.items() if k not in to_hide}
+        trimmed_required = [r for r in schema.get("required", []) if r not in to_hide]
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": {
+                        "type": "object",
+                        "properties": trimmed_props,
+                        "required": trimmed_required,
+                    },
+                },
+            }
+        )
+    return result
+
+
+def _make_injecting_tool_node(
+    base_tool_node: ToolNode,
+    injections: dict[str, str],
+) -> Any:
+    """Create a graph node that injects state values into MCP tool call args.
+
+    Before the ToolNode executes, this node copies the last AI message and
+    injects values from the agent state into every MCP tool call's args.
+    ``injections`` maps tool-arg-name → state-field-name.  This ensures the
+    MCP server always receives the correct context IDs regardless of what the
+    LLM generated.
+    """
+
+    async def injecting_node(state: AgentState) -> dict[str, Any]:
+        messages = list(state["messages"])
+        last_msg = messages[-1]
+
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            modified_msg = copy.copy(last_msg)
+            modified_calls = []
+            for tc in last_msg.tool_calls:
+                if tc["name"] in MCP_TOOL_NAMES:
+                    extra = {k: state.get(v, "") for k, v in injections.items()}
+                    tc = {**tc, "args": {**tc["args"], **extra}}
+                modified_calls.append(tc)
+            modified_msg.tool_calls = modified_calls
+            messages = messages[:-1] + [modified_msg]
+
+        return await base_tool_node.ainvoke({"messages": messages})
+
+    return injecting_node
+
+
 def build_agent_graph(
-    project: Project,
+    tenant_membership: TenantMembership,
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
 ):
     """
-    Build a LangGraph agent graph for a specific project.
-
-    This function assembles all components of the Scout agent:
-    1. Creates project-scoped tools (SQL execution, table description, learning)
-    2. Binds tools to the LLM (ChatAnthropic)
-    3. Assembles the system prompt from multiple sources
-    4. Builds the graph with self-correction loop
-    5. Compiles with optional checkpointer for persistence
-
-    The resulting graph handles:
-    - User questions about data
-    - SQL query generation and execution
-    - Automatic error detection and correction (up to 3 retries)
-    - Learning from successful corrections
-    - Knowledge-grounded responses using canonical metrics and business rules
+    Build a LangGraph agent graph for a tenant workspace.
 
     Args:
-        project: The Project model instance containing database connection
-            settings, system prompt, and configuration.
-        user: Optional User model instance for tracking who triggered learnings.
-            If None, learnings will have no associated user.
+        tenant_membership: The TenantMembership for the current user.
+        user: Optional User model instance.
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
-            If None, conversations won't persist between sessions.
-            Use MemorySaver for development, PostgresSaver for production.
-
-    Returns:
-        A compiled LangGraph that can be invoked with:
-            graph.invoke(
-                {
-                    "messages": [HumanMessage(content="...")],
-                    "project_id": str(project.id),
-                    "project_name": project.name,
-                    "user_id": str(user.id) if user else "",
-                    "user_role": "analyst",
-                    "needs_correction": False,
-                    "retry_count": 0,
-                    "correction_context": {},
-                },
-                config={"configurable": {"thread_id": "unique-thread-id"}}
-            )
-
-    Example:
-        >>> from apps.projects.models import Project
-        >>> from langgraph.checkpoint.memory import MemorySaver
-        >>>
-        >>> project = Project.objects.get(slug="analytics")
-        >>> checkpointer = MemorySaver()
-        >>> graph = build_agent_graph(project, checkpointer=checkpointer)
-        >>>
-        >>> result = graph.invoke({
-        ...     "messages": [HumanMessage(content="How many users signed up last month?")],
-        ...     "project_id": str(project.id),
-        ...     "project_name": project.name,
-        ...     "user_id": "",
-        ...     "user_role": "analyst",
-        ...     "needs_correction": False,
-        ...     "retry_count": 0,
-        ...     "correction_context": {},
-        ... }, config={"configurable": {"thread_id": "thread-123"}})
+        mcp_tools: List of MCP tools to include.
+        oauth_tokens: Optional OAuth tokens for tool authentication.
     """
-    logger.info("Building agent graph for project: %s", project.slug)
+    from apps.projects.models import TenantWorkspace
+
+    workspace, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id=tenant_membership.tenant_id,
+        defaults={"tenant_name": tenant_membership.tenant_name},
+    )
+
+    logger.info("Building agent graph for tenant:%s", tenant_membership.tenant_id)
 
     # --- Build tools ---
-    tools = _build_tools(project, user, mcp_tools or [])
-    logger.debug("Created %d tools for project %s", len(tools), project.slug)
+    tools = _build_tools(workspace, user, mcp_tools or [])
+    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant_id)
+
+    # --- Inject tenant_id and tenant_membership_id into MCP tool calls ---
+    injections = {
+        "tenant_id": "tenant_id",
+        "tenant_membership_id": "tenant_membership_id",
+    }
+    hidden_params = list(injections.keys())
 
     # --- Build LLM with tools ---
     llm = ChatAnthropic(
-        model=project.llm_model,
+        model="claude-sonnet-4-5-20250929",
         max_tokens=DEFAULT_MAX_TOKENS,
         temperature=DEFAULT_TEMPERATURE,
     )
-    llm_with_tools = llm.bind_tools(tools)
+    llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
+    llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = _build_system_prompt(project)
+    system_prompt = _build_system_prompt(workspace, tenant_membership)
     logger.debug(
-        "System prompt assembled: %d characters for project %s",
+        "System prompt assembled: %d characters for tenant:%s",
         len(system_prompt),
-        project.slug,
+        tenant_membership.tenant_id,
     )
 
-    # --- Create tool node ---
-    tool_node = ToolNode(tools)
+    # --- Create tool node with context ID injection ---
+    base_tool_node = ToolNode(tools)
+    tool_node = _make_injecting_tool_node(base_tool_node, injections)
 
     # --- Define graph nodes ---
 
@@ -237,15 +289,15 @@ def build_agent_graph(
     compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "Agent graph compiled for project %s (checkpointer: %s)",
-        project.slug,
+        "Agent graph compiled for tenant:%s (checkpointer: %s)",
+        tenant_membership.tenant_id,
         type(checkpointer).__name__ if checkpointer else "None",
     )
 
     return compiled
 
 
-def _build_tools(project: Project, user: User | None, mcp_tools: list) -> list:
+def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list) -> list:
     """
     Build the tool list for the agent.
 
@@ -259,99 +311,66 @@ def _build_tools(project: Project, user: User | None, mcp_tools: list) -> list:
     - save_learning: For persisting discovered corrections
     - create_artifact: For creating interactive visualizations
     - update_artifact: For updating existing artifacts
-    - create_recipe: For creating replayable analysis workflows
+    - save_as_recipe: For creating replayable analysis workflows
 
     Args:
-        project: The Project model instance.
+        workspace: The TenantWorkspace model instance.
         user: Optional User for tracking learning discovery.
         mcp_tools: LangChain tools loaded from the MCP server.
 
     Returns:
         List of LangChain tool functions.
     """
-    # Start with MCP tools (data access)
     tools = list(mcp_tools)
-
-    # Learning tool (always included)
-    learning_tool = create_save_learning_tool(project, user)
-    tools.append(learning_tool)
-
-    # Artifact tools (always included)
-    artifact_tools = create_artifact_tools(project, user)
-    tools.extend(artifact_tools)
-
-    # Recipe tool (always included)
-    recipe_tool = create_recipe_tool(project, user)
-    tools.append(recipe_tool)
-
+    tools.append(create_save_learning_tool(workspace, user))
+    tools.extend(create_artifact_tools(workspace, user))
+    tools.append(create_recipe_tool(workspace, user))
     return tools
 
 
-def _build_system_prompt(project: Project) -> str:
+def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMembership) -> str:
     """
-    Assemble the complete system prompt from multiple sources.
+    Assemble the complete system prompt for a tenant workspace.
 
     The prompt is built from:
     1. BASE_SYSTEM_PROMPT: Core agent behavior and formatting
-    2. Project system prompt: Project-specific instructions
-    3. Knowledge retriever output: Metrics, rules, learnings
-    4. Data dictionary: Schema information
-
-    For large schemas, the data dictionary is abbreviated and the agent
-    should use the describe_table tool for details.
+    2. ARTIFACT_PROMPT_ADDITION: Instructions for creating artifacts
+    3. Workspace system prompt: Tenant-specific instructions
+    4. Knowledge retriever output: Metrics, rules, learnings
+    5. Tenant context: Tenant name, provider, query config
 
     Args:
-        project: The Project model instance.
+        workspace: The TenantWorkspace model instance.
+        tenant_membership: The TenantMembership for context metadata.
 
     Returns:
         Complete system prompt string.
     """
     sections = [BASE_SYSTEM_PROMPT]
-
-    # Artifact creation instructions
     sections.append(ARTIFACT_PROMPT_ADDITION)
 
-    # Project-specific system prompt
-    if project.system_prompt:
-        sections.append(f"""
-## Project-Specific Instructions
+    if workspace.system_prompt:
+        sections.append(f"\n## Tenant-Specific Instructions\n\n{workspace.system_prompt}\n")
 
-{project.system_prompt}
-""")
-
-    # Knowledge retriever output (metrics, rules, learnings)
-    retriever = KnowledgeRetriever(project)
+    retriever = KnowledgeRetriever(workspace)
     knowledge_context = retriever.retrieve()
-
     if knowledge_context:
-        sections.append(f"""
-## Project Knowledge Base
-
-{knowledge_context}
-""")
-
-    # Data dictionary
-    dd_generator = DataDictionaryGenerator(project)
-    dd_text = dd_generator.render_for_prompt()
+        sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
     sections.append(f"""
-## Database Schema
+## Tenant Context
 
-{dd_text}
-""")
+- Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant_id})
+- Provider: {tenant_membership.provider}
 
-    # Query configuration
-    sections.append(f"""
 ## Query Configuration
 
-- Project ID: {project.id}
-- Maximum rows per query: {project.max_rows_per_query}
-- Query timeout: {project.max_query_timeout_seconds} seconds
-- Schema: {project.db_schema}
-
-**Important:** When using the `query`, `list_tables`, `describe_table`, or `get_metadata` tools, always pass `project_id` = "{project.id}".
+- Maximum rows per query: 500
+- Query timeout: 30 seconds
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+
+You can materialize data from CommCare using the `run_materialization` tool.
 """)
 
     return "\n".join(sections)

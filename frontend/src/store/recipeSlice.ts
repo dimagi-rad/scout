@@ -56,14 +56,13 @@ export interface RecipeSlice {
   currentRecipe: Recipe | null
   recipeRuns: RecipeRun[]
   recipeActions: {
-    fetchRecipes: (projectId: string) => Promise<void>
-    fetchRecipe: (projectId: string, recipeId: string) => Promise<Recipe>
-    updateRecipe: (projectId: string, recipeId: string, data: Partial<Recipe>) => Promise<Recipe>
-    deleteRecipe: (projectId: string, recipeId: string) => Promise<void>
-    runRecipe: (projectId: string, recipeId: string, variables: Record<string, string>) => Promise<RecipeRun>
-    fetchRuns: (projectId: string, recipeId: string) => Promise<void>
+    fetchRecipes: () => Promise<void>
+    fetchRecipe: (recipeId: string) => Promise<Recipe>
+    updateRecipe: (recipeId: string, data: Partial<Recipe>) => Promise<Recipe>
+    deleteRecipe: (recipeId: string) => Promise<void>
+    runRecipe: (recipeId: string, variables: Record<string, string>) => Promise<RecipeRun>
+    fetchRuns: (recipeId: string) => Promise<void>
     updateRecipeRun: (
-      projectId: string,
       recipeId: string,
       runId: string,
       data: { is_shared?: boolean; is_public?: boolean },
@@ -78,10 +77,10 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
   currentRecipe: null,
   recipeRuns: [],
   recipeActions: {
-    fetchRecipes: async (projectId: string) => {
+    fetchRecipes: async () => {
       set({ recipeStatus: "loading", recipeError: null })
       try {
-        const recipes = await api.get<Recipe[]>(`/api/projects/${projectId}/recipes/`)
+        const recipes = await api.get<Recipe[]>(`/api/recipes/`)
         set({ recipes, recipeStatus: "loaded", recipeError: null })
       } catch (error) {
         set({
@@ -91,9 +90,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       }
     },
 
-    fetchRecipe: async (projectId: string, recipeId: string) => {
+    fetchRecipe: async (recipeId: string) => {
       try {
-        const recipe = await api.get<Recipe>(`/api/projects/${projectId}/recipes/${recipeId}/`)
+        const recipe = await api.get<Recipe>(`/api/recipes/${recipeId}/`)
         set({ currentRecipe: recipe })
         return recipe
       } catch (error) {
@@ -102,8 +101,8 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       }
     },
 
-    updateRecipe: async (projectId: string, recipeId: string, data: Partial<Recipe>) => {
-      const recipe = await api.put<Recipe>(`/api/projects/${projectId}/recipes/${recipeId}/`, data)
+    updateRecipe: async (recipeId: string, data: Partial<Recipe>) => {
+      const recipe = await api.put<Recipe>(`/api/recipes/${recipeId}/`, data)
       const recipes = get().recipes.map((r) => (r.id === recipeId ? recipe : r))
       set({
         recipes,
@@ -112,8 +111,8 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       return recipe
     },
 
-    deleteRecipe: async (projectId: string, recipeId: string) => {
-      await api.delete<void>(`/api/projects/${projectId}/recipes/${recipeId}/`)
+    deleteRecipe: async (recipeId: string) => {
+      await api.delete<void>(`/api/recipes/${recipeId}/`)
       const recipes = get().recipes.filter((r) => r.id !== recipeId)
       set({
         recipes,
@@ -121,8 +120,8 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       })
     },
 
-    runRecipe: async (projectId: string, recipeId: string, variables: Record<string, string>) => {
-      const run = await api.post<RecipeRun>(`/api/projects/${projectId}/recipes/${recipeId}/run/`, {
+    runRecipe: async (recipeId: string, variables: Record<string, string>) => {
+      const run = await api.post<RecipeRun>(`/api/recipes/${recipeId}/run/`, {
         variable_values: variables,
       })
       const runs = get().recipeRuns
@@ -130,9 +129,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       return run
     },
 
-    fetchRuns: async (projectId: string, recipeId: string) => {
+    fetchRuns: async (recipeId: string) => {
       try {
-        const runs = await api.get<RecipeRun[]>(`/api/projects/${projectId}/recipes/${recipeId}/runs/`)
+        const runs = await api.get<RecipeRun[]>(`/api/recipes/${recipeId}/runs/`)
         set({ recipeRuns: runs })
       } catch {
         set({ recipeRuns: [] })
@@ -140,13 +139,12 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
     },
 
     updateRecipeRun: async (
-      projectId: string,
       recipeId: string,
       runId: string,
       data: { is_shared?: boolean; is_public?: boolean },
     ) => {
       const updated = await api.patch<RecipeRun>(
-        `/api/projects/${projectId}/recipes/${recipeId}/runs/${runId}/`,
+        `/api/recipes/${recipeId}/runs/${runId}/`,
         data,
       )
       const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))

@@ -4,15 +4,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('recipes', '0002_recipe_is_public_recipe_share_token_and_more'),
+        ("recipes", "0002_recipe_is_public_recipe_share_token_and_more"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='recipe',
-            name='prompt',
-            field=models.TextField(blank=True, default='', help_text='Prompt template with {{variable}} placeholders. Supports markdown.'),
+            model_name="recipe",
+            name="prompt",
+            field=models.TextField(
+                blank=True,
+                default="",
+                help_text="Prompt template with {{variable}} placeholders. Supports markdown.",
+            ),
         ),
     ]

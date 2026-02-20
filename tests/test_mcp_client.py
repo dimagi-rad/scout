@@ -88,7 +88,9 @@ class TestCheckResultNode:
             msg.status = status
         return {
             "messages": [
-                AIMessage(content="", tool_calls=[{"id": "call_123", "name": tool_name, "args": {}}]),
+                AIMessage(
+                    content="", tool_calls=[{"id": "call_123", "name": tool_name, "args": {}}]
+                ),
                 msg,
             ],
             "needs_correction": False,
@@ -97,10 +99,12 @@ class TestCheckResultNode:
 
     def test_mcp_envelope_error_triggers_correction(self):
         """MCP envelope error should trigger needs_correction."""
-        state = self._make_state({
-            "success": False,
-            "error": {"code": "VALIDATION_ERROR", "message": "Only SELECT allowed"},
-        })
+        state = self._make_state(
+            {
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR", "message": "Only SELECT allowed"},
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert result["correction_context"]["error_message"] == "Only SELECT allowed"
@@ -108,11 +112,13 @@ class TestCheckResultNode:
 
     def test_direct_error_triggers_correction(self):
         """Direct error format should still trigger needs_correction."""
-        state = self._make_state({
-            "error": "column 'usr_id' does not exist",
-            "sql_executed": "SELECT usr_id FROM users",
-            "tables_accessed": ["users"],
-        })
+        state = self._make_state(
+            {
+                "error": "column 'usr_id' does not exist",
+                "sql_executed": "SELECT usr_id FROM users",
+                "tables_accessed": ["users"],
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert result["correction_context"]["error_message"] == "column 'usr_id' does not exist"
@@ -121,34 +127,40 @@ class TestCheckResultNode:
 
     def test_mcp_envelope_success_no_correction(self):
         """MCP envelope with success=True should not trigger correction."""
-        state = self._make_state({
-            "success": True,
-            "data": {"columns": ["id"], "rows": [[1]], "row_count": 1},
-        })
+        state = self._make_state(
+            {
+                "success": True,
+                "data": {"columns": ["id"], "rows": [[1]], "row_count": 1},
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is False
 
     def test_successful_direct_result_no_correction(self):
         """Direct result with no error should not trigger correction."""
-        state = self._make_state({
-            "columns": ["id", "name"],
-            "rows": [[1, "Alice"]],
-            "row_count": 1,
-            "sql_executed": "SELECT id, name FROM users",
-        })
+        state = self._make_state(
+            {
+                "columns": ["id", "name"],
+                "rows": [[1, "Alice"]],
+                "row_count": 1,
+                "sql_executed": "SELECT id, name FROM users",
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is False
 
     def test_mcp_envelope_extracts_data_fields(self):
         """MCP envelope error with data should extract sql and tables from data."""
-        state = self._make_state({
-            "success": False,
-            "error": {"code": "QUERY_TIMEOUT", "message": "Query timed out"},
-            "data": {
-                "sql_executed": "SELECT * FROM big_table",
-                "tables_accessed": ["big_table"],
-            },
-        })
+        state = self._make_state(
+            {
+                "success": False,
+                "error": {"code": "QUERY_TIMEOUT", "message": "Query timed out"},
+                "data": {
+                    "sql_executed": "SELECT * FROM big_table",
+                    "tables_accessed": ["big_table"],
+                },
+            }
+        )
         result = check_result_node(state)
         assert result["needs_correction"] is True
         assert result["correction_context"]["failed_sql"] == "SELECT * FROM big_table"
@@ -204,13 +216,15 @@ class TestCheckResultNode:
 
     def test_error_classification_preserved(self):
         """Error type classification should work with MCP envelope format."""
-        state = self._make_state({
-            "success": False,
-            "error": {
-                "code": "VALIDATION_ERROR",
-                "message": "relation \"nonexistent\" does not exist",
-            },
-        })
+        state = self._make_state(
+            {
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": 'relation "nonexistent" does not exist',
+                },
+            }
+        )
         result = check_result_node(state)
         assert result["correction_context"]["error_type"] == "table_not_found"
 
@@ -219,7 +233,6 @@ class TestCheckResultNode:
 
 
 class TestMCPClient:
-
     @pytest.mark.asyncio
     async def test_get_mcp_client_creates_singleton(self):
         """get_mcp_client should return the same instance on repeated calls."""

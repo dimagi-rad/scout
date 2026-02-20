@@ -2,6 +2,7 @@ import { useEffect } from "react"
 import { RouterProvider } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
+import { OnboardingWizard } from "@/components/OnboardingWizard/OnboardingWizard"
 import { Skeleton } from "@/components/ui/skeleton"
 import { router } from "@/router"
 import { PublicRecipeRunPage } from "@/pages/PublicRecipeRunPage"
@@ -16,6 +17,7 @@ function getPublicPageComponent(): React.ReactNode | null {
 
 export default function App() {
   const authStatus = useAppStore((s) => s.authStatus)
+  const user = useAppStore((s) => s.user)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(window.location.pathname)
 
@@ -43,6 +45,11 @@ export default function App() {
 
   if (authStatus === "unauthenticated") {
     return <LoginForm />
+  }
+
+  // authenticated — check onboarding
+  if (authStatus === "authenticated" && user && !user.onboarding_complete) {
+    return <OnboardingWizard />
   }
 
   return <RouterProvider router={router} />

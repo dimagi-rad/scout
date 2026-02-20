@@ -143,21 +143,17 @@ class SQLValidator:
     1. Only SELECT statements are executed
     2. Only a single statement is present
     3. No dangerous functions are called
-    4. Only allowed tables/schemas are accessed
+    4. Only allowed schemas are accessed
 
     Attributes:
         schema: The primary database schema to enforce (e.g., "public")
         allowed_schemas: Additional schemas the user can access (e.g., materialized data)
-        allowed_tables: Tables that can be queried (empty = all tables allowed)
-        excluded_tables: Tables that cannot be queried
         max_limit: Maximum number of rows to return
         dialect: SQL dialect for parsing (default: postgres)
     """
 
     schema: str = "public"
     allowed_schemas: list[str] = field(default_factory=list)
-    allowed_tables: list[str] = field(default_factory=list)
-    excluded_tables: list[str] = field(default_factory=list)
     max_limit: int = 500
     dialect: str = "postgres"
 
@@ -271,31 +267,11 @@ class SQLValidator:
                 )
 
     def _validate_table_access(self, statement: exp.Expression, sql: str) -> None:
-        """Validate that only allowed tables are accessed."""
+        """Validate that only allowed schemas are accessed."""
         tables_accessed = self._extract_tables(statement)
 
         for table_info in tables_accessed:
-            table_name = table_info["table"]
             table_schema = table_info.get("schema")
-
-            # Check if table is in excluded list
-            if table_name.lower() in {t.lower() for t in self.excluded_tables}:
-                raise SQLValidationError(
-                    f"Access to table '{table_name}' is not permitted.",
-                    sql=sql,
-                    error_type="table_not_allowed",
-                )
-
-            # If allowed_tables is specified, check if table is in the list
-            if self.allowed_tables:
-                allowed_lower = {t.lower() for t in self.allowed_tables}
-                if table_name.lower() not in allowed_lower:
-                    raise SQLValidationError(
-                        f"Access to table '{table_name}' is not permitted. "
-                        f"Allowed tables: {', '.join(self.allowed_tables)}",
-                        sql=sql,
-                        error_type="table_not_allowed",
-                    )
 
             # Validate schema if specified in the query
             if table_schema:

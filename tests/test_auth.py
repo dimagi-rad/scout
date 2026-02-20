@@ -3,6 +3,7 @@ Comprehensive tests for Phase 4 (Auth) of the Scout data agent platform.
 
 Tests OAuth integration with django-allauth, custom providers, and header-based auth.
 """
+
 from unittest.mock import Mock, patch
 
 import pytest
@@ -10,6 +11,8 @@ from allauth.socialaccount.models import SocialAccount, SocialApp
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
+
+from apps.users.models import TenantCredential, TenantMembership
 
 User = get_user_model()
 
@@ -27,7 +30,7 @@ def site(db):
         defaults={
             "domain": "testserver",
             "name": "Test Server",
-        }
+        },
     )
     return site
 
@@ -334,9 +337,7 @@ class TestHeaderAuthCallback:
         }
 
         # Look up user by email from header
-        authenticated_user = User.objects.filter(
-            email=headers["X-Forwarded-Email"]
-        ).first()
+        authenticated_user = User.objects.filter(email=headers["X-Forwarded-Email"]).first()
 
         assert authenticated_user is not None
         assert authenticated_user.id == user.id
@@ -357,8 +358,12 @@ class TestHeaderAuthCallback:
         # Create user from headers
         new_user = User.objects.create_user(
             email=headers["X-Forwarded-Email"],
-            first_name=headers.get("X-Forwarded-Name", "").split()[0] if headers.get("X-Forwarded-Name") else "",
-            last_name=" ".join(headers.get("X-Forwarded-Name", "").split()[1:]) if headers.get("X-Forwarded-Name") else "",
+            first_name=headers.get("X-Forwarded-Name", "").split()[0]
+            if headers.get("X-Forwarded-Name")
+            else "",
+            last_name=" ".join(headers.get("X-Forwarded-Name", "").split()[1:])
+            if headers.get("X-Forwarded-Name")
+            else "",
         )
 
         assert new_user.email == headers["X-Forwarded-Email"]
@@ -371,9 +376,11 @@ class TestHeaderAuthCallback:
             # Missing X-Forwarded-Email
         }
 
-        authenticated_user = User.objects.filter(
-            email=headers.get("X-Forwarded-Email")
-        ).first() if headers.get("X-Forwarded-Email") else None
+        authenticated_user = (
+            User.objects.filter(email=headers.get("X-Forwarded-Email")).first()
+            if headers.get("X-Forwarded-Email")
+            else None
+        )
 
         assert authenticated_user is None
 
@@ -400,7 +407,9 @@ class TestChainlitAuthIntegration:
     """Tests for Chainlit authentication callback integration."""
 
     @patch("allauth.socialaccount.models.SocialAccount.objects")
-    def test_oauth_callback_lookup_by_token(self, mock_social_account_objects, user, social_account):
+    def test_oauth_callback_lookup_by_token(
+        self, mock_social_account_objects, user, social_account
+    ):
         """Test OAuth callback looks up user by provider token/uid."""
         # Mock the SocialAccount query
         mock_social_account_objects.filter.return_value.first.return_value = social_account
@@ -724,3 +733,65 @@ class TestDisconnectProvider:
         client.force_login(user)
         resp = client.post("/api/auth/providers/google/disconnect/")
         assert resp.status_code == 404
+
+
+class TestSignup:
+    def test_signup_creates_user_and_logs_in(self, client, db):
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "new@example.com", "password": "str0ngPass!"},
+            content_type="application/json",
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["email"] == "new@example.com"
+
+        # Should be logged in — me/ returns 200
+        me = client.get("/api/auth/me/")
+        assert me.status_code == 200
+
+    def test_signup_duplicate_email_returns_400(self, client, db):
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        User.objects.create_user(email="existing@example.com", password="pass")
+
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "existing@example.com", "password": "newpass"},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+    def test_signup_missing_fields_returns_400(self, client, db):
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "x@example.com"},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+
+class TestMeOnboardingComplete:
+    def test_false_with_no_memberships(self, client, db):
+        user = User.objects.create_user(email="u@example.com", password="pass")
+        client.force_login(user)
+        resp = client.get("/api/auth/me/")
+        assert resp.status_code == 200
+        assert resp.json()["onboarding_complete"] is False
+
+    def test_true_with_membership_and_credential(self, client, db):
+        user = User.objects.create_user(email="u2@example.com", password="pass")
+        tm = TenantMembership.objects.create(
+            user=user,
+            provider="commcare",
+            tenant_id="d1",
+            tenant_name="D1",
+        )
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.OAUTH,
+        )
+        client.force_login(user)
+        resp = client.get("/api/auth/me/")
+        assert resp.json()["onboarding_complete"] is True

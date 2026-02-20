@@ -8,6 +8,7 @@ export interface User {
   email: string
   name: string
   is_staff: boolean
+  onboarding_complete: boolean
 }
 
 export interface AuthSlice {

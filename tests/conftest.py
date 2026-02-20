@@ -1,10 +1,9 @@
 """
 Pytest configuration and fixtures for Scout tests.
 """
+
 import pytest
 from django.contrib.auth import get_user_model
-
-from apps.projects.models import DatabaseConnection
 
 
 @pytest.fixture
@@ -32,16 +31,19 @@ def admin_user(db):
 
 
 @pytest.fixture
-def db_connection(db, user):
-    """Create a DatabaseConnection for tests."""
-    conn = DatabaseConnection(
-        name="Test Connection",
-        db_host="localhost",
-        db_port=5432,
-        db_name="testdb",
-        created_by=user,
+def tenant_membership(db, user):
+    from apps.users.models import TenantMembership
+
+    return TenantMembership.objects.create(
+        user=user, provider="commcare", tenant_id="test-domain", tenant_name="Test Domain"
     )
-    conn.db_user = "testuser"
-    conn.db_password = "testpass"
-    conn.save()
-    return conn
+
+
+@pytest.fixture
+def workspace(db):
+    from apps.projects.models import TenantWorkspace
+
+    return TenantWorkspace.objects.create(
+        tenant_id="test-domain",
+        tenant_name="Test Domain",
+    )

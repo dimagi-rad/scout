@@ -19,6 +19,7 @@ class TestTokenStorageSettings:
         """allauth should be configured to persist OAuth tokens."""
         assert settings.SOCIALACCOUNT_STORE_TOKENS is True
 
+
 TEST_FERNET_KEY = Fernet.generate_key().decode()
 
 
@@ -28,6 +29,7 @@ class TestTokenEncryptionAdapter:
     @pytest.fixture
     def adapter(self):
         from apps.users.adapters import EncryptingSocialAccountAdapter
+
         return EncryptingSocialAccountAdapter()
 
     @patch.object(settings, "DB_CREDENTIAL_KEY", TEST_FERNET_KEY)
@@ -64,6 +66,7 @@ class TestCommCareConnectProvider:
     def test_provider_registered(self):
         """CommCare Connect provider should be discoverable by allauth."""
         from allauth.socialaccount import providers
+
         registry = providers.registry
         provider_cls = registry.get_class("commcare_connect")
         assert provider_cls is not None
@@ -152,11 +155,13 @@ class TestTokenRefresh:
 
         mock_post.return_value = MagicMock(
             status_code=200,
-            json=MagicMock(return_value={
-                "access_token": "new_access_token",
-                "refresh_token": "new_refresh_token",
-                "expires_in": 3600,
-            }),
+            json=MagicMock(
+                return_value={
+                    "access_token": "new_access_token",
+                    "refresh_token": "new_refresh_token",
+                    "expires_in": 3600,
+                }
+            ),
         )
         mock_post.return_value.raise_for_status = MagicMock()
 
@@ -218,13 +223,13 @@ class TestTokenRefresh:
         assert token_needs_refresh(None) is False
 
 
+@pytest.mark.django_db
 class TestGraphOAuthConfig:
     """Test that build_agent_graph accepts oauth_tokens gracefully."""
 
     @patch("apps.agents.graph.base.ChatAnthropic")
     @patch("apps.agents.graph.base.KnowledgeRetriever")
-    @patch("apps.agents.graph.base.DataDictionaryGenerator")
-    def test_build_graph_accepts_oauth_tokens(self, mock_dd, mock_kr, mock_llm):
+    def test_build_graph_accepts_oauth_tokens(self, mock_kr, mock_llm, tenant_membership):
         """build_agent_graph should accept oauth_tokens without error."""
         from apps.agents.graph.base import build_agent_graph
 
@@ -232,26 +237,13 @@ class TestGraphOAuthConfig:
         mock_kr_instance.retrieve.return_value = ""
         mock_kr.return_value = mock_kr_instance
 
-        mock_dd_instance = MagicMock()
-        mock_dd_instance.render_for_prompt.return_value = "schema info"
-        mock_dd.return_value = mock_dd_instance
-
         mock_llm_instance = MagicMock()
         mock_llm_instance.bind_tools.return_value = mock_llm_instance
         mock_llm.return_value = mock_llm_instance
 
-        project = MagicMock()
-        project.slug = "test"
-        project.id = "test-id"
-        project.llm_model = "claude-sonnet-4-5-20250929"
-        project.system_prompt = ""
-        project.max_rows_per_query = 500
-        project.max_query_timeout_seconds = 30
-        project.db_schema = "public"
-
         # Should not raise
         graph = build_agent_graph(
-            project=project,
+            tenant_membership=tenant_membership,
             oauth_tokens={"commcare": "test_token"},
         )
         assert graph is not None

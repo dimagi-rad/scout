@@ -1,4 +1,5 @@
 """URL configuration for auth endpoints."""
+
 from django.urls import path
 
 from apps.chat.views import (
@@ -8,6 +9,13 @@ from apps.chat.views import (
     logout_view,
     me_view,
     providers_view,
+    signup_view,
+)
+from apps.users.views import (
+    tenant_credential_detail_view,
+    tenant_credential_list_view,
+    tenant_list_view,
+    tenant_select_view,
 )
 
 app_name = "auth"
@@ -22,5 +30,14 @@ urlpatterns = [
         "providers/<str:provider_id>/disconnect/",
         disconnect_provider_view,
         name="disconnect-provider",
+    ),
+    path("signup/", signup_view, name="signup"),
+    path("tenants/", tenant_list_view, name="tenant-list"),
+    path("tenants/select/", tenant_select_view, name="tenant-select"),
+    path("tenant-credentials/", tenant_credential_list_view, name="tenant-credential-list"),
+    path(
+        "tenant-credentials/<str:membership_id>/",
+        tenant_credential_detail_view,
+        name="tenant-credential-detail",
     ),
 ]

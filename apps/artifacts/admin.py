@@ -4,6 +4,7 @@ Django admin configuration for Artifact models.
 Provides admin interfaces for managing Artifacts and SharedArtifacts
 with filtering, search, and inline editing capabilities.
 """
+
 from django.contrib import admin
 from django.utils.html import format_html
 
@@ -41,7 +42,7 @@ class ArtifactAdmin(admin.ModelAdmin):
     list_display = (
         "title",
         "artifact_type",
-        "project",
+        "workspace",
         "created_by",
         "version",
         "created_at",
@@ -49,7 +50,7 @@ class ArtifactAdmin(admin.ModelAdmin):
     )
     list_filter = (
         "artifact_type",
-        "project",
+        "workspace",
         "created_at",
     )
     search_fields = (
@@ -65,7 +66,7 @@ class ArtifactAdmin(admin.ModelAdmin):
         "updated_at",
         "version_history_display",
     )
-    raw_id_fields = ("project", "created_by", "parent_artifact")
+    raw_id_fields = ("workspace", "created_by", "parent_artifact")
     date_hierarchy = "created_at"
     inlines = [SharedArtifactInline]
 
@@ -96,7 +97,7 @@ class ArtifactAdmin(admin.ModelAdmin):
             "Relationships",
             {
                 "fields": (
-                    "project",
+                    "workspace",
                     "created_by",
                     "conversation_id",
                 )

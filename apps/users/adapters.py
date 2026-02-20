@@ -34,11 +34,17 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         return f.encrypt(plaintext.encode()).decode()
 
     def decrypt_token(self, ciphertext: str) -> str:
-        """Decrypt a token string. Returns empty string for empty input."""
+        """Decrypt a token string. Returns empty string for empty or unreadable input."""
         if not ciphertext:
             return ""
+        from cryptography.fernet import InvalidToken
+
         f = self._get_fernet()
-        return f.decrypt(ciphertext.encode()).decode()
+        try:
+            return f.decrypt(ciphertext.encode()).decode()
+        except InvalidToken:
+            logger.error("Failed to decrypt OAuth token — possible key rotation or data corruption")
+            return ""
 
     def serialize_instance(self, instance):
         """Encrypt token fields before serialization (storage)."""
@@ -63,3 +69,25 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             if data.get("token_secret"):
                 data["token_secret"] = self.decrypt_token(data["token_secret"])
         return super().deserialize_instance(model, data)
+
+
+def encrypt_credential(plaintext: str) -> str:
+    """Fernet-encrypt a credential string using DB_CREDENTIAL_KEY."""
+    from django.conf import settings
+
+    key = settings.DB_CREDENTIAL_KEY
+    if not key:
+        raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
+    f = Fernet(key.encode() if isinstance(key, str) else key)
+    return f.encrypt(plaintext.encode()).decode()
+
+
+def decrypt_credential(ciphertext: str) -> str:
+    """Fernet-decrypt a credential string using DB_CREDENTIAL_KEY."""
+    from django.conf import settings
+
+    key = settings.DB_CREDENTIAL_KEY
+    if not key:
+        raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
+    f = Fernet(key.encode() if isinstance(key, str) else key)
+    return f.decrypt(ciphertext.encode()).decode()

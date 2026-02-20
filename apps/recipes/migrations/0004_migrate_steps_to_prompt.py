@@ -24,9 +24,8 @@ def reverse_migration(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('recipes', '0003_add_recipe_prompt_field'),
+        ("recipes", "0003_add_recipe_prompt_field"),
     ]
 
     operations = [
