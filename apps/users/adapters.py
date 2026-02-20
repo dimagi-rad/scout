@@ -63,3 +63,25 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             if data.get("token_secret"):
                 data["token_secret"] = self.decrypt_token(data["token_secret"])
         return super().deserialize_instance(model, data)
+
+
+def encrypt_credential(plaintext: str) -> str:
+    """Fernet-encrypt a credential string using DB_CREDENTIAL_KEY."""
+    from django.conf import settings
+
+    key = settings.DB_CREDENTIAL_KEY
+    if not key:
+        raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
+    f = Fernet(key.encode() if isinstance(key, str) else key)
+    return f.encrypt(plaintext.encode()).decode()
+
+
+def decrypt_credential(ciphertext: str) -> str:
+    """Fernet-decrypt a credential string using DB_CREDENTIAL_KEY."""
+    from django.conf import settings
+
+    key = settings.DB_CREDENTIAL_KEY
+    if not key:
+        raise ValueError("DB_CREDENTIAL_KEY is not set in settings")
+    f = Fernet(key.encode() if isinstance(key, str) else key)
+    return f.decrypt(ciphertext.encode()).decode()

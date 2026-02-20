@@ -106,3 +106,42 @@ class TenantMembership(models.Model):
 
     def __str__(self):
         return f"{self.user.email} - {self.provider}:{self.tenant_id}"
+
+
+class TenantCredential(models.Model):
+    """Stores credentials for a tenant — either OAuth pointer or encrypted API key.
+
+    For credential_type == OAUTH: encrypted_credential is blank; the actual
+    token lives in allauth's SocialToken and is retrieved from there.
+
+    For credential_type == API_KEY: encrypted_credential holds a Fernet-encrypted
+    opaque string. Format is provider-specific, e.g. "username:apikey" for CommCare.
+    """
+
+    OAUTH = "oauth"
+    API_KEY = "api_key"
+    TYPE_CHOICES = [
+        (OAUTH, "OAuth Token"),
+        (API_KEY, "API Key"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_membership = models.OneToOneField(
+        TenantMembership,
+        on_delete=models.CASCADE,
+        related_name="credential",
+    )
+    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    encrypted_credential = models.CharField(
+        max_length=2000,
+        blank=True,
+        help_text="Fernet-encrypted opaque string. Empty for OAuth type.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.tenant_membership} ({self.credential_type})"
