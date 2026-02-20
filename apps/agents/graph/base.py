@@ -144,7 +144,7 @@ def _make_injecting_tool_node(
 
 
 def build_agent_graph(
-    project: Project,
+    project: Project | None = None,
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,

@@ -23,7 +23,7 @@ class CreateShareSerializer(serializers.Serializer):
 
     access_level = serializers.ChoiceField(
         choices=AccessLevel.choices,
-        default=AccessLevel.PROJECT,
+        default=AccessLevel.TENANT,
         help_text="Access level for the share link.",
     )
     allowed_users = serializers.ListField(
@@ -71,7 +71,7 @@ class CreateShareSerializer(serializers.Serializer):
             artifact=artifact,
             created_by=request.user,
             share_token=share_token,
-            access_level=validated_data.get("access_level", AccessLevel.PROJECT),
+            access_level=validated_data.get("access_level", AccessLevel.TENANT),
             expires_at=validated_data.get("expires_at"),
         )
 

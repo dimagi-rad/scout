@@ -877,7 +877,7 @@ class SharedArtifactView(View):
         if share.access_level == AccessLevel.PUBLIC:
             # Public links are accessible to anyone
             pass
-        elif share.access_level == AccessLevel.PROJECT:
+        elif share.access_level == AccessLevel.TENANT:
             # Project-level access requires authentication and project membership
             if not request.user.is_authenticated:
                 return JsonResponse(
@@ -937,7 +937,7 @@ class SharedArtifactView(View):
         # Check access based on access level (same checks as GET)
         if share.access_level == AccessLevel.PUBLIC:
             pass
-        elif share.access_level == AccessLevel.PROJECT:
+        elif share.access_level == AccessLevel.TENANT:
             if not request.user.is_authenticated:
                 return JsonResponse(
                     {"error": "Authentication required."},

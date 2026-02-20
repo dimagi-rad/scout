@@ -9,13 +9,6 @@ class Thread(models.Model):
     """Indexes chat thread metadata for listing and restoring sessions."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    project = models.ForeignKey(
-        "projects.Project",
-        on_delete=models.CASCADE,
-        related_name="threads",
-        null=True,
-        blank=True,
-    )
     tenant_membership = models.ForeignKey(
         "users.TenantMembership",
         on_delete=models.CASCADE,
@@ -40,8 +33,8 @@ class Thread(models.Model):
     class Meta:
         indexes = [
             models.Index(
-                fields=["project", "user", "-updated_at"],
-                name="chat_thread_proj_user_updated",
+                fields=["tenant_membership", "user", "-updated_at"],
+                name="chat_thread_tm_user_updated",
             ),
         ]
         ordering = ["-updated_at"]

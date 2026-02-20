@@ -3,8 +3,6 @@ from django.contrib import admin
 
 from .models import (
     AgentLearning,
-    EvalRun,
-    GoldenQuery,
     KnowledgeEntry,
     TableKnowledge,
 )
@@ -12,13 +10,13 @@ from .models import (
 
 @admin.register(TableKnowledge)
 class TableKnowledgeAdmin(admin.ModelAdmin):
-    list_display = ["table_name", "project", "owner", "refresh_frequency", "updated_at"]
-    list_filter = ["project", "updated_at"]
+    list_display = ["table_name", "workspace", "owner", "refresh_frequency", "updated_at"]
+    list_filter = ["workspace", "updated_at"]
     search_fields = ["table_name", "description", "owner"]
-    autocomplete_fields = ["project", "updated_by"]
+    autocomplete_fields = ["updated_by"]
 
     fieldsets = (
-        (None, {"fields": ("project", "table_name")}),
+        (None, {"fields": ("workspace", "table_name")}),
         ("Description", {"fields": ("description", "use_cases")}),
         (
             "Data Quality",
@@ -42,10 +40,10 @@ class TableKnowledgeAdmin(admin.ModelAdmin):
 
 @admin.register(KnowledgeEntry)
 class KnowledgeEntryAdmin(admin.ModelAdmin):
-    list_display = ["title", "project", "tags_display", "updated_at"]
-    list_filter = ["project", "updated_at"]
+    list_display = ["title", "workspace", "tags_display", "updated_at"]
+    list_filter = ["workspace", "updated_at"]
     search_fields = ["title", "content"]
-    autocomplete_fields = ["project", "created_by"]
+    autocomplete_fields = ["created_by"]
     readonly_fields = ["created_at", "updated_at"]
 
     @admin.display(description="Tags")
@@ -83,14 +81,14 @@ class ConfidenceRangeFilter(admin.SimpleListFilter):
 class AgentLearningAdmin(admin.ModelAdmin):
     list_display = [
         "description_short",
-        "project",
+        "workspace",
         "category",
         "confidence_badge",
         "times_applied",
         "is_active",
         "created_at",
     ]
-    list_filter = ["project", "category", "is_active", ConfidenceRangeFilter]
+    list_filter = ["workspace", "category", "is_active", ConfidenceRangeFilter]
     search_fields = ["description", "original_error", "original_sql", "corrected_sql"]
     actions = [
         "approve_learnings",
@@ -100,7 +98,7 @@ class AgentLearningAdmin(admin.ModelAdmin):
     ]
 
     fieldsets = (
-        (None, {"fields": ("project", "description", "category")}),
+        (None, {"fields": ("workspace", "description", "category")}),
         ("Scope", {"fields": ("applies_to_tables",)}),
         (
             "Evidence",
@@ -174,67 +172,3 @@ class AgentLearningAdmin(admin.ModelAdmin):
             learning.decrease_confidence(0.1)
             count += 1
         self.message_user(request, f"Decreased confidence for {count} learnings")
-
-
-@admin.register(GoldenQuery)
-class GoldenQueryAdmin(admin.ModelAdmin):
-    list_display = ["question_short", "project", "difficulty", "comparison_mode", "created_at"]
-    list_filter = ["project", "difficulty", "comparison_mode"]
-    search_fields = ["question", "expected_sql"]
-    autocomplete_fields = ["project", "created_by"]
-
-    fieldsets = (
-        (None, {"fields": ("project", "question")}),
-        ("Expected", {"fields": ("expected_sql", "expected_result")}),
-        ("Comparison", {"fields": ("comparison_mode", "tolerance")}),
-        ("Categorization", {"fields": ("difficulty", "tags")}),
-        (
-            "Metadata",
-            {
-                "fields": ("created_by", "created_at"),
-                "classes": ("collapse",),
-            },
-        ),
-    )
-    readonly_fields = ["created_at"]
-
-    @admin.display(description="Question")
-    def question_short(self, obj):
-        return obj.question[:80] + "..." if len(obj.question) > 80 else obj.question
-
-    def save_model(self, request, obj, form, change):
-        if not obj.created_by:
-            obj.created_by = request.user
-        super().save_model(request, obj, form, change)
-
-
-@admin.register(EvalRun)
-class EvalRunAdmin(admin.ModelAdmin):
-    list_display = [
-        "project",
-        "model_used",
-        "total_queries",
-        "passed",
-        "failed",
-        "accuracy_display",
-        "started_at",
-    ]
-    list_filter = ["project", "model_used", "started_at"]
-    readonly_fields = [
-        "id",
-        "model_used",
-        "knowledge_snapshot",
-        "total_queries",
-        "passed",
-        "failed",
-        "errored",
-        "accuracy",
-        "results",
-        "started_at",
-        "completed_at",
-        "triggered_by",
-    ]
-
-    @admin.display(description="Accuracy")
-    def accuracy_display(self, obj):
-        return f"{obj.accuracy:.1%}"

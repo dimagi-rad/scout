@@ -33,10 +33,12 @@ class Recipe(models.Model):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    project = models.ForeignKey(
-        "projects.Project",
+    workspace = models.ForeignKey(
+        "projects.TenantWorkspace",
         on_delete=models.CASCADE,
         related_name="recipes",
+        null=True,
+        blank=True,
     )
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
@@ -86,8 +88,8 @@ class Recipe(models.Model):
     class Meta:
         ordering = ["-updated_at"]
         indexes = [
-            models.Index(fields=["project", "is_shared"]),
-            models.Index(fields=["project", "created_by"]),
+            models.Index(fields=["workspace", "is_shared"]),
+            models.Index(fields=["workspace", "created_by"]),
         ]
 
     def save(self, *args, **kwargs):
@@ -98,7 +100,7 @@ class Recipe(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.project.name})"
+        return f"{self.name} ({self.workspace.tenant_name})"
 
     def get_variable_names(self) -> list[str]:
         """Return a list of variable names defined in this recipe."""

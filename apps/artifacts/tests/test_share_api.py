@@ -225,7 +225,7 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
             artifact=self.artifact,
             created_by=self.creator,
             share_token="token0987654321",
-            access_level=AccessLevel.PROJECT,
+            access_level=AccessLevel.TENANT,
         )
 
     def test_list_shares_as_creator(self):
