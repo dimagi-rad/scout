@@ -9,6 +9,7 @@ from apps.chat.views import (
     logout_view,
     me_view,
     providers_view,
+    signup_view,
 )
 from apps.users.views import tenant_list_view, tenant_select_view
 
@@ -25,6 +26,7 @@ urlpatterns = [
         disconnect_provider_view,
         name="disconnect-provider",
     ),
+    path("signup/", signup_view, name="signup"),
     path("tenants/", tenant_list_view, name="tenant-list"),
     path("tenants/select/", tenant_select_view, name="tenant-select"),
 ]

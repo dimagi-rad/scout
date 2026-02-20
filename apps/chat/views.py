@@ -169,6 +169,41 @@ def logout_view(request):
     return JsonResponse({"ok": True})
 
 
+@require_POST
+def signup_view(request):
+    """Create a new account with email and password, then log in."""
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+
+    if not email or not password:
+        return JsonResponse({"error": "Email and password are required"}, status=400)
+
+    from django.contrib.auth import get_user_model
+
+    UserModel = get_user_model()
+
+    if UserModel.objects.filter(email=email).exists():
+        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+
+    user = UserModel.objects.create_user(email=email, password=password)
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+
+    return JsonResponse(
+        {
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.get_full_name(),
+            "is_staff": user.is_staff,
+        },
+        status=201,
+    )
+
+
 PROVIDER_DISPLAY = {
     "google": "Google",
     "github": "GitHub",

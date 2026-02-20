@@ -731,3 +731,39 @@ class TestDisconnectProvider:
         client.force_login(user)
         resp = client.post("/api/auth/providers/google/disconnect/")
         assert resp.status_code == 404
+
+
+class TestSignup:
+    def test_signup_creates_user_and_logs_in(self, client, db):
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "new@example.com", "password": "str0ngPass!"},
+            content_type="application/json",
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["email"] == "new@example.com"
+
+        # Should be logged in — me/ returns 200
+        me = client.get("/api/auth/me/")
+        assert me.status_code == 200
+
+    def test_signup_duplicate_email_returns_400(self, client, db):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        User.objects.create_user(email="existing@example.com", password="pass")
+
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "existing@example.com", "password": "newpass"},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+    def test_signup_missing_fields_returns_400(self, client, db):
+        response = client.post(
+            "/api/auth/signup/",
+            data={"email": "x@example.com"},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
