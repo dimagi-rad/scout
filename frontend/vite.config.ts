@@ -13,16 +13,16 @@ export default defineConfig(({ mode }) => {
         "@": path.resolve(__dirname, "./src"),
       },
     },
-  },
-  server: {
-    allowedHosts: ['.ngrok-free.app'],
-    proxy: {
-      "/api": {
-        target: `http://localhost:${env.API_PORT || 8000}`,
-        changeOrigin: true,
-      },
-      "/accounts": {
-        target: `http://localhost:${env.API_PORT || 8000}`,
+    server: {
+      allowedHosts: ['.ngrok-free.app'],
+      proxy: {
+        "/api": {
+          target: `http://localhost:${env.API_PORT || 8000}`,
+          changeOrigin: true,
+        },
+        "/accounts": {
+          target: `http://localhost:${env.API_PORT || 8000}`,
+        },
       },
     },
   }
