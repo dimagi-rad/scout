@@ -199,11 +199,15 @@ SOCIALACCOUNT_PROVIDERS = {
     "google": {
         "SCOPE": ["profile", "email"],
         "AUTH_PARAMS": {"access_type": "online"},
+        "OAUTH_PKCE_ENABLED": True,
     },
     "github": {
         "SCOPE": ["user:email"],
+        "OAUTH_PKCE_ENABLED": True,
     },
-    "commcare_connect": {},
+    "commcare_connect": {
+        "OAUTH_PKCE_ENABLED": True,
+    },
 }
 
 
