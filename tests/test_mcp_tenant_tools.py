@@ -704,3 +704,69 @@ class TestGetSchemaStatusTool:
         assert result["data"]["exists"] is True
         assert result["data"]["tables"] == []
         assert result["data"]["last_materialized_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema tool
+# ---------------------------------------------------------------------------
+
+PATCH_SCHEMA_MANAGER = "apps.projects.services.schema_manager.SchemaManager"
+
+
+class TestTeardownSchemaTool:
+    """Test the teardown_schema MCP tool."""
+
+    async def test_requires_confirm_true(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        result = await teardown_schema(tenant_id, confirm=False)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "confirm=True" in result["error"]["message"]
+
+    async def test_default_confirm_is_false(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        result = await teardown_schema(tenant_id)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    async def test_not_found_when_no_schema(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        with patch(PATCH_TENANT_SCHEMA) as mock_ts_cls:
+            mock_qs = MagicMock()
+            mock_qs.exclude.return_value = mock_qs
+            mock_qs.afirst = AsyncMock(return_value=None)
+            mock_ts_cls.objects.filter.return_value = mock_qs
+
+            result = await teardown_schema(tenant_id, confirm=True)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == NOT_FOUND
+
+    async def test_calls_schema_manager_teardown_on_confirm(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        mock_schema = MagicMock()
+        mock_schema.schema_name = "test_domain"
+
+        with (
+            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
+            patch(PATCH_SCHEMA_MANAGER) as mock_mgr_cls,
+        ):
+            mock_qs = MagicMock()
+            mock_qs.exclude.return_value = mock_qs
+            mock_qs.afirst = AsyncMock(return_value=mock_schema)
+            mock_ts_cls.objects.filter.return_value = mock_qs
+
+            mock_mgr = MagicMock()
+            mock_mgr_cls.return_value = mock_mgr
+
+            result = await teardown_schema(tenant_id, confirm=True)
+
+        assert result["success"] is True
+        assert result["data"]["schema_dropped"] == "test_domain"
+        mock_mgr.teardown.assert_called_once_with(mock_schema)

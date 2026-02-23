@@ -421,6 +421,62 @@ async def get_schema_status(tenant_id: str) -> dict:
         return tc["result"]
 
 
+@mcp.tool()
+async def teardown_schema(tenant_id: str, confirm: bool = False) -> dict:
+    """Drop the tenant's schema and all its materialized data.
+
+    Destructive — the schema and all tables are permanently dropped. The
+    schema will be re-provisioned automatically on the next materialization run.
+    Metadata extracted during materialization (CommCare app structure, field
+    definitions) is stored separately and is NOT affected.
+
+    Only call this when the user explicitly requests a data reset, or when
+    a failed materialization has left the schema in an unrecoverable state.
+
+    Args:
+        tenant_id: The tenant identifier (e.g. CommCare domain name).
+        confirm: Must be True to execute. Defaults to False as a safety guard.
+    """
+    from asgiref.sync import sync_to_async
+
+    from apps.projects.models import SchemaState, TenantSchema
+    from apps.projects.services.schema_manager import SchemaManager
+
+    async with tool_context("teardown_schema", tenant_id, confirm=confirm) as tc:
+        if not confirm:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                "Pass confirm=True to tear down the schema. "
+                "This will permanently drop all materialized data for this tenant.",
+            )
+            return tc["result"]
+
+        ts = (
+            await TenantSchema.objects.filter(
+                tenant_membership__tenant_id=tenant_id,
+            )
+            .exclude(state=SchemaState.TEARDOWN)
+            .afirst()
+        )
+
+        if ts is None:
+            tc["result"] = error_response(
+                NOT_FOUND, f"No active schema found for tenant '{tenant_id}'"
+            )
+            return tc["result"]
+
+        schema_name = ts.schema_name
+        mgr = SchemaManager()
+        await sync_to_async(mgr.teardown)(ts)
+
+        tc["result"] = success_response(
+            {"schema_dropped": schema_name},
+            tenant_id=tenant_id,
+            schema=schema_name,
+        )
+        return tc["result"]
+
+
 # --- Server setup ---
 
 
