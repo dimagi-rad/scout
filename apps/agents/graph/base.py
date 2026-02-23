@@ -57,6 +57,8 @@ MCP_TOOL_NAMES = frozenset(
         "query",
         "get_metadata",
         "run_materialization",
+        "get_schema_status",
+        "teardown_schema",
     }
 )
 
