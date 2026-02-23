@@ -57,6 +57,8 @@ MCP_TOOL_NAMES = frozenset(
         "query",
         "get_metadata",
         "run_materialization",
+        "get_schema_status",
+        "teardown_schema",
     }
 )
 
@@ -370,7 +372,30 @@ def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMe
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 
-You can materialize data from CommCare using the `run_materialization` tool.
+## Data Availability
+
+At the start of every conversation, call `get_schema_status` to check whether
+data has been loaded for this tenant.
+
+- If `exists` is false or `state` is `not_provisioned`: tell the user you are
+  loading their CommCare data ("I'll load your data now — this usually takes a
+  minute"), then call `run_materialization`. When it completes, summarise what
+  was loaded (tables and row counts from the result), then answer the original
+  question.
+
+- If `state` is `materializing`: a load is already in progress. Tell the user
+  ("Your data is currently loading — this usually takes a minute") and suggest
+  they ask again shortly. Do NOT call `run_materialization` again.
+
+- If `state` is `active`: proceed normally. If the user asks about recent or
+  current data, mention when it was last loaded (from `last_materialized_at`)
+  so they can judge freshness.
+
+Only call `teardown_schema` when the user explicitly requests a data reset or
+wipe, or when materialization has left the schema in a state that cannot be
+recovered by retrying (e.g. the materialization keeps failing after teardown and
+re-run). Always confirm with the user before tearing down ("This will drop all
+your loaded data. Are you sure?").
 """)
 
     return "\n".join(sections)

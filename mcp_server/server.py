@@ -362,6 +362,129 @@ async def run_materialization(
         return tc["result"]
 
 
+@mcp.tool()
+async def get_schema_status(tenant_id: str) -> dict:
+    """Check whether data has been loaded for this tenant.
+
+    Returns schema existence, state, last materialization timestamp, and table
+    list. Always succeeds — returns exists=False if no schema has been
+    provisioned yet. Safe to call before any data has been loaded.
+
+    Args:
+        tenant_id: The tenant identifier (e.g. CommCare domain name).
+    """
+    from apps.projects.models import MaterializationRun, SchemaState, TenantSchema
+
+    async with tool_context("get_schema_status", tenant_id) as tc:
+        ts = await TenantSchema.objects.filter(
+            tenant_membership__tenant_id=tenant_id,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+
+        if ts is None:
+            tc["result"] = success_response(
+                {
+                    "exists": False,
+                    "state": "not_provisioned",
+                    "last_materialized_at": None,
+                    "tables": [],
+                },
+                tenant_id=tenant_id,
+                schema="",
+            )
+            return tc["result"]
+
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema=ts,
+                state=MaterializationRun.RunState.COMPLETED,
+            )
+            .order_by("-completed_at")
+            .afirst()
+        )
+
+        last_materialized_at = None
+        tables = []
+        if last_run:
+            if last_run.completed_at:
+                last_materialized_at = last_run.completed_at.isoformat()
+            result_data = last_run.result or {}
+            # Single-table envelope: {"table": "...", "rows_loaded": N}.
+            # Multi-table pipelines may use a "tables" key instead; handle both.
+            if "tables" in result_data:
+                tables = result_data["tables"]
+            elif "table" in result_data and "rows_loaded" in result_data:
+                tables = [{"name": result_data["table"], "row_count": result_data["rows_loaded"]}]
+
+        tc["result"] = success_response(
+            {
+                "exists": True,
+                "state": ts.state,
+                "last_materialized_at": last_materialized_at,
+                "tables": tables,
+            },
+            tenant_id=tenant_id,
+            schema=ts.schema_name,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def teardown_schema(tenant_id: str, confirm: bool = False) -> dict:
+    """Drop the tenant's schema and all its materialized data.
+
+    Destructive — the schema and all tables are permanently dropped. The
+    schema will be re-provisioned automatically on the next materialization run.
+    Metadata extracted during materialization (CommCare app structure, field
+    definitions) is stored separately and is NOT affected.
+
+    Only call this when the user explicitly requests a data reset, or when
+    a failed materialization has left the schema in an unrecoverable state.
+
+    Args:
+        tenant_id: The tenant identifier (e.g. CommCare domain name).
+        confirm: Must be True to execute. Defaults to False as a safety guard.
+    """
+    from asgiref.sync import sync_to_async
+
+    from apps.projects.models import SchemaState, TenantSchema
+    from apps.projects.services.schema_manager import SchemaManager
+
+    async with tool_context("teardown_schema", tenant_id, confirm=confirm) as tc:
+        if not confirm:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                "Pass confirm=True to tear down the schema. "
+                "This will permanently drop all materialized data for this tenant.",
+            )
+            return tc["result"]
+
+        ts = (
+            await TenantSchema.objects.filter(
+                tenant_membership__tenant_id=tenant_id,
+            )
+            .exclude(state=SchemaState.TEARDOWN)
+            .afirst()
+        )
+
+        if ts is None:
+            tc["result"] = error_response(
+                NOT_FOUND, f"No active schema found for tenant '{tenant_id}'"
+            )
+            return tc["result"]
+
+        schema_name = ts.schema_name
+        mgr = SchemaManager()
+        await sync_to_async(mgr.teardown)(ts)
+
+        tc["result"] = success_response(
+            {"schema_dropped": schema_name},
+            tenant_id=tenant_id,
+            schema=schema_name,
+        )
+        return tc["result"]
+
+
 # --- Server setup ---
 
 

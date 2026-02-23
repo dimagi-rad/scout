@@ -6,6 +6,7 @@ the SQL validator. Tests verify the full chain from tool handler through
 to the parameterized query execution.
 """
 
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -614,3 +615,160 @@ class TestParseDbUrl:
         assert params["host"] == "localhost"
         assert params["port"] == 5432
         assert params["dbname"] == "scout"
+
+
+# ---------------------------------------------------------------------------
+# get_schema_status tool
+# ---------------------------------------------------------------------------
+
+PATCH_TENANT_SCHEMA = "apps.projects.models.TenantSchema"
+PATCH_MATERIALIZATION_RUN = "apps.projects.models.MaterializationRun"
+
+
+class TestGetSchemaStatusTool:
+    """Test the get_schema_status MCP tool."""
+
+    async def test_returns_not_provisioned_when_no_schema(self, tenant_id):
+        from mcp_server.server import get_schema_status
+
+        with patch(PATCH_TENANT_SCHEMA) as mock_ts_cls:
+            mock_qs = AsyncMock()
+            mock_qs.afirst.return_value = None
+            mock_ts_cls.objects.filter.return_value = mock_qs
+
+            result = await get_schema_status(tenant_id)
+
+        assert result["success"] is True
+        assert result["data"]["exists"] is False
+        assert result["data"]["state"] == "not_provisioned"
+        assert result["data"]["tables"] == []
+        assert result["data"]["last_materialized_at"] is None
+
+    async def test_returns_active_schema_with_tables(self, tenant_id):
+        from datetime import datetime
+
+        from mcp_server.server import get_schema_status
+
+        mock_schema = MagicMock()
+        mock_schema.schema_name = "test_domain"
+        mock_schema.state = "active"
+
+        completed_at = datetime(2026, 2, 23, 10, 30, 0, tzinfo=UTC)
+        mock_run = MagicMock()
+        mock_run.completed_at = completed_at
+        mock_run.result = {"table": "cases", "rows_loaded": 15420}
+
+        with (
+            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
+            patch(PATCH_MATERIALIZATION_RUN) as mock_run_cls,
+        ):
+            mock_schema_qs = AsyncMock()
+            mock_schema_qs.afirst.return_value = mock_schema
+            mock_ts_cls.objects.filter.return_value = mock_schema_qs
+
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value = mock_run_qs
+            mock_run_qs.afirst = AsyncMock(return_value=mock_run)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+
+            result = await get_schema_status(tenant_id)
+
+        assert result["success"] is True
+        assert result["data"]["exists"] is True
+        assert result["data"]["state"] == "active"
+        assert result["data"]["last_materialized_at"] == "2026-02-23T10:30:00+00:00"
+        assert result["data"]["tables"] == [{"name": "cases", "row_count": 15420}]
+        assert result["schema"] == "test_domain"
+
+    async def test_returns_tables_empty_when_no_completed_run(self, tenant_id):
+        from mcp_server.server import get_schema_status
+
+        mock_schema = MagicMock()
+        mock_schema.schema_name = "test_domain"
+        mock_schema.state = "active"
+
+        with (
+            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
+            patch(PATCH_MATERIALIZATION_RUN) as mock_run_cls,
+        ):
+            mock_schema_qs = AsyncMock()
+            mock_schema_qs.afirst.return_value = mock_schema
+            mock_ts_cls.objects.filter.return_value = mock_schema_qs
+
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value = mock_run_qs
+            mock_run_qs.afirst = AsyncMock(return_value=None)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+
+            result = await get_schema_status(tenant_id)
+
+        assert result["success"] is True
+        assert result["data"]["exists"] is True
+        assert result["data"]["tables"] == []
+        assert result["data"]["last_materialized_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema tool
+# ---------------------------------------------------------------------------
+
+PATCH_SCHEMA_MANAGER = "apps.projects.services.schema_manager.SchemaManager"
+
+
+class TestTeardownSchemaTool:
+    """Test the teardown_schema MCP tool."""
+
+    async def test_requires_confirm_true(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        result = await teardown_schema(tenant_id, confirm=False)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "confirm=True" in result["error"]["message"]
+
+    async def test_default_confirm_is_false(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        result = await teardown_schema(tenant_id)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    async def test_not_found_when_no_schema(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        with patch(PATCH_TENANT_SCHEMA) as mock_ts_cls:
+            mock_qs = MagicMock()
+            mock_qs.exclude.return_value = mock_qs
+            mock_qs.afirst = AsyncMock(return_value=None)
+            mock_ts_cls.objects.filter.return_value = mock_qs
+
+            result = await teardown_schema(tenant_id, confirm=True)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == NOT_FOUND
+
+    async def test_calls_schema_manager_teardown_on_confirm(self, tenant_id):
+        from mcp_server.server import teardown_schema
+
+        mock_schema = MagicMock()
+        mock_schema.schema_name = "test_domain"
+
+        with (
+            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
+            patch(PATCH_SCHEMA_MANAGER) as mock_mgr_cls,
+        ):
+            mock_qs = MagicMock()
+            mock_qs.exclude.return_value = mock_qs
+            mock_qs.afirst = AsyncMock(return_value=mock_schema)
+            mock_ts_cls.objects.filter.return_value = mock_qs
+
+            mock_mgr = MagicMock()
+            mock_mgr_cls.return_value = mock_mgr
+
+            result = await teardown_schema(tenant_id, confirm=True)
+
+        assert result["success"] is True
+        assert result["data"]["schema_dropped"] == "test_domain"
+        mock_mgr.teardown.assert_called_once_with(mock_schema)
