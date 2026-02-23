@@ -362,6 +362,65 @@ async def run_materialization(
         return tc["result"]
 
 
+@mcp.tool()
+async def get_schema_status(tenant_id: str) -> dict:
+    """Check whether data has been loaded for this tenant.
+
+    Returns schema existence, state, last materialization timestamp, and table
+    list. Always succeeds — returns exists=False if no schema has been
+    provisioned yet. Safe to call before any data has been loaded.
+
+    Args:
+        tenant_id: The tenant identifier (e.g. CommCare domain name).
+    """
+    from apps.projects.models import MaterializationRun, SchemaState, TenantSchema
+
+    async with tool_context("get_schema_status", tenant_id) as tc:
+        ts = await TenantSchema.objects.filter(
+            tenant_membership__tenant_id=tenant_id,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+
+        if ts is None:
+            tc["result"] = success_response(
+                {
+                    "exists": False,
+                    "state": "not_provisioned",
+                    "last_materialized_at": None,
+                    "tables": [],
+                },
+                tenant_id=tenant_id,
+                schema="",
+            )
+            return tc["result"]
+
+        last_run = await MaterializationRun.objects.filter(
+            tenant_schema=ts,
+            state="completed",
+        ).afirst()
+
+        last_materialized_at = None
+        tables = []
+        if last_run:
+            if last_run.completed_at:
+                last_materialized_at = last_run.completed_at.isoformat()
+            result_data = last_run.result or {}
+            if "table" in result_data and "rows_loaded" in result_data:
+                tables = [{"name": result_data["table"], "row_count": result_data["rows_loaded"]}]
+
+        tc["result"] = success_response(
+            {
+                "exists": True,
+                "state": ts.state,
+                "last_materialized_at": last_materialized_at,
+                "tables": tables,
+            },
+            tenant_id=tenant_id,
+            schema=ts.schema_name,
+        )
+        return tc["result"]
+
+
 # --- Server setup ---
 
 
