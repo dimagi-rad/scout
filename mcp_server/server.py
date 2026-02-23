@@ -394,10 +394,14 @@ async def get_schema_status(tenant_id: str) -> dict:
             )
             return tc["result"]
 
-        last_run = await MaterializationRun.objects.filter(
-            tenant_schema=ts,
-            state="completed",
-        ).afirst()
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema=ts,
+                state=MaterializationRun.RunState.COMPLETED,
+            )
+            .order_by("-completed_at")
+            .afirst()
+        )
 
         last_materialized_at = None
         tables = []
@@ -405,7 +409,11 @@ async def get_schema_status(tenant_id: str) -> dict:
             if last_run.completed_at:
                 last_materialized_at = last_run.completed_at.isoformat()
             result_data = last_run.result or {}
-            if "table" in result_data and "rows_loaded" in result_data:
+            # Single-table envelope: {"table": "...", "rows_loaded": N}.
+            # Multi-table pipelines may use a "tables" key instead; handle both.
+            if "tables" in result_data:
+                tables = result_data["tables"]
+            elif "table" in result_data and "rows_loaded" in result_data:
                 tables = [{"name": result_data["table"], "row_count": result_data["rows_loaded"]}]
 
         tc["result"] = success_response(

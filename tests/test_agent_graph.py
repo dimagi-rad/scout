@@ -39,4 +39,4 @@ class TestSystemPrompt:
         prompt = _build_system_prompt(workspace, tenant_membership)
 
         # Agent must know to run materialization when no data exists
-        assert "exists" in prompt or "not_provisioned" in prompt or "loading" in prompt.lower()
+        assert "not_provisioned" in prompt or "loading" in prompt.lower()

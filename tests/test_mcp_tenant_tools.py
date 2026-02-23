@@ -666,8 +666,9 @@ class TestGetSchemaStatusTool:
             mock_schema_qs.afirst.return_value = mock_schema
             mock_ts_cls.objects.filter.return_value = mock_schema_qs
 
-            mock_run_qs = AsyncMock()
-            mock_run_qs.afirst.return_value = mock_run
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value = mock_run_qs
+            mock_run_qs.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
 
             result = await get_schema_status(tenant_id)
@@ -694,8 +695,9 @@ class TestGetSchemaStatusTool:
             mock_schema_qs.afirst.return_value = mock_schema
             mock_ts_cls.objects.filter.return_value = mock_schema_qs
 
-            mock_run_qs = AsyncMock()
-            mock_run_qs.afirst.return_value = None
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value = mock_run_qs
+            mock_run_qs.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
 
             result = await get_schema_status(tenant_id)
