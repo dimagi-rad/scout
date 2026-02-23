@@ -6,7 +6,7 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 
 ## MCP Tools
 
-- [ ] **`teardown_schema` tool** — expose `SchemaManager.teardown()` as an MCP tool; `requires_confirmation` parameter per design
+- [x] **`teardown_schema` tool** — expose `SchemaManager.teardown()` as an MCP tool; `requires_confirmation` parameter per design
 - [ ] **`get_materialization_status` tool** — query `MaterializationRun` by run ID; enables reconnect-and-poll fallback
 - [ ] **`list_pipelines` tool** — list available pipelines from the registry with descriptions
 - [ ] **`cancel_materialization` tool** — graceful shutdown of in-progress loader/DBT subprocesses
@@ -68,3 +68,6 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 - [x] `stdio` and `streamable-http` transports
 - [x] Pass-through auth via `TenantCredential` (OAuth + API key paths)
 - [x] Token refresh service (`apps/users/services/token_refresh.py`)
+- [x] `get_schema_status` tool — check schema existence without triggering correction loop
+- [x] Automatic materialization via agent system prompt (Data Availability section)
+- [x] `teardown_schema` tool with `confirm=True` guard
