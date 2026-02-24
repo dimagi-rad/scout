@@ -26,6 +26,7 @@ import sys
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import FastMCP
 
+from apps.projects.models import MaterializationRun
 from mcp_server.context import load_tenant_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -278,6 +279,49 @@ async def list_pipelines() -> dict:
         tc["result"] = success_response(
             {"pipelines": pipelines},
             schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def get_materialization_status(run_id: str) -> dict:
+    """Retrieve the status of a materialization run by ID.
+
+    Primarily a fallback for reconnection scenarios — live progress is delivered
+    via MCP progress notifications during an active run_materialization call.
+
+    Args:
+        run_id: UUID of the MaterializationRun to look up.
+    """
+    async with tool_context("get_materialization_status", run_id) as tc:
+        try:
+            run = await MaterializationRun.objects.select_related(
+                "tenant_schema__tenant_membership"
+            ).aget(id=run_id)
+        except Exception as e:
+            if "DoesNotExist" in type(e).__name__ or "invalid" in str(e).lower():
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+            raise
+
+        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        schema = run.tenant_schema.schema_name
+
+        tc["result"] = success_response(
+            {
+                "run_id": str(run.id),
+                "pipeline": run.pipeline,
+                "state": run.state,
+                "result": run.result,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "tenant_id": tenant_id,
+            },
+            tenant_id=tenant_id,
+            schema=schema,
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
