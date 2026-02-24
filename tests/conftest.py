@@ -40,6 +40,15 @@ def tenant_membership(db, user):
 
 
 @pytest.fixture
+def other_user(db):
+    User = get_user_model()
+    return User.objects.create_user(
+        email="other@example.com",
+        password="otherpass123",
+    )
+
+
+@pytest.fixture
 def workspace(db):
     from apps.projects.models import TenantWorkspace
 
