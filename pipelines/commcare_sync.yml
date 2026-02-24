@@ -1,0 +1,23 @@
+pipeline: commcare_sync
+description: "Sync case and form data from CommCare HQ"
+version: "1.0"
+provider: commcare
+
+sources:
+  - name: cases
+    loader: loaders/commcare/cases.py
+    description: "CommCare case records"
+  - name: forms
+    loader: loaders/commcare/forms.py
+    description: "CommCare form submission records (includes nested case updates)"
+
+metadata_discovery:
+  loader: loaders/commcare/metadata.py
+  description: "Extract application structure, case types, and form definitions"
+
+transforms:
+  dbt_project: transforms/commcare
+  target_schema: "{{ schema_name }}"
+  models:
+    - stg_cases
+    - stg_forms
