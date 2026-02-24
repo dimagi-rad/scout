@@ -116,6 +116,9 @@ class TenantMetadata(models.Model):
         on_delete=models.CASCADE,
         related_name="metadata",
     )
+    # schema=dict is intentionally untyped: the model is provider-agnostic and
+    # each loader defines its own structure. A typed Pydantic schema can be
+    # introduced per-provider without a migration when the need arises.
     metadata: dict = SchemaField(
         schema=dict,
         default=dict,

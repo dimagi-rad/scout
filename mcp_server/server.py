@@ -23,7 +23,9 @@ import asyncio
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 
+from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -302,13 +304,9 @@ async def get_materialization_status(run_id: str) -> dict:
             run = await MaterializationRun.objects.select_related(
                 "tenant_schema__tenant_membership"
             ).aget(id=run_id)
-        except Exception as e:
-            if "DoesNotExist" in type(e).__name__ or "invalid" in str(e).lower():
-                tc["result"] = error_response(
-                    NOT_FOUND, f"Materialization run '{run_id}' not found"
-                )
-                return tc["result"]
-            raise
+        except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
 
         tenant_id = run.tenant_schema.tenant_membership.tenant_id
         schema = run.tenant_schema.schema_name
@@ -341,22 +339,14 @@ async def cancel_materialization(run_id: str) -> dict:
     Args:
         run_id: UUID of the MaterializationRun to cancel.
     """
-    from datetime import UTC, datetime
-
-    from asgiref.sync import sync_to_async
-
     async with tool_context("cancel_materialization", run_id) as tc:
         try:
             run = await MaterializationRun.objects.select_related(
                 "tenant_schema__tenant_membership"
             ).aget(id=run_id)
-        except Exception as e:
-            if "DoesNotExist" in type(e).__name__ or "invalid" in str(e).lower():
-                tc["result"] = error_response(
-                    NOT_FOUND, f"Materialization run '{run_id}' not found"
-                )
-                return tc["result"]
-            raise
+        except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
 
         in_progress = {
             MaterializationRun.RunState.STARTED,
@@ -408,8 +398,6 @@ async def run_materialization(
         tenant_membership_id: UUID of the specific TenantMembership to use.
         pipeline: Pipeline to run (default: commcare_sync).
     """
-    from asgiref.sync import sync_to_async
-
     from apps.users.models import TenantCredential, TenantMembership
     from mcp_server.loaders.commcare_base import CommCareAuthError
 

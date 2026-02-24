@@ -11,13 +11,10 @@ version: "1.0"
 provider: commcare
 sources:
   - name: cases
-    loader: loaders/commcare/cases.py
     description: "CommCare case records"
   - name: forms
-    loader: loaders/commcare/forms.py
     description: "CommCare form submission records"
 metadata_discovery:
-  loader: loaders/commcare/metadata.py
   description: "Extract application structure"
 transforms:
   dbt_project: transforms/commcare

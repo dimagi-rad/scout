@@ -16,13 +16,11 @@ _DEFAULT_PIPELINES_DIR = pathlib.Path(__file__).parent.parent / "pipelines"
 @dataclass
 class SourceConfig:
     name: str
-    loader: str
     description: str = ""
 
 
 @dataclass
 class MetadataDiscoveryConfig:
-    loader: str
     description: str = ""
 
 
@@ -30,7 +28,6 @@ class MetadataDiscoveryConfig:
 class TransformConfig:
     dbt_project: str
     models: list[str] = field(default_factory=list)
-    target_schema: str = "{{ schema_name }}"
 
 
 @dataclass
@@ -83,21 +80,18 @@ class PipelineRegistry:
 
 def _parse_pipeline(data: dict) -> PipelineConfig:
     sources = [
-        SourceConfig(name=s["name"], loader=s["loader"], description=s.get("description", ""))
+        SourceConfig(name=s["name"], description=s.get("description", ""))
         for s in data.get("sources", [])
     ]
     md_raw = data.get("metadata_discovery")
     metadata_discovery = (
-        MetadataDiscoveryConfig(loader=md_raw["loader"], description=md_raw.get("description", ""))
-        if md_raw
-        else None
+        MetadataDiscoveryConfig(description=md_raw.get("description", "")) if md_raw else None
     )
     tr_raw = data.get("transforms")
     transforms = (
         TransformConfig(
             dbt_project=tr_raw["dbt_project"],
             models=tr_raw.get("models", []),
-            target_schema=tr_raw.get("target_schema", "{{ schema_name }}"),
         )
         if tr_raw
         else None

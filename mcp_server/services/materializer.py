@@ -6,7 +6,11 @@ Design notes:
 - Loaders expose load_pages() iterators; rows are written page-by-page so the
   full dataset is never held in memory. Inserts use execute_values for efficiency.
 - Transform failures are isolated — run is marked COMPLETED; error stored in result.
-- An assertion at the end guards against total_steps / report() drift.
+- The final COMPLETED state is written via a conditional UPDATE (filter on TRANSFORMING)
+  so that a concurrent cancel_materialization call is not overwritten. Note: cancellation
+  during DISCOVER/LOAD phases will be overwritten by subsequent state transitions;
+  full cancellation support requires Celery workers (see TODO.md).
+- A step count check at the end guards against total_steps / report() drift.
 """
 
 from __future__ import annotations
@@ -125,14 +129,28 @@ def run_pipeline(
         report("No DBT transforms configured — skipping")
 
     # ── 5. COMPLETE ───────────────────────────────────────────────────────────
-    run.state = MaterializationRun.RunState.COMPLETED
-    run.completed_at = datetime.now(UTC)
-    run.result = {
+    # Conditional UPDATE: only transition to COMPLETED if still in TRANSFORMING
+    # state. This preserves a FAILED state written by cancel_materialization
+    # while the transform phase was running.
+    final_result = {
         "sources": source_results,
         "pipeline": pipeline.name,
         "transforms": transform_result,
     }
-    run.save(update_fields=["state", "completed_at", "result"])
+    now = datetime.now(UTC)
+    rows_updated = MaterializationRun.objects.filter(
+        id=run.id, state=MaterializationRun.RunState.TRANSFORMING
+    ).update(
+        state=MaterializationRun.RunState.COMPLETED,
+        completed_at=now,
+        result=final_result,
+    )
+    if rows_updated:
+        run.state = MaterializationRun.RunState.COMPLETED  # reflect DB update locally
+    else:
+        logger.info(
+            "Run %s state changed externally (cancelled?); preserving current DB state", run.id
+        )
 
     tenant_schema.state = "active"
     tenant_schema.save(update_fields=["state", "last_accessed_at"])
@@ -140,10 +158,11 @@ def run_pipeline(
     total_rows = sum(s.get("rows", 0) for s in source_results.values())
     logger.info("Pipeline '%s' complete for '%s': %d rows", pipeline.name, schema_name, total_rows)
 
-    assert step == total_steps, (
-        f"Progress step count mismatch: expected {total_steps}, got {step}. "
-        "Update total_steps if you add/remove report() calls."
-    )
+    if step != total_steps:
+        raise RuntimeError(
+            f"Progress step count mismatch: expected {total_steps}, got {step}. "
+            "Update total_steps if you add/remove report() calls."
+        )
 
     transform_error = transform_result.get("error")
     result: dict = {
@@ -252,6 +271,9 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ).format(schema=sid)
     )
 
+    # ins_sql is computed lazily on the first non-empty page because
+    # psycopg2.sql.Composed.as_string() strictly validates its argument is a
+    # real psycopg2 connection/cursor (rejects MagicMock in tests).
     ins_sql: str | None = None
     total = 0
     for page in pages:
@@ -324,6 +346,7 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ).format(schema=sid)
     )
 
+    # ins_sql is computed lazily — see _write_cases for the rationale.
     ins_sql: str | None = None
     total = 0
     for page in pages:

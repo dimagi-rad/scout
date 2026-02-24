@@ -31,7 +31,11 @@ class TestRunPipeline:
             description="",
             version="1.0",
             provider="commcare",
-            sources=[SourceConfig(name="cases", loader="")],
+            sources=[
+                SourceConfig(
+                    name="cases",
+                )
+            ],
         )
 
         with (
@@ -71,7 +75,11 @@ class TestRunPipeline:
             description="",
             version="1.0",
             provider="commcare",
-            sources=[SourceConfig(name="cases", loader="")],
+            sources=[
+                SourceConfig(
+                    name="cases",
+                )
+            ],
             # No metadata_discovery, no transforms — simplest pipeline
         )
         # total_steps = 1 (provision) + 1 (discover) + 1 (cases) + 1 (transform/skip) = 4
@@ -206,7 +214,11 @@ class TestRunPipeline:
             description="",
             version="1.0",
             provider="commcare",
-            sources=[SourceConfig(name="cases", loader="")],
+            sources=[
+                SourceConfig(
+                    name="cases",
+                )
+            ],
         )
 
         with (

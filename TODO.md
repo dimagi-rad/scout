@@ -47,6 +47,7 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 
 - [ ] **Celery workers** — run materialization in background tasks so the MCP tool call can stream progress without blocking; result retrievable via `get_materialization_status`
 - [ ] **Long-run resilience** — ensure `MaterializationRun` captures enough state that a reconnecting agent can get the final result even if the original connection dropped
+- [ ] **DBT concurrency ceiling** — `_dbt_lock` in `dbt_runner.py` serialises all in-process dbt invocations across tenants (dbtRunner is not thread-safe). This is a hard throughput ceiling in multi-tenant scenarios; Celery workers with per-worker dbt isolation would remove it.
 
 ---
 
