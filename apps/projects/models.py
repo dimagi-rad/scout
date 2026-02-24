@@ -48,6 +48,7 @@ class MaterializationRun(models.Model):
 
     class RunState(models.TextChoices):
         STARTED = "started"
+        DISCOVERING = "discovering"
         LOADING = "loading"
         TRANSFORMING = "transforming"
         COMPLETED = "completed"
