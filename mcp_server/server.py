@@ -331,6 +331,66 @@ async def get_materialization_status(run_id: str) -> dict:
 
 
 @mcp.tool()
+async def cancel_materialization(run_id: str) -> dict:
+    """Cancel a running materialization pipeline.
+
+    Marks the run as failed in the database. This is a best-effort cancellation —
+    in-flight loader operations may not terminate immediately. Full subprocess
+    cancellation is a future feature.
+
+    Args:
+        run_id: UUID of the MaterializationRun to cancel.
+    """
+    from datetime import UTC, datetime
+
+    from asgiref.sync import sync_to_async
+
+    async with tool_context("cancel_materialization", run_id) as tc:
+        try:
+            run = await MaterializationRun.objects.select_related(
+                "tenant_schema__tenant_membership"
+            ).aget(id=run_id)
+        except Exception as e:
+            if "DoesNotExist" in type(e).__name__ or "invalid" in str(e).lower():
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+            raise
+
+        in_progress = {
+            MaterializationRun.RunState.STARTED,
+            MaterializationRun.RunState.DISCOVERING,
+            MaterializationRun.RunState.LOADING,
+            MaterializationRun.RunState.TRANSFORMING,
+        }
+        if run.state not in in_progress:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                f"Run '{run_id}' is not in progress (state: {run.state})",
+            )
+            return tc["result"]
+
+        previous_state = run.state
+        run.state = MaterializationRun.RunState.FAILED
+        run.completed_at = datetime.now(UTC)
+        run.result = {**(run.result or {}), "cancelled": True}
+        await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
+
+        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        schema = run.tenant_schema.schema_name
+        logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
+
+        tc["result"] = success_response(
+            {"run_id": run_id, "cancelled": True, "previous_state": previous_state},
+            tenant_id=tenant_id,
+            schema=schema,
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
 async def run_materialization(
     tenant_id: str,
     tenant_membership_id: str = "",
