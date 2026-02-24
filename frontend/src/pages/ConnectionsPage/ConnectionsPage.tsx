@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import { api } from "@/api/client"
+import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -23,6 +24,7 @@ interface ApiKeyDomain {
 type FormMode = "hidden" | "add" | { editing: ApiKeyDomain }
 
 export function ConnectionsPage() {
+  const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const [domains, setDomains] = useState<ApiKeyDomain[]>([])
   const [loadingProviders, setLoadingProviders] = useState(true)
@@ -101,6 +103,7 @@ export function ConnectionsPage() {
         credential: `${formUsername}:${formApiKey}`,
       })
       await fetchDomains()
+      void fetchStoreDomains()
       setFormMode("hidden")
     } catch (err) {
       setFormError(err instanceof Error ? err.message : "Failed to add domain.")
@@ -137,6 +140,7 @@ export function ConnectionsPage() {
     try {
       await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
       await fetchDomains()
+      void fetchStoreDomains()
     } catch {
       setError("Failed to remove domain.")
     } finally {

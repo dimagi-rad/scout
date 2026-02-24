@@ -5,6 +5,42 @@ from apps.users.models import TenantMembership
 
 
 @pytest.mark.django_db
+class TestTenantCredentialDeleteAPI:
+    def test_delete_removes_domain_from_tenants_list(self, user):
+        """Deleting a credential should remove the domain from GET /api/auth/tenants/."""
+        from apps.users.adapters import encrypt_credential
+        from apps.users.models import TenantCredential
+
+        tm = TenantMembership.objects.create(
+            user=user, provider="commcare", tenant_id="sk-test", tenant_name="sk-test"
+        )
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.API_KEY,
+            encrypted_credential=encrypt_credential("user@example.com:apikey"),
+        )
+
+        client = Client()
+        client.force_login(user)
+
+        # Confirm it appears in the tenants list before deletion
+        response = client.get("/api/auth/tenants/")
+        assert response.status_code == 200
+        tenant_ids = [t["tenant_id"] for t in response.json()]
+        assert "sk-test" in tenant_ids
+
+        # Delete it
+        response = client.delete(f"/api/auth/tenant-credentials/{tm.id}/")
+        assert response.status_code == 200
+
+        # Should no longer appear in the tenants list
+        response = client.get("/api/auth/tenants/")
+        assert response.status_code == 200
+        tenant_ids = [t["tenant_id"] for t in response.json()]
+        assert "sk-test" not in tenant_ids
+
+
+@pytest.mark.django_db
 class TestTenantListAPI:
     def test_list_tenants(self, user):
         TenantMembership.objects.create(
