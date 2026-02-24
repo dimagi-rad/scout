@@ -45,6 +45,8 @@ dependencies = [
     "mcp>=1.0",
     "langchain-mcp-adapters>=0.1",
     "django-pydantic-field>=0.5.4",
+    "dbt-core>=1.11.6",
+    "dbt-postgres>=1.10.0",
 ]
 
 [project.optional-dependencies]
