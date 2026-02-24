@@ -137,6 +137,25 @@ def me_view(request):
         credential__isnull=False,
     ).exists()
 
+    # If the user just completed CommCare OAuth but tenant resolution hasn't
+    # run yet, resolve now so onboarding can complete.
+    if not onboarding_complete:
+        from apps.users.views import _get_commcare_token
+
+        access_token = _get_commcare_token(user)
+        if access_token:
+            try:
+                from apps.users.services.tenant_resolution import resolve_commcare_domains
+
+                resolve_commcare_domains(user, access_token)
+                onboarding_complete = True
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Failed to resolve CommCare domains in me_view", exc_info=True
+                )
+
     return JsonResponse(
         {
             "id": str(user.id),

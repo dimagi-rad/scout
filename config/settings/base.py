@@ -208,6 +208,9 @@ SOCIALACCOUNT_PROVIDERS = {
     "commcare_connect": {
         "OAUTH_PKCE_ENABLED": True,
     },
+    "commcare": {
+        "OAUTH_PKCE_ENABLED": True,
+    },
 }
 
 
