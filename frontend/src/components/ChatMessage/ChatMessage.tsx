@@ -38,6 +38,22 @@ function extractArtifactId(part: any): string | null {
   return null
 }
 
+function formatToolOutput(output: unknown): string {
+  if (typeof output === "string") {
+    // Try to parse JSON strings so we can pretty-print them
+    try {
+      const parsed = JSON.parse(output)
+      if (typeof parsed === "object" && parsed !== null) {
+        return JSON.stringify(parsed, null, 2)
+      }
+    } catch {
+      // Not JSON — return as-is
+    }
+    return output
+  }
+  return JSON.stringify(output, null, 2)
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ToolCallPart({ part, index }: { part: any; index: number }) {
   const [expanded, setExpanded] = useState(false)
@@ -45,7 +61,7 @@ function ToolCallPart({ part, index }: { part: any; index: number }) {
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const outputText = hasOutput && part.output != null
-    ? typeof part.output === "string" ? part.output : JSON.stringify(part.output, null, 2)
+    ? formatToolOutput(part.output)
     : null
 
   return (

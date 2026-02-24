@@ -15,6 +15,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       allowedHosts: ['.ngrok-free.app'],
+      watch: {
+        usePolling: !!process.env.WSL_DISTRO_NAME,
+      },
       proxy: {
         "/api": {
           target: `http://localhost:${env.API_PORT || 8000}`,
