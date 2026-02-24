@@ -772,3 +772,30 @@ class TestTeardownSchemaTool:
         assert result["success"] is True
         assert result["data"]["schema_dropped"] == "test_domain"
         mock_mgr.teardown.assert_called_once_with(mock_schema)
+
+
+class TestListPipelines:
+    def test_returns_available_pipelines(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from mcp_server.pipeline_registry import PipelineConfig
+
+        fake_pipelines = [
+            PipelineConfig(
+                name="commcare_sync",
+                description="Sync case and form data from CommCare HQ",
+                version="1.0",
+                provider="commcare",
+            )
+        ]
+        with patch("mcp_server.server.get_registry") as mock_reg:
+            mock_reg.return_value.list.return_value = fake_pipelines
+            from mcp_server.server import list_pipelines
+
+            result = asyncio.run(list_pipelines())
+
+        assert result["success"] is True
+        assert len(result["data"]["pipelines"]) == 1
+        assert result["data"]["pipelines"][0]["name"] == "commcare_sync"
+        assert result["data"]["pipelines"][0]["provider"] == "commcare"

@@ -35,6 +35,7 @@ from mcp_server.envelope import (
     success_response,
     tool_context,
 )
+from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,35 @@ async def query(tenant_id: str, sql: str) -> dict:
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
             warnings=warnings or None,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def list_pipelines() -> dict:
+    """List available materialization pipelines and their descriptions.
+
+    Returns the registry of pipelines that can be run via run_materialization.
+    Each entry includes the pipeline name, description, provider, sources, and DBT models.
+    """
+    async with tool_context("list_pipelines", "") as tc:
+        registry = get_registry()
+        pipelines = [
+            {
+                "name": p.name,
+                "description": p.description,
+                "provider": p.provider,
+                "version": p.version,
+                "sources": [{"name": s.name, "description": s.description} for s in p.sources],
+                "has_metadata_discovery": p.has_metadata_discovery,
+                "dbt_models": p.dbt_models,
+            }
+            for p in registry.list()
+        ]
+        tc["result"] = success_response(
+            {"pipelines": pipelines},
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
 
