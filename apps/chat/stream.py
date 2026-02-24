@@ -45,12 +45,41 @@ def _sse(chunk: dict) -> str:
 
 
 def _tool_content_to_str(output: Any) -> str:
-    """Convert tool output to a string."""
+    """Convert tool output to a readable string for frontend display.
+
+    LangChain ToolMessages often wrap results as a list of content blocks:
+    [{"type": "text", "text": '{"success": true, ...}'}]
+    We extract the text and pretty-print any embedded JSON.
+    """
     if isinstance(output, ToolMessage):
-        return output.content if isinstance(output.content, str) else str(output.content)
-    if isinstance(output, str):
-        return output
-    return str(output)
+        content = output.content
+    else:
+        content = output
+    if isinstance(content, str):
+        return _try_pretty_json(content)
+    # Handle list-of-content-blocks format from LangChain
+    if isinstance(content, list):
+        texts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                texts.append(_try_pretty_json(block.get("text", "")))
+            elif isinstance(block, str):
+                texts.append(_try_pretty_json(block))
+            else:
+                texts.append(json.dumps(block, indent=2, default=str))
+        return "\n".join(texts)
+    return json.dumps(content, indent=2, default=str)
+
+
+def _try_pretty_json(s: str) -> str:
+    """If s is a JSON string, return it pretty-printed. Otherwise return as-is."""
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, (dict, list)):
+            return json.dumps(parsed, indent=2, default=str)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return s
 
 
 audit_logger = logging.getLogger("scout.agent.audit")
