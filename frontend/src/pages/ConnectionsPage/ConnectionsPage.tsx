@@ -32,6 +32,8 @@ export function ConnectionsPage() {
   const [error, setError] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
+  // membershipId awaiting inline confirmation, or null
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [formMode, setFormMode] = useState<FormMode>("hidden")
 
   // Form state
@@ -75,6 +77,7 @@ export function ConnectionsPage() {
     setFormUsername("")
     setFormApiKey("")
     setFormError(null)
+    setConfirmRemoveId(null)
     setFormMode("add")
   }
 
@@ -83,6 +86,7 @@ export function ConnectionsPage() {
     setFormUsername("")
     setFormApiKey("")
     setFormError(null)
+    setConfirmRemoveId(null)
     setFormMode({ editing: domain })
   }
 
@@ -133,10 +137,14 @@ export function ConnectionsPage() {
     }
   }
 
-  async function handleRemoveDomain(membershipId: string) {
-    if (!confirm("Remove this domain? This cannot be undone.")) return
+  async function confirmRemove(membershipId: string) {
     setRemoving(membershipId)
+    setConfirmRemoveId(null)
     setError(null)
+    // If this domain is open for editing, close the form
+    if (typeof formMode === "object" && formMode.editing.membership_id === membershipId) {
+      setFormMode("hidden")
+    }
     try {
       await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
       await fetchDomains()
@@ -161,7 +169,8 @@ export function ConnectionsPage() {
     }
   }
 
-  const isEditing = typeof formMode === "object"
+  const editingId =
+    typeof formMode === "object" ? formMode.editing.membership_id : null
 
   return (
     <div className="mx-auto max-w-2xl space-y-8 p-6">
@@ -200,51 +209,151 @@ export function ConnectionsPage() {
           <p className="text-sm text-muted-foreground">No API key domains connected.</p>
         ) : null}
 
-        {domains.map((domain) => (
-          <Card key={domain.membership_id}>
-            <CardContent className="flex items-center justify-between p-4">
-              <div>
-                <p className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
-                  {domain.tenant_name || domain.tenant_id}
-                </p>
-                <p className="text-sm text-muted-foreground">{domain.tenant_id}</p>
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => openEditForm(domain)}
-                  data-testid={`edit-domain-${domain.tenant_id}`}
-                >
-                  Edit
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleRemoveDomain(domain.membership_id)}
-                  disabled={removing === domain.membership_id}
-                  data-testid={`remove-domain-${domain.tenant_id}`}
-                >
-                  {removing === domain.membership_id ? "Removing..." : "Remove"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+        {domains.map((domain) => {
+          const isThisEditing = editingId === domain.membership_id
+          const isConfirming = confirmRemoveId === domain.membership_id
 
-        {/* Add / Edit form */}
-        {formMode !== "hidden" && (
-          <Card data-testid="domain-form">
+          // Inline edit: replace card with the edit form
+          if (isThisEditing) {
+            return (
+              <Card key={domain.membership_id} data-testid="domain-form">
+                <CardContent className="p-4">
+                  <form onSubmit={handleEditDomain} className="space-y-4">
+                    <p className="font-medium">Edit Domain</p>
+                    <div className="space-y-2">
+                      <Label htmlFor="form-domain">CommCare Domain</Label>
+                      <Input
+                        id="form-domain"
+                        data-testid="domain-form-domain"
+                        required
+                        placeholder="my-project"
+                        value={formDomain}
+                        onChange={(e) => setFormDomain(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="form-username">
+                        CommCare Username (leave blank to keep existing)
+                      </Label>
+                      <Input
+                        id="form-username"
+                        data-testid="domain-form-username"
+                        type="email"
+                        placeholder="you@example.com"
+                        value={formUsername}
+                        onChange={(e) => setFormUsername(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="form-api-key">
+                        API Key (leave blank to keep existing)
+                      </Label>
+                      <Input
+                        id="form-api-key"
+                        data-testid="domain-form-api-key"
+                        type="password"
+                        value={formApiKey}
+                        onChange={(e) => setFormApiKey(e.target.value)}
+                      />
+                    </div>
+                    {formError && (
+                      <p className="text-sm text-destructive" data-testid="domain-form-error">
+                        {formError}
+                      </p>
+                    )}
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="flex-1"
+                        onClick={cancelForm}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="submit" className="flex-1" disabled={formLoading}>
+                        {formLoading ? "Saving..." : "Save Changes"}
+                      </Button>
+                    </div>
+                  </form>
+                </CardContent>
+              </Card>
+            )
+          }
+
+          return (
+            <Card key={domain.membership_id}>
+              <CardContent className="p-4">
+                {isConfirming ? (
+                  // Inline remove confirmation
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-medium">
+                      Remove <span className="font-semibold">{domain.tenant_name || domain.tenant_id}</span>? This cannot be undone.
+                    </p>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfirmRemoveId(null)}
+                        data-testid={`cancel-remove-${domain.tenant_id}`}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => confirmRemove(domain.membership_id)}
+                        disabled={removing === domain.membership_id}
+                        data-testid={`confirm-remove-${domain.tenant_id}`}
+                      >
+                        {removing === domain.membership_id ? "Removing..." : "Remove"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  // Normal card row
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
+                        {domain.tenant_name || domain.tenant_id}
+                      </p>
+                      <p className="text-sm text-muted-foreground">{domain.tenant_id}</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openEditForm(domain)}
+                        disabled={formMode !== "hidden"}
+                        data-testid={`edit-domain-${domain.tenant_id}`}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => setConfirmRemoveId(domain.membership_id)}
+                        data-testid={`remove-domain-${domain.tenant_id}`}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )
+        })}
+
+        {/* Add form at bottom (only for "add" mode, not edit) */}
+        {formMode === "add" && (
+          <Card data-testid="domain-form-add">
             <CardContent className="p-4">
-              <form
-                onSubmit={isEditing ? handleEditDomain : handleAddDomain}
-                className="space-y-4"
-              >
-                <p className="font-medium">{isEditing ? "Edit Domain" : "Add Domain"}</p>
+              <form onSubmit={handleAddDomain} className="space-y-4">
+                <p className="font-medium">Add Domain</p>
                 <div className="space-y-2">
-                  <Label htmlFor="form-domain">CommCare Domain</Label>
+                  <Label htmlFor="form-domain-add">CommCare Domain</Label>
                   <Input
-                    id="form-domain"
+                    id="form-domain-add"
                     data-testid="domain-form-domain"
                     required
                     placeholder="my-project"
@@ -253,28 +362,24 @@ export function ConnectionsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="form-username">
-                    CommCare Username{isEditing ? " (leave blank to keep existing)" : ""}
-                  </Label>
+                  <Label htmlFor="form-username-add">CommCare Username</Label>
                   <Input
-                    id="form-username"
+                    id="form-username-add"
                     data-testid="domain-form-username"
                     type="email"
-                    required={!isEditing}
+                    required
                     placeholder="you@example.com"
                     value={formUsername}
                     onChange={(e) => setFormUsername(e.target.value)}
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="form-api-key">
-                    API Key{isEditing ? " (leave blank to keep existing)" : ""}
-                  </Label>
+                  <Label htmlFor="form-api-key-add">API Key</Label>
                   <Input
-                    id="form-api-key"
+                    id="form-api-key-add"
                     data-testid="domain-form-api-key"
                     type="password"
-                    required={!isEditing}
+                    required
                     value={formApiKey}
                     onChange={(e) => setFormApiKey(e.target.value)}
                   />
@@ -294,7 +399,7 @@ export function ConnectionsPage() {
                     Cancel
                   </Button>
                   <Button type="submit" className="flex-1" disabled={formLoading}>
-                    {formLoading ? "Saving..." : isEditing ? "Save Changes" : "Add Domain"}
+                    {formLoading ? "Saving..." : "Add Domain"}
                   </Button>
                 </div>
               </form>
