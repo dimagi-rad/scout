@@ -7,6 +7,7 @@ Defines TenantWorkspace, TenantSchema, and MaterializationRun models.
 import uuid
 
 from django.db import models
+from django_pydantic_field import SchemaField
 
 
 class SchemaState(models.TextChoices):
@@ -99,3 +100,37 @@ class TenantWorkspace(models.Model):
 
     def __str__(self):
         return f"{self.tenant_name} ({self.tenant_id})"
+
+
+class TenantMetadata(models.Model):
+    """Generic provider metadata discovered during the materialize/discover phase.
+
+    Completely provider-agnostic — each provider stores whatever structure it needs
+    in the ``metadata`` JSON field. Survives schema teardown so re-provisioning can
+    skip re-discovery if the data is still current.
+    """
+
+    tenant_membership = models.OneToOneField(
+        "users.TenantMembership",
+        on_delete=models.CASCADE,
+        related_name="metadata",
+    )
+    metadata: dict = SchemaField(
+        schema=dict,
+        default=dict,
+        help_text="Provider-specific metadata blob. Structure defined by the loader.",
+    )
+    discovered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When this metadata was last successfully fetched from the provider",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Tenant Metadata"
+        verbose_name_plural = "Tenant Metadata"
+
+    def __str__(self) -> str:
+        return f"Metadata for {self.tenant_membership.tenant_id}"
