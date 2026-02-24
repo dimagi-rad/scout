@@ -25,6 +25,9 @@ type FormMode = "hidden" | "add" | { editing: ApiKeyDomain }
 
 export function ConnectionsPage() {
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const storeDomains = useAppStore((s) => s.domains)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const [domains, setDomains] = useState<ApiKeyDomain[]>([])
   const [loadingProviders, setLoadingProviders] = useState(true)
@@ -148,7 +151,12 @@ export function ConnectionsPage() {
     try {
       await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
       await fetchDomains()
-      void fetchStoreDomains()
+      await fetchStoreDomains()
+      // If the removed domain was active in the sidebar, switch to the next available one
+      if (activeDomainId === membershipId) {
+        const next = storeDomains.find((d) => d.id !== membershipId)
+        if (next) setActiveDomain(next.id)
+      }
     } catch {
       setError("Failed to remove domain.")
     } finally {
@@ -299,13 +307,14 @@ export function ConnectionsPage() {
                         Cancel
                       </Button>
                       <Button
-                        variant="destructive"
+                        variant="outline"
                         size="sm"
                         onClick={() => confirmRemove(domain.membership_id)}
                         disabled={removing === domain.membership_id}
+                        className="border-red-300 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800"
                         data-testid={`confirm-remove-${domain.tenant_id}`}
                       >
-                        {removing === domain.membership_id ? "Removing..." : "Remove"}
+                        {removing === domain.membership_id ? "Removing..." : "Confirm Remove"}
                       </Button>
                     </div>
                   </div>
@@ -329,9 +338,10 @@ export function ConnectionsPage() {
                         Edit
                       </Button>
                       <Button
-                        variant="destructive"
+                        variant="outline"
                         size="sm"
                         onClick={() => setConfirmRemoveId(domain.membership_id)}
+                        className="border-red-300 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800"
                         data-testid={`remove-domain-${domain.tenant_id}`}
                       >
                         Remove
