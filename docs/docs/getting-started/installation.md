@@ -40,6 +40,14 @@ Generate a Fernet encryption key for database credential storage:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
+Install and set up pre-commit hooks:
+
+```bash
+uv run pre-commit install
+```
+
+This installs hooks that run ruff linting and formatting checks before each commit.
+
 Run migrations and create a superuser:
 
 ```bash
