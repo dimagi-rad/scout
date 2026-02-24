@@ -34,7 +34,7 @@ export function ArtifactsPage() {
   }, [deleteArtifact])
 
   return (
-    <div className="container mx-auto py-8">
+    <div className="container mx-auto px-8 py-8">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Artifacts</h1>
