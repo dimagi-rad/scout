@@ -208,7 +208,6 @@ async def tenant_credential_detail_view(request, membership_id):
         )
 
     from apps.users.adapters import encrypt_credential
-    from apps.users.models import TenantCredential
 
     encrypted = None
     if credential:

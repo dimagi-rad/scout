@@ -81,8 +81,8 @@ class TestTenantSelectAPI:
 @pytest.mark.django_db
 class TestTenantCredentialUpdateAPI:
     def test_patch_updates_credential(self, user):
-        from apps.users.models import TenantCredential
         from apps.users.adapters import encrypt_credential
+        from apps.users.models import TenantCredential
 
         tm = TenantMembership.objects.create(
             user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
