@@ -74,92 +74,64 @@ Optional:
 
 ## Working in Git worktrees
 
-Multiple agents can work simultaneously in isolated worktrees under `.worktrees/`. Key setup steps every time you create a worktree:
+Multiple agents can work simultaneously in isolated worktrees under `.worktrees/`. The steps below are required every time you create a new worktree — none of these files carry over automatically.
 
-### 1. Copy the `.env` file
+### Setup checklist
 
-The root `.env` is gitignored and doesn't carry over to worktrees. Copy it right after creation:
-
-```bash
-cp /Users/bderenzi/Code/scout/.env .worktrees/<branch-name>/
-```
-
-### 2. Install frontend dependencies
-
-`node_modules` is not shared between worktrees. Run inside the worktree's `frontend/`:
+**Copy `.env`** — it is gitignored and not shared. From the worktree root:
 
 ```bash
-cd .worktrees/<branch-name>/frontend && bun install
+cp $(git rev-parse --show-toplevel)/.env .
 ```
 
-### 3. Start servers on alternate ports
+**Install frontend dependencies** — `node_modules` is also gitignored. Use `bun install` rather than copying the directory: bun deduplicates packages via its global cache so it's fast and doesn't waste disk space.
 
-Other agents may already hold ports 8000 (backend), 5173 (frontend), 8100 (MCP). Check first:
+```bash
+cd frontend && bun install
+```
+
+**Start servers on alternate ports** — other agents may already hold ports 8000 (backend), 5173 (frontend), and 8100 (MCP). Check first, then start on free ports. Use a branch-specific log prefix in `/tmp` to avoid collisions:
 
 ```bash
 lsof -i :8000,5173,8100 -sTCP:LISTEN
-```
 
-Start backend and frontend independently on free ports (e.g. 8002 / 5175). Log to `/tmp` so output doesn't clutter the worktree:
+BRANCH=$(git branch --show-current | tr '/' '-')
 
-```bash
-# From worktree root — source .env so all vars are loaded
+# Backend — source .env so all vars are loaded
 source .env && DJANGO_SETTINGS_MODULE=config.settings.development \
-  uv run uvicorn config.asgi:application --reload --port 8002 > /tmp/web.log 2>&1 &
+  uv run uvicorn config.asgi:application --reload --port 8002 \
+  > /tmp/${BRANCH}-web.log 2>&1 &
 
 # Frontend — API_PORT tells Vite's proxy which backend to forward to
-cd frontend && API_PORT=8002 bun run vite --port 5175 > /tmp/frontend.log 2>&1 &
+cd frontend && API_PORT=8002 bun run vite --port 5175 \
+  > /tmp/${BRANCH}-frontend.log 2>&1 &
 ```
 
-**Do not use `honcho` in worktrees.** It starts MCP as well, which requires extra env config and always targets the default ports, causing collisions with other agents.
+**Do not use `honcho` in worktrees.** It also starts MCP, which requires additional env config and always targets the default ports, causing collisions.
 
-### 4. Trust the frontend port for CSRF
-
-Django rejects POST requests from unrecognised origins. Add your port to the worktree's `.env` before starting the backend:
+**Trust the frontend port for CSRF** — Django rejects POST requests from unrecognised origins. Add your port to the worktree's `.env` before starting the backend (no code changes needed; `CSRF_TRUSTED_ORIGINS` is read from the environment):
 
 ```bash
 echo 'CSRF_TRUSTED_ORIGINS=http://localhost:5173,http://localhost:5175' >> .env
 ```
 
-`CSRF_TRUSTED_ORIGINS` is read from the environment (`base.py` uses `env.list(..., default=[...])`), so setting it in `.env` and sourcing before uvicorn is enough — no code changes needed.
-
-### 5. `API_PORT` controls the Vite proxy target
-
-`frontend/vite.config.ts` reads `API_PORT` from the project-root `.env` (one level up from `frontend/`). Pass it as an env var when launching Vite:
-
-```bash
-API_PORT=8002 bun run vite --port 5175
-```
+**`API_PORT` controls the Vite proxy target** — `frontend/vite.config.ts` reads `API_PORT` from the project-root `.env`. Pass it inline when launching Vite so the proxy forwards to your backend port rather than the default 8000.
 
 ## UI verification with Playwright CLI
 
-Use `playwright-cli` to reproduce and verify UI behaviour. It's available globally.
-
-### Keep output files out of the working tree
-
-Playwright CLI writes screenshots and snapshot `.yml` files to **whichever directory the command is run from**. To avoid cluttering the repo, run Playwright from `/tmp`, or pass absolute paths:
+Use `playwright-cli` to reproduce and verify UI behaviour. It writes screenshots and snapshot `.yml` files to whichever directory the command is run from. Use a branch-specific subdirectory under `/tmp` to keep everything out of the repo and avoid conflicts between concurrent agents:
 
 ```bash
-# Run from /tmp so all output lands there
-cd /tmp && playwright-cli open http://localhost:5175
-
-# Or pass an absolute path per screenshot
-playwright-cli screenshot --filename=/tmp/after-login.png
+BRANCH=$(git branch --show-current | tr '/' '-')
+mkdir -p /tmp/${BRANCH}-playwright
+cd /tmp/${BRANCH}-playwright && playwright-cli open http://localhost:5175
 ```
 
-The `.playwright-cli/` folder inside `frontend/` is gitignored, so running Playwright from `frontend/` is also acceptable.
-
-### Finding stray files
-
-If output lands somewhere unexpected:
-
-```bash
-find /System/Volumes/Data/Users/bderenzi/Code/scout -name "*.png" -maxdepth 8 2>/dev/null
-```
+Screenshots saved with `--filename` also resolve relative to the working directory, so they'll land in `/tmp/${BRANCH}-playwright/` automatically.
 
 ### Login flow
 
-The app fetches `/api/auth/csrf/` automatically before login — you don't need to do it manually. The basic sequence:
+The frontend fetches `/api/auth/csrf/` automatically before login — no manual setup needed. The basic sequence:
 
 ```bash
 playwright-cli open http://localhost:5175
@@ -167,7 +139,7 @@ playwright-cli snapshot                        # get element refs
 playwright-cli fill <email-ref> "user@example.com"
 playwright-cli fill <pwd-ref> "password"
 playwright-cli click <submit-ref>
-playwright-cli screenshot --filename=/tmp/after-login.png
+playwright-cli screenshot --filename=after-login.png
 ```
 
 Refs are reassigned after every navigation — always take a fresh snapshot before interacting with new elements.
