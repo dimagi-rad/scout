@@ -44,76 +44,13 @@ from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import run_pipeline
 from mcp_server.services.metadata import (
     pipeline_describe_table,
+    pipeline_get_metadata,
     pipeline_list_tables,
 )
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("scout")
-
-
-# --- Tenant metadata helpers ---
-# These query information_schema directly, bypassing the Project-based
-# metadata service. Used for tenant contexts where there's no Project.
-
-
-async def _tenant_list_tables(ctx) -> list[dict]:
-    """List tables in a tenant schema via information_schema.
-
-    Raises RuntimeError if the database query fails, so callers can
-    return a proper error response rather than silently reporting an
-    empty table list.
-    """
-    from mcp_server.services.query import execute_internal_query
-
-    result = await execute_internal_query(
-        ctx,
-        "SELECT table_name, table_type FROM information_schema.tables "
-        "WHERE table_schema = %s ORDER BY table_name",
-        (ctx.schema_name,),
-    )
-    if not result.get("success", True) and "error" in result:
-        msg = result["error"].get("message", "Database query failed")
-        raise RuntimeError(msg)
-
-    tables = []
-    for row in result.get("rows", []):
-        tables.append(
-            {
-                "name": row[0],
-                "type": "view" if row[1] == "VIEW" else "table",
-                "description": "",
-            }
-        )
-    return tables
-
-
-async def _tenant_describe_table(ctx, table_name: str) -> dict | None:
-    """Describe a table in a tenant schema via information_schema."""
-    from mcp_server.services.query import execute_internal_query
-
-    result = await execute_internal_query(
-        ctx,
-        "SELECT column_name, data_type, is_nullable, column_default "
-        "FROM information_schema.columns "
-        "WHERE table_schema = %s AND table_name = %s "
-        "ORDER BY ordinal_position",
-        (ctx.schema_name, table_name),
-    )
-    if not result.get("rows"):
-        return None
-
-    columns = []
-    for row in result.get("rows", []):
-        columns.append(
-            {
-                "name": row[0],
-                "type": row[1],
-                "nullable": row[2] == "YES",
-                "default": row[3],
-            }
-        )
-    return {"name": table_name, "columns": columns}
 
 
 # --- Tools ---
@@ -233,7 +170,8 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
 async def get_metadata(tenant_id: str) -> dict:
     """Get a complete metadata snapshot for the tenant's database.
 
-    Returns all tables with their columns.
+    Returns all tables with their columns, descriptions, and table relationships
+    defined by the materialization pipeline.
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
@@ -241,22 +179,46 @@ async def get_metadata(tenant_id: str) -> dict:
     async with tool_context("get_metadata", tenant_id) as tc:
         try:
             ctx = await load_tenant_context(tenant_id)
-            tables_list = await _tenant_list_tables(ctx)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
-        except RuntimeError as e:
-            tc["result"] = error_response("INTERNAL_ERROR", str(e))
+
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+        if ts is None:
+            tc["result"] = success_response(
+                {"schema": ctx.schema_name, "table_count": 0, "tables": {}, "relationships": []},
+                tenant_id=tenant_id,
+                schema=ctx.schema_name,
+                timing_ms=tc["timer"].elapsed_ms,
+            )
             return tc["result"]
 
-        tables = {}
-        for t in tables_list:
-            detail = await _tenant_describe_table(ctx, t["name"])
-            if detail:
-                tables[t["name"]] = detail
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema=ts,
+                state=MaterializationRun.RunState.COMPLETED,
+            )
+            .order_by("-completed_at")
+            .afirst()
+        )
+        pipeline_name = last_run.pipeline if last_run else "commcare_sync"
+        pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
+
+        tenant_metadata = await TenantMetadata.objects.filter(
+            tenant_membership=ts.tenant_membership
+        ).afirst()
+
+        metadata = await sync_to_async(pipeline_get_metadata)(
+            ts, ctx, tenant_metadata, pipeline_config
+        )
 
         tc["result"] = success_response(
-            {"schema": ctx.schema_name, "table_count": len(tables), "tables": tables},
+            {
+                "schema": ctx.schema_name,
+                "table_count": len(metadata["tables"]),
+                "tables": metadata["tables"],
+                "relationships": metadata["relationships"],
+            },
             tenant_id=tenant_id,
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,

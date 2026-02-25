@@ -393,41 +393,93 @@ class TestDescribeTableTool:
 # get_metadata tool handler
 # ---------------------------------------------------------------------------
 
+PATCH_PIPELINE_GET_METADATA = "mcp_server.server.pipeline_get_metadata"
+
 
 class TestGetMetadataTool:
-    """Test the get_metadata MCP tool handler."""
-
-    async def test_combines_list_and_describe(self, tenant_id, tenant_context):
+    async def test_returns_tables_and_relationships(self, tenant_id, tenant_context):
         from mcp_server.server import get_metadata
 
-        # Two calls: first for list_tables, then for describe of each table
-        query_results = [
-            # _tenant_list_tables call
-            {
-                "columns": ["table_name", "table_type"],
-                "rows": [["cases", "BASE TABLE"]],
-                "row_count": 1,
+        mock_ts = MagicMock()
+        mock_ts.tenant_membership = MagicMock()
+        mock_run = MagicMock()
+        mock_run.pipeline = "commcare_sync"
+        mock_result = {
+            "tables": {
+                "cases": {
+                    "name": "cases",
+                    "description": "CommCare cases",
+                    "columns": [
+                        {
+                            "name": "case_id",
+                            "type": "text",
+                            "nullable": False,
+                            "default": None,
+                            "description": "",
+                        }
+                    ],
+                }
             },
-            # _tenant_describe_table("cases") call
-            {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [["case_id", "text", "NO", None]],
-                "row_count": 1,
-            },
-        ]
+            "relationships": [
+                {
+                    "from_table": "forms",
+                    "from_column": "case_ids",
+                    "to_table": "cases",
+                    "to_column": "case_id",
+                    "description": "",
+                }
+            ],
+        }
 
         with (
             patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
-            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch("mcp_server.server.MaterializationRun") as mock_run_cls,
+            patch(PATCH_PIPELINE_GET_METADATA, return_value=mock_result),
+            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
-            mock_query.side_effect = query_results
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+            mock_run_cls.RunState.COMPLETED = "completed"
 
             result = await get_metadata(tenant_id)
 
         assert result["success"] is True
         assert result["data"]["table_count"] == 1
         assert "cases" in result["data"]["tables"]
+        assert len(result["data"]["relationships"]) == 1
+
+    async def test_returns_empty_when_no_active_schema(self, tenant_id, tenant_context):
+        from mcp_server.server import get_metadata
+
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+        ):
+            mock_ctx.return_value = tenant_context
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
+
+            result = await get_metadata(tenant_id)
+
+        assert result["success"] is True
+        assert result["data"]["table_count"] == 0
+        assert result["data"]["tables"] == {}
+        assert result["data"]["relationships"] == []
+
+    async def test_invalid_tenant_returns_validation_error(self):
+        from mcp_server.server import get_metadata
+
+        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx:
+            mock_ctx.side_effect = ValueError("No active schema")
+            result = await get_metadata("bad")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
 
 
 # ---------------------------------------------------------------------------
