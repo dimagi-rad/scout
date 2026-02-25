@@ -901,3 +901,132 @@ class TestCancelMaterialization:
 
         assert result["success"] is False
         assert "not in progress" in result["error"]["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Integration tests — require a real PostgreSQL connection
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteSyncIntegration:
+    """
+    End-to-end tests for _execute_sync and _execute_sync_parameterized against
+    a real PostgreSQL server.  These catch driver-level regressions (e.g. SET
+    statement_timeout failing with psycopg3's server-side parameters) that
+    mock-based tests can't detect.
+
+    Skipped automatically when DATABASE_URL is not set.
+    """
+
+    @pytest.fixture(autouse=True)
+    def real_db(self):
+        import os
+        from urllib.parse import urlparse
+
+        import psycopg
+
+        db_url = os.environ.get("DATABASE_URL")
+        if not db_url:
+            pytest.skip("No DATABASE_URL for integration test")
+
+        parsed = urlparse(db_url)
+        self.connection_params = {
+            "host": parsed.hostname or "localhost",
+            "port": parsed.port or 5432,
+            "dbname": parsed.path.lstrip("/") or "scout",
+            "user": parsed.username or "",
+            "password": parsed.password or "",
+        }
+        self.schema = "test_query_exec"
+
+        conn = psycopg.connect(**self.connection_params, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.schema}"')
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS "{self.schema}".items (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT,
+                        value INTEGER
+                    )
+                    """
+                )
+                cur.execute(
+                    f"""
+                    INSERT INTO "{self.schema}".items (name, value)
+                    VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
+                    """
+                )
+        finally:
+            conn.close()
+
+        yield
+
+        conn = psycopg.connect(**self.connection_params, autocommit=True)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
+        finally:
+            conn.close()
+
+    def _ctx(self):
+        from mcp_server.context import QueryContext
+
+        return QueryContext(
+            tenant_id="test-integration",
+            schema_name=self.schema,
+            max_rows_per_query=500,
+            max_query_timeout_seconds=30,
+            connection_params=self.connection_params,
+        )
+
+    def test_returns_rows(self):
+        from mcp_server.services.query import _execute_sync
+
+        result = _execute_sync(self._ctx(), "SELECT name, value FROM items ORDER BY value", 30)
+
+        assert result["columns"] == ["name", "value"]
+        assert result["rows"] == [["alpha", 1], ["beta", 2], ["gamma", 3]]
+        assert result["row_count"] == 3
+
+    def test_statement_timeout_does_not_use_server_side_param(self):
+        """Regression: SET statement_timeout TO $1 raises SyntaxError in psycopg3."""
+        from mcp_server.services.query import _execute_sync
+
+        # Would raise psycopg.errors.SyntaxError before the fix
+        result = _execute_sync(self._ctx(), "SELECT 1 AS n", 30)
+        assert result["row_count"] == 1
+
+    def test_empty_result(self):
+        from mcp_server.services.query import _execute_sync
+
+        result = _execute_sync(self._ctx(), "SELECT name FROM items WHERE value > 9999", 30)
+
+        assert result["columns"] == ["name"]
+        assert result["rows"] == []
+        assert result["row_count"] == 0
+
+    def test_parameterized_filters_rows(self):
+        from mcp_server.services.query import _execute_sync_parameterized
+
+        result = _execute_sync_parameterized(
+            self._ctx(),
+            "SELECT name, value FROM items WHERE value > %s ORDER BY value",
+            (1,),
+            30,
+        )
+
+        assert result["columns"] == ["name", "value"]
+        assert result["rows"] == [["beta", 2], ["gamma", 3]]
+        assert result["row_count"] == 2
+
+    def test_search_path_is_applied(self):
+        """Unqualified table name resolves because search_path is set to the schema."""
+        from mcp_server.services.query import _execute_sync
+
+        # No schema qualifier — relies on SET search_path TO working correctly
+        result = _execute_sync(self._ctx(), "SELECT count(*) AS n FROM items", 30)
+
+        assert result["row_count"] == 1
+        assert result["rows"][0][0] == 3
