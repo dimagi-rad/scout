@@ -3,7 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 export function DataSourcesPage() {
   return (
-    <div className="container mx-auto py-8">
+    <div className="container mx-auto px-8 py-8">
       <div className="mb-6">
         <h1 className="text-2xl font-bold">Data Sources</h1>
         <p className="text-muted-foreground">

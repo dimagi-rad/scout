@@ -132,7 +132,7 @@ export function KnowledgePage() {
   const filteredItems = knowledgeItems
 
   return (
-    <div className="container mx-auto py-8">
+    <div className="container mx-auto px-8 py-8">
       {/* Header */}
       <div className="mb-8 flex items-center justify-between">
         <div>

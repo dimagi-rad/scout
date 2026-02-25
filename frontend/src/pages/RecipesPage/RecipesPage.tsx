@@ -149,7 +149,7 @@ export function RecipesPage() {
     const run = recipeRuns.find((r) => r.id === runId)
     if (run) {
       return (
-        <div className="container mx-auto py-8">
+        <div className="container mx-auto px-8 py-8">
           <RecipeRunDetail
             recipe={currentRecipe}
             run={run}
@@ -164,7 +164,7 @@ export function RecipesPage() {
   // Show detail view if we have an ID
   if (id && currentRecipe) {
     return (
-      <div className="container mx-auto py-8">
+      <div className="container mx-auto px-8 py-8">
         <RecipeDetail
           recipe={currentRecipe}
           runs={recipeRuns}
@@ -209,7 +209,7 @@ export function RecipesPage() {
 
   // Show list view
   return (
-    <div className="container mx-auto py-8">
+    <div className="container mx-auto px-8 py-8">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Recipes</h1>
