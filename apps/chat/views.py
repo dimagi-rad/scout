@@ -8,6 +8,7 @@ plain Django views to keep this app self-contained.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -522,9 +523,21 @@ async def chat_view(request):
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
-    # Load MCP tools (data access via MCP server)
+    # Load MCP tools; attach progress callback for run_materialization updates.
+    progress_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _on_mcp_progress(progress, total, message, context) -> None:
+        if message is not None:
+            await progress_queue.put(
+                {
+                    "current": int(progress),
+                    "total": int(total) if total else 0,
+                    "message": message,
+                }
+            )
+
     try:
-        mcp_tools = await get_mcp_tools()
+        mcp_tools = await get_mcp_tools(on_progress=_on_mcp_progress)
     except Exception as e:
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
@@ -584,7 +597,7 @@ async def chat_view(request):
 
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)
     response = StreamingHttpResponse(
-        langgraph_to_ui_stream(agent, input_state, config),
+        langgraph_to_ui_stream(agent, input_state, config, progress_queue=progress_queue),
         content_type="text/event-stream; charset=utf-8",
     )
     response["Cache-Control"] = "no-cache"
