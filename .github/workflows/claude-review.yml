@@ -32,6 +32,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: ${{ github.event_name == 'pull_request' && format('/code-review:code-review {0}/pull/{1}', github.repository, github.event.pull_request.number) || '' }}
-          plugins: 'code-review@claude-plugins-official'
+          plugin_marketplaces: anthropics/claude-code
+          plugins: 'code-review@claude-code-plugins'
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(git diff*),Bash(git log*),Bash(git show*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git branch:*),Bash(gh pr list:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(bun run lint:*),Bash(bun run type-check:*),Bash(bun run build:*),Bash(uv run ruff check:*),Bash(uv run ruff format:*),Bash(uv run pytest:*),Read,Write,Edit"
