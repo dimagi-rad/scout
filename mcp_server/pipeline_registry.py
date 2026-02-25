@@ -31,6 +31,15 @@ class TransformConfig:
 
 
 @dataclass
+class RelationshipConfig:
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+    description: str = ""
+
+
+@dataclass
 class PipelineConfig:
     name: str
     description: str
@@ -39,6 +48,7 @@ class PipelineConfig:
     sources: list[SourceConfig] = field(default_factory=list)
     metadata_discovery: MetadataDiscoveryConfig | None = None
     transforms: TransformConfig | None = None
+    relationships: list[RelationshipConfig] = field(default_factory=list)
 
     @property
     def has_metadata_discovery(self) -> bool:
@@ -96,6 +106,17 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         if tr_raw
         else None
     )
+    rel_raw = data.get("relationships", [])
+    relationships = [
+        RelationshipConfig(
+            from_table=r["from_table"],
+            from_column=r["from_column"],
+            to_table=r["to_table"],
+            to_column=r["to_column"],
+            description=r.get("description", ""),
+        )
+        for r in rel_raw
+    ]
     return PipelineConfig(
         name=data["pipeline"],
         description=data.get("description", ""),
@@ -104,6 +125,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         sources=sources,
         metadata_discovery=metadata_discovery,
         transforms=transforms,
+        relationships=relationships,
     )
 
 
