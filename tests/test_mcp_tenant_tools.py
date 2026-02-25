@@ -187,84 +187,6 @@ class TestExecuteSyncParameterized:
 
 
 # ---------------------------------------------------------------------------
-# _tenant_describe_table
-# ---------------------------------------------------------------------------
-
-
-class TestTenantDescribeTable:
-    """Test the _tenant_describe_table helper."""
-
-    async def test_queries_information_schema_with_correct_params(self, tenant_context):
-        from mcp_server.server import _tenant_describe_table
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [
-                    ["case_id", "text", "NO", None],
-                    ["case_type", "text", "YES", None],
-                ],
-                "row_count": 2,
-            }
-
-            await _tenant_describe_table(tenant_context, "cases")
-
-        mock_query.assert_called_once()
-        called_sql = mock_query.call_args[0][1]
-        called_params = mock_query.call_args[0][2]
-
-        assert "information_schema.columns" in called_sql
-        assert "table_schema = %s" in called_sql
-        assert "table_name = %s" in called_sql
-        assert called_params == ("test_domain", "cases")
-
-    async def test_returns_formatted_columns(self, tenant_context):
-        from mcp_server.server import _tenant_describe_table
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [
-                    ["case_id", "text", "NO", None],
-                    ["properties", "jsonb", "YES", "'{}'::jsonb"],
-                ],
-                "row_count": 2,
-            }
-
-            result = await _tenant_describe_table(tenant_context, "cases")
-
-        assert result is not None
-        assert result["name"] == "cases"
-        assert len(result["columns"]) == 2
-        assert result["columns"][0] == {
-            "name": "case_id",
-            "type": "text",
-            "nullable": False,
-            "default": None,
-        }
-        assert result["columns"][1] == {
-            "name": "properties",
-            "type": "jsonb",
-            "nullable": True,
-            "default": "'{}'::jsonb",
-        }
-
-    async def test_returns_none_when_table_not_found(self, tenant_context):
-        from mcp_server.server import _tenant_describe_table
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [],
-                "row_count": 0,
-            }
-
-            result = await _tenant_describe_table(tenant_context, "nonexistent")
-
-        assert result is None
-
-
-# ---------------------------------------------------------------------------
 # list_tables tool handler
 # ---------------------------------------------------------------------------
 
@@ -374,43 +296,82 @@ class TestListTablesTool:
 # describe_table tool handler
 # ---------------------------------------------------------------------------
 
+PATCH_PIPELINE_DESCRIBE_TABLE = "mcp_server.server.pipeline_describe_table"
+
 
 class TestDescribeTableTool:
-    """Test the describe_table MCP tool handler end-to-end."""
-
-    async def test_success(self, tenant_id, tenant_context):
+    async def test_success_returns_enriched_columns(self, tenant_id, tenant_context):
         from mcp_server.server import describe_table
+
+        mock_ts = MagicMock()
+        mock_ts.tenant_membership = MagicMock()
+        mock_run = MagicMock()
+        mock_run.pipeline = "commcare_sync"
+        mock_table = {
+            "name": "cases",
+            "description": "CommCare case records",
+            "columns": [
+                {
+                    "name": "case_id",
+                    "type": "text",
+                    "nullable": False,
+                    "default": None,
+                    "description": "",
+                },
+                {
+                    "name": "properties",
+                    "type": "jsonb",
+                    "nullable": True,
+                    "default": None,
+                    "description": "Contains case properties. Available case types: pregnancy",
+                },
+            ],
+        }
 
         with (
             patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
-            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch("mcp_server.server.MaterializationRun") as mock_run_cls,
+            patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=mock_table),
+            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
-            mock_query.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [["case_id", "text", "NO", None]],
-                "row_count": 1,
-            }
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+            mock_run_cls.RunState.COMPLETED = "completed"
 
             result = await describe_table(tenant_id, "cases")
 
         assert result["success"] is True
         assert result["data"]["name"] == "cases"
-        assert result["data"]["columns"][0]["name"] == "case_id"
+        assert result["data"]["description"] == "CommCare case records"
+        assert "properties" in [c["name"] for c in result["data"]["columns"]]
 
     async def test_table_not_found(self, tenant_id, tenant_context):
         from mcp_server.server import describe_table
 
+        mock_ts = MagicMock()
+        mock_ts.tenant_membership = MagicMock()
+
         with (
             patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
-            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch("mcp_server.server.MaterializationRun") as mock_run_cls,
+            patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),
+            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
-            mock_query.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [],
-                "row_count": 0,
-            }
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+            mock_run_cls.RunState.COMPLETED = "completed"
 
             result = await describe_table(tenant_id, "nonexistent")
 
@@ -422,7 +383,6 @@ class TestDescribeTableTool:
 
         with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema")
-
             result = await describe_table("bad", "cases")
 
         assert result["success"] is False

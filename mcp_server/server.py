@@ -29,7 +29,7 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
-from apps.projects.models import MaterializationRun, TenantSchema
+from apps.projects.models import MaterializationRun, TenantMetadata, TenantSchema
 from mcp_server.context import load_tenant_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -43,6 +43,7 @@ from mcp_server.envelope import (
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import run_pipeline
 from mcp_server.services.metadata import (
+    pipeline_describe_table,
     pipeline_list_tables,
 )
 
@@ -176,7 +177,8 @@ async def list_tables(tenant_id: str) -> dict:
 async def describe_table(tenant_id: str, table_name: str) -> dict:
     """Get detailed metadata for a specific table.
 
-    Returns columns (name, type, nullable, default).
+    Returns columns (name, type, nullable, default, description) and a table description.
+    JSONB columns are annotated with summaries from the CommCare discover phase when available.
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
@@ -189,7 +191,29 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        table = await _tenant_describe_table(ctx, table_name)
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+
+        last_run = None
+        tenant_metadata = None
+        if ts is not None:
+            last_run = (
+                await MaterializationRun.objects.filter(
+                    tenant_schema=ts,
+                    state=MaterializationRun.RunState.COMPLETED,
+                )
+                .order_by("-completed_at")
+                .afirst()
+            )
+            tenant_metadata = await TenantMetadata.objects.filter(
+                tenant_membership=ts.tenant_membership
+            ).afirst()
+
+        pipeline_name = last_run.pipeline if last_run else "commcare_sync"
+        pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
+
+        table = await sync_to_async(pipeline_describe_table)(
+            table_name, ctx, tenant_metadata, pipeline_config
+        )
         if table is None:
             tc["result"] = error_response(
                 NOT_FOUND, f"Table '{table_name}' not found in schema '{ctx.schema_name}'"
