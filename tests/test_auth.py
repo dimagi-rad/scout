@@ -772,6 +772,38 @@ class TestSignup:
         assert response.status_code == 400
 
 
+class TestLoginOnboardingComplete:
+    def test_login_includes_onboarding_complete_false(self, client, db):
+        User.objects.create_user(email="u@example.com", password="pass")
+        resp = client.post(
+            "/api/auth/login/",
+            data={"email": "u@example.com", "password": "pass"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["onboarding_complete"] is False
+
+    def test_login_includes_onboarding_complete_true_when_connections_exist(self, client, db):
+        user = User.objects.create_user(email="u2@example.com", password="pass")
+        tm = TenantMembership.objects.create(
+            user=user,
+            provider="commcare",
+            tenant_id="d1",
+            tenant_name="D1",
+        )
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.OAUTH,
+        )
+        resp = client.post(
+            "/api/auth/login/",
+            data={"email": "u2@example.com", "password": "pass"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["onboarding_complete"] is True
+
+
 class TestMeOnboardingComplete:
     def test_false_with_no_memberships(self, client, db):
         user = User.objects.create_user(email="u@example.com", password="pass")

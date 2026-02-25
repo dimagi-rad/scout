@@ -192,12 +192,20 @@ def login_view(request):
     _record_attempt(email, True)
     login(request, user)
 
+    from apps.users.models import TenantMembership
+
+    onboarding_complete = TenantMembership.objects.filter(
+        user=user,
+        credential__isnull=False,
+    ).exists()
+
     return JsonResponse(
         {
             "id": str(user.id),
             "email": user.email,
             "name": user.get_full_name(),
             "is_staff": user.is_staff,
+            "onboarding_complete": onboarding_complete,
         }
     )
 
