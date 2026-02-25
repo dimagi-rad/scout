@@ -171,22 +171,71 @@ async def tenant_credential_list_view(request):
     return JsonResponse({"membership_id": str(tm.id)}, status=201)
 
 
-@require_http_methods(["DELETE"])
+@require_http_methods(["DELETE", "PATCH"])
 async def tenant_credential_detail_view(request, membership_id):
-    """DELETE /api/auth/tenant-credentials/<membership_id>/ — remove a credential"""
+    """DELETE /api/auth/tenant-credentials/<membership_id>/ — remove a credential
+    PATCH  /api/auth/tenant-credentials/<membership_id>/ — update credential"""
     user = await _get_user_if_authenticated(request)
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    def _delete():
-        try:
-            tm = TenantMembership.objects.get(id=membership_id, user=user)
-            tm.delete()  # cascades to TenantCredential
-            return True
-        except TenantMembership.DoesNotExist:
-            return False
+    if request.method == "DELETE":
+        def _delete():
+            try:
+                tm = TenantMembership.objects.get(id=membership_id, user=user)
+                tm.delete()  # cascades to TenantCredential
+                return True
+            except TenantMembership.DoesNotExist:
+                return False
 
-    deleted = await sync_to_async(_delete)()
-    if not deleted:
+        deleted = await sync_to_async(_delete)()
+        if not deleted:
+            return JsonResponse({"error": "Not found"}, status=404)
+        return JsonResponse({"status": "deleted"})
+
+    # PATCH
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    tenant_name = body.get("tenant_name", "").strip()
+    credential = body.get("credential", "").strip()
+
+    if not tenant_name and not credential:
+        return JsonResponse(
+            {"error": "At least one of tenant_name or credential is required"}, status=400
+        )
+
+    from apps.users.adapters import encrypt_credential
+
+    encrypted = None
+    if credential:
+        try:
+            encrypted = await sync_to_async(encrypt_credential)(credential)
+        except ValueError as e:
+            return JsonResponse({"error": str(e)}, status=500)
+
+    def _update():
+        try:
+            tm = TenantMembership.objects.select_related("credential").get(
+                id=membership_id, user=user
+            )
+        except TenantMembership.DoesNotExist:
+            return None
+
+        if tenant_name:
+            tm.tenant_name = tenant_name
+            tm.save(update_fields=["tenant_name"])
+
+        if encrypted and hasattr(tm, "credential"):
+            tm.credential.encrypted_credential = encrypted
+            tm.credential.save(update_fields=["encrypted_credential"])
+
+        return tm
+
+    tm = await sync_to_async(_update)()
+    if tm is None:
         return JsonResponse({"error": "Not found"}, status=404)
-    return JsonResponse({"status": "deleted"})
+
+    return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant_name})

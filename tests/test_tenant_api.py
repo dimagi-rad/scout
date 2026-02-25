@@ -5,6 +5,42 @@ from apps.users.models import TenantMembership
 
 
 @pytest.mark.django_db
+class TestTenantCredentialDeleteAPI:
+    def test_delete_removes_domain_from_tenants_list(self, user):
+        """Deleting a credential should remove the domain from GET /api/auth/tenants/."""
+        from apps.users.adapters import encrypt_credential
+        from apps.users.models import TenantCredential
+
+        tm = TenantMembership.objects.create(
+            user=user, provider="commcare", tenant_id="sk-test", tenant_name="sk-test"
+        )
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.API_KEY,
+            encrypted_credential=encrypt_credential("user@example.com:apikey"),
+        )
+
+        client = Client()
+        client.force_login(user)
+
+        # Confirm it appears in the tenants list before deletion
+        response = client.get("/api/auth/tenants/")
+        assert response.status_code == 200
+        tenant_ids = [t["tenant_id"] for t in response.json()]
+        assert "sk-test" in tenant_ids
+
+        # Delete it
+        response = client.delete(f"/api/auth/tenant-credentials/{tm.id}/")
+        assert response.status_code == 200
+
+        # Should no longer appear in the tenants list
+        response = client.get("/api/auth/tenants/")
+        assert response.status_code == 200
+        tenant_ids = [t["tenant_id"] for t in response.json()]
+        assert "sk-test" not in tenant_ids
+
+
+@pytest.mark.django_db
 class TestTenantListAPI:
     def test_list_tenants(self, user):
         TenantMembership.objects.create(
@@ -40,3 +76,57 @@ class TestTenantSelectAPI:
         assert response.status_code == 200
         tm.refresh_from_db()
         assert tm.last_selected_at is not None
+
+
+@pytest.mark.django_db
+class TestTenantCredentialUpdateAPI:
+    def test_patch_updates_credential(self, user):
+        from apps.users.adapters import encrypt_credential
+        from apps.users.models import TenantCredential
+
+        tm = TenantMembership.objects.create(
+            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
+        )
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.API_KEY,
+            encrypted_credential=encrypt_credential("old@example.com:oldkey"),
+        )
+
+        client = Client()
+        client.force_login(user)
+        response = client.patch(
+            f"/api/auth/tenant-credentials/{tm.id}/",
+            data={
+                "tenant_name": "Dimagi Updated",
+                "credential": "new@example.com:newkey",
+            },
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        tm.refresh_from_db()
+        assert tm.tenant_name == "Dimagi Updated"
+        tm.credential.refresh_from_db()
+        assert tm.credential.encrypted_credential != encrypt_credential("old@example.com:oldkey")
+
+    def test_patch_requires_auth(self):
+        client = Client()
+        response = client.patch(
+            "/api/auth/tenant-credentials/00000000-0000-0000-0000-000000000000/",
+            data={"tenant_name": "x"},
+            content_type="application/json",
+        )
+        assert response.status_code == 401
+
+    def test_patch_returns_404_for_wrong_user(self, user, other_user):
+        tm = TenantMembership.objects.create(
+            user=other_user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
+        )
+        client = Client()
+        client.force_login(user)
+        response = client.patch(
+            f"/api/auth/tenant-credentials/{tm.id}/",
+            data={"tenant_name": "hijacked"},
+            content_type="application/json",
+        )
+        assert response.status_code == 404
