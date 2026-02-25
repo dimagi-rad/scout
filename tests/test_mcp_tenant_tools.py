@@ -187,105 +187,6 @@ class TestExecuteSyncParameterized:
 
 
 # ---------------------------------------------------------------------------
-# _tenant_list_tables
-# ---------------------------------------------------------------------------
-
-
-class TestTenantListTables:
-    """Test the _tenant_list_tables helper."""
-
-    async def test_queries_information_schema_with_correct_params(self, tenant_context):
-        from mcp_server.server import _tenant_list_tables
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [["cases", "BASE TABLE"], ["locations", "BASE TABLE"]],
-                "row_count": 2,
-            }
-
-            await _tenant_list_tables(tenant_context)
-
-        # Verify the SQL uses parameterized query with the schema name
-        mock_query.assert_called_once()
-        called_args = mock_query.call_args
-        called_ctx = called_args[0][0]
-        called_sql = called_args[0][1]
-        called_params = called_args[0][2]
-
-        assert called_ctx is tenant_context
-        assert "information_schema.tables" in called_sql
-        assert "table_schema = %s" in called_sql
-        assert called_params == ("test_domain",)
-
-    async def test_returns_formatted_table_list(self, tenant_context):
-        from mcp_server.server import _tenant_list_tables
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [["cases", "BASE TABLE"], ["my_view", "VIEW"]],
-                "row_count": 2,
-            }
-
-            tables = await _tenant_list_tables(tenant_context)
-
-        assert len(tables) == 2
-        assert tables[0] == {"name": "cases", "type": "table", "description": ""}
-        assert tables[1] == {"name": "my_view", "type": "view", "description": ""}
-
-    async def test_raises_on_error(self, tenant_context):
-        from mcp_server.server import _tenant_list_tables
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "success": False,
-                "error": {"code": "CONNECTION_ERROR", "message": "fail"},
-            }
-
-            with pytest.raises(RuntimeError, match="fail"):
-                await _tenant_list_tables(tenant_context)
-
-    async def test_returns_empty_list_when_no_tables(self, tenant_context):
-        from mcp_server.server import _tenant_list_tables
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [],
-                "row_count": 0,
-            }
-
-            tables = await _tenant_list_tables(tenant_context)
-
-        assert tables == []
-
-    async def test_uses_ctx_schema_name_not_hardcoded(self):
-        """Ensure the schema name comes from context, not hardcoded."""
-        from mcp_server.server import _tenant_list_tables
-
-        custom_ctx = QueryContext(
-            tenant_id="my-org",
-            schema_name="my_custom_schema",
-            max_rows_per_query=500,
-            max_query_timeout_seconds=30,
-            connection_params={},
-        )
-
-        with patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query:
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [],
-                "row_count": 0,
-            }
-
-            await _tenant_list_tables(custom_ctx)
-
-        called_params = mock_query.call_args[0][2]
-        assert called_params == ("my_custom_schema",)
-
-
-# ---------------------------------------------------------------------------
 # _tenant_describe_table
 # ---------------------------------------------------------------------------
 
@@ -367,31 +268,80 @@ class TestTenantDescribeTable:
 # list_tables tool handler
 # ---------------------------------------------------------------------------
 
+PATCH_PIPELINE_LIST_TABLES = "mcp_server.server.pipeline_list_tables"
+
+
+def _fake_sync_to_async(fn):
+    """Test helper: makes sync_to_async a transparent pass-through."""
+
+    async def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+
+    return wrapper
+
 
 class TestListTablesTool:
-    """Test the list_tables MCP tool handler end-to-end."""
-
-    async def test_success(self, tenant_id, tenant_context):
+    async def test_success_returns_enriched_tables(self, tenant_id, tenant_context):
         from mcp_server.server import list_tables
+
+        mock_ts = MagicMock()
+        mock_run = MagicMock()
+        mock_run.pipeline = "commcare_sync"
+        mock_tables = [
+            {
+                "name": "cases",
+                "type": "table",
+                "description": "CommCare cases",
+                "row_count": 100,
+                "materialized_at": "2026-02-24T10:00:00Z",
+            }
+        ]
 
         with (
             patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
-            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.MaterializationRun") as mock_run_cls,
+            patch(PATCH_PIPELINE_LIST_TABLES, return_value=mock_tables),
+            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [["cases", "BASE TABLE"]],
-                "row_count": 1,
-            }
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+            mock_run_cls.RunState.COMPLETED = "completed"
 
             result = await list_tables(tenant_id)
 
         assert result["success"] is True
         assert len(result["data"]["tables"]) == 1
-        assert result["data"]["tables"][0]["name"] == "cases"
-        assert result["tenant_id"] == tenant_id
-        assert result["schema"] == "test_domain"
+        assert result["data"]["tables"][0]["row_count"] == 100
+        assert result["data"]["note"] is None
+
+    async def test_empty_tables_when_no_completed_run(self, tenant_id, tenant_context):
+        from mcp_server.server import list_tables
+
+        mock_ts = MagicMock()
+
+        with (
+            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.MaterializationRun") as mock_run_cls,
+            patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
+            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
+        ):
+            mock_ctx.return_value = tenant_context
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_run_qs = MagicMock()
+            mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
+            mock_run_cls.objects.filter.return_value = mock_run_qs
+            mock_run_cls.RunState.COMPLETED = "completed"
+
+            result = await list_tables(tenant_id)
+
+        assert result["success"] is True
+        assert result["data"]["tables"] == []
+        assert "run_materialization" in result["data"]["note"]
 
     async def test_invalid_tenant_returns_validation_error(self):
         from mcp_server.server import list_tables
@@ -404,19 +354,15 @@ class TestListTablesTool:
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
 
-    async def test_empty_schema_returns_empty_tables(self, tenant_id, tenant_context):
+    async def test_returns_empty_when_no_tenant_schema(self, tenant_id, tenant_context):
         from mcp_server.server import list_tables
 
         with (
             patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
-            patch(PATCH_INTERNAL_QUERY, new_callable=AsyncMock) as mock_query,
+            patch("mcp_server.server.TenantSchema") as mock_ts_cls,
         ):
             mock_ctx.return_value = tenant_context
-            mock_query.return_value = {
-                "columns": ["table_name", "table_type"],
-                "rows": [],
-                "row_count": 0,
-            }
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
             result = await list_tables(tenant_id)
 

@@ -29,7 +29,7 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
-from apps.projects.models import MaterializationRun
+from apps.projects.models import MaterializationRun, TenantSchema
 from mcp_server.context import load_tenant_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -42,6 +42,9 @@ from mcp_server.envelope import (
 )
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import run_pipeline
+from mcp_server.services.metadata import (
+    pipeline_list_tables,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,9 +120,10 @@ async def _tenant_describe_table(ctx, table_name: str) -> dict | None:
 
 @mcp.tool()
 async def list_tables(tenant_id: str) -> dict:
-    """List all tables and views in the tenant's database schema.
+    """List all tables in the tenant's database schema.
 
-    Returns table names, types (table/view), and descriptions.
+    Returns table names, types, descriptions, row counts, and materialization timestamps.
+    Returns an empty list if no materialization run has completed yet.
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
@@ -127,16 +131,40 @@ async def list_tables(tenant_id: str) -> dict:
     async with tool_context("list_tables", tenant_id) as tc:
         try:
             ctx = await load_tenant_context(tenant_id)
-            tables = await _tenant_list_tables(ctx)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
-        except RuntimeError as e:
-            tc["result"] = error_response("INTERNAL_ERROR", str(e))
+
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+        if ts is None:
+            tc["result"] = success_response(
+                {"tables": [], "note": None},
+                tenant_id=tenant_id,
+                schema=ctx.schema_name,
+                timing_ms=tc["timer"].elapsed_ms,
+            )
             return tc["result"]
 
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema=ts,
+                state=MaterializationRun.RunState.COMPLETED,
+            )
+            .order_by("-completed_at")
+            .afirst()
+        )
+        pipeline_name = last_run.pipeline if last_run else "commcare_sync"
+        pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
+
+        tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+
+        note = (
+            "No completed materialization run found. Run run_materialization to load data."
+            if not tables
+            else None
+        )
         tc["result"] = success_response(
-            {"tables": tables},
+            {"tables": tables, "note": note},
             tenant_id=tenant_id,
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
