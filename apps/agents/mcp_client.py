@@ -1,47 +1,46 @@
 """
 MCP client for connecting the Scout agent to the MCP data server.
 
-Provides a singleton MultiServerMCPClient that connects to the Scout MCP
-server over streamable HTTP and converts MCP tools into LangChain-compatible
-tools for use with ToolNode.
+Creates a fresh MultiServerMCPClient per call so per-request progress
+callbacks can be attached. Circuit breaker logic prevents hammering an
+unavailable server.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.conf import settings
+from langchain_mcp_adapters.callbacks import Callbacks, ProgressCallback
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger = logging.getLogger(__name__)
 
-_mcp_client: MultiServerMCPClient | None = None
-_mcp_lock = asyncio.Lock()
-
 # Circuit breaker state
 _consecutive_failures: int = 0
 _last_failure_time: float = 0.0
-_CIRCUIT_BREAKER_THRESHOLD = 5  # failures before opening circuit
-_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds before retrying after circuit opens
+_CIRCUIT_BREAKER_THRESHOLD = 5
+_CIRCUIT_BREAKER_COOLDOWN = 30.0
 
 
 class MCPServerUnavailable(Exception):
-    """Raised when the MCP server is unreachable and the circuit breaker is open."""
+    """Raised when the circuit breaker is open."""
 
 
-async def get_mcp_client() -> MultiServerMCPClient:
-    """Get or create the MCP client singleton.
+async def get_mcp_tools(on_progress: ProgressCallback | None = None) -> list:
+    """Load MCP tools as LangChain tools.
 
-    Thread-safe via asyncio.Lock. Includes circuit breaker logic to avoid
-    hammering an unreachable MCP server.
+    Creates a fresh MultiServerMCPClient on each call. Pass on_progress to
+    receive real-time step updates during long-running tools such as
+    run_materialization.
+
+    Raises MCPServerUnavailable when the circuit breaker is open.
     """
-    global _mcp_client, _consecutive_failures, _last_failure_time
+    global _consecutive_failures, _last_failure_time
 
-    # Check circuit breaker before acquiring lock
     if _consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD:
         elapsed = time.monotonic() - _last_failure_time
         if elapsed < _CIRCUIT_BREAKER_COOLDOWN:
@@ -51,43 +50,13 @@ async def get_mcp_client() -> MultiServerMCPClient:
             )
         logger.info("Circuit breaker cooldown elapsed, allowing retry")
 
-    async with _mcp_lock:
-        if _mcp_client is not None:
-            return _mcp_client
-
-        url = settings.MCP_SERVER_URL
-        logger.info("Creating MCP client connecting to %s", url)
-        try:
-            _mcp_client = MultiServerMCPClient(
-                {
-                    "scout-data": {
-                        "transport": "streamable_http",
-                        "url": url,
-                    }
-                }
-            )
-            _consecutive_failures = 0
-            return _mcp_client
-        except Exception:
-            _consecutive_failures += 1
-            _last_failure_time = time.monotonic()
-            logger.error("MCP client creation failed (attempt %d)", _consecutive_failures)
-            raise
-
-
-async def get_mcp_tools() -> list:
-    """Load MCP tools as LangChain tools.
-
-    Returns a list of LangChain-compatible tools that proxy calls to the
-    Scout MCP server (query, list_tables, describe_table, get_metadata).
-
-    Includes circuit breaker: after repeated failures, raises
-    MCPServerUnavailable instead of trying again immediately.
-    """
-    global _mcp_client, _consecutive_failures, _last_failure_time
-
+    url = settings.MCP_SERVER_URL
+    callbacks = Callbacks(on_progress=on_progress) if on_progress else None
     try:
-        client = await get_mcp_client()
+        client = MultiServerMCPClient(
+            {"scout-data": {"transport": "streamable_http", "url": url}},
+            callbacks=callbacks,
+        )
         tools = await client.get_tools()
         logger.info("Loaded %d MCP tools: %s", len(tools), [t.name for t in tools])
         _consecutive_failures = 0
@@ -97,16 +66,13 @@ async def get_mcp_tools() -> list:
     except Exception:
         _consecutive_failures += 1
         _last_failure_time = time.monotonic()
-        # Reset client so next attempt creates a fresh one
-        _mcp_client = None
         logger.error("MCP tool loading failed (attempt %d)", _consecutive_failures)
         raise
 
 
 def reset_circuit_breaker() -> None:
-    """Reset the circuit breaker state. Useful for testing."""
-    global _mcp_client, _consecutive_failures, _last_failure_time
-    _mcp_client = None
+    """Reset circuit breaker state. Used in tests."""
+    global _consecutive_failures, _last_failure_time
     _consecutive_failures = 0
     _last_failure_time = 0.0
 
@@ -117,26 +83,17 @@ COMMCARE_PROVIDERS = frozenset({"commcare", "commcare_connect"})
 
 
 async def get_user_oauth_tokens(user) -> dict[str, str]:
-    """Retrieve decrypted OAuth tokens for a user's CommCare providers.
-
-    Returns a dict mapping provider ID to access token string.
-    Only includes CommCare HQ and CommCare Connect tokens.
-    Returns empty dict if user is None or has no connected accounts.
-    """
+    """Retrieve OAuth tokens for a user's CommCare providers."""
     if user is None or not getattr(user, "pk", None):
         return {}
-
-    tokens = await sync_to_async(_get_tokens_sync)(user)
-    return tokens
+    return await sync_to_async(_get_tokens_sync)(user)
 
 
 def _get_tokens_sync(user) -> dict[str, str]:
-    """Synchronous token retrieval — called via sync_to_async."""
     social_tokens = SocialToken.objects.filter(
         account__user=user,
         account__provider__in=COMMCARE_PROVIDERS,
     ).select_related("account")
-
     return {
         st.account.provider: st.token
         for st in social_tokens

@@ -1084,3 +1084,180 @@ class TestEndToEndStreaming:
 
             assert response.status_code == 200
             assert call_count == 2  # First failed, second succeeded
+
+
+class TestProgressStream:
+    """Tests for progress queue integration in langgraph_to_ui_stream."""
+
+    @pytest.mark.asyncio
+    async def test_run_materialization_card_opens_on_tool_start(self):
+        """on_tool_start for run_materialization should emit tool-input-available immediately."""
+        mock_agent = AsyncMock()
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_start",
+                "run_id": "run-mat-1",
+                "name": "run_materialization",
+                "data": {},
+            }
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-mat-1",
+                "name": "run_materialization",
+                "data": {
+                    "output": ToolMessage(
+                        content='{"success": true, "status": "completed"}',
+                        tool_call_id="call-mat-1",
+                        name="run_materialization",
+                    ),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(mock_agent, {}, {}):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        types = [e["type"] for e in events]
+        # tool-input-available must appear (opened on tool_start)
+        assert "tool-input-available" in types
+        # tool-output-available must appear (final result on tool_end)
+        assert "tool-output-available" in types
+        # Only one tool-input-available (not duplicated)
+        assert types.count("tool-input-available") == 1
+
+    @pytest.mark.asyncio
+    async def test_progress_queue_items_emitted_as_tool_output(self):
+        """Progress queue items should be emitted as tool-output-available with progress text."""
+        import asyncio as _asyncio
+
+        mock_agent = AsyncMock()
+
+        progress_queue = _asyncio.Queue()
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_start",
+                "run_id": "run-mat-2",
+                "name": "run_materialization",
+                "data": {},
+            }
+            # Simulate progress arriving while tool runs
+            await progress_queue.put({"current": 1, "total": 3, "message": "Discovering metadata"})
+            await progress_queue.put({"current": 2, "total": 3, "message": "Loading cases"})
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-mat-2",
+                "name": "run_materialization",
+                "data": {
+                    "output": ToolMessage(
+                        content='{"success": true, "rows_loaded": 42}',
+                        tool_call_id="call-mat-2",
+                        name="run_materialization",
+                    ),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(
+            mock_agent, {}, {}, progress_queue=progress_queue
+        ):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        tool_outputs = [e for e in events if e["type"] == "tool-output-available"]
+        # At least the two progress updates + the final result
+        assert len(tool_outputs) >= 3
+        # Progress text contains the message
+        assert any("Discovering metadata" in e.get("output", "") for e in tool_outputs)
+        assert any("Loading cases" in e.get("output", "") for e in tool_outputs)
+        # All updates share the same toolCallId
+        call_ids = {e["toolCallId"] for e in tool_outputs}
+        assert len(call_ids) == 1
+
+    @pytest.mark.asyncio
+    async def test_final_result_replaces_progress(self):
+        """The on_tool_end result is the last tool-output-available."""
+        import asyncio as _asyncio
+
+        mock_agent = AsyncMock()
+
+        progress_queue = _asyncio.Queue()
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_start",
+                "run_id": "run-mat-3",
+                "name": "run_materialization",
+                "data": {},
+            }
+            await progress_queue.put({"current": 1, "total": 2, "message": "Step one"})
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-mat-3",
+                "name": "run_materialization",
+                "data": {
+                    "output": ToolMessage(
+                        content='{"success": true, "status": "completed", "rows_loaded": 100}',
+                        tool_call_id="call-mat-3",
+                        name="run_materialization",
+                    ),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(
+            mock_agent, {}, {}, progress_queue=progress_queue
+        ):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        tool_outputs = [e for e in events if e["type"] == "tool-output-available"]
+        # Last output is the final result (contains rows_loaded)
+        assert "rows_loaded" in tool_outputs[-1].get("output", "")
+
+    @pytest.mark.asyncio
+    async def test_non_materialization_tool_unaffected(self):
+        """Other tools still use the on_tool_end-only path."""
+        mock_agent = AsyncMock()
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-query-1",
+                "name": "query",
+                "data": {
+                    "output": ToolMessage(
+                        content='{"success": true, "rows": []}',
+                        tool_call_id="call-q-1",
+                        name="query",
+                    ),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(mock_agent, {}, {}):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        types = [e["type"] for e in events]
+        assert "tool-input-available" in types
+        assert "tool-output-available" in types
+        assert types.count("tool-input-available") == 1

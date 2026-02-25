@@ -54,10 +54,14 @@ function formatToolOutput(output: unknown): string {
   return JSON.stringify(output, null, 2)
 }
 
+// Tools that emit MCP progress notifications and should auto-expand.
+// Mirrors _PROGRESS_TOOLS in apps/chat/stream.py — keep in sync when adding new tools.
+const PROGRESS_TOOLS = new Set(["run_materialization"])
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ToolCallPart({ part, index }: { part: any; index: number }) {
-  const [expanded, setExpanded] = useState(false)
   const toolName = getToolName(part)
+  const [expanded, setExpanded] = useState(() => PROGRESS_TOOLS.has(toolName))
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const outputText = hasOutput && part.output != null
