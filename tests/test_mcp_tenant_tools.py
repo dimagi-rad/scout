@@ -772,3 +772,132 @@ class TestTeardownSchemaTool:
         assert result["success"] is True
         assert result["data"]["schema_dropped"] == "test_domain"
         mock_mgr.teardown.assert_called_once_with(mock_schema)
+
+
+class TestListPipelines:
+    def test_returns_available_pipelines(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from mcp_server.pipeline_registry import PipelineConfig
+
+        fake_pipelines = [
+            PipelineConfig(
+                name="commcare_sync",
+                description="Sync case and form data from CommCare HQ",
+                version="1.0",
+                provider="commcare",
+            )
+        ]
+        with patch("mcp_server.server.get_registry") as mock_reg:
+            mock_reg.return_value.list.return_value = fake_pipelines
+            from mcp_server.server import list_pipelines
+
+            result = asyncio.run(list_pipelines())
+
+        assert result["success"] is True
+        assert len(result["data"]["pipelines"]) == 1
+        assert result["data"]["pipelines"][0]["name"] == "commcare_sync"
+        assert result["data"]["pipelines"][0]["provider"] == "commcare"
+
+
+class TestGetMaterializationStatus:
+    def test_returns_run_status(self):
+        import asyncio
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        run_id = str(uuid.uuid4())
+        mock_run = MagicMock()
+        mock_run.id = uuid.UUID(run_id)
+        mock_run.pipeline = "commcare_sync"
+        mock_run.state = "completed"
+        mock_run.started_at.isoformat.return_value = "2026-02-24T10:00:00+00:00"
+        mock_run.completed_at.isoformat.return_value = "2026-02-24T10:05:00+00:00"
+        mock_run.result = {"sources": {"cases": {"rows": 100}}}
+        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.schema_name = "dimagi"
+
+        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+            mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
+            from mcp_server.server import get_materialization_status
+
+            result = asyncio.run(get_materialization_status(run_id=run_id))
+
+        assert result["success"] is True
+        assert result["data"]["run_id"] == run_id
+        assert result["data"]["state"] == "completed"
+
+    def test_unknown_run_returns_not_found(self):
+        import asyncio
+        import uuid
+        from unittest.mock import AsyncMock, patch
+
+        from django.core.exceptions import ObjectDoesNotExist
+
+        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+            mock_cls.DoesNotExist = ObjectDoesNotExist
+            mock_cls.objects.select_related.return_value.aget = AsyncMock(
+                side_effect=ObjectDoesNotExist
+            )
+            from mcp_server.server import get_materialization_status
+
+            result = asyncio.run(get_materialization_status(run_id=str(uuid.uuid4())))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "NOT_FOUND"
+
+
+class TestCancelMaterialization:
+    def test_cancel_in_progress_run(self):
+        import asyncio
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        run_id = str(uuid.uuid4())
+        mock_run = MagicMock()
+        mock_run.id = uuid.UUID(run_id)
+        mock_run.state = "loading"
+        mock_run.result = {}
+        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.schema_name = "dimagi"
+
+        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+            mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
+            mock_cls.RunState.STARTED = "started"
+            mock_cls.RunState.DISCOVERING = "discovering"
+            mock_cls.RunState.LOADING = "loading"
+            mock_cls.RunState.TRANSFORMING = "transforming"
+            mock_cls.RunState.FAILED = "failed"
+            from mcp_server.server import cancel_materialization
+
+            result = asyncio.run(cancel_materialization(run_id=run_id))
+
+        assert result["success"] is True
+        assert result["data"]["cancelled"] is True
+        assert result["data"]["run_id"] == run_id
+
+    def test_cancel_completed_run_returns_error(self):
+        import asyncio
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        run_id = str(uuid.uuid4())
+        mock_run = MagicMock()
+        mock_run.state = "completed"
+        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.schema_name = "dimagi"
+
+        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+            mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
+            mock_cls.RunState.STARTED = "started"
+            mock_cls.RunState.DISCOVERING = "discovering"
+            mock_cls.RunState.LOADING = "loading"
+            mock_cls.RunState.TRANSFORMING = "transforming"
+            mock_cls.RunState.FAILED = "failed"
+            from mcp_server.server import cancel_materialization
+
+            result = asyncio.run(cancel_materialization(run_id=run_id))
+
+        assert result["success"] is False
+        assert "not in progress" in result["error"]["message"].lower()

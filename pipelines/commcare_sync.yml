@@ -1,0 +1,19 @@
+pipeline: commcare_sync
+description: "Sync case and form data from CommCare HQ"
+version: "1.0"
+provider: commcare
+
+sources:
+  - name: cases
+    description: "CommCare case records"
+  - name: forms
+    description: "CommCare form submission records (includes nested case updates)"
+
+metadata_discovery:
+  description: "Extract application structure, case types, and form definitions"
+
+transforms:
+  dbt_project: transforms/commcare
+  models:
+    - stg_cases
+    - stg_forms

@@ -7,28 +7,28 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 ## MCP Tools
 
 - [x] **`teardown_schema` tool** — expose `SchemaManager.teardown()` as an MCP tool; `requires_confirmation` parameter per design
-- [ ] **`get_materialization_status` tool** — query `MaterializationRun` by run ID; enables reconnect-and-poll fallback
-- [ ] **`list_pipelines` tool** — list available pipelines from the registry with descriptions
-- [ ] **`cancel_materialization` tool** — graceful shutdown of in-progress loader/DBT subprocesses
+- [x] **`get_materialization_status` tool** — query `MaterializationRun` by run ID; enables reconnect-and-poll fallback
+- [x] **`list_pipelines` tool** — list available pipelines from the registry with descriptions
+- [x] **`cancel_materialization` tool** — marks in-progress runs as failed (best-effort; subprocess cancellation deferred)
 
 ---
 
 ## Materialization Pipeline
 
-- [ ] **Pipeline Registry** — YAML-based pipeline definitions (`pipelines/commcare_sync.yml`) with sources, loader references, DBT model list
-- [ ] **Three-phase structure** — split `run_commcare_sync` into distinct Discover → Load → Transform phases with per-phase state tracking in `MaterializationRun`
-- [ ] **Discover phase** — query CommCare API for app definitions, case types, form structure, and custom field labels; store in Django models (see Metadata section)
-- [ ] **Forms loader** — paginated CommCare form submission loader (`loaders/commcare/forms.py`)
+- [x] **Pipeline Registry** — YAML-based pipeline definitions (`pipelines/commcare_sync.yml`) with sources, loader references, DBT model list
+- [x] **Three-phase structure** — Discover → Load → Transform phases with per-phase state tracking in `MaterializationRun`
+- [x] **Discover phase** — CommCare metadata loader (app definitions, case types, form structure); stored in generic `TenantMetadata` model (django-pydantic-field)
+- [x] **Forms loader** — paginated CommCare form submission loader with nested case-reference extraction (`loaders/commcare_forms.py`)
 - [ ] **Users loader** — CommCare user loader (`loaders/commcare/users.py`)
-- [ ] **DBT integration** — runtime `profiles.yml` generation, DBT subprocess runner, capture structured run results
-- [ ] **MCP progress notifications** — emit `notifications/progress` messages when caller provides a `progressToken`; calculate total steps upfront
-- [ ] **Cancellation support** — handle MCP `cancelled` notifications; terminate active loader/DBT subprocesses gracefully
+- [x] **DBT integration** — runtime `profiles.yml` generation, programmatic `dbtRunner` API, threading.Lock for concurrency safety
+- [x] **MCP progress notifications** — `ctx.report_progress` with `asyncio.run_coroutine_threadsafe`; done-callback for silent failure logging
+- [ ] **Cancellation support** — handle MCP `cancelled` notifications; terminate active loader/DBT subprocesses gracefully (deferred)
 
 ---
 
 ## Metadata Service
 
-- [ ] **Tenant semantic metadata models** — Django models for CommCare app definitions, case types, form structure, and custom field labels (persists across schema lifecycle events)
+- [x] **Tenant semantic metadata models** — generic `TenantMetadata` model (provider-agnostic JSON field, persists across schema teardown)
 - [ ] **Pipeline-driven `list_tables`** — replace `information_schema` introspection with pipeline registry + `MaterializationRun` records; include row counts and `materialized_at` timestamps
 - [ ] **Pipeline-driven `describe_table`** — merge pipeline column definitions with tenant-specific field descriptions from the discover phase output
 - [ ] **`get_metadata` enrichment** — include table relationships defined by the pipeline
@@ -47,6 +47,7 @@ Tracks remaining work against the design in `data-explorer-mcp-design.md`.
 
 - [ ] **Celery workers** — run materialization in background tasks so the MCP tool call can stream progress without blocking; result retrievable via `get_materialization_status`
 - [ ] **Long-run resilience** — ensure `MaterializationRun` captures enough state that a reconnecting agent can get the final result even if the original connection dropped
+- [ ] **DBT concurrency ceiling** — `_dbt_lock` in `dbt_runner.py` serialises all in-process dbt invocations across tenants (dbtRunner is not thread-safe). This is a hard throughput ceiling in multi-tenant scenarios; Celery workers with per-worker dbt isolation would remove it.
 
 ---
 

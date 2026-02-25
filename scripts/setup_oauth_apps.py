@@ -21,9 +21,8 @@ import django
 
 django.setup()
 
-from django.contrib.sites.models import Site
-
-from allauth.socialaccount.models import SocialApp
+from allauth.socialaccount.models import SocialApp  # noqa: E402
+from django.contrib.sites.models import Site  # noqa: E402
 
 # (provider_id, display_name, env_prefix)
 PROVIDERS = [
