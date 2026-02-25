@@ -72,6 +72,106 @@ Optional:
 - `MCP_SERVER_URL` - MCP server URL (default: `http://localhost:8100/mcp`)
 - `REDIS_URL` - Redis connection URL for caching and Celery
 
+## Working in Git worktrees
+
+Multiple agents can work simultaneously in isolated worktrees under `.worktrees/`. Key setup steps every time you create a worktree:
+
+### 1. Copy the `.env` file
+
+The root `.env` is gitignored and doesn't carry over to worktrees. Copy it right after creation:
+
+```bash
+cp /Users/bderenzi/Code/scout/.env .worktrees/<branch-name>/
+```
+
+### 2. Install frontend dependencies
+
+`node_modules` is not shared between worktrees. Run inside the worktree's `frontend/`:
+
+```bash
+cd .worktrees/<branch-name>/frontend && bun install
+```
+
+### 3. Start servers on alternate ports
+
+Other agents may already hold ports 8000 (backend), 5173 (frontend), 8100 (MCP). Check first:
+
+```bash
+lsof -i :8000,5173,8100 -sTCP:LISTEN
+```
+
+Start backend and frontend independently on free ports (e.g. 8002 / 5175). Log to `/tmp` so output doesn't clutter the worktree:
+
+```bash
+# From worktree root — source .env so all vars are loaded
+source .env && DJANGO_SETTINGS_MODULE=config.settings.development \
+  uv run uvicorn config.asgi:application --reload --port 8002 > /tmp/web.log 2>&1 &
+
+# Frontend — API_PORT tells Vite's proxy which backend to forward to
+cd frontend && API_PORT=8002 bun run vite --port 5175 > /tmp/frontend.log 2>&1 &
+```
+
+**Do not use `honcho` in worktrees.** It starts MCP as well, which requires extra env config and always targets the default ports, causing collisions with other agents.
+
+### 4. Trust the frontend port for CSRF
+
+Django rejects POST requests from unrecognised origins. Add your port to the worktree's `.env` before starting the backend:
+
+```bash
+echo 'CSRF_TRUSTED_ORIGINS=http://localhost:5173,http://localhost:5175' >> .env
+```
+
+`CSRF_TRUSTED_ORIGINS` is read from the environment (`base.py` uses `env.list(..., default=[...])`), so setting it in `.env` and sourcing before uvicorn is enough — no code changes needed.
+
+### 5. `API_PORT` controls the Vite proxy target
+
+`frontend/vite.config.ts` reads `API_PORT` from the project-root `.env` (one level up from `frontend/`). Pass it as an env var when launching Vite:
+
+```bash
+API_PORT=8002 bun run vite --port 5175
+```
+
+## UI verification with Playwright CLI
+
+Use `playwright-cli` to reproduce and verify UI behaviour. It's available globally.
+
+### Keep output files out of the working tree
+
+Playwright CLI writes screenshots and snapshot `.yml` files to **whichever directory the command is run from**. To avoid cluttering the repo, run Playwright from `/tmp`, or pass absolute paths:
+
+```bash
+# Run from /tmp so all output lands there
+cd /tmp && playwright-cli open http://localhost:5175
+
+# Or pass an absolute path per screenshot
+playwright-cli screenshot --filename=/tmp/after-login.png
+```
+
+The `.playwright-cli/` folder inside `frontend/` is gitignored, so running Playwright from `frontend/` is also acceptable.
+
+### Finding stray files
+
+If output lands somewhere unexpected:
+
+```bash
+find /System/Volumes/Data/Users/bderenzi/Code/scout -name "*.png" -maxdepth 8 2>/dev/null
+```
+
+### Login flow
+
+The app fetches `/api/auth/csrf/` automatically before login — you don't need to do it manually. The basic sequence:
+
+```bash
+playwright-cli open http://localhost:5175
+playwright-cli snapshot                        # get element refs
+playwright-cli fill <email-ref> "user@example.com"
+playwright-cli fill <pwd-ref> "password"
+playwright-cli click <submit-ref>
+playwright-cli screenshot --filename=/tmp/after-login.png
+```
+
+Refs are reassigned after every navigation — always take a fresh snapshot before interacting with new elements.
+
 ## Code style
 
 - **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B)
