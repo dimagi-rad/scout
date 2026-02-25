@@ -716,12 +716,12 @@ class ArtifactDataView(View):
 
 
 def _json_safe(value: Any) -> Any:
-    """Coerce psycopg2 result values to JSON-serializable types."""
+    """Coerce database result values to JSON-serializable types."""
     if value is None:
         return None
     if isinstance(value, Decimal):
         return float(value)
-    if isinstance(value, (datetime, date)):
+    if isinstance(value, datetime | date):
         return value.isoformat()
     if isinstance(value, UUID):
         return str(value)

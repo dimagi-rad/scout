@@ -34,15 +34,15 @@ def _build_validator(ctx: QueryContext) -> SQLValidator:
 
 
 def _get_connection(ctx: QueryContext):
-    """Create a psycopg2 connection from context params."""
-    import psycopg2
+    """Create a psycopg connection from context params."""
+    import psycopg
 
-    return psycopg2.connect(**ctx.connection_params)
+    return psycopg.connect(**ctx.connection_params)
 
 
 def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
     """Run a SQL query synchronously."""
-    from psycopg2 import sql as psql
+    from psycopg import sql as psql
 
     with _get_connection(ctx) as conn:
         cursor = conn.cursor()
@@ -50,7 +50,7 @@ def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str
             cursor.execute(
                 psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
             )
-            cursor.execute("SET statement_timeout TO %s", (f"{timeout_seconds}s",))
+            cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
             cursor.execute(sql)
 
             columns: list[str] = []
@@ -73,7 +73,7 @@ def _execute_sync_parameterized(
     ctx: QueryContext, sql: str, params: tuple, timeout_seconds: int
 ) -> dict[str, Any]:
     """Run a parameterized SQL query synchronously. No validation or LIMIT injection."""
-    from psycopg2 import sql as psql
+    from psycopg import sql as psql
 
     with _get_connection(ctx) as conn:
         cursor = conn.cursor()
@@ -81,7 +81,7 @@ def _execute_sync_parameterized(
             cursor.execute(
                 psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
             )
-            cursor.execute("SET statement_timeout TO %s", (f"{timeout_seconds}s",))
+            cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
             cursor.execute(sql, params)
 
             columns: list[str] = []
@@ -158,13 +158,13 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
 
 def _classify_error(exc: Exception) -> tuple[str, str]:
     """Classify a database exception into an error code and user-safe message."""
-    import psycopg2
-    import psycopg2.errors
+    import psycopg
+    import psycopg.errors
 
-    if isinstance(exc, psycopg2.errors.QueryCanceled):
+    if isinstance(exc, psycopg.errors.QueryCanceled):
         return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
 
-    if isinstance(exc, psycopg2.Error):
+    if isinstance(exc, psycopg.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
             return (

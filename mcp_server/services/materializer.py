@@ -1,10 +1,10 @@
 """Three-phase materialization orchestrator: Discover → Load → Transform.
 
 Design notes:
-- All source writes share a single psycopg2 connection, committed in one
+- All source writes share a single psycopg connection, committed in one
   transaction. A mid-run failure rolls back all sources atomically.
 - Loaders expose load_pages() iterators; rows are written page-by-page so the
-  full dataset is never held in memory. Inserts use execute_values for efficiency.
+  full dataset is never held in memory. Inserts use executemany for efficiency.
 - Transform failures are isolated — run is marked COMPLETED; error stored in result.
 - The final COMPLETED state is written via a conditional UPDATE (filter on TRANSFORMING)
   so that a concurrent cancel_materialization call is not overwritten. Note: cancellation
@@ -22,8 +22,7 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 
-from psycopg2 import sql as psql
-from psycopg2.extras import execute_values
+from psycopg import sql as psql
 
 from apps.projects.models import MaterializationRun, TenantMetadata
 from apps.projects.services.schema_manager import SchemaManager, get_managed_db_connection
@@ -239,8 +238,38 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str) -> dict:
 
 
 # ── Table writers ──────────────────────────────────────────────────────────────
-# Writers accept a shared psycopg2 connection managed by the caller.
+# Writers accept a shared psycopg connection managed by the caller.
 # The caller owns commit/rollback; writers only cursor.execute.
+
+_CASES_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.cases
+        (case_id, case_type, case_name, external_id, owner_id,
+         date_opened, last_modified, server_last_modified, indexed_on,
+         closed, date_closed, properties, indices)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (case_id) DO UPDATE SET
+        case_name=EXCLUDED.case_name, owner_id=EXCLUDED.owner_id,
+        last_modified=EXCLUDED.last_modified,
+        server_last_modified=EXCLUDED.server_last_modified,
+        indexed_on=EXCLUDED.indexed_on, closed=EXCLUDED.closed,
+        date_closed=EXCLUDED.date_closed, properties=EXCLUDED.properties,
+        indices=EXCLUDED.indices
+    """
+)
+
+_FORMS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.forms
+        (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (form_id) DO UPDATE SET
+        received_on=EXCLUDED.received_on,
+        server_modified_on=EXCLUDED.server_modified_on,
+        form_data=EXCLUDED.form_data,
+        case_ids=EXCLUDED.case_ids
+    """
+)
 
 
 def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
@@ -271,35 +300,11 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ).format(schema=sid)
     )
 
-    # ins_sql is computed lazily on the first non-empty page because
-    # psycopg2.sql.Composed.as_string() strictly validates its argument is a
-    # real psycopg2 connection/cursor (rejects MagicMock in tests).
-    ins_sql: str | None = None
+    ins_sql = _CASES_INSERT.format(schema=sid)
     total = 0
     for page in pages:
         if not page:
             continue
-        if ins_sql is None:
-            ins_sql = (
-                psql.SQL(
-                    """
-                INSERT INTO {schema}.cases
-                    (case_id, case_type, case_name, external_id, owner_id,
-                     date_opened, last_modified, server_last_modified, indexed_on,
-                     closed, date_closed, properties, indices)
-                VALUES %s
-                ON CONFLICT (case_id) DO UPDATE SET
-                    case_name=EXCLUDED.case_name, owner_id=EXCLUDED.owner_id,
-                    last_modified=EXCLUDED.last_modified,
-                    server_last_modified=EXCLUDED.server_last_modified,
-                    indexed_on=EXCLUDED.indexed_on, closed=EXCLUDED.closed,
-                    date_closed=EXCLUDED.date_closed, properties=EXCLUDED.properties,
-                    indices=EXCLUDED.indices
-                """
-                )
-                .format(schema=sid)
-                .as_string(conn)
-            )
         rows = [
             (
                 c.get("case_id"),
@@ -318,7 +323,7 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
             )
             for c in page
         ]
-        execute_values(cur, ins_sql, rows)
+        cur.executemany(ins_sql, rows)
         total += len(page)
 
     return total
@@ -346,29 +351,11 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ).format(schema=sid)
     )
 
-    # ins_sql is computed lazily — see _write_cases for the rationale.
-    ins_sql: str | None = None
+    ins_sql = _FORMS_INSERT.format(schema=sid)
     total = 0
     for page in pages:
         if not page:
             continue
-        if ins_sql is None:
-            ins_sql = (
-                psql.SQL(
-                    """
-                INSERT INTO {schema}.forms
-                    (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids)
-                VALUES %s
-                ON CONFLICT (form_id) DO UPDATE SET
-                    received_on=EXCLUDED.received_on,
-                    server_modified_on=EXCLUDED.server_modified_on,
-                    form_data=EXCLUDED.form_data,
-                    case_ids=EXCLUDED.case_ids
-                """
-                )
-                .format(schema=sid)
-                .as_string(conn)
-            )
         rows = [
             (
                 f.get("form_id", ""),
@@ -381,7 +368,7 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
             )
             for f in page
         ]
-        execute_values(cur, ins_sql, rows)
+        cur.executemany(ins_sql, rows)
         total += len(page)
 
     return total

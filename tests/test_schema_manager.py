@@ -13,15 +13,9 @@ class TestSchemaManager:
         mock_cursor = MagicMock()
         mock_conn.cursor.return_value = mock_cursor
 
-        with (
-            patch(
-                "apps.projects.services.schema_manager.get_managed_db_connection",
-                return_value=mock_conn,
-            ),
-            patch(
-                "apps.projects.services.schema_manager.psycopg2.extensions.quote_ident",
-                side_effect=lambda name, _: f'"{name}"',
-            ),
+        with patch(
+            "apps.projects.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
         ):
             mgr = SchemaManager()
             ts = mgr.provision(tenant_membership)

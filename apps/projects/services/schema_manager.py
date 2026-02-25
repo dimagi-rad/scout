@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import logging
 
-import psycopg2
+import psycopg
+import psycopg.sql
 from django.conf import settings
 
 from apps.projects.models import SchemaState, TenantSchema
@@ -17,13 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_managed_db_connection():
-    """Get a psycopg2 connection to the managed database."""
+    """Get a psycopg connection to the managed database."""
     url = settings.MANAGED_DATABASE_URL
     if not url:
         raise RuntimeError("MANAGED_DATABASE_URL is not configured")
-    conn = psycopg2.connect(url)
-    conn.autocommit = True
-    return conn
+    return psycopg.connect(url, autocommit=True)
 
 
 class SchemaManager:
@@ -69,8 +68,9 @@ class SchemaManager:
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    f"CREATE SCHEMA IF NOT EXISTS "
-                    f"{psycopg2.extensions.quote_ident(schema_name, cursor)}"
+                    psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        psycopg.sql.Identifier(schema_name)
+                    )
                 )
                 cursor.close()
             finally:
@@ -97,8 +97,9 @@ class SchemaManager:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                f"DROP SCHEMA IF EXISTS "
-                f"{psycopg2.extensions.quote_ident(tenant_schema.schema_name, cursor)} CASCADE"
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(tenant_schema.schema_name)
+                )
             )
             cursor.close()
         finally:

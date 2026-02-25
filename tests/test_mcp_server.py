@@ -2,7 +2,7 @@
 Integration tests for the MCP server tools.
 
 Tests the full tool handler → service → response envelope chain.
-Database access is mocked at the Django ORM / psycopg2 boundary.
+Database access is mocked at the Django ORM / psycopg boundary.
 """
 
 from unittest.mock import patch
@@ -170,9 +170,9 @@ class TestExecuteQuery:
     @pytest.mark.asyncio
     @patch("mcp_server.services.query._execute_sync")
     async def test_timeout_error(self, mock_exec, project_context):
-        import psycopg2.errors
+        import psycopg.errors
 
-        mock_exec.side_effect = psycopg2.errors.QueryCanceled()
+        mock_exec.side_effect = psycopg.errors.QueryCanceled()
         result = await execute_query(project_context, "SELECT * FROM users")
         assert result["success"] is False
         assert result["error"]["code"] == QUERY_TIMEOUT
@@ -180,9 +180,9 @@ class TestExecuteQuery:
     @pytest.mark.asyncio
     @patch("mcp_server.services.query._execute_sync")
     async def test_connection_error(self, mock_exec, project_context):
-        import psycopg2
+        import psycopg
 
-        mock_exec.side_effect = psycopg2.OperationalError("could not connect to server")
+        mock_exec.side_effect = psycopg.OperationalError("could not connect to server")
         result = await execute_query(project_context, "SELECT * FROM users")
         assert result["success"] is False
         assert result["error"]["code"] == CONNECTION_ERROR

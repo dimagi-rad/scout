@@ -249,13 +249,13 @@ class TestRunPipeline:
 
 @pytest.mark.django_db
 class TestWriteCases:
-    """Real DB tests for _write_cases using psycopg2."""
+    """Real DB tests for _write_cases using psycopg."""
 
     def test_inserts_cases(self, django_db_setup, db):
         """_write_cases should insert rows into the named schema."""
         import os
 
-        import psycopg2
+        import psycopg
 
         from mcp_server.services.materializer import _write_cases
 
@@ -264,8 +264,7 @@ class TestWriteCases:
             pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
 
         test_schema = "test_write_cases"
-        conn = psycopg2.connect(db_url)
-        conn.autocommit = True
+        conn = psycopg.connect(db_url, autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {test_schema}")
@@ -307,7 +306,7 @@ class TestWriteForms:
     def test_inserts_forms(self, django_db_setup, db):
         import os
 
-        import psycopg2
+        import psycopg
 
         from mcp_server.services.materializer import _write_forms
 
@@ -316,8 +315,7 @@ class TestWriteForms:
             pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
 
         test_schema = "test_write_forms"
-        conn = psycopg2.connect(db_url)
-        conn.autocommit = True
+        conn = psycopg.connect(db_url, autocommit=True)
         try:
             with conn.cursor() as cur:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {test_schema}")
