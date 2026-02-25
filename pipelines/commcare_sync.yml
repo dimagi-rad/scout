@@ -17,3 +17,10 @@ transforms:
   models:
     - stg_cases
     - stg_forms
+
+relationships:
+  - from_table: forms
+    from_column: case_ids
+    to_table: cases
+    to_column: case_id
+    description: "Form submissions reference the cases they update (case_ids is a JSON array)"

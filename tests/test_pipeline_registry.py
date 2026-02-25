@@ -48,3 +48,37 @@ transforms:
     def test_get_unknown_pipeline_returns_none(self, tmp_path):
         registry = PipelineRegistry(pipelines_dir=str(tmp_path))
         assert registry.get("nonexistent") is None
+
+    def test_parses_relationships(self, tmp_path):
+        yml = tmp_path / "rel.yml"
+        yml.write_text("""
+pipeline: rel_test
+description: "Test"
+version: "1.0"
+provider: commcare
+sources: []
+relationships:
+  - from_table: forms
+    from_column: case_ids
+    to_table: cases
+    to_column: case_id
+    description: "Forms reference cases"
+""")
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        config = registry.get("rel_test")
+        assert len(config.relationships) == 1
+        r = config.relationships[0]
+        assert r.from_table == "forms"
+        assert r.from_column == "case_ids"
+        assert r.to_table == "cases"
+        assert r.to_column == "case_id"
+        assert r.description == "Forms reference cases"
+
+    def test_relationships_defaults_to_empty(self, tmp_path):
+        yml = tmp_path / "no_rel.yml"
+        yml.write_text(
+            "pipeline: no_rel\ndescription: ''\nversion: '1.0'\nprovider: commcare\nsources: []\n"
+        )
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        config = registry.get("no_rel")
+        assert config.relationships == []
