@@ -336,6 +336,9 @@ async def langgraph_to_ui_stream(
                 "delta": "\n\nAn error occurred while processing your request.",
             }
         )
+    finally:
+        lg_task.cancel()
+        pg_task.cancel()
 
     # Close any open parts
     if reasoning_started:
