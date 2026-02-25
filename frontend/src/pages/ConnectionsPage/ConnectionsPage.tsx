@@ -181,7 +181,7 @@ export function ConnectionsPage() {
     typeof formMode === "object" ? formMode.editing.membership_id : null
 
   return (
-    <div className="mx-auto max-w-2xl space-y-8 p-6">
+    <div className="container mx-auto space-y-8 px-8 py-8">
       <div>
         <h1 className="text-2xl font-semibold">Connected Accounts</h1>
         <p className="text-sm text-muted-foreground">
