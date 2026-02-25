@@ -19,6 +19,12 @@ cd scout
 uv sync
 ```
 
+Install the pre-commit hooks:
+
+```bash
+uv run prek install
+```
+
 Create an environment file from the example and edit it with your settings:
 
 ```bash
