@@ -1,5 +1,6 @@
 """Tests for core models."""
 
+import pytest
 from django.contrib.auth import get_user_model
 
 from apps.knowledge.models import (
@@ -86,3 +87,37 @@ class TestKnowledgeModels:
         assert learning.category == "type_mismatch"
         assert learning.is_active
         assert learning.confidence_score == 0.5
+
+
+@pytest.mark.django_db
+class TestTenantMetadata:
+    def test_create_and_retrieve_metadata(self, tenant_membership):
+        from django.utils import timezone
+
+        from apps.projects.models import TenantMetadata
+
+        payload = {
+            "case_types": ["patient", "household"],
+            "app_definitions": [{"id": "abc", "name": "CHW App"}],
+        }
+        meta = TenantMetadata.objects.create(
+            tenant_membership=tenant_membership,
+            metadata=payload,
+            discovered_at=timezone.now(),
+        )
+        retrieved = TenantMetadata.objects.get(pk=meta.pk)
+        assert retrieved.metadata["case_types"] == ["patient", "household"]
+        assert retrieved.metadata["app_definitions"][0]["id"] == "abc"
+
+    def test_one_to_one_with_tenant_membership(self, tenant_membership):
+        from apps.projects.models import TenantMetadata
+
+        TenantMetadata.objects.create(tenant_membership=tenant_membership)
+        with pytest.raises(Exception, match="unique constraint"):  # noqa: B017
+            TenantMetadata.objects.create(tenant_membership=tenant_membership)
+
+    def test_metadata_defaults_to_empty_dict(self, tenant_membership):
+        from apps.projects.models import TenantMetadata
+
+        meta = TenantMetadata.objects.create(tenant_membership=tenant_membership)
+        assert meta.metadata == {}

@@ -661,8 +661,8 @@ class TestSSEStreamFormat:
         # String
         assert _tool_content_to_str("hello") == "hello"
 
-        # Dict
-        assert _tool_content_to_str({"key": "value"}) == "{'key': 'value'}"
+        # Dict — falls through to json.dumps fallback
+        assert _tool_content_to_str({"key": "value"}) == '{\n  "key": "value"\n}'
 
 
 # ---------------------------------------------------------------------------

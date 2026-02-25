@@ -19,22 +19,29 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 
+from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
+from apps.projects.models import MaterializationRun
 from mcp_server.context import load_tenant_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
+    INTERNAL_ERROR,
     NOT_FOUND,
     VALIDATION_ERROR,
     error_response,
     success_response,
     tool_context,
 )
+from mcp_server.pipeline_registry import get_registry
+from mcp_server.services.materializer import run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -254,44 +261,160 @@ async def query(tenant_id: str, sql: str) -> dict:
 
 
 @mcp.tool()
+async def list_pipelines() -> dict:
+    """List available materialization pipelines and their descriptions.
+
+    Returns the registry of pipelines that can be run via run_materialization.
+    Each entry includes the pipeline name, description, provider, sources, and DBT models.
+    """
+    async with tool_context("list_pipelines", "") as tc:
+        registry = get_registry()
+        pipelines = [
+            {
+                "name": p.name,
+                "description": p.description,
+                "provider": p.provider,
+                "version": p.version,
+                "sources": [{"name": s.name, "description": s.description} for s in p.sources],
+                "has_metadata_discovery": p.has_metadata_discovery,
+                "dbt_models": p.dbt_models,
+            }
+            for p in registry.list()
+        ]
+        tc["result"] = success_response(
+            {"pipelines": pipelines},
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def get_materialization_status(run_id: str) -> dict:
+    """Retrieve the status of a materialization run by ID.
+
+    Primarily a fallback for reconnection scenarios — live progress is delivered
+    via MCP progress notifications during an active run_materialization call.
+
+    Args:
+        run_id: UUID of the MaterializationRun to look up.
+    """
+    async with tool_context("get_materialization_status", run_id) as tc:
+        try:
+            run = await MaterializationRun.objects.select_related(
+                "tenant_schema__tenant_membership"
+            ).aget(id=run_id)
+        except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        schema = run.tenant_schema.schema_name
+
+        tc["result"] = success_response(
+            {
+                "run_id": str(run.id),
+                "pipeline": run.pipeline,
+                "state": run.state,
+                "result": run.result,
+                "started_at": run.started_at.isoformat() if run.started_at else None,
+                "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                "tenant_id": tenant_id,
+            },
+            tenant_id=tenant_id,
+            schema=schema,
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def cancel_materialization(run_id: str) -> dict:
+    """Cancel a running materialization pipeline.
+
+    Marks the run as failed in the database. This is a best-effort cancellation —
+    in-flight loader operations may not terminate immediately. Full subprocess
+    cancellation is a future feature.
+
+    Args:
+        run_id: UUID of the MaterializationRun to cancel.
+    """
+    async with tool_context("cancel_materialization", run_id) as tc:
+        try:
+            run = await MaterializationRun.objects.select_related(
+                "tenant_schema__tenant_membership"
+            ).aget(id=run_id)
+        except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        in_progress = {
+            MaterializationRun.RunState.STARTED,
+            MaterializationRun.RunState.DISCOVERING,
+            MaterializationRun.RunState.LOADING,
+            MaterializationRun.RunState.TRANSFORMING,
+        }
+        if run.state not in in_progress:
+            tc["result"] = error_response(
+                VALIDATION_ERROR,
+                f"Run '{run_id}' is not in progress (state: {run.state})",
+            )
+            return tc["result"]
+
+        previous_state = run.state
+        run.state = MaterializationRun.RunState.FAILED
+        run.completed_at = datetime.now(UTC)
+        run.result = {**(run.result or {}), "cancelled": True}
+        await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
+
+        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        schema = run.tenant_schema.schema_name
+        logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
+
+        tc["result"] = success_response(
+            {"run_id": run_id, "cancelled": True, "previous_state": previous_state},
+            tenant_id=tenant_id,
+            schema=schema,
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
 async def run_materialization(
     tenant_id: str,
     tenant_membership_id: str = "",
     pipeline: str = "commcare_sync",
+    ctx: Context | None = None,
 ) -> dict:
     """Materialize data from CommCare into the tenant's schema.
 
-    Loads case data from the CommCare API and writes it to the tenant's
-    schema in the managed database. Creates the schema if it doesn't exist.
+    Runs a three-phase pipeline (Discover → Load → Transform). Creates the schema
+    automatically if it doesn't exist. Streams progress via MCP notifications/progress
+    when the caller provides a progressToken.
 
     Args:
         tenant_id: The tenant identifier (CommCare domain name).
         tenant_membership_id: UUID of the specific TenantMembership to use.
         pipeline: Pipeline to run (default: commcare_sync).
     """
-    from mcp_server.envelope import INTERNAL_ERROR
+    from apps.users.models import TenantCredential, TenantMembership
+    from mcp_server.loaders.commcare_base import CommCareAuthError
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
-        from apps.users.models import TenantMembership
-
+        # ── Resolve TenantMembership ──────────────────────────────────────────
         try:
             qs = TenantMembership.objects.select_related("user")
-            if tenant_membership_id:
-                # Scope to tenant_id so a caller cannot use an arbitrary membership UUID
-                # to trigger materialization with a different user's credentials.
-                tm = await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
-            else:
-                tm = await qs.aget(
-                    tenant_id=tenant_id,
-                    provider="commcare",
-                )
+            tm = (
+                await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
+                if tenant_membership_id
+                else await qs.aget(tenant_id=tenant_id, provider="commcare")
+            )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
 
-        # Get credential from TenantCredential (supports both OAuth and API key)
-        from apps.users.models import TenantCredential
-
+        # ── Resolve credential ────────────────────────────────────────────────
         try:
             cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
                 tenant_membership=tm
@@ -302,24 +425,17 @@ async def run_materialization(
             )
             return tc["result"]
 
-        from asgiref.sync import sync_to_async
-
         if cred_obj.credential_type == TenantCredential.API_KEY:
             from apps.users.adapters import decrypt_credential
 
             try:
                 decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
             except Exception:
-                logger.exception(
-                    "Failed to decrypt API key for tenant %s membership %s",
-                    tenant_id,
-                    cred_obj.id,
-                )
+                logger.exception("Failed to decrypt API key for tenant %s", tenant_id)
                 tc["result"] = error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
                 return tc["result"]
             credential = {"type": "api_key", "value": decrypted}
         else:
-            # OAuth: retrieve from allauth SocialToken
             from allauth.socialaccount.models import SocialToken
 
             token_obj = (
@@ -335,22 +451,45 @@ async def run_materialization(
                 return tc["result"]
             credential = {"type": "oauth", "value": token_obj.token}
 
-        # Run materialization (sync, wrapped in sync_to_async)
-        from mcp_server.loaders.commcare_cases import CommCareAuthError
-        from mcp_server.services.materializer import run_commcare_sync
+        # ── Resolve pipeline config ───────────────────────────────────────────
+        registry = get_registry()
+        pipeline_config = registry.get(pipeline)
+        if pipeline_config is None:
+            tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
+            return tc["result"]
 
+        # ── Build progress callback ───────────────────────────────────────────
+        # run_pipeline runs in a thread (via sync_to_async), so we bridge back
+        # to the async event loop with run_coroutine_threadsafe.
+        # A done-callback logs any silent delivery failures.
+        progress_callback = None
+        if ctx is not None:
+            loop = asyncio.get_running_loop()
+
+            def _on_progress_done(fut):
+                exc = fut.exception()
+                if exc is not None:
+                    logger.warning("Progress notification delivery failed: %s", exc)
+
+            def progress_callback(current: int, total: int, message: str) -> None:
+                fut = asyncio.run_coroutine_threadsafe(
+                    ctx.report_progress(current, total, message),
+                    loop,
+                )
+                fut.add_done_callback(_on_progress_done)
+
+        # ── Run pipeline ──────────────────────────────────────────────────────
         try:
-            result = await sync_to_async(run_commcare_sync)(tm, credential)
+            result = await sync_to_async(run_pipeline)(
+                tm, credential, pipeline_config, progress_callback
+            )
         except CommCareAuthError as e:
             logger.warning("CommCare auth failed for tenant %s: %s", tenant_id, e)
-            tc["result"] = error_response(
-                AUTH_TOKEN_EXPIRED,
-                str(e),
-            )
+            tc["result"] = error_response(AUTH_TOKEN_EXPIRED, str(e))
             return tc["result"]
-        except Exception as e:
-            logger.exception("Materialization failed for tenant %s", tenant_id)
-            tc["result"] = error_response(INTERNAL_ERROR, f"Materialization failed: {e}")
+        except Exception:
+            logger.exception("Pipeline '%s' failed for tenant %s", pipeline, tenant_id)
+            tc["result"] = error_response(INTERNAL_ERROR, f"Pipeline '{pipeline}' failed")
             return tc["result"]
 
         tc["result"] = success_response(
