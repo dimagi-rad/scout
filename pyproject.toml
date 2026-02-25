@@ -95,4 +95,5 @@ dev = [
     "zensical>=0.0.21",
     "requests-mock>=1.12.1",
     "honcho>=1.1",
+    "prek>=0.3.3",
 ]
