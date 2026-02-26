@@ -102,7 +102,10 @@ export function DataDictionaryPage() {
       {/* Right Panel - Table Detail */}
       <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
         {selectedTable ? (
-          <TableDetail table={selectedTable} />
+          <TableDetail
+            key={`${selectedTable.schema}.${selectedTable.table}`}
+            table={selectedTable}
+          />
         ) : (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">

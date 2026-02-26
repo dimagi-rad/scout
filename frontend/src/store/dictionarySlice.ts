@@ -9,6 +9,23 @@ export interface Column {
   description?: string
 }
 
+export interface CaseTypeItem {
+  name: string
+  app_name: string
+  module_name: string
+}
+
+export interface FormDefinitionItem {
+  name: string
+  app_name: string
+  module_name: string
+  case_type: string
+}
+
+export type SourceMetadata =
+  | { type: "case_types"; items: CaseTypeItem[] }
+  | { type: "form_definitions"; items: FormDefinitionItem[] }
+
 export interface TableAnnotations {
   description: string
   use_cases: string
@@ -22,6 +39,7 @@ export interface TableAnnotations {
 export interface TableInfo {
   columns: Column[]
   annotations?: TableAnnotations
+  sourceMetadata?: SourceMetadata
 }
 
 export interface DataDictionary {
@@ -33,6 +51,7 @@ export interface TableDetail {
   table: string
   columns: Column[]
   annotations: TableAnnotations | null
+  sourceMetadata: SourceMetadata | null
 }
 
 /** Shape of the data dictionary as returned by the backend API. */
@@ -62,6 +81,7 @@ interface BackendTable {
   columns: BackendColumn[]
   primary_key: string[]
   annotation?: BackendAnnotation
+  source_metadata?: SourceMetadata
 }
 
 interface BackendDictionaryResponse {
@@ -77,6 +97,7 @@ interface BackendTableDetailResponse {
   columns: BackendColumn[]
   primary_key: string[]
   annotation?: BackendAnnotation
+  source_metadata?: SourceMetadata
 }
 
 export type DictionaryStatus = "idle" | "loading" | "loaded" | "error"
@@ -129,6 +150,7 @@ function transformBackendResponse(raw: BackendDictionaryResponse): DataDictionar
             column_notes: table.annotation.column_notes,
           }
         : undefined,
+      sourceMetadata: table.source_metadata ?? undefined,
     }
   }
 
@@ -204,6 +226,7 @@ export const createDictionarySlice: StateCreator<
               column_notes: raw.annotation.column_notes,
             }
           : null,
+        sourceMetadata: raw.source_metadata ?? null,
       }
       set({ selectedTable: data })
     },
