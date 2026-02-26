@@ -70,6 +70,7 @@ Thumbs.db
 # Frontend
 frontend/node_modules/
 frontend/dist/
+bun.lockb
 
 # Documentation build output
 docs/site/
