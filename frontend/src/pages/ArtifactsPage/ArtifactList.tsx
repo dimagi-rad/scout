@@ -158,23 +158,26 @@ function ArtifactCard({
                 variant="destructive"
                 size="sm"
                 onClick={onDelete}
+                data-testid={`artifact-confirm-delete-${artifact.id}`}
               >
-                Confirm
+                Confirm Delete
               </Button>
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setConfirmDelete(false)}
+                data-testid={`artifact-cancel-delete-${artifact.id}`}
               >
                 Cancel
               </Button>
             </div>
           ) : (
             <Button
-              variant="ghost"
+              variant="destructive"
               size="sm"
               onClick={() => setConfirmDelete(true)}
-              className="text-destructive hover:text-destructive"
+              className="ml-auto"
+              data-testid={`artifact-delete-${artifact.id}`}
             >
               <Trash2 className="mr-1 h-4 w-4" />
               Delete
