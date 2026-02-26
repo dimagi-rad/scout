@@ -12,7 +12,11 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import type { TableDetail as TableDetailType, TableAnnotations } from "@/store/dictionarySlice"
+import type {
+  TableDetail as TableDetailType,
+  TableAnnotations,
+  SourceMetadata,
+} from "@/store/dictionarySlice"
 
 interface TableDetailProps {
   table: TableDetailType
@@ -35,11 +39,92 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue
 }
 
+function SourceMetadataPanel({ metadata }: { metadata: SourceMetadata }) {
+  if (metadata.type === "case_types") {
+    return (
+      <div className="mb-6">
+        <h3 className="mb-3 text-sm font-medium">Case Types</h3>
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Case Type</TableHead>
+                <TableHead>App</TableHead>
+                <TableHead>Module</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {metadata.items.map((item) => (
+                <TableRow key={item.name}>
+                  <TableCell className="font-mono text-sm font-medium">
+                    {item.name}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {item.app_name || "—"}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {item.module_name || "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    )
+  }
+
+  if (metadata.type === "form_definitions") {
+    return (
+      <div className="mb-6">
+        <h3 className="mb-3 text-sm font-medium">Form Definitions</h3>
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Form</TableHead>
+                <TableHead>App</TableHead>
+                <TableHead>Module</TableHead>
+                <TableHead>Case Type</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {metadata.items.map((item) => (
+                <TableRow key={item.name}>
+                  <TableCell className="text-sm font-medium">
+                    {item.name}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {item.app_name || "—"}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {item.module_name || "—"}
+                  </TableCell>
+                  <TableCell>
+                    {item.case_type ? (
+                      <Badge variant="secondary" className="font-mono text-xs">
+                        {item.case_type}
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    )
+  }
+
+  return null
+}
+
 export function TableDetail({ table }: TableDetailProps) {
   const updateAnnotations = useAppStore((s) => s.dictionaryActions.updateAnnotations)
 
   // Local state for form fields
-  const [description, setDescription] = useState("")
   const [useCases, setUseCases] = useState("")
   const [dataQualityNotes, setDataQualityNotes] = useState("")
   const [refreshFrequency, setRefreshFrequency] = useState("")
@@ -54,7 +139,6 @@ export function TableDetail({ table }: TableDetailProps) {
   if (initializedForTable !== tableKey) {
     setInitializedForTable(tableKey)
     const annotations = table.annotations
-    setDescription(annotations?.description ?? "")
     setUseCases(annotations?.use_cases ?? "")
     setDataQualityNotes(annotations?.data_quality_notes ?? "")
     setRefreshFrequency(annotations?.refresh_frequency ?? "")
@@ -63,7 +147,6 @@ export function TableDetail({ table }: TableDetailProps) {
   }
 
   // Debounced values for auto-save
-  const debouncedDescription = useDebounce(description, 1000)
   const debouncedUseCases = useDebounce(useCases, 1000)
   const debouncedDataQualityNotes = useDebounce(dataQualityNotes, 1000)
   const debouncedRefreshFrequency = useDebounce(refreshFrequency, 1000)
@@ -75,7 +158,6 @@ export function TableDetail({ table }: TableDetailProps) {
     if (initializedForTable !== tableKey) return
 
     const annotations: Partial<TableAnnotations> = {
-      description: debouncedDescription,
       use_cases: debouncedUseCases,
       data_quality_notes: debouncedDataQualityNotes,
       refresh_frequency: debouncedRefreshFrequency,
@@ -93,7 +175,6 @@ export function TableDetail({ table }: TableDetailProps) {
     table.table,
     tableKey,
     initializedForTable,
-    debouncedDescription,
     debouncedUseCases,
     debouncedDataQualityNotes,
     debouncedRefreshFrequency,
@@ -148,6 +229,11 @@ export function TableDetail({ table }: TableDetailProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4">
+        {/* Source metadata (case types / form definitions from discovery) */}
+        {table.sourceMetadata && (
+          <SourceMetadataPanel metadata={table.sourceMetadata} />
+        )}
+
         {/* Columns Table */}
         <div className="mb-6">
           <h3 className="mb-3 text-sm font-medium">Columns</h3>
@@ -197,20 +283,9 @@ export function TableDetail({ table }: TableDetailProps) {
 
         {/* Annotation Fields */}
         <div className="space-y-4">
-          <h3 className="text-sm font-medium">Table Annotations</h3>
+          <h3 className="text-sm font-medium">Notes</h3>
 
           <div className="grid gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                placeholder="Describe what this table contains..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={3}
-              />
-            </div>
-
             <div className="space-y-2">
               <Label htmlFor="use_cases">Use Cases</Label>
               <Textarea
