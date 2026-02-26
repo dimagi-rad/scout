@@ -17,6 +17,9 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
+from mcp_server.context import load_tenant_context
+from mcp_server.services.query import execute_query
+
 from .models import AccessLevel, Artifact, SharedArtifact
 from .services.export import ArtifactExporter
 
@@ -732,24 +735,82 @@ def _json_safe(value: Any) -> Any:
 
 class ArtifactQueryDataView(View):
     """
-    Returns static data for an artifact's stored queries.
+    Executes an artifact's source_queries via the MCP query service and returns results.
 
-    Live query execution against project databases is no longer supported
-    now that the platform uses MCP server-based data access.
+    For artifacts with source_queries, each SQL query is executed against the tenant's
+    database using the same query service as the MCP server. Results are returned in a
+    format the artifact sandbox can consume directly via mergeQueryResults().
     """
 
-    def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
-        artifact = get_object_or_404(Artifact, pk=artifact_id)
+    async def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+        from django.http import Http404
 
-        if not request.user.is_authenticated:
+        try:
+            artifact = await Artifact.objects.select_related("workspace").aget(pk=artifact_id)
+        except Artifact.DoesNotExist:
+            raise Http404 from None
+
+        user = await request.auser()
+        if not user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        return JsonResponse(
-            {
-                "queries": [],
-                "static_data": artifact.data or {},
-            }
-        )
+        if not user.is_superuser:
+            if not artifact.workspace_id:
+                return JsonResponse({"error": "Access denied"}, status=403)
+            from apps.users.models import TenantMembership
+
+            has_access = await TenantMembership.objects.filter(
+                user=user, tenant_id=artifact.workspace.tenant_id
+            ).aexists()
+            if not has_access:
+                return JsonResponse({"error": "Access denied"}, status=403)
+
+        if not artifact.source_queries:
+            return JsonResponse({"queries": [], "static_data": artifact.data or {}})
+
+        if artifact.workspace is None:
+            return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
+
+        try:
+            ctx = await load_tenant_context(artifact.workspace.tenant_id)
+        except Exception as e:
+            error_msg = str(e)
+            results = [
+                {"name": entry.get("name", f"query_{i}"), "error": error_msg}
+                for i, entry in enumerate(artifact.source_queries)
+            ]
+            return JsonResponse({"queries": results, "static_data": artifact.data or {}})
+
+        results = []
+        for i, entry in enumerate(artifact.source_queries):
+            name = entry.get("name", f"query_{i}")
+            sql = entry.get("sql", "")
+            if not sql:
+                results.append({"name": name, "error": "Empty SQL query"})
+                continue
+
+            result = await execute_query(ctx, sql)
+
+            if not result.get("success", True) or result.get("error"):
+                error_info = result.get("error", {})
+                msg = (
+                    error_info.get("message", "Query failed")
+                    if isinstance(error_info, dict)
+                    else str(error_info)
+                )
+                results.append({"name": name, "error": msg})
+            else:
+                results.append(
+                    {
+                        "name": name,
+                        "columns": result.get("columns", []),
+                        "rows": result.get("rows", []),
+                        "row_count": result.get("row_count", 0),
+                        "truncated": result.get("truncated", False),
+                    }
+                )
+
+        return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
 
 class SharedArtifactView(View):
