@@ -22,7 +22,7 @@ class CommCareMetadataLoader(CommCareBaseLoader):
                 {"name": str, "app_id": str, "app_name": str, "module_name": str}
             ],
             "form_definitions": {        # keyed by xmlns
-                "<xmlns>": {"name": str, "case_type": str, "questions": [...]}
+                "<xmlns>": {"name": str, "app_name": str, "module_name": str, "case_type": str, "questions": [...]}
             },
         }
     """
@@ -86,6 +86,8 @@ def _extract_form_definitions(apps: list[dict]) -> dict[str, dict]:
                 if xmlns:
                     forms[xmlns] = {
                         "name": form.get("name", ""),
+                        "app_name": app.get("name", ""),
+                        "module_name": module.get("name", ""),
                         "case_type": module.get("case_type", ""),
                         "questions": form.get("questions", []),
                     }
