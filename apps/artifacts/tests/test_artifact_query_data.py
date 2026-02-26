@@ -5,6 +5,8 @@ Tests for ArtifactQueryDataView — live query execution via MCP service.
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from django.contrib.auth.models import update_last_login
+from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
 from django.urls import reverse
 
@@ -31,6 +33,27 @@ def member_user(db, workspace):
 @pytest.fixture
 def other_user(db):
     return User.objects.create_user(email="other@example.com", password="pass")
+
+
+def _make_auth_client(user):
+    """Return an AsyncClient logged in as user, with update_last_login signal disconnected."""
+    client = AsyncClient()
+    user_logged_in.disconnect(update_last_login)
+    try:
+        client.force_login(user)
+    finally:
+        user_logged_in.connect(update_last_login)
+    return client
+
+
+@pytest.fixture
+def member_client(member_user):
+    return _make_auth_client(member_user)
+
+
+@pytest.fixture
+def other_client(other_user):
+    return _make_auth_client(other_user)
 
 
 @pytest.fixture
@@ -84,13 +107,10 @@ MOCK_DAILY_RESULT = {
 }
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_returns_query_results_for_live_artifact(live_artifact, member_user):
+async def test_returns_query_results_for_live_artifact(live_artifact, member_client):
     """Happy path: queries are executed and results returned with correct shape."""
-    client = AsyncClient()
-    await client.aforce_login(member_user)
-
     url = reverse("artifacts:query_data", kwargs={"artifact_id": live_artifact.id})
 
     with (
@@ -103,7 +123,7 @@ async def test_returns_query_results_for_live_artifact(live_artifact, member_use
             new=AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT]),
         ),
     ):
-        response = await client.get(url)
+        response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
@@ -116,15 +136,12 @@ async def test_returns_query_results_for_live_artifact(live_artifact, member_use
     assert data["static_data"] == {}
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_returns_empty_queries_for_static_artifact(static_artifact, member_user):
+async def test_returns_empty_queries_for_static_artifact(static_artifact, member_client):
     """Artifacts with no source_queries return empty queries list."""
-    client = AsyncClient()
-    await client.aforce_login(member_user)
-
     url = reverse("artifacts:query_data", kwargs={"artifact_id": static_artifact.id})
-    response = await client.get(url)
+    response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
@@ -132,7 +149,7 @@ async def test_returns_empty_queries_for_static_artifact(static_artifact, member
     assert data["static_data"] == {"total": 42}
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_unauthenticated_returns_401(live_artifact):
     """Unauthenticated request returns 401."""
@@ -142,20 +159,18 @@ async def test_unauthenticated_returns_401(live_artifact):
     assert response.status_code == 401
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_non_member_returns_403(live_artifact, other_user):
+async def test_non_member_returns_403(live_artifact, other_client):
     """User without workspace membership returns 403."""
-    client = AsyncClient()
-    await client.aforce_login(other_user)
     url = reverse("artifacts:query_data", kwargs={"artifact_id": live_artifact.id})
-    response = await client.get(url)
+    response = await other_client.get(url)
     assert response.status_code == 403
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_no_workspace_returns_400(db, member_user):
+async def test_no_workspace_returns_400(member_user, member_client):
     """Artifact with no workspace returns 400."""
     artifact = await Artifact.objects.acreate(
         workspace=None,
@@ -166,26 +181,22 @@ async def test_no_workspace_returns_400(db, member_user):
         conversation_id="t",
         source_queries=[{"name": "q", "sql": "SELECT 1"}],
     )
-    client = AsyncClient()
-    await client.aforce_login(member_user)
     url = reverse("artifacts:query_data", kwargs={"artifact_id": artifact.id})
-    response = await client.get(url)
+    response = await member_client.get(url)
     assert response.status_code == 400
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_tenant_context_error_returns_error_query(live_artifact, member_user):
+async def test_tenant_context_error_returns_error_query(live_artifact, member_client):
     """If load_tenant_context fails (no schema), return error response."""
-    client = AsyncClient()
-    await client.aforce_login(member_user)
     url = reverse("artifacts:query_data", kwargs={"artifact_id": live_artifact.id})
 
     with patch(
         "apps.artifacts.views.load_tenant_context",
         new=AsyncMock(side_effect=ValueError("No active schema")),
     ):
-        response = await client.get(url)
+        response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
@@ -193,12 +204,10 @@ async def test_tenant_context_error_returns_error_query(live_artifact, member_us
     assert all("error" in q for q in data["queries"])
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_individual_query_failure_continues(live_artifact, member_user):
+async def test_individual_query_failure_continues(live_artifact, member_client):
     """A failed query includes an error entry; other queries still execute."""
-    client = AsyncClient()
-    await client.aforce_login(member_user)
     url = reverse("artifacts:query_data", kwargs={"artifact_id": live_artifact.id})
 
     error_result = {"success": False, "error": {"code": "QUERY_TIMEOUT", "message": "Timed out"}}
@@ -213,7 +222,7 @@ async def test_individual_query_failure_continues(live_artifact, member_user):
             new=AsyncMock(side_effect=[error_result, MOCK_DAILY_RESULT]),
         ),
     ):
-        response = await client.get(url)
+        response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
