@@ -15,7 +15,7 @@ import logging
 import time
 import uuid
 
-from allauth.socialaccount.models import SocialAccount, SocialApp
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.sites.models import Site
@@ -276,60 +276,72 @@ PROVIDER_DISPLAY = {
 
 @require_POST
 def disconnect_provider_view(request, provider_id):
-    """Disconnect a social account. Prevents removing the last login method."""
+    """Revoke OAuth API token for a provider, keeping the SocialAccount for login."""
     if not request.user.is_authenticated:
         return JsonResponse({"error": "Not authenticated"}, status=401)
 
-    from django.db import transaction
-
-    with transaction.atomic():
-        # SocialAccount.provider may store provider_id (e.g. "commcare_prod")
-        # rather than the provider class id (e.g. "commcare"), so check both.
-        account = (
-            SocialAccount.objects.select_for_update()
-            .filter(user=request.user, provider=provider_id)
-            .first()
+    # Find tokens for this provider — check both provider class id and provider_id
+    tokens = SocialToken.objects.filter(
+        account__user=request.user, account__provider=provider_id
+    )
+    if not tokens.exists():
+        app_provider_ids = list(
+            SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
         )
-        if not account:
-            # Try matching via SocialApp.provider_id
-            app_provider_ids = list(
-                SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
+        if app_provider_ids:
+            tokens = SocialToken.objects.filter(
+                account__user=request.user, account__provider__in=app_provider_ids
             )
-            if app_provider_ids:
-                account = (
-                    SocialAccount.objects.select_for_update()
-                    .filter(user=request.user, provider__in=app_provider_ids)
-                    .first()
-                )
-        if not account:
-            return JsonResponse({"error": "Not connected"}, status=404)
+    if not tokens.exists():
+        return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
-        # Guard: must keep at least one login method
-        has_password = request.user.has_usable_password()
-        other_socials = (
-            SocialAccount.objects.filter(user=request.user).exclude(provider=provider_id).exists()
-        )
-        if not has_password and not other_socials:
-            return JsonResponse(
-                {"error": "Cannot disconnect your only login method. Set a password first."},
-                status=400,
-            )
-
-        account.delete()
+    tokens.delete()
     return JsonResponse({"status": "disconnected"})
 
 
 @require_GET
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
+    from apps.users.services.token_refresh import (
+        TokenRefreshError,
+        refresh_oauth_token,
+        token_needs_refresh,
+    )
+
+    # Map provider IDs to their token endpoint URLs for refresh
+    PROVIDER_TOKEN_URLS = {
+        "commcare": "https://www.commcarehq.org/oauth/token/",
+        "commcare_connect": "https://connect.commcarehq.org/oauth/token/",
+    }
+
     current_site = Site.objects.get_current()
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
 
     connected_providers = set()
+    token_status = {}  # provider -> "connected" | "expired"
     if request.user.is_authenticated:
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
         )
+        # Check token validity for connected providers
+        tokens = SocialToken.objects.filter(
+            account__user=request.user,
+        ).select_related("account", "app")
+        for social_token in tokens:
+            provider = social_token.account.provider
+            if token_needs_refresh(social_token.expires_at):
+                # Attempt refresh
+                token_url = PROVIDER_TOKEN_URLS.get(provider)
+                if token_url and social_token.token_secret:
+                    try:
+                        refresh_oauth_token(social_token, token_url)
+                        token_status[provider] = "connected"
+                    except TokenRefreshError:
+                        token_status[provider] = "expired"
+                else:
+                    token_status[provider] = "expired"
+            else:
+                token_status[provider] = "connected"
 
     providers = []
     for app in apps:
@@ -341,9 +353,18 @@ def providers_view(request):
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
             # not the provider class id (e.g. "commcare"), so check both.
-            entry["connected"] = (
+            is_connected = (
                 app.provider in connected_providers or app.provider_id in connected_providers
             )
+            entry["connected"] = is_connected
+            if is_connected:
+                # No token_status entry means the SocialAccount exists but no token
+                # (user revoked API access) — treat as disconnected
+                entry["status"] = token_status.get(
+                    app.provider, token_status.get(app.provider_id, "disconnected")
+                )
+            else:
+                entry["status"] = None
         providers.append(entry)
 
     return JsonResponse({"providers": providers})

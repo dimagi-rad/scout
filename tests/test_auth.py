@@ -7,7 +7,7 @@ Tests OAuth integration with django-allauth, custom providers, and header-based 
 from unittest.mock import Mock, patch
 
 import pytest
-from allauth.socialaccount.models import SocialAccount, SocialApp
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
@@ -73,6 +73,17 @@ def social_account(db, user):
             "name": f"{user.first_name} {user.last_name}",
             "picture": "https://example.com/photo.jpg",
         },
+    )
+
+
+@pytest.fixture
+def social_token(db, social_account, google_social_app):
+    """Create a SocialToken linked to a social account."""
+    return SocialToken.objects.create(
+        app=google_social_app,
+        account=social_account,
+        token="test-access-token",
+        token_secret="test-refresh-token",
     )
 
 
@@ -694,42 +705,33 @@ class TestProvidersEndpoint:
 
 @pytest.mark.django_db
 class TestDisconnectProvider:
-    """Tests for POST /api/auth/providers/<provider>/disconnect/."""
+    """Tests for POST /api/auth/providers/<provider>/disconnect/.
+
+    Disconnect revokes the OAuth token but keeps the SocialAccount for login.
+    """
 
     def test_disconnect_requires_auth(self, client):
         resp = client.post("/api/auth/providers/google/disconnect/")
         assert resp.status_code == 401
 
-    def test_disconnect_existing_provider(self, client, user, social_account):
-        """User with password + social account can disconnect the social account."""
+    def test_disconnect_revokes_token(self, client, user, social_account, social_token):
+        """Disconnect deletes the token but keeps the SocialAccount."""
         client.force_login(user)
         resp = client.post("/api/auth/providers/google/disconnect/")
         assert resp.status_code == 200
         assert resp.json()["status"] == "disconnected"
-        assert not SocialAccount.objects.filter(user=user, provider="google").exists()
-
-    def test_disconnect_only_login_method_blocked(self, client, user, social_account):
-        """Cannot disconnect if it's the only login method (no password)."""
-        user.set_unusable_password()
-        user.save()
-        client.force_login(user)
-        resp = client.post("/api/auth/providers/google/disconnect/")
-        assert resp.status_code == 400
-        assert "only login method" in resp.json()["error"].lower()
-        # Social account should still exist
+        # Token should be deleted
+        assert not SocialToken.objects.filter(account=social_account).exists()
+        # SocialAccount should still exist (login preserved)
         assert SocialAccount.objects.filter(user=user, provider="google").exists()
 
-    def test_disconnect_allowed_with_other_provider(self, client, user, social_account):
-        """Can disconnect one provider if another is still connected."""
-        user.set_unusable_password()
-        user.save()
-        # Add a second social account
-        SocialAccount.objects.create(user=user, provider="github", uid="gh_123")
+    def test_disconnect_no_token_returns_404(self, client, user, social_account):
+        """If there's no token to revoke, return 404."""
         client.force_login(user)
         resp = client.post("/api/auth/providers/google/disconnect/")
-        assert resp.status_code == 200
+        assert resp.status_code == 404
 
-    def test_disconnect_nonexistent_returns_404(self, client, user):
+    def test_disconnect_nonexistent_provider_returns_404(self, client, user):
         client.force_login(user)
         resp = client.post("/api/auth/providers/google/disconnect/")
         assert resp.status_code == 404
