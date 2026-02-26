@@ -170,8 +170,8 @@ async def test_non_member_returns_403(live_artifact, other_client):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_no_workspace_returns_400(member_user, member_client):
-    """Artifact with no workspace returns 400."""
+async def test_no_workspace_returns_403(member_user, member_client):
+    """Artifact with no workspace returns 403 for non-superusers."""
     artifact = await Artifact.objects.acreate(
         workspace=None,
         created_by=member_user,
@@ -183,7 +183,7 @@ async def test_no_workspace_returns_400(member_user, member_client):
     )
     url = reverse("artifacts:query_data", kwargs={"artifact_id": artifact.id})
     response = await member_client.get(url)
-    assert response.status_code == 400
+    assert response.status_code == 403
 
 
 @pytest.mark.django_db(transaction=True)

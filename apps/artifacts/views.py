@@ -754,7 +754,9 @@ class ArtifactQueryDataView(View):
         if not user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        if not user.is_superuser and artifact.workspace_id:
+        if not user.is_superuser:
+            if not artifact.workspace_id:
+                return JsonResponse({"error": "Access denied"}, status=403)
             from apps.users.models import TenantMembership
 
             has_access = await TenantMembership.objects.filter(
