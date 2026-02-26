@@ -11,6 +11,7 @@ interface OAuthProvider {
   name: string
   login_url: string
   connected: boolean
+  status?: "connected" | "expired" | "disconnected" | null
 }
 
 interface ApiKeyDomain {
@@ -170,8 +171,8 @@ export function ConnectionsPage() {
     try {
       await api.post(`/api/auth/providers/${providerId}/disconnect/`)
       await fetchProviders()
-    } catch {
-      setError("Failed to disconnect provider.")
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to disconnect provider.")
     } finally {
       setDisconnecting(null)
     }
@@ -431,11 +432,15 @@ export function ConnectionsPage() {
               <CardContent className="flex items-center justify-between p-4">
                 <div>
                   <p className="font-medium">{provider.name}</p>
-                  <p className="text-sm text-muted-foreground">
-                    {provider.connected ? "Connected" : "Not connected"}
+                  <p className={`text-sm ${provider.status === "expired" ? "text-amber-600" : "text-muted-foreground"}`}>
+                    {provider.status === "connected"
+                      ? "Connected"
+                      : provider.status === "expired"
+                        ? "Connection expired"
+                        : "Not connected"}
                   </p>
                 </div>
-                {provider.connected ? (
+                {provider.status === "connected" ? (
                   <Button
                     variant="outline"
                     size="sm"
@@ -448,7 +453,7 @@ export function ConnectionsPage() {
                 ) : (
                   <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
                     <a href={`${provider.login_url}?process=connect&next=/settings/connections`}>
-                      Connect
+                      {provider.status === "expired" ? "Reconnect" : "Connect"}
                     </a>
                   </Button>
                 )}
