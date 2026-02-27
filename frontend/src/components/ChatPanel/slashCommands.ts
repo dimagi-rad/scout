@@ -15,4 +15,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       return args ? `${base}\n\n${args}` : base
     },
   },
+  {
+    name: "refresh-data",
+    description: "Pull the latest data from connected accounts",
+    buildPrompt: (args) => {
+      const base =
+        "Trigger a fresh data sync from the connected account using the run_materialization tool. " +
+        "Run the appropriate pipeline to pull the latest data, then confirm when the sync is complete."
+      return args ? `${base}\n\n${args}` : base
+    },
+  },
 ]
