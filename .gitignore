@@ -66,6 +66,7 @@ Thumbs.db
 
 # Worktrees
 .worktrees/
+.claude/worktrees/
 
 # Frontend
 frontend/node_modules/
