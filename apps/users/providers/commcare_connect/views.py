@@ -9,19 +9,13 @@ from allauth.socialaccount.providers.oauth2.views import (
 
 
 class CommCareConnectOAuth2Adapter(OAuth2Adapter):
-    """
-    OAuth2 adapter for CommCare Connect.
-
-    Endpoint URLs are placeholders -- update when Connect's OAuth URLs
-    are confirmed.
-    """
+    """OAuth2 adapter for CommCare Connect (connect.dimagi.com)."""
 
     provider_id = "commcare_connect"
 
-    # Placeholder endpoints -- replace with actual Connect OAuth URLs
-    access_token_url = "https://connect.commcarehq.org/oauth/token/"
-    authorize_url = "https://connect.commcarehq.org/oauth/authorize/"
-    profile_url = "https://connect.commcarehq.org/api/v0.5/identity/"
+    access_token_url = "https://connect.dimagi.com/o/token/"
+    authorize_url = "https://connect.dimagi.com/o/authorize/"
+    profile_url = "https://connect.dimagi.com/api/users/me/"
 
     def complete_login(self, request, app, token, **kwargs):
         response = requests.get(

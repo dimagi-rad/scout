@@ -2,6 +2,12 @@
 
 Reads test targets from tests/smoke/.env. Tests skip gracefully when
 their required env vars are not configured.
+
+Run smoke tests against the real platform database:
+
+    uv run pytest -m smoke --override-ini="addopts=" \
+        -o "DJANGO_SETTINGS_MODULE=config.settings.development" \
+        -s --log-cli-level=INFO
 """
 
 from __future__ import annotations
@@ -24,6 +30,18 @@ def _csv_list(key: str) -> list[str]:
     """Read a comma-separated env var into a list of non-empty strings."""
     raw = smoke_env(key, default="")
     return [v.strip() for v in raw.split(",") if v.strip()]
+
+
+@pytest.fixture(scope="session")
+def django_db_setup():
+    """Skip test database creation — smoke tests use the real platform DB."""
+    pass
+
+
+@pytest.fixture(scope="session")
+def scout_base_url():
+    """Base URL for Scout's Django backend."""
+    return smoke_env("SCOUT_BASE_URL", default="http://localhost:8001")
 
 
 @pytest.fixture(params=_csv_list("CONNECT_OPPORTUNITY_IDS") or [None])
