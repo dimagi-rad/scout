@@ -26,6 +26,7 @@ def _make_loader(cls):
 # Visit loader tests
 # ---------------------------------------------------------------------------
 
+
 class TestConnectVisitLoader:
     @pytest.fixture
     def loader(self):
@@ -37,7 +38,7 @@ class TestConnectVisitLoader:
             "visit_date,status,reason,location,flagged,flag_reason,form_json,"
             "completed_work,status_modified_date,review_status,review_created_on,"
             "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-            '1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,'
+            "1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,"
             '"{""q1"": ""yes""}",cw1,2025-01-02,approved,2025-01-03,,2025-01-01,cw1,du1,[]\n'
         )
         with rm.Mocker() as m:
@@ -56,7 +57,7 @@ class TestConnectVisitLoader:
             "visit_date,status,reason,location,flagged,flag_reason,form_json,"
             "completed_work,status_modified_date,review_status,review_created_on,"
             "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-            '1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,'
+            "1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,"
             '"{""q1"": ""yes""}",cw1,2025-01-02,approved,2025-01-03,,2025-01-01,cw1,du1,[]\n'
         )
         with rm.Mocker() as m:
@@ -127,8 +128,7 @@ class TestConnectVisitLoader:
             "justification,date_created,completed_work_id,deliver_unit_id,images"
         )
         rows = [
-            f"{i},814,user{i},du,e,Ent,2025-01-01,approved,,,,,,,,,,,,,,[]"
-            for i in range(1, 1502)
+            f"{i},814,user{i},du,e,Ent,2025-01-01,approved,,,,,,,,,,,,,,[]" for i in range(1, 1502)
         ]
         csv_text = header + "\n" + "\n".join(rows) + "\n"
         with rm.Mocker() as m:
@@ -143,6 +143,7 @@ class TestConnectVisitLoader:
 # Simple loader tests (users, completed_works, payments, invoices,
 #                       assessments, completed_modules)
 # ---------------------------------------------------------------------------
+
 
 class TestConnectUserLoader:
     @pytest.fixture
@@ -255,10 +256,7 @@ class TestConnectCompletedModuleLoader:
         return _make_loader(ConnectCompletedModuleLoader)
 
     def test_load_pages(self, loader):
-        csv_text = (
-            "username,module,opportunity_id,date,duration\n"
-            "alice,mod1,814,2025-01-01,30\n"
-        )
+        csv_text = "username,module,opportunity_id,date,duration\nalice,mod1,814,2025-01-01,30\n"
         with rm.Mocker() as m:
             m.get(f"{BASE}/export/opportunity/{OPP_ID}/completed_module/", text=csv_text)
             pages = list(loader.load_pages())

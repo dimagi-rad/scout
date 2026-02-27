@@ -29,6 +29,14 @@ from apps.projects.services.schema_manager import SchemaManager, get_managed_db_
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
+from mcp_server.loaders.connect_assessments import ConnectAssessmentLoader
+from mcp_server.loaders.connect_completed_modules import ConnectCompletedModuleLoader
+from mcp_server.loaders.connect_completed_works import ConnectCompletedWorkLoader
+from mcp_server.loaders.connect_invoices import ConnectInvoiceLoader
+from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
+from mcp_server.loaders.connect_payments import ConnectPaymentLoader
+from mcp_server.loaders.connect_users import ConnectUserLoader
+from mcp_server.loaders.connect_visits import ConnectVisitLoader
 from mcp_server.pipeline_registry import PipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -82,7 +90,7 @@ def run_pipeline(
 
     try:
         # ── 2. DISCOVER ───────────────────────────────────────────────────────
-        report("Discovering tenant metadata from CommCare...")
+        report(f"Discovering tenant metadata from {pipeline.provider}...")
         _run_discover_phase(tenant_membership, credential, pipeline)
 
         # ── 3. LOAD ───────────────────────────────────────────────────────────
@@ -93,8 +101,15 @@ def run_pipeline(
         conn.autocommit = False
         try:
             for source in pipeline.sources:
-                report(f"Loading {source.name} from CommCare API...")
-                rows = _load_source(source.name, tenant_membership, credential, schema_name, conn)
+                report(f"Loading {source.name} from {pipeline.provider} API...")
+                rows = _load_source(
+                    source.name,
+                    tenant_membership,
+                    credential,
+                    schema_name,
+                    conn,
+                    provider=pipeline.provider,
+                )
                 source_results[source.name] = {"state": "loaded", "rows": rows}
                 logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
             conn.commit()
@@ -180,25 +195,26 @@ def run_pipeline(
 def _run_discover_phase(
     tenant_membership: Any, credential: dict[str, str], pipeline: PipelineConfig
 ) -> None:
-    """Fetch CommCare metadata and upsert into TenantMetadata."""
+    """Fetch provider metadata and upsert into TenantMetadata."""
     from django.utils import timezone
 
     if not pipeline.has_metadata_discovery:
         return
 
-    loader = CommCareMetadataLoader(domain=tenant_membership.tenant_id, credential=credential)
+    if pipeline.provider == "commcare_connect":
+        loader = ConnectMetadataLoader(
+            opportunity_id=int(tenant_membership.tenant_id),
+            credential=credential,
+        )
+    else:
+        loader = CommCareMetadataLoader(domain=tenant_membership.tenant_id, credential=credential)
     metadata = loader.load()
 
     TenantMetadata.objects.update_or_create(
         tenant_membership=tenant_membership,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
-    logger.info(
-        "Stored metadata for tenant %s: %d apps, %d case types",
-        tenant_membership.tenant_id,
-        len(metadata.get("app_definitions", [])),
-        len(metadata.get("case_types", [])),
-    )
+    logger.info("Stored metadata for tenant %s", tenant_membership.tenant_id)
 
 
 def _load_source(
@@ -207,7 +223,11 @@ def _load_source(
     credential: dict[str, str],
     schema_name: str,
     conn: Any,
+    provider: str = "commcare",
 ) -> int:
+    if provider == "commcare_connect":
+        return _load_connect_source(source_name, tenant_membership, credential, schema_name, conn)
+    # Existing CommCare dispatch
     domain = tenant_membership.tenant_id
     if source_name == "cases":
         loader = CommCareCaseLoader(domain=domain, credential=credential)
@@ -216,6 +236,32 @@ def _load_source(
         loader = CommCareFormLoader(domain=domain, credential=credential)
         return _write_forms(loader.load_pages(), schema_name, conn)
     raise ValueError(f"Unknown source '{source_name}'. Known sources: cases, forms")
+
+
+def _load_connect_source(
+    source_name: str,
+    tenant_membership: Any,
+    credential: dict[str, str],
+    schema_name: str,
+    conn: Any,
+) -> int:
+    opp_id = int(tenant_membership.tenant_id)
+    loader_map = {
+        "visits": (ConnectVisitLoader, _write_connect_visits),
+        "users": (ConnectUserLoader, _write_connect_users),
+        "completed_works": (ConnectCompletedWorkLoader, _write_connect_completed_works),
+        "payments": (ConnectPaymentLoader, _write_connect_payments),
+        "invoices": (ConnectInvoiceLoader, _write_connect_invoices),
+        "assessments": (ConnectAssessmentLoader, _write_connect_assessments),
+        "completed_modules": (ConnectCompletedModuleLoader, _write_connect_completed_modules),
+    }
+    if source_name not in loader_map:
+        known = ", ".join(loader_map.keys())
+        raise ValueError(f"Unknown Connect source '{source_name}'. Known: {known}")
+
+    loader_cls, writer_fn = loader_map[source_name]
+    loader = loader_cls(opportunity_id=opp_id, credential=credential)
+    return writer_fn(loader.load_pages(), schema_name, conn)
 
 
 def _run_transform_phase(pipeline: PipelineConfig, schema_name: str) -> dict:
@@ -367,6 +413,472 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
                 json.dumps(f.get("case_ids", [])),
             )
             for f in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+# ── Connect table writers ──────────────────────────────────────────────────────
+
+_CONNECT_VISITS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.visits
+        (visit_id, opportunity_id, username, deliver_unit, entity_id, entity_name,
+         visit_date, status, reason, location, flagged, flag_reason, form_json,
+         completed_work, status_modified_date, review_status, review_created_on,
+         justification, date_created, completed_work_id, deliver_unit_id, images)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (visit_id) DO UPDATE SET
+        status=EXCLUDED.status, form_json=EXCLUDED.form_json,
+        review_status=EXCLUDED.review_status, images=EXCLUDED.images
+    """
+)
+
+_CONNECT_USERS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.users
+        (username, name, phone, date_learn_started, user_invite_status,
+         payment_accrued, suspended, suspension_date, suspension_reason,
+         invited_date, completed_learn_date, last_active, date_claimed, claim_limits)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (username) DO UPDATE SET
+        name=EXCLUDED.name, phone=EXCLUDED.phone,
+        payment_accrued=EXCLUDED.payment_accrued, last_active=EXCLUDED.last_active
+    """
+)
+
+_CONNECT_COMPLETED_WORKS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.completed_works
+        (username, opportunity_id, payment_unit_id, status, last_modified,
+         entity_id, entity_name, reason, status_modified_date, payment_date,
+         date_created, saved_completed_count, saved_approved_count,
+         saved_payment_accrued, saved_payment_accrued_usd,
+         saved_org_payment_accrued, saved_org_payment_accrued_usd)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+)
+
+_CONNECT_PAYMENTS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.payments
+        (username, opportunity_id, created_at, amount, amount_usd, date_paid,
+         payment_unit, confirmed, confirmation_date, organization, invoice_id,
+         payment_method, payment_operator)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+)
+
+_CONNECT_INVOICES_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.invoices
+        (opportunity_id, amount, amount_usd, date, invoice_number,
+         service_delivery, exchange_rate)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+)
+
+_CONNECT_ASSESSMENTS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.assessments
+        (username, app, opportunity_id, date, score, passing_score, passed)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    """
+)
+
+_CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.completed_modules
+        (username, module, opportunity_id, date, duration)
+    VALUES (%s, %s, %s, %s, %s)
+    """
+)
+
+
+def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the visits table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.visits CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.visits (
+            visit_id TEXT PRIMARY KEY,
+            opportunity_id TEXT,
+            username TEXT,
+            deliver_unit TEXT,
+            entity_id TEXT,
+            entity_name TEXT,
+            visit_date TEXT,
+            status TEXT,
+            reason TEXT,
+            location TEXT,
+            flagged TEXT,
+            flag_reason TEXT,
+            form_json JSONB,
+            completed_work TEXT,
+            status_modified_date TEXT,
+            review_status TEXT,
+            review_created_on TEXT,
+            justification TEXT,
+            date_created TEXT,
+            completed_work_id TEXT,
+            deliver_unit_id TEXT,
+            images JSONB
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_VISITS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("visit_id", ""),
+                r.get("opportunity_id", ""),
+                r.get("username", ""),
+                r.get("deliver_unit", ""),
+                r.get("entity_id", ""),
+                r.get("entity_name", ""),
+                r.get("visit_date", ""),
+                r.get("status", ""),
+                r.get("reason", ""),
+                r.get("location", ""),
+                r.get("flagged", ""),
+                r.get("flag_reason", ""),
+                json.dumps(r.get("form_json", {})),
+                r.get("completed_work", ""),
+                r.get("status_modified_date", ""),
+                r.get("review_status", ""),
+                r.get("review_created_on", ""),
+                r.get("justification", ""),
+                r.get("date_created", ""),
+                r.get("completed_work_id", ""),
+                r.get("deliver_unit_id", ""),
+                json.dumps(r.get("images", [])),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the users table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.users CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.users (
+            username TEXT PRIMARY KEY,
+            name TEXT,
+            phone TEXT,
+            date_learn_started TEXT,
+            user_invite_status TEXT,
+            payment_accrued TEXT,
+            suspended TEXT,
+            suspension_date TEXT,
+            suspension_reason TEXT,
+            invited_date TEXT,
+            completed_learn_date TEXT,
+            last_active TEXT,
+            date_claimed TEXT,
+            claim_limits TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_USERS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("username", ""),
+                r.get("name", ""),
+                r.get("phone", ""),
+                r.get("date_learn_started", ""),
+                r.get("user_invite_status", ""),
+                r.get("payment_accrued", ""),
+                r.get("suspended", ""),
+                r.get("suspension_date", ""),
+                r.get("suspension_reason", ""),
+                r.get("invited_date", ""),
+                r.get("completed_learn_date", ""),
+                r.get("last_active", ""),
+                r.get("date_claimed", ""),
+                r.get("claim_limits", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the completed_works table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.completed_works CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.completed_works (
+            username TEXT,
+            opportunity_id TEXT,
+            payment_unit_id TEXT,
+            status TEXT,
+            last_modified TEXT,
+            entity_id TEXT,
+            entity_name TEXT,
+            reason TEXT,
+            status_modified_date TEXT,
+            payment_date TEXT,
+            date_created TEXT,
+            saved_completed_count TEXT,
+            saved_approved_count TEXT,
+            saved_payment_accrued TEXT,
+            saved_payment_accrued_usd TEXT,
+            saved_org_payment_accrued TEXT,
+            saved_org_payment_accrued_usd TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_COMPLETED_WORKS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("username", ""),
+                r.get("opportunity_id", ""),
+                r.get("payment_unit_id", ""),
+                r.get("status", ""),
+                r.get("last_modified", ""),
+                r.get("entity_id", ""),
+                r.get("entity_name", ""),
+                r.get("reason", ""),
+                r.get("status_modified_date", ""),
+                r.get("payment_date", ""),
+                r.get("date_created", ""),
+                r.get("saved_completed_count", ""),
+                r.get("saved_approved_count", ""),
+                r.get("saved_payment_accrued", ""),
+                r.get("saved_payment_accrued_usd", ""),
+                r.get("saved_org_payment_accrued", ""),
+                r.get("saved_org_payment_accrued_usd", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the payments table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.payments CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.payments (
+            username TEXT,
+            opportunity_id TEXT,
+            created_at TEXT,
+            amount TEXT,
+            amount_usd TEXT,
+            date_paid TEXT,
+            payment_unit TEXT,
+            confirmed TEXT,
+            confirmation_date TEXT,
+            organization TEXT,
+            invoice_id TEXT,
+            payment_method TEXT,
+            payment_operator TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_PAYMENTS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("username", ""),
+                r.get("opportunity_id", ""),
+                r.get("created_at", ""),
+                r.get("amount", ""),
+                r.get("amount_usd", ""),
+                r.get("date_paid", ""),
+                r.get("payment_unit", ""),
+                r.get("confirmed", ""),
+                r.get("confirmation_date", ""),
+                r.get("organization", ""),
+                r.get("invoice_id", ""),
+                r.get("payment_method", ""),
+                r.get("payment_operator", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the invoices table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.invoices CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.invoices (
+            opportunity_id TEXT,
+            amount TEXT,
+            amount_usd TEXT,
+            date TEXT,
+            invoice_number TEXT,
+            service_delivery TEXT,
+            exchange_rate TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_INVOICES_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("opportunity_id", ""),
+                r.get("amount", ""),
+                r.get("amount_usd", ""),
+                r.get("date", ""),
+                r.get("invoice_number", ""),
+                r.get("service_delivery", ""),
+                r.get("exchange_rate", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the assessments table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.assessments CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.assessments (
+            username TEXT,
+            app TEXT,
+            opportunity_id TEXT,
+            date TEXT,
+            score TEXT,
+            passing_score TEXT,
+            passed TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_ASSESSMENTS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("username", ""),
+                r.get("app", ""),
+                r.get("opportunity_id", ""),
+                r.get("date", ""),
+                r.get("score", ""),
+                r.get("passing_score", ""),
+                r.get("passed", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_connect_completed_modules(
+    pages: Iterator[list[dict]], schema_name: str, conn: Any
+) -> int:
+    """Create the completed_modules table and bulk-insert all pages. Returns total row count."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.completed_modules CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.completed_modules (
+            username TEXT,
+            module TEXT,
+            opportunity_id TEXT,
+            date TEXT,
+            duration TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _CONNECT_COMPLETED_MODULES_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("username", ""),
+                r.get("module", ""),
+                r.get("opportunity_id", ""),
+                r.get("date", ""),
+                r.get("duration", ""),
+            )
+            for r in page
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)

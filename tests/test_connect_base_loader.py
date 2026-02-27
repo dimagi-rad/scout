@@ -68,7 +68,5 @@ class TestConnectBaseLoader:
                 headers={"Content-Type": "text/csv"},
                 status_code=200,
             )
-            rows = loader._get_csv(
-                "https://connect.example.com/export/opportunity/814/user_data/"
-            )
+            rows = loader._get_csv("https://connect.example.com/export/opportunity/814/user_data/")
             assert rows == []

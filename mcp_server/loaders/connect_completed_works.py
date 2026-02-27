@@ -19,9 +19,7 @@ class ConnectCompletedWorkLoader(ConnectBaseLoader):
     def load_pages(self) -> Iterator[list[dict]]:
         url = self._opp_url("completed_works/")
         rows = self._get_csv(url)
-        logger.info(
-            "Fetched %d completed works for opportunity %s", len(rows), self.opportunity_id
-        )
+        logger.info("Fetched %d completed works for opportunity %s", len(rows), self.opportunity_id)
         if rows:
             yield rows
 

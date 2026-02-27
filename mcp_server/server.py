@@ -430,9 +430,7 @@ async def run_materialization(
             tm = (
                 await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
                 if tenant_membership_id
-                else await qs.aget(
-                    tenant_id=tenant_id, provider=pipeline_config.provider
-                )
+                else await qs.aget(tenant_id=tenant_id, provider=pipeline_config.provider)
             )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")

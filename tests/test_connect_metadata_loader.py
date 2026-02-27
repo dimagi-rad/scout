@@ -31,9 +31,7 @@ class TestConnectMetadataLoader:
                             "program": 25,
                         }
                     ],
-                    "programs": [
-                        {"id": 25, "name": "CHC Nutrition", "organization": "dimagi"}
-                    ],
+                    "programs": [{"id": 25, "name": "CHC Nutrition", "organization": "dimagi"}],
                 },
             )
             m.get(
