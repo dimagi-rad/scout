@@ -15,7 +15,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# (connect_timeout_seconds, read_timeout_seconds)
+# (connect_timeout, read_timeout) — 300s read timeout for large CSV exports
 HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 
 
@@ -44,7 +44,7 @@ class ConnectBaseLoader:
                 from django.conf import settings
 
                 base_url = getattr(settings, "CONNECT_API_URL", self.DEFAULT_BASE_URL)
-            except Exception:
+            except ImportError:
                 base_url = self.DEFAULT_BASE_URL
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()

@@ -25,9 +25,11 @@ def _parse_json_field(value: str) -> dict | list:
     try:
         return json.loads(value)
     except (json.JSONDecodeError, ValueError):
+        logger.debug("form_json is not valid JSON, trying Python literal_eval")
         try:
             return ast.literal_eval(value)
         except (ValueError, SyntaxError):
+            logger.warning("form_json could not be parsed as JSON or Python literal: %.200s", value)
             return {}
 
 
