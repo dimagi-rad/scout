@@ -11,8 +11,10 @@ from apps.chat.views import public_thread_view
 from apps.projects.api.views import RefreshSchemaView
 from apps.projects.views import health_check
 from apps.recipes.api.views import PublicRecipeRunView
+from config.views import widget_js_view
 
 urlpatterns = [
+    path("widget.js", widget_js_view, name="widget-js"),
     path("health/", health_check, name="health_check"),
     path("admin/", admin.site.urls),
     path("accounts/", include("allauth.urls")),

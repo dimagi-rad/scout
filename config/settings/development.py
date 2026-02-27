@@ -33,6 +33,14 @@ if not MANAGED_DATABASE_URL:  # noqa: F405
 # MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")
 # INTERNAL_IPS = ["127.0.0.1"]
 
+# Allow local Connect Labs to embed Scout
+EMBED_ALLOWED_ORIGINS = ["http://localhost:8001", "http://localhost:3000"]
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",  # Vite dev
+    "http://localhost:8001",  # Connect Labs dev
+    "http://localhost:3000",  # Connect Labs frontend dev
+]
+
 # Logging
 LOGGING = {
     "version": 1,
