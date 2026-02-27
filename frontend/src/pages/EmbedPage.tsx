@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useCallback } from "react"
 import { RouterProvider, createBrowserRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
@@ -8,13 +8,7 @@ import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
-import { useEmbedParams } from "@/hooks/useEmbedParams"
-
-function notifyParent(type: string, payload?: Record<string, unknown>) {
-  if (window.parent !== window) {
-    window.parent.postMessage({ type, ...payload }, "*")
-  }
-}
+import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
 
 const embedRouter = createBrowserRouter([
   {
@@ -36,8 +30,17 @@ const embedRouter = createBrowserRouter([
 export function EmbedPage() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
-  // tenant param available via useEmbedParams() for future multi-tenant support
-  useEmbedParams()
+
+  const handleCommand = useCallback((type: string, payload: Record<string, unknown>) => {
+    if (type === "scout:set-tenant") {
+      console.log("[Scout Embed] set-tenant:", payload.tenant)
+    }
+    if (type === "scout:set-mode") {
+      console.log("[Scout Embed] set-mode:", payload.mode)
+    }
+  }, [])
+
+  const { sendEvent } = useEmbedMessaging(handleCommand)
 
   useEffect(() => {
     fetchMe()
@@ -45,11 +48,11 @@ export function EmbedPage() {
 
   useEffect(() => {
     if (authStatus === "authenticated") {
-      notifyParent("scout:ready")
+      sendEvent("scout:ready")
     } else if (authStatus === "unauthenticated") {
-      notifyParent("scout:auth-required")
+      sendEvent("scout:auth-required")
     }
-  }, [authStatus])
+  }, [authStatus, sendEvent])
 
   if (authStatus === "idle" || authStatus === "loading") {
     return (
