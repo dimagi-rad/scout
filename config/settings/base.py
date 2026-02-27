@@ -73,6 +73,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "config.middleware.embed.EmbedFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
 ]
 
@@ -268,6 +269,9 @@ CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
 SESSION_COOKIE_NAME = "sessionid_scout"
+
+# Embed widget settings
+EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 
 # Celery configuration
