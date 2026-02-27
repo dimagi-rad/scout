@@ -20,7 +20,7 @@ export function useEmbedMessaging(onCommand?: MessageHandler) {
     function handleMessage(event: MessageEvent) {
       const data = event.data
       if (!data || typeof data.type !== "string" || !data.type.startsWith("scout:")) return
-      onCommand(data.type, data.payload || {})
+      onCommand?.(data.type, data.payload || {})
     }
 
     window.addEventListener("message", handleMessage)
