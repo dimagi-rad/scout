@@ -24,4 +24,10 @@ class EmbedFrameOptionsMiddleware:
         # Set CSP frame-ancestors
         origins = " ".join(allowed_origins)
         response["Content-Security-Policy"] = f"frame-ancestors 'self' {origins}"
+
+        # Patch cookies for cross-origin iframe usage
+        for cookie_name in response.cookies:
+            response.cookies[cookie_name]["samesite"] = "None"
+            response.cookies[cookie_name]["secure"] = True
+
         return response

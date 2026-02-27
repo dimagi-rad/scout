@@ -45,3 +45,23 @@ class TestEmbedFrameOptionsMiddleware:
         request = self.factory.get("/embed/")
         response = self.middleware(request)
         assert response.get("X-Frame-Options") == "DENY"
+
+    @override_settings(EMBED_ALLOWED_ORIGINS=["https://connect-labs.example.com"])
+    def test_embed_route_sets_samesite_none_on_cookies(self):
+        self._make_response()
+        self._response.set_cookie("sessionid_scout", "abc123")
+        self._response.set_cookie("csrftoken_scout", "xyz789")
+        request = self.factory.get("/embed/")
+        response = self.middleware(request)
+        for cookie_name in ["sessionid_scout", "csrftoken_scout"]:
+            cookie = response.cookies[cookie_name]
+            assert cookie["samesite"] == "None"
+            assert cookie["secure"] is True
+
+    @override_settings(EMBED_ALLOWED_ORIGINS=["https://connect-labs.example.com"])
+    def test_non_embed_route_does_not_change_cookies(self):
+        self._make_response()
+        self._response.set_cookie("sessionid_scout", "abc123", samesite="Lax")
+        request = self.factory.get("/api/chat/")
+        response = self.middleware(request)
+        assert response.cookies["sessionid_scout"]["samesite"] == "Lax"
