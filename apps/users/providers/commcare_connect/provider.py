@@ -32,17 +32,24 @@ class CommCareConnectProvider(OAuth2Provider):
     oauth2_adapter_class = CommCareConnectOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
-        return ["read"]
+        return ["read", "export"]
 
     def extract_uid(self, data: dict) -> str:
-        return str(data["id"])
+        # /api/users/me/ returns {"name": "...", "url": "http://.../api/users/123/"}
+        # Extract the pk from the URL as the uid
+        if "id" in data:
+            return str(data["id"])
+        url = data.get("url", "")
+        pk = url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        return pk
 
     def extract_common_fields(self, data: dict) -> dict:
+        name = data.get("name", "")
         return {
-            "email": data.get("email"),
-            "username": data.get("username"),
-            "first_name": data.get("first_name", ""),
-            "last_name": data.get("last_name", ""),
+            "email": data.get("email", ""),
+            "username": data.get("username", name),
+            "first_name": name,
+            "last_name": "",
         }
 
 
