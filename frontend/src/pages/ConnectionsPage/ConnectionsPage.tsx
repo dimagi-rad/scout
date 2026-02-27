@@ -308,11 +308,10 @@ export function ConnectionsPage() {
                         Cancel
                       </Button>
                       <Button
-                        variant="outline"
+                        variant="destructive"
                         size="sm"
                         onClick={() => confirmRemove(domain.membership_id)}
                         disabled={removing === domain.membership_id}
-                        className="border-red-300 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800"
                         data-testid={`confirm-remove-${domain.tenant_id}`}
                       >
                         {removing === domain.membership_id ? "Removing..." : "Confirm Remove"}
@@ -339,10 +338,9 @@ export function ConnectionsPage() {
                         Edit
                       </Button>
                       <Button
-                        variant="outline"
+                        variant="destructive"
                         size="sm"
                         onClick={() => setConfirmRemoveId(domain.membership_id)}
-                        className="border-red-300 bg-red-50 text-red-700 hover:bg-red-100 hover:text-red-800"
                         data-testid={`remove-domain-${domain.tenant_id}`}
                       >
                         Remove
