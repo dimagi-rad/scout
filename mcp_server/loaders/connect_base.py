@@ -39,7 +39,14 @@ class ConnectBaseLoader:
         base_url: str | None = None,
     ) -> None:
         self.opportunity_id = opportunity_id
-        self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
+        if base_url is None:
+            try:
+                from django.conf import settings
+
+                base_url = getattr(settings, "CONNECT_API_URL", self.DEFAULT_BASE_URL)
+            except Exception:
+                base_url = self.DEFAULT_BASE_URL
+        self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
 
