@@ -1,5 +1,5 @@
 import pytest
-from django.test import RequestFactory, override_settings
+from django.test import Client, RequestFactory, override_settings
 
 from config.middleware.embed import EmbedFrameOptionsMiddleware
 
@@ -65,3 +65,22 @@ class TestEmbedFrameOptionsMiddleware:
         request = self.factory.get("/api/chat/")
         response = self.middleware(request)
         assert response.cookies["sessionid_scout"]["samesite"] == "Lax"
+
+
+class TestWidgetJSView:
+    def test_widget_js_returns_javascript(self):
+        client = Client()
+        response = client.get("/widget.js")
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/javascript"
+
+    def test_widget_js_contains_scout_widget(self):
+        client = Client()
+        response = client.get("/widget.js")
+        content = response.content.decode()
+        assert "ScoutWidget" in content
+
+    def test_widget_js_has_cors_header(self):
+        client = Client()
+        response = client.get("/widget.js")
+        assert response.get("Access-Control-Allow-Origin") == "*"
