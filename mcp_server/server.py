@@ -401,28 +401,38 @@ async def run_materialization(
     pipeline: str = "commcare_sync",
     ctx: Context | None = None,
 ) -> dict:
-    """Materialize data from CommCare into the tenant's schema.
+    """Materialize data from a provider into the tenant's schema.
 
     Runs a three-phase pipeline (Discover → Load → Transform). Creates the schema
     automatically if it doesn't exist. Streams progress via MCP notifications/progress
     when the caller provides a progressToken.
 
     Args:
-        tenant_id: The tenant identifier (CommCare domain name).
+        tenant_id: The tenant identifier (domain or opportunity slug).
         tenant_membership_id: UUID of the specific TenantMembership to use.
         pipeline: Pipeline to run (default: commcare_sync).
     """
     from apps.users.models import TenantCredential, TenantMembership
     from mcp_server.loaders.commcare_base import CommCareAuthError
+    from mcp_server.loaders.connect_base import ConnectAuthError
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
+        # ── Resolve pipeline config ───────────────────────────────────────────
+        registry = get_registry()
+        pipeline_config = registry.get(pipeline)
+        if pipeline_config is None:
+            tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
+            return tc["result"]
+
         # ── Resolve TenantMembership ──────────────────────────────────────────
         try:
             qs = TenantMembership.objects.select_related("user")
             tm = (
                 await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
                 if tenant_membership_id
-                else await qs.aget(tenant_id=tenant_id, provider="commcare")
+                else await qs.aget(
+                    tenant_id=tenant_id, provider=pipeline_config.provider
+                )
             )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
@@ -452,25 +462,27 @@ async def run_materialization(
         else:
             from allauth.socialaccount.models import SocialToken
 
-            token_obj = (
-                await SocialToken.objects.filter(
+            if tm.provider == "commcare_connect":
+                token_obj = await SocialToken.objects.filter(
                     account__user=tm.user,
-                    account__provider__startswith="commcare",
+                    account__provider__startswith="commcare_connect",
+                ).afirst()
+            else:
+                token_obj = (
+                    await SocialToken.objects.filter(
+                        account__user=tm.user,
+                        account__provider__startswith="commcare",
+                    )
+                    .exclude(account__provider__startswith="commcare_connect")
+                    .afirst()
                 )
-                .exclude(account__provider__startswith="commcare_connect")
-                .afirst()
-            )
             if not token_obj:
-                tc["result"] = error_response("AUTH_TOKEN_MISSING", "No CommCare OAuth token found")
+                tc["result"] = error_response(
+                    "AUTH_TOKEN_MISSING",
+                    f"No OAuth token found for provider '{tm.provider}'",
+                )
                 return tc["result"]
             credential = {"type": "oauth", "value": token_obj.token}
-
-        # ── Resolve pipeline config ───────────────────────────────────────────
-        registry = get_registry()
-        pipeline_config = registry.get(pipeline)
-        if pipeline_config is None:
-            tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
-            return tc["result"]
 
         # ── Build progress callback ───────────────────────────────────────────
         # run_pipeline runs in a thread (via sync_to_async), so we bridge back
@@ -497,8 +509,8 @@ async def run_materialization(
             result = await sync_to_async(run_pipeline)(
                 tm, credential, pipeline_config, progress_callback
             )
-        except CommCareAuthError as e:
-            logger.warning("CommCare auth failed for tenant %s: %s", tenant_id, e)
+        except (CommCareAuthError, ConnectAuthError) as e:
+            logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
             tc["result"] = error_response(AUTH_TOKEN_EXPIRED, str(e))
             return tc["result"]
         except Exception:
