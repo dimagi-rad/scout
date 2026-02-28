@@ -86,3 +86,9 @@ def check(c: Context) -> None:
 def docker_up(c: Context) -> None:
     """Start all services via Docker Compose (api :8000, frontend :3000, mcp :8100)."""
     c.run("docker compose up", pty=True)
+
+
+@task
+def purge_data(c: Context) -> None:
+    """Purge all materialized tenant data (schemas, metadata, data dictionaries). Dev only."""
+    c.run("uv run python manage.py purge_synced_data --confirm", pty=True)
