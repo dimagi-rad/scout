@@ -238,6 +238,9 @@ DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
+# CommCare Connect API
+CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
+
 
 # Cache configuration
 # Use Redis if available, otherwise fall back to local memory cache
