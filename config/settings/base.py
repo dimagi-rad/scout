@@ -73,6 +73,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "config.middleware.embed.EmbedFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
 ]
 
@@ -237,6 +238,9 @@ DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
+# CommCare Connect API
+CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
+
 
 # Cache configuration
 # Use Redis if available, otherwise fall back to local memory cache
@@ -268,6 +272,9 @@ CSRF_COOKIE_HTTPONLY = False
 # Trust the Vite dev server origin for CSRF
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
 SESSION_COOKIE_NAME = "sessionid_scout"
+
+# Embed widget settings
+EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 
 # Celery configuration

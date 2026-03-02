@@ -7,6 +7,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { router } from "@/router"
 import { PublicRecipeRunPage } from "@/pages/PublicRecipeRunPage"
 import { PublicThreadPage } from "@/pages/PublicThreadPage"
+import { EmbedPage } from "@/pages/EmbedPage"
 
 function getPublicPageComponent(): React.ReactNode | null {
   const path = window.location.pathname
@@ -20,15 +21,20 @@ export default function App() {
   const user = useAppStore((s) => s.user)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(window.location.pathname)
+  const isEmbedPage = window.location.pathname.startsWith("/embed")
 
   useEffect(() => {
-    if (!isPublicPage) {
+    if (!isPublicPage && !isEmbedPage) {
       fetchMe()
     }
-  }, [fetchMe, isPublicPage])
+  }, [fetchMe, isPublicPage, isEmbedPage])
 
   if (isPublicPage) {
     return getPublicPageComponent()
+  }
+
+  if (isEmbedPage) {
+    return <EmbedPage />
   }
 
   if (authStatus === "idle" || authStatus === "loading") {

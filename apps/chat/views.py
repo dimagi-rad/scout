@@ -157,6 +157,24 @@ def me_view(request):
                     "Failed to resolve CommCare domains in me_view", exc_info=True
                 )
 
+    # Same for Connect OAuth — resolve opportunities if token exists.
+    if not onboarding_complete:
+        from apps.users.views import _get_connect_token
+
+        connect_token = _get_connect_token(user)
+        if connect_token:
+            try:
+                from apps.users.services.tenant_resolution import resolve_connect_opportunities
+
+                resolve_connect_opportunities(user, connect_token)
+                onboarding_complete = True
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Failed to resolve Connect opportunities in me_view", exc_info=True
+                )
+
     return JsonResponse(
         {
             "id": str(user.id),

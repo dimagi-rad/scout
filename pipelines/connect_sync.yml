@@ -1,0 +1,50 @@
+pipeline: connect_sync
+description: "Sync data from CommCare Connect"
+version: "1.0"
+provider: commcare_connect
+
+sources:
+  - name: visits
+    description: "User visit records with form data"
+  - name: users
+    description: "FLW/worker roster"
+  - name: completed_works
+    description: "Completed work records"
+  - name: payments
+    description: "Payment records"
+  - name: invoices
+    description: "Invoice records"
+  - name: assessments
+    description: "Assessment results"
+  - name: completed_modules
+    description: "Learn module completions"
+
+metadata_discovery:
+  description: "Fetch opportunity detail and org/program structure from Connect API"
+
+relationships:
+  - from_table: visits
+    from_column: username
+    to_table: users
+    to_column: username
+    description: "Visits reference the FLW who performed them"
+  - from_table: completed_works
+    from_column: username
+    to_table: users
+    to_column: username
+    description: "Completed works reference the FLW"
+  - from_table: payments
+    from_column: username
+    to_table: users
+    to_column: username
+    description: "Payments reference the FLW who earned them"
+  - from_table: assessments
+    from_column: username
+    to_table: users
+    to_column: username
+    description: "Assessments reference the FLW"
+  - from_table: completed_modules
+    from_column: username
+    to_table: users
+    to_column: username
+    description: "Module completions reference the FLW"

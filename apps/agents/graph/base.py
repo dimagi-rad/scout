@@ -359,11 +359,20 @@ def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMe
     if knowledge_context:
         sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
+    provider = tenant_membership.provider
+    if provider == "commcare_connect":
+        pipeline_name = "connect_sync"
+        data_label = "Connect"
+    else:
+        pipeline_name = "commcare_sync"
+        data_label = "CommCare"
+
     sections.append(f"""
 ## Tenant Context
 
 - Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant_id})
-- Provider: {tenant_membership.provider}
+- Provider: {provider}
+- Pipeline: {pipeline_name}
 
 ## Query Configuration
 
@@ -378,10 +387,10 @@ At the start of every conversation, call `get_schema_status` to check whether
 data has been loaded for this tenant.
 
 - If `exists` is false or `state` is `not_provisioned`: tell the user you are
-  loading their CommCare data ("I'll load your data now — this usually takes a
-  minute"), then call `run_materialization`. When it completes, summarise what
-  was loaded (tables and row counts from the result), then answer the original
-  question.
+  loading their {data_label} data ("I'll load your data now — this usually takes a
+  minute"), then call `run_materialization` with `pipeline="{pipeline_name}"`.
+  When it completes, summarise what was loaded (tables and row counts from the
+  result), then answer the original question.
 
 - If `state` is `materializing`: a load is already in progress. Tell the user
   ("Your data is currently loading — this usually takes a minute") and suggest

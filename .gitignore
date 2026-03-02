@@ -39,6 +39,7 @@ staticfiles/
 
 # Secrets
 .env
+tests/smoke/.env
 *.pem
 *.key
 

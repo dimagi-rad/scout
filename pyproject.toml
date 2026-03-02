@@ -81,7 +81,10 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "config.settings.test"
 python_files = ["test_*.py"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not smoke'"
+markers = [
+    "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
+]
 
 [dependency-groups]
 dev = [

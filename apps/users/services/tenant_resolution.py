@@ -50,6 +50,55 @@ class CommCareAuthError(Exception):
     """Raised when CommCare returns a 401/403 during domain resolution."""
 
 
+class ConnectAuthError(Exception):
+    """Raised when Connect returns a 401/403 during opportunity resolution."""
+
+
+def resolve_connect_opportunities(user, access_token: str) -> list[TenantMembership]:
+    """Fetch the user's Connect opportunities and upsert TenantMembership records."""
+    try:
+        from django.conf import settings
+
+        base_url = getattr(settings, "CONNECT_API_URL", "https://connect.dimagi.com")
+    except ImportError:
+        base_url = "https://connect.dimagi.com"
+
+    url = f"{base_url.rstrip('/')}/export/opp_org_program_list/"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=30,
+    )
+    if resp.status_code in (401, 403):
+        raise ConnectAuthError(
+            f"Connect returned {resp.status_code} — access token may have expired"
+        )
+    resp.raise_for_status()
+
+    opportunities = resp.json().get("opportunities", [])
+    memberships = []
+
+    for opp in opportunities:
+        tm, _created = TenantMembership.objects.update_or_create(
+            user=user,
+            provider="commcare_connect",
+            tenant_id=str(opp["id"]),
+            defaults={"tenant_name": opp["name"]},
+        )
+        TenantCredential.objects.get_or_create(
+            tenant_membership=tm,
+            defaults={"credential_type": TenantCredential.OAUTH},
+        )
+        memberships.append(tm)
+
+    logger.info(
+        "Resolved %d Connect opportunities for user %s",
+        len(memberships),
+        user.email,
+    )
+    return memberships
+
+
 def _fetch_all_domains(access_token: str) -> list[dict]:
     """Paginate through the CommCare user_domains API.
 

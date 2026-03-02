@@ -74,6 +74,25 @@ relationships:
         assert r.to_column == "case_id"
         assert r.description == "Forms reference cases"
 
+    def test_loads_connect_sync_pipeline(self):
+        """Test that the real connect_sync.yml loads correctly from the pipelines dir."""
+        registry = PipelineRegistry()
+        config = registry.get("connect_sync")
+        assert config is not None
+        assert config.name == "connect_sync"
+        assert config.provider == "commcare_connect"
+        assert len(config.sources) == 7
+        source_names = [s.name for s in config.sources]
+        assert "visits" in source_names
+        assert "users" in source_names
+        assert "completed_works" in source_names
+        assert "payments" in source_names
+        assert "invoices" in source_names
+        assert "assessments" in source_names
+        assert "completed_modules" in source_names
+        assert config.has_metadata_discovery
+        assert len(config.relationships) == 5
+
     def test_relationships_defaults_to_empty(self, tmp_path):
         yml = tmp_path / "no_rel.yml"
         yml.write_text(
