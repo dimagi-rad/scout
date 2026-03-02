@@ -37,6 +37,7 @@ class TenantSchema(models.Model):
     last_accessed_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = "projects_tenantschema"
         ordering = ["-last_accessed_at"]
 
     def __str__(self):
@@ -67,6 +68,7 @@ class MaterializationRun(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        db_table = "projects_materializationrun"
         ordering = ["-started_at"]
 
     def __str__(self):
@@ -97,6 +99,7 @@ class TenantWorkspace(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = "projects_tenantworkspace"
         ordering = ["tenant_name"]
 
     def __str__(self):
@@ -133,6 +136,7 @@ class TenantMetadata(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        db_table = "projects_tenantmetadata"
         verbose_name = "Tenant Metadata"
         verbose_name_plural = "Tenant Metadata"
 

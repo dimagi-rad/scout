@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
         ("artifacts", "0003_rescope_to_workspace"),
         ("chat", "0004_rescope_to_workspace"),
         ("knowledge", "0006_rescope_to_workspace"),
-        ("projects", "0012_add_tenant_workspace"),
+        ("workspace", "0012_add_tenant_workspace"),
         ("recipes", "0005_rescope_to_workspace"),
     ]
 

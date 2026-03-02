@@ -44,7 +44,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
     from asgiref.sync import sync_to_async
     from django.conf import settings
 
-    from apps.projects.models import SchemaState, TenantSchema
+    from apps.workspace.models import SchemaState, TenantSchema
 
     ts = await TenantSchema.objects.filter(
         tenant_membership__tenant_id=tenant_id,

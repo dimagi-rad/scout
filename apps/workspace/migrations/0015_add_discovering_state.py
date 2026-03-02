@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0014_tenantmetadata"),
+        ("workspace", "0014_tenantmetadata"),
     ]
 
     operations = [

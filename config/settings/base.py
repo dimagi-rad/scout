@@ -57,7 +57,7 @@ INSTALLED_APPS = [
     "apps.users.providers.commcare_connect",
     # Local apps
     "apps.users",
-    "apps.projects",
+    "apps.workspace",
     "apps.knowledge",
     "apps.agents",
     "apps.artifacts",

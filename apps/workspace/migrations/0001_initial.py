@@ -27,6 +27,7 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
+                "db_table": "projects_conversationlog",
                 "ordering": ["-updated_at"],
             },
         ),
@@ -88,6 +89,7 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
+                "db_table": "projects_project",
                 "ordering": ["name"],
             },
         ),
@@ -110,6 +112,9 @@ class Migration(migrations.Migration):
                 ),
                 ("created_at", models.DateTimeField(auto_now_add=True)),
             ],
+            options={
+                "db_table": "projects_projectmembership",
+            },
         ),
         migrations.CreateModel(
             name="SavedQuery",
@@ -131,6 +136,7 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
+                "db_table": "projects_savedquery",
                 "verbose_name_plural": "Saved queries",
                 "ordering": ["-updated_at"],
             },

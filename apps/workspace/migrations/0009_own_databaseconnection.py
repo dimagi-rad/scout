@@ -22,7 +22,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0005_remove_savedquery_and_conversationlog"),
+        ("workspace", "0005_remove_savedquery_and_conversationlog"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

@@ -45,8 +45,8 @@ from apps.knowledge.services.retriever import KnowledgeRetriever
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership, User
+    from apps.workspace.models import TenantWorkspace
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +162,7 @@ async def build_agent_graph(
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
     """
-    from apps.projects.models import TenantWorkspace
+    from apps.workspace.models import TenantWorkspace
 
     workspace, _ = await TenantWorkspace.objects.aget_or_create(
         tenant_id=tenant_membership.tenant_id,

@@ -18,8 +18,8 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import User
+    from apps.workspace.models import TenantWorkspace
 
 logger = logging.getLogger(__name__)
 

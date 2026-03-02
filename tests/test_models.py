@@ -94,7 +94,7 @@ class TestTenantMetadata:
     def test_create_and_retrieve_metadata(self, tenant_membership):
         from django.utils import timezone
 
-        from apps.projects.models import TenantMetadata
+        from apps.workspace.models import TenantMetadata
 
         payload = {
             "case_types": ["patient", "household"],
@@ -110,14 +110,14 @@ class TestTenantMetadata:
         assert retrieved.metadata["app_definitions"][0]["id"] == "abc"
 
     def test_one_to_one_with_tenant_membership(self, tenant_membership):
-        from apps.projects.models import TenantMetadata
+        from apps.workspace.models import TenantMetadata
 
         TenantMetadata.objects.create(tenant_membership=tenant_membership)
         with pytest.raises(Exception, match="unique constraint"):  # noqa: B017
             TenantMetadata.objects.create(tenant_membership=tenant_membership)
 
     def test_metadata_defaults_to_empty_dict(self, tenant_membership):
-        from apps.projects.models import TenantMetadata
+        from apps.workspace.models import TenantMetadata
 
         meta = TenantMetadata.objects.create(tenant_membership=tenant_membership)
         assert meta.metadata == {}

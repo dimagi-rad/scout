@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0011_tenantschema_materializationrun"),
+        ("workspace", "0011_tenantschema_materializationrun"),
     ]
 
     operations = [
@@ -47,6 +47,7 @@ class Migration(migrations.Migration):
                 ("updated_at", models.DateTimeField(auto_now=True)),
             ],
             options={
+                "db_table": "projects_tenantworkspace",
                 "ordering": ["tenant_name"],
             },
         ),

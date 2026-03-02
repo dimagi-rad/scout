@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("knowledge", "0001_initial"),
-        ("projects", "0001_initial"),
+        ("workspace", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -28,7 +28,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="learnings",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -44,7 +44,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="business_rules",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -53,7 +53,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="canonical_metrics",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -69,7 +69,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="eval_runs",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -92,7 +92,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="golden_queries",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -101,7 +101,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="table_knowledge",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -117,7 +117,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="verified_queries",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
