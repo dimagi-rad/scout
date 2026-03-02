@@ -26,47 +26,79 @@ A self-hosted platform for deploying AI agents that can query project-specific P
 
 ### Prerequisites
 
-- Python 3.12+ (recommended; 3.11+ supported)
-- PostgreSQL 14+
-- Redis
-- Node.js 18+ or Bun
-- [uv](https://docs.astral.sh/uv/) (Python package manager)
-- [direnv](https://direnv.net/) (optional, recommended) — automatically loads `.env` and activates the uv virtualenv when you `cd` into the project. Run `direnv allow` once after cloning.
+Install the following tools before cloning:
 
-### Backend
+| Tool | Install |
+|------|---------|
+| [uv](https://docs.astral.sh/uv/) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| [direnv](https://direnv.net/) | `brew install direnv` (macOS) or see [direnv docs](https://direnv.net/docs/installation.html) |
+| [Bun](https://bun.sh/) | `curl -fsSL https://bun.sh/install \| bash` |
+| [invoke](https://www.pyinvoke.org/) | Installed automatically via `uv sync` |
+
+You also need a running **PostgreSQL 14+** and **Redis** instance (or use `inv deps` to start them via Docker).
+
+### 1. Clone and allow direnv
 
 ```bash
-# Install dependencies
+git clone <repo-url> scout && cd scout
+direnv allow   # loads .env and activates the uv virtualenv automatically
+```
+
+### 2. Install Python dependencies
+
+```bash
 uv sync
-
-# Set up environment
-cp .env.example .env
-# Edit .env with your database URL, secret key, and Anthropic API key
-
-# Run migrations
-uv run manage.py migrate
-
-# Collect static files (needed for admin under uvicorn)
-uv run manage.py collectstatic --noinput
-
-# Create a superuser
-uv run manage.py createsuperuser
-
-# Start the backend (ASGI)
-uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload
 ```
 
-### Frontend
+### 3. Configure environment
 
 ```bash
-cd frontend
-bun install
-bun dev
+cp .env.example .env
+# Edit .env — at minimum set DATABASE_URL, DJANGO_SECRET_KEY,
+# ANTHROPIC_API_KEY, and DB_CREDENTIAL_KEY
 ```
 
-The frontend dev server runs on http://localhost:5173 and proxies `/api/*` to the backend.
+### 4. Install frontend dependencies
 
-### Docker
+```bash
+inv frontend-install   # runs: cd frontend && bun install
+```
+
+### 5. Start PostgreSQL and Redis
+
+Install PostgreSQL 14+ and Redis via your platform's package manager (e.g. `apt`, `brew`, Postgres.app) and ensure both are running. Then create the database:
+
+```bash
+createdb agent_platform
+```
+
+Alternatively, use Docker for just the backing services:
+
+```bash
+inv deps   # docker compose up platform-db redis
+```
+
+### 6. Run migrations
+
+```bash
+inv migrate
+```
+
+### 7. Create a superuser
+
+```bash
+inv createsuperuser   # prompts for email and password
+```
+
+### 8. Start all dev servers
+
+```bash
+inv dev   # Django :8000, MCP :8100, Vite :5173
+```
+
+Open http://localhost:5173 in your browser.
+
+### Docker (alternative)
 
 ```bash
 docker compose up --build
