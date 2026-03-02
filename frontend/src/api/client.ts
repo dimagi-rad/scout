@@ -2,6 +2,12 @@
  * Thin fetch wrapper that handles CSRF tokens and session cookies.
  */
 
+let activeCustomWorkspaceId: string | null = null
+
+export function setActiveCustomWorkspaceId(id: string | null) {
+  activeCustomWorkspaceId = id
+}
+
 export function getCsrfToken(): string {
   const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
   return match ? match[1] : ""
@@ -17,6 +23,7 @@ async function request<T>(
   const headers: Record<string, string> = {
     // Skip Content-Type for FormData — the browser sets the multipart boundary
     ...(rawBody ? {} : { "Content-Type": "application/json" }),
+    ...(activeCustomWorkspaceId && { "X-Custom-Workspace": activeCustomWorkspaceId }),
     ...(fetchOptions.headers as Record<string, string> | undefined),
   }
 
@@ -33,7 +40,7 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText)
+    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText, body)
   }
 
   // Handle 204 No Content (common for DELETE responses)
@@ -46,11 +53,13 @@ async function request<T>(
 
 export class ApiError extends Error {
   status: number
+  body: Record<string, unknown> | null
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, body?: Record<string, unknown>) {
     super(message)
     this.name = "ApiError"
     this.status = status
+    this.body = body ?? null
   }
 }
 
