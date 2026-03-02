@@ -1,0 +1,1832 @@
+# CustomWorkspace Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Introduce CustomWorkspace — a user-created, multi-tenant workspace with role-based membership, alongside the existing TenantWorkspace, with a full-width tabbed workspace selector UI.
+
+**Architecture:** Rename `apps/projects` → `apps/workspace` to house both TenantWorkspace and CustomWorkspace as peers. Add dual nullable FKs on knowledge/chat models. New REST API at `/api/custom-workspaces/`. Frontend gets a workspaceSlice and full-width tabbed workspace selector panel.
+
+**Tech Stack:** Django 5 + DRF, PostgreSQL, React 19 + Zustand + Tailwind CSS 4, shadcn/ui components.
+
+---
+
+## Phase 1: Rename `apps/projects` → `apps/workspace`
+
+This is the foundation. All subsequent work depends on this being done first.
+
+### Task 1: Rename the app directory and update AppConfig
+
+**Files:**
+- Rename: `apps/projects/` → `apps/workspace/`
+- Modify: `apps/workspace/apps.py` (was `apps/projects/apps.py`)
+
+**Step 1: Rename the directory**
+
+```bash
+git mv apps/projects apps/workspace
+```
+
+**Step 2: Update AppConfig**
+
+Edit `apps/workspace/apps.py`:
+
+```python
+from django.apps import AppConfig
+
+
+class WorkspaceConfig(AppConfig):
+    default_auto_field = "django.db.models.BigAutoField"
+    name = "apps.workspace"
+    label = "workspace"
+    verbose_name = "Workspace"
+```
+
+Note: Setting `label = "workspace"` means Django will use `workspace` as the app label in FK string references, migration directories, and content types. The `db_table` values will change from `projects_*` to `workspace_*` unless we explicitly set them.
+
+**Step 3: Set explicit `db_table` on all existing models to preserve table names**
+
+Edit `apps/workspace/models.py` — add `db_table` to each model's Meta:
+
+```python
+class TenantSchema(models.Model):
+    # ... existing fields ...
+    class Meta:
+        ordering = ["-last_accessed_at"]
+        db_table = "projects_tenantschema"
+
+class MaterializationRun(models.Model):
+    # ... existing fields ...
+    class Meta:
+        ordering = ["-started_at"]
+        db_table = "projects_materializationrun"
+
+class TenantWorkspace(models.Model):
+    # ... existing fields ...
+    class Meta:
+        ordering = ["tenant_name"]
+        db_table = "projects_tenantworkspace"
+
+class TenantMetadata(models.Model):
+    # ... existing fields ...
+    class Meta:
+        verbose_name = "Tenant Metadata"
+        verbose_name_plural = "Tenant Metadata"
+        db_table = "projects_tenantmetadata"
+```
+
+**Step 4: Run tests to verify nothing broke yet**
+
+```bash
+uv run pytest tests/ -x -q
+```
+
+Expected: Tests may fail due to import errors — that's addressed in Task 2.
+
+**Step 5: Commit**
+
+```bash
+git add -A && git commit -m "refactor: rename apps/projects to apps/workspace (directory + AppConfig)"
+```
+
+---
+
+### Task 2: Update all imports and string references
+
+**Files to modify (all references to `apps.projects` or `"projects.`)**:
+- `config/settings/base.py:60` — INSTALLED_APPS
+- `config/urls.py:12-13` — imports
+- `apps/knowledge/models.py:31,95,140` — FK string `"projects.TenantWorkspace"`
+- `apps/recipes/models.py:38` — FK string `"projects.TenantWorkspace"`
+- `apps/artifacts/models.py:59` — FK string `"projects.TenantWorkspace"`
+- `apps/workspace/api/views.py` — internal imports
+- `apps/workspace/services/schema_manager.py:15` — internal import
+- `apps/agents/graph/base.py:47,164` — imports
+- `apps/agents/tools/recipe_tool.py:19` — import
+- `apps/agents/tools/learning_tool.py:22` — import
+- `apps/agents/tools/artifact_tool.py:21` — import
+- `apps/knowledge/api/views.py:43` — import
+- `apps/knowledge/services/retriever.py:15` — import
+- `apps/recipes/api/views.py:32` — import
+- `apps/artifacts/views.py:944` — import
+- `mcp_server/server.py:32,552,626-627` — imports
+- `mcp_server/services/materializer.py:27-28` — imports
+- `mcp_server/services/metadata.py:13,18` — imports
+- `mcp_server/context.py:47` — import
+- `tests/conftest.py:53` — import
+- `tests/test_models.py:97,113,120` — imports
+- `tests/test_artifacts.py:393` — import
+- `tests/test_mcp_tenant_tools.py:496,521` — imports
+- `tests/test_schema_manager.py:5-6` — imports
+- `apps/artifacts/tests/test_share_api.py:21` — import
+- `apps/artifacts/tests/test_artifact_query_data.py:14` — import
+
+**Step 1: Update INSTALLED_APPS**
+
+In `config/settings/base.py:60`, change:
+```python
+"apps.projects",
+```
+to:
+```python
+"apps.workspace",
+```
+
+**Step 2: Update all FK string references**
+
+In models that use `"projects.TenantWorkspace"`, change to `"workspace.TenantWorkspace"`:
+
+- `apps/knowledge/models.py` — 3 occurrences (lines 31, 95, 140)
+- `apps/recipes/models.py` — 1 occurrence (line 38)
+- `apps/artifacts/models.py` — 1 occurrence (line 59)
+
+**Step 3: Update all Python imports**
+
+Global find-and-replace: `from apps.projects` → `from apps.workspace` in all `.py` files listed above. Also update `apps.projects.` in any lazy import strings.
+
+**Step 4: Update URL config**
+
+In `config/urls.py`:
+```python
+from apps.workspace.api.views import RefreshSchemaView
+from apps.workspace.views import health_check
+```
+And:
+```python
+path("api/data-dictionary/", include("apps.workspace.api.urls")),
+```
+
+**Step 5: Create a migration to handle the app label change**
+
+Django needs a migration to update the `django_content_type` table and internal references. Create `apps/workspace/migrations/0016_rename_app_label.py`:
+
+```python
+from django.db import migrations
+
+
+class Migration(migrations.Migration):
+    dependencies = [
+        ("workspace", "0015_add_discovering_state"),
+    ]
+
+    operations = [
+        migrations.RunSQL(
+            sql="UPDATE django_content_type SET app_label = 'workspace' WHERE app_label = 'projects'",
+            reverse_sql="UPDATE django_content_type SET app_label = 'projects' WHERE app_label = 'workspace'",
+        ),
+    ]
+```
+
+Also rename the migrations `__init__.py` module reference — the migration files themselves still reference `"projects"` in their `dependencies`. Update **each migration file** that has `("projects", ...)` in its dependencies list to use `("workspace", ...)`. Same for any cross-app migrations referencing `("projects", ...)`.
+
+Cross-app migration files to update:
+- `apps/knowledge/migrations/0006_rescope_to_workspace.py`
+- `apps/knowledge/migrations/0002_initial.py`
+- `apps/knowledge/migrations/0005_simplify_knowledge.py`
+- `apps/recipes/migrations/0005_rescope_to_workspace.py`
+- `apps/recipes/migrations/0001_initial_recipe_models.py`
+- `apps/artifacts/migrations/0003_rescope_to_workspace.py`
+- `apps/artifacts/migrations/0001_initial.py`
+- `apps/chat/migrations/0003_thread_tenant_membership_alter_thread_project.py`
+- `apps/chat/migrations/0001_initial.py`
+
+In each, change `("projects", "XXXX")` → `("workspace", "XXXX")` in the `dependencies` list.
+
+**Step 6: Run migrations**
+
+```bash
+uv run python manage.py migrate
+```
+
+**Step 7: Run full test suite**
+
+```bash
+uv run pytest tests/ -x -q
+```
+
+Expected: All pass. If any import errors remain, fix them.
+
+**Step 8: Run linting**
+
+```bash
+uv run ruff check . && uv run ruff format .
+```
+
+**Step 9: Commit**
+
+```bash
+git add -A && git commit -m "refactor: update all imports and references for apps/projects → apps/workspace rename"
+```
+
+---
+
+## Phase 2: Add CustomWorkspace Models
+
+### Task 3: Write tests for CustomWorkspace models
+
+**Files:**
+- Create: `tests/test_custom_workspace.py`
+
+**Step 1: Write the model tests**
+
+```python
+import pytest
+from django.contrib.auth import get_user_model
+
+from apps.users.models import TenantMembership
+from apps.workspace.models import TenantWorkspace
+
+User = get_user_model()
+
+
+@pytest.fixture
+def owner(db):
+    return User.objects.create_user(email="owner@test.com", password="testpass123")
+
+
+@pytest.fixture
+def member(db):
+    return User.objects.create_user(email="member@test.com", password="testpass123")
+
+
+@pytest.fixture
+def tenant_membership_a(owner):
+    return TenantMembership.objects.create(
+        user=owner, provider="commcare", tenant_id="domain-a", tenant_name="Domain A"
+    )
+
+
+@pytest.fixture
+def tenant_membership_b(owner):
+    return TenantMembership.objects.create(
+        user=owner, provider="commcare", tenant_id="domain-b", tenant_name="Domain B"
+    )
+
+
+@pytest.fixture
+def member_membership_a(member):
+    return TenantMembership.objects.create(
+        user=member, provider="commcare", tenant_id="domain-a", tenant_name="Domain A"
+    )
+
+
+@pytest.fixture
+def tenant_workspace_a(tenant_membership_a):
+    ws, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id="domain-a", defaults={"tenant_name": "Domain A"}
+    )
+    return ws
+
+
+@pytest.fixture
+def tenant_workspace_b(tenant_membership_b):
+    ws, _ = TenantWorkspace.objects.get_or_create(
+        tenant_id="domain-b", defaults={"tenant_name": "Domain B"}
+    )
+    return ws
+
+
+class TestCustomWorkspaceModel:
+    def test_create_custom_workspace(self, owner):
+        from apps.workspace.models import CustomWorkspace
+
+        ws = CustomWorkspace.objects.create(name="My Workspace", created_by=owner)
+        assert ws.name == "My Workspace"
+        assert ws.created_by == owner
+        assert ws.id is not None
+
+    def test_add_tenants_to_workspace(self, owner, tenant_workspace_a, tenant_workspace_b):
+        from apps.workspace.models import CustomWorkspace, CustomWorkspaceTenant
+
+        ws = CustomWorkspace.objects.create(name="Multi-tenant", created_by=owner)
+        CustomWorkspaceTenant.objects.create(workspace=ws, tenant_workspace=tenant_workspace_a)
+        CustomWorkspaceTenant.objects.create(workspace=ws, tenant_workspace=tenant_workspace_b)
+        assert ws.custom_workspace_tenants.count() == 2
+
+    def test_duplicate_tenant_rejected(self, owner, tenant_workspace_a):
+        from django.db import IntegrityError
+
+        from apps.workspace.models import CustomWorkspace, CustomWorkspaceTenant
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        CustomWorkspaceTenant.objects.create(workspace=ws, tenant_workspace=tenant_workspace_a)
+        with pytest.raises(IntegrityError):
+            CustomWorkspaceTenant.objects.create(
+                workspace=ws, tenant_workspace=tenant_workspace_a
+            )
+
+
+class TestWorkspaceMembership:
+    def test_create_membership(self, owner):
+        from apps.workspace.models import CustomWorkspace, WorkspaceMembership
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        membership = WorkspaceMembership.objects.create(
+            workspace=ws, user=owner, role="owner"
+        )
+        assert membership.role == "owner"
+        assert ws.memberships.count() == 1
+
+    def test_duplicate_membership_rejected(self, owner):
+        from django.db import IntegrityError
+
+        from apps.workspace.models import CustomWorkspace, WorkspaceMembership
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        WorkspaceMembership.objects.create(workspace=ws, user=owner, role="owner")
+        with pytest.raises(IntegrityError):
+            WorkspaceMembership.objects.create(workspace=ws, user=owner, role="editor")
+
+    def test_role_choices(self, owner):
+        from apps.workspace.models import CustomWorkspace, WorkspaceMembership
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        for role in ["owner", "editor", "viewer"]:
+            ws2 = CustomWorkspace.objects.create(name=f"Test-{role}", created_by=owner)
+            m = WorkspaceMembership.objects.create(workspace=ws2, user=owner, role=role)
+            assert m.role == role
+```
+
+**Step 2: Run tests to verify they fail**
+
+```bash
+uv run pytest tests/test_custom_workspace.py -x -v
+```
+
+Expected: FAIL — `CustomWorkspace` model doesn't exist yet.
+
+---
+
+### Task 4: Implement CustomWorkspace models
+
+**Files:**
+- Modify: `apps/workspace/models.py`
+
+**Step 1: Add the new models after TenantMetadata**
+
+Add to end of `apps/workspace/models.py`:
+
+```python
+class CustomWorkspace(models.Model):
+    """User-created workspace that groups multiple tenants together."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    system_prompt = models.TextField(
+        blank=True,
+        help_text="Workspace-level system prompt. Layered on top of tenant prompts.",
+    )
+    created_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.CASCADE,
+        related_name="custom_workspaces",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
+class CustomWorkspaceTenant(models.Model):
+    """Links a CustomWorkspace to a TenantWorkspace."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        CustomWorkspace,
+        on_delete=models.CASCADE,
+        related_name="custom_workspace_tenants",
+    )
+    tenant_workspace = models.ForeignKey(
+        TenantWorkspace,
+        on_delete=models.CASCADE,
+        related_name="custom_workspace_links",
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["workspace", "tenant_workspace"]
+
+    def __str__(self):
+        return f"{self.workspace.name} ← {self.tenant_workspace.tenant_name}"
+
+
+class WorkspaceMembership(models.Model):
+    """Role-based membership for CustomWorkspace."""
+
+    ROLE_CHOICES = [
+        ("owner", "Owner"),
+        ("editor", "Editor"),
+        ("viewer", "Viewer"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        CustomWorkspace,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        "users.User",
+        on_delete=models.CASCADE,
+        related_name="workspace_memberships",
+    )
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
+    invited_by = models.ForeignKey(
+        "users.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workspace_invitations",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ["workspace", "user"]
+
+    def __str__(self):
+        return f"{self.user.email} - {self.role} in {self.workspace.name}"
+```
+
+**Step 2: Generate and run migration**
+
+```bash
+uv run python manage.py makemigrations workspace --name add_custom_workspace_models
+uv run python manage.py migrate
+```
+
+**Step 3: Run tests**
+
+```bash
+uv run pytest tests/test_custom_workspace.py -x -v
+```
+
+Expected: All pass.
+
+**Step 4: Commit**
+
+```bash
+git add -A && git commit -m "feat: add CustomWorkspace, CustomWorkspaceTenant, WorkspaceMembership models"
+```
+
+---
+
+## Phase 3: Dual FKs on Knowledge and Chat Models
+
+### Task 5: Write tests for dual FK on knowledge models
+
+**Files:**
+- Add to: `tests/test_custom_workspace.py`
+
+**Step 1: Add tests for knowledge entry scoping**
+
+```python
+class TestKnowledgeDualFK:
+    def test_knowledge_entry_on_tenant_workspace(self, tenant_workspace_a):
+        from apps.knowledge.models import KnowledgeEntry
+
+        entry = KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a,
+            title="Tenant Knowledge",
+            content="Some content",
+        )
+        assert entry.workspace == tenant_workspace_a
+        assert entry.custom_workspace is None
+
+    def test_knowledge_entry_on_custom_workspace(self, owner):
+        from apps.knowledge.models import KnowledgeEntry
+        from apps.workspace.models import CustomWorkspace
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        entry = KnowledgeEntry.objects.create(
+            custom_workspace=ws,
+            title="Custom Knowledge",
+            content="Some content",
+        )
+        assert entry.custom_workspace == ws
+        assert entry.workspace is None
+
+    def test_agent_learning_on_custom_workspace(self, owner):
+        from apps.knowledge.models import AgentLearning
+        from apps.workspace.models import CustomWorkspace
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        learning = AgentLearning.objects.create(
+            custom_workspace=ws,
+            description="Test learning",
+        )
+        assert learning.custom_workspace == ws
+        assert learning.workspace is None
+```
+
+**Step 2: Run to verify failure**
+
+```bash
+uv run pytest tests/test_custom_workspace.py::TestKnowledgeDualFK -x -v
+```
+
+Expected: FAIL — `custom_workspace` field doesn't exist.
+
+---
+
+### Task 6: Add dual FK to knowledge and chat models
+
+**Files:**
+- Modify: `apps/knowledge/models.py` — add `custom_workspace` FK to TableKnowledge, KnowledgeEntry, AgentLearning
+- Modify: `apps/chat/models.py` — add `custom_workspace` FK to Thread
+
+**Step 1: Add `custom_workspace` FK to TableKnowledge**
+
+In `apps/knowledge/models.py`, after the existing `workspace` FK on TableKnowledge (line 36), add:
+
+```python
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="table_knowledge",
+        null=True,
+        blank=True,
+    )
+```
+
+Update Meta:
+```python
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="table_knowledge_one_workspace",
+            ),
+        ]
+        ordering = ["table_name"]
+        verbose_name_plural = "Table knowledge"
+```
+
+Remove `unique_together = ["workspace", "table_name"]` and replace with the constraint above. Note: uniqueness per workspace type should be handled with two partial unique indexes or application logic, since the table can belong to either workspace type.
+
+**Step 2: Add `custom_workspace` FK to KnowledgeEntry**
+
+After the existing `workspace` FK (line 100), add the same pattern:
+
+```python
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="knowledge_entries",
+        null=True,
+        blank=True,
+    )
+```
+
+Add to Meta:
+```python
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="knowledge_entry_one_workspace",
+            ),
+        ]
+        ordering = ["-updated_at"]
+        verbose_name_plural = "Knowledge entries"
+```
+
+**Step 3: Add `custom_workspace` FK to AgentLearning**
+
+After the existing `workspace` FK (line 145), same pattern:
+
+```python
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="learnings",
+        null=True,
+        blank=True,
+    )
+```
+
+Update the existing index to also include the new field. Add to Meta constraints:
+```python
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="agent_learning_one_workspace",
+            ),
+        ]
+```
+
+**Step 4: Add `custom_workspace` FK to Thread**
+
+In `apps/chat/models.py`, after the `tenant_membership` FK (line 18), add:
+
+```python
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="threads",
+        null=True,
+        blank=True,
+    )
+```
+
+**Step 5: Generate and run migrations**
+
+```bash
+uv run python manage.py makemigrations knowledge chat --name add_custom_workspace_fk
+uv run python manage.py migrate
+```
+
+**Step 6: Run tests**
+
+```bash
+uv run pytest tests/test_custom_workspace.py -x -v
+```
+
+Expected: All pass.
+
+**Step 7: Commit**
+
+```bash
+git add -A && git commit -m "feat: add custom_workspace FK to knowledge and chat models with check constraints"
+```
+
+---
+
+## Phase 4: Backend API
+
+### Task 7: Write tests for CustomWorkspace CRUD API
+
+**Files:**
+- Create: `tests/test_custom_workspace_api.py`
+
+**Step 1: Write API tests**
+
+```python
+import pytest
+from django.contrib.auth import get_user_model
+from django.test import Client
+
+from apps.users.models import TenantMembership
+from apps.workspace.models import CustomWorkspace, TenantWorkspace, WorkspaceMembership
+
+User = get_user_model()
+
+
+@pytest.fixture
+def api_client():
+    return Client(enforce_csrf_checks=False)
+
+
+@pytest.fixture
+def owner(db):
+    user = User.objects.create_user(email="owner@test.com", password="testpass123")
+    return user
+
+
+@pytest.fixture
+def other_user(db):
+    return User.objects.create_user(email="other@test.com", password="testpass123")
+
+
+@pytest.fixture
+def tenant_workspace_a(db):
+    return TenantWorkspace.objects.create(tenant_id="domain-a", tenant_name="Domain A")
+
+
+@pytest.fixture
+def tenant_workspace_b(db):
+    return TenantWorkspace.objects.create(tenant_id="domain-b", tenant_name="Domain B")
+
+
+@pytest.fixture
+def owner_memberships(owner, tenant_workspace_a, tenant_workspace_b):
+    TenantMembership.objects.create(
+        user=owner, provider="commcare", tenant_id="domain-a", tenant_name="Domain A"
+    )
+    TenantMembership.objects.create(
+        user=owner, provider="commcare", tenant_id="domain-b", tenant_name="Domain B"
+    )
+
+
+@pytest.fixture
+def other_user_partial_access(other_user):
+    """other_user only has access to domain-a, not domain-b."""
+    TenantMembership.objects.create(
+        user=other_user, provider="commcare", tenant_id="domain-a", tenant_name="Domain A"
+    )
+
+
+@pytest.fixture
+def custom_workspace(owner, tenant_workspace_a, tenant_workspace_b, owner_memberships):
+    from apps.workspace.models import CustomWorkspaceTenant
+
+    ws = CustomWorkspace.objects.create(name="Test Workspace", created_by=owner)
+    CustomWorkspaceTenant.objects.create(workspace=ws, tenant_workspace=tenant_workspace_a)
+    CustomWorkspaceTenant.objects.create(workspace=ws, tenant_workspace=tenant_workspace_b)
+    WorkspaceMembership.objects.create(workspace=ws, user=owner, role="owner")
+    return ws
+
+
+class TestCustomWorkspaceList:
+    def test_list_returns_only_user_workspaces(self, api_client, owner, custom_workspace):
+        api_client.force_login(owner)
+        response = api_client.get("/api/custom-workspaces/")
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+        assert response.json()[0]["name"] == "Test Workspace"
+
+    def test_list_excludes_non_member_workspaces(self, api_client, other_user, custom_workspace):
+        api_client.force_login(other_user)
+        response = api_client.get("/api/custom-workspaces/")
+        assert response.status_code == 200
+        assert len(response.json()) == 0
+
+    def test_unauthenticated_returns_403(self, api_client):
+        response = api_client.get("/api/custom-workspaces/")
+        assert response.status_code == 403
+
+
+class TestCustomWorkspaceCreate:
+    def test_create_workspace(self, api_client, owner, tenant_workspace_a, owner_memberships):
+        api_client.force_login(owner)
+        response = api_client.post(
+            "/api/custom-workspaces/",
+            data={
+                "name": "New Workspace",
+                "tenant_workspace_ids": [str(tenant_workspace_a.id)],
+            },
+            content_type="application/json",
+        )
+        assert response.status_code == 201
+        ws = CustomWorkspace.objects.get(name="New Workspace")
+        assert ws.created_by == owner
+        assert ws.custom_workspace_tenants.count() == 1
+        assert WorkspaceMembership.objects.filter(workspace=ws, user=owner, role="owner").exists()
+
+
+class TestCustomWorkspaceEnter:
+    def test_enter_workspace_success(self, api_client, owner, custom_workspace):
+        api_client.force_login(owner)
+        response = api_client.post(f"/api/custom-workspaces/{custom_workspace.id}/enter/")
+        assert response.status_code == 200
+
+    def test_enter_blocked_when_missing_tenant_access(
+        self, api_client, other_user, custom_workspace, other_user_partial_access
+    ):
+        WorkspaceMembership.objects.create(
+            workspace=custom_workspace, user=other_user, role="viewer"
+        )
+        api_client.force_login(other_user)
+        response = api_client.post(f"/api/custom-workspaces/{custom_workspace.id}/enter/")
+        assert response.status_code == 403
+        data = response.json()
+        assert "domain-b" in str(data.get("missing_tenants", []))
+
+    def test_enter_blocked_for_non_member(self, api_client, other_user, custom_workspace):
+        api_client.force_login(other_user)
+        response = api_client.post(f"/api/custom-workspaces/{custom_workspace.id}/enter/")
+        assert response.status_code == 403
+```
+
+**Step 2: Run to verify failure**
+
+```bash
+uv run pytest tests/test_custom_workspace_api.py -x -v
+```
+
+Expected: FAIL — URL not found (404).
+
+---
+
+### Task 8: Implement CustomWorkspace API views, serializers, and URLs
+
+**Files:**
+- Create: `apps/workspace/api/serializers.py`
+- Modify: `apps/workspace/api/views.py`
+- Modify: `apps/workspace/api/urls.py`
+- Modify: `config/urls.py`
+
+**Step 1: Create serializers**
+
+Create `apps/workspace/api/serializers.py`:
+
+```python
+from rest_framework import serializers
+
+from apps.workspace.models import CustomWorkspace, CustomWorkspaceTenant, WorkspaceMembership
+
+
+class CustomWorkspaceTenantSerializer(serializers.ModelSerializer):
+    tenant_id = serializers.CharField(source="tenant_workspace.tenant_id", read_only=True)
+    tenant_name = serializers.CharField(source="tenant_workspace.tenant_name", read_only=True)
+    tenant_workspace_id = serializers.UUIDField(source="tenant_workspace.id", read_only=True)
+
+    class Meta:
+        model = CustomWorkspaceTenant
+        fields = ["id", "tenant_workspace_id", "tenant_id", "tenant_name", "added_at"]
+
+
+class WorkspaceMembershipSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField(source="user.email", read_only=True)
+    user_id = serializers.UUIDField(source="user.id", read_only=True)
+
+    class Meta:
+        model = WorkspaceMembership
+        fields = ["id", "user_id", "email", "role", "joined_at"]
+
+
+class CustomWorkspaceListSerializer(serializers.ModelSerializer):
+    tenant_count = serializers.IntegerField(read_only=True)
+    member_count = serializers.IntegerField(read_only=True)
+    role = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = CustomWorkspace
+        fields = [
+            "id", "name", "description", "created_at", "updated_at",
+            "tenant_count", "member_count", "role",
+        ]
+
+
+class CustomWorkspaceDetailSerializer(serializers.ModelSerializer):
+    tenants = CustomWorkspaceTenantSerializer(
+        source="custom_workspace_tenants", many=True, read_only=True
+    )
+    members = WorkspaceMembershipSerializer(source="memberships", many=True, read_only=True)
+
+    class Meta:
+        model = CustomWorkspace
+        fields = [
+            "id", "name", "description", "system_prompt",
+            "created_at", "updated_at", "tenants", "members",
+        ]
+
+
+class CustomWorkspaceCreateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255)
+    description = serializers.CharField(required=False, default="")
+    tenant_workspace_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1
+    )
+```
+
+**Step 2: Add views**
+
+Add to `apps/workspace/api/views.py` (after existing views):
+
+```python
+from django.db.models import Count, Q, Value
+from django.db.models.functions import Coalesce
+from rest_framework.exceptions import PermissionDenied, ValidationError
+
+from apps.users.models import TenantMembership
+from apps.workspace.api.serializers import (
+    CustomWorkspaceCreateSerializer,
+    CustomWorkspaceDetailSerializer,
+    CustomWorkspaceListSerializer,
+    CustomWorkspaceTenantSerializer,
+    WorkspaceMembershipSerializer,
+)
+from apps.workspace.models import (
+    CustomWorkspace,
+    CustomWorkspaceTenant,
+    TenantWorkspace,
+    WorkspaceMembership,
+)
+
+
+def _check_workspace_role(user, workspace, required_roles):
+    """Check user has one of the required roles. Returns the membership or raises."""
+    membership = WorkspaceMembership.objects.filter(workspace=workspace, user=user).first()
+    if not membership:
+        raise PermissionDenied("Not a member of this workspace.")
+    if membership.role not in required_roles:
+        raise PermissionDenied(f"Requires role: {', '.join(required_roles)}")
+    return membership
+
+
+def _validate_tenant_access(user, workspace):
+    """Validate user has TenantMembership for all tenants in workspace. Returns missing list."""
+    tenant_ids = set(
+        workspace.custom_workspace_tenants.values_list(
+            "tenant_workspace__tenant_id", flat=True
+        )
+    )
+    user_tenant_ids = set(
+        TenantMembership.objects.filter(user=user).values_list("tenant_id", flat=True)
+    )
+    return list(tenant_ids - user_tenant_ids)
+
+
+class CustomWorkspaceListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        workspaces = (
+            CustomWorkspace.objects.filter(memberships__user=request.user)
+            .annotate(
+                tenant_count=Count("custom_workspace_tenants"),
+                member_count=Count("memberships"),
+                role=models.Subquery(
+                    WorkspaceMembership.objects.filter(
+                        workspace=models.OuterRef("pk"), user=request.user
+                    ).values("role")[:1]
+                ),
+            )
+            .order_by("name")
+        )
+        serializer = CustomWorkspaceListSerializer(workspaces, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = CustomWorkspaceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        tenant_workspace_ids = serializer.validated_data["tenant_workspace_ids"]
+        tenant_workspaces = TenantWorkspace.objects.filter(id__in=tenant_workspace_ids)
+        if tenant_workspaces.count() != len(tenant_workspace_ids):
+            raise ValidationError("One or more tenant workspaces not found.")
+
+        # Verify user has TenantMembership for all requested tenants
+        tenant_ids = set(tenant_workspaces.values_list("tenant_id", flat=True))
+        user_tenant_ids = set(
+            TenantMembership.objects.filter(user=request.user).values_list(
+                "tenant_id", flat=True
+            )
+        )
+        missing = tenant_ids - user_tenant_ids
+        if missing:
+            raise ValidationError(f"No access to tenants: {', '.join(missing)}")
+
+        workspace = CustomWorkspace.objects.create(
+            name=serializer.validated_data["name"],
+            description=serializer.validated_data.get("description", ""),
+            created_by=request.user,
+        )
+        for tw in tenant_workspaces:
+            CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=request.user, role="owner"
+        )
+
+        detail = CustomWorkspaceDetailSerializer(workspace)
+        return Response(detail.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+    def patch(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        for field in ["name", "description", "system_prompt"]:
+            if field in request.data:
+                setattr(workspace, field, request.data[field])
+        workspace.save()
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+    def delete(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+        workspace.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CustomWorkspaceEnterView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+
+        missing = _validate_tenant_access(request.user, workspace)
+        if missing:
+            return Response(
+                {
+                    "error": "Missing tenant access",
+                    "missing_tenants": missing,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+
+class CustomWorkspaceTenantListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        tenants = workspace.custom_workspace_tenants.select_related("tenant_workspace")
+        serializer = CustomWorkspaceTenantSerializer(tenants, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        tw_id = request.data.get("tenant_workspace_id")
+        tw = TenantWorkspace.objects.filter(id=tw_id).first()
+        if not tw:
+            raise ValidationError("Tenant workspace not found.")
+
+        if not TenantMembership.objects.filter(
+            user=request.user, tenant_id=tw.tenant_id
+        ).exists():
+            raise ValidationError("You don't have access to this tenant.")
+
+        cwt, created = CustomWorkspaceTenant.objects.get_or_create(
+            workspace=workspace, tenant_workspace=tw
+        )
+        if not created:
+            raise ValidationError("Tenant already in workspace.")
+
+        serializer = CustomWorkspaceTenantSerializer(cwt)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceTenantDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, workspace_id, tenant_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+        deleted, _ = CustomWorkspaceTenant.objects.filter(
+            workspace=workspace, id=tenant_id
+        ).delete()
+        if not deleted:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceMemberListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        members = workspace.memberships.select_related("user")
+        serializer = WorkspaceMembershipSerializer(members, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        from django.contrib.auth import get_user_model
+
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        User = get_user_model()
+        user_id = request.data.get("user_id")
+        role = request.data.get("role", "viewer")
+        if role not in ["editor", "viewer"]:
+            raise ValidationError("Role must be 'editor' or 'viewer'.")
+
+        invitee = User.objects.filter(id=user_id).first()
+        if not invitee:
+            raise ValidationError("User not found.")
+
+        # Validate invitee has access to all tenants
+        missing = _validate_tenant_access(invitee, workspace)
+        if missing:
+            raise ValidationError(
+                f"Invitee lacks access to tenants: {', '.join(missing)}"
+            )
+
+        membership, created = WorkspaceMembership.objects.get_or_create(
+            workspace=workspace,
+            user=invitee,
+            defaults={"role": role, "invited_by": request.user},
+        )
+        if not created:
+            raise ValidationError("User is already a member.")
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class WorkspaceMemberDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, workspace_id, member_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        membership = WorkspaceMembership.objects.filter(
+            workspace=workspace, id=member_id
+        ).first()
+        if not membership:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        role = request.data.get("role")
+        if role and role in ["owner", "editor", "viewer"]:
+            membership.role = role
+            membership.save(update_fields=["role"])
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data)
+
+    def delete(self, request, workspace_id, member_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        deleted, _ = WorkspaceMembership.objects.filter(
+            workspace=workspace, id=member_id
+        ).delete()
+        if not deleted:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+```
+
+**Step 3: Add URL configuration**
+
+Create or update URL routing. Add to `config/urls.py`:
+
+```python
+path("api/custom-workspaces/", include("apps.workspace.api.custom_workspace_urls")),
+```
+
+Create `apps/workspace/api/custom_workspace_urls.py`:
+
+```python
+from django.urls import path
+
+from apps.workspace.api.views import (
+    CustomWorkspaceDetailView,
+    CustomWorkspaceEnterView,
+    CustomWorkspaceListCreateView,
+    CustomWorkspaceTenantDeleteView,
+    CustomWorkspaceTenantListCreateView,
+    WorkspaceMemberDetailView,
+    WorkspaceMemberListCreateView,
+)
+
+app_name = "custom_workspaces"
+
+urlpatterns = [
+    path("", CustomWorkspaceListCreateView.as_view(), name="list-create"),
+    path("<uuid:workspace_id>/", CustomWorkspaceDetailView.as_view(), name="detail"),
+    path("<uuid:workspace_id>/enter/", CustomWorkspaceEnterView.as_view(), name="enter"),
+    path(
+        "<uuid:workspace_id>/tenants/",
+        CustomWorkspaceTenantListCreateView.as_view(),
+        name="tenants",
+    ),
+    path(
+        "<uuid:workspace_id>/tenants/<uuid:tenant_id>/",
+        CustomWorkspaceTenantDeleteView.as_view(),
+        name="tenant-delete",
+    ),
+    path(
+        "<uuid:workspace_id>/members/",
+        WorkspaceMemberListCreateView.as_view(),
+        name="members",
+    ),
+    path(
+        "<uuid:workspace_id>/members/<uuid:member_id>/",
+        WorkspaceMemberDetailView.as_view(),
+        name="member-detail",
+    ),
+]
+```
+
+**Step 4: Run tests**
+
+```bash
+uv run pytest tests/test_custom_workspace_api.py -x -v
+```
+
+Expected: All pass.
+
+**Step 5: Run linting**
+
+```bash
+uv run ruff check . && uv run ruff format .
+```
+
+**Step 6: Commit**
+
+```bash
+git add -A && git commit -m "feat: add CustomWorkspace REST API with CRUD, enter, tenants, and members endpoints"
+```
+
+---
+
+## Phase 5: Frontend Workspace Store
+
+### Task 9: Add workspaceSlice to Zustand store
+
+**Files:**
+- Create: `frontend/src/store/workspaceSlice.ts`
+- Modify: `frontend/src/store/store.ts`
+- Modify: `frontend/src/api/client.ts`
+
+**Step 1: Create the workspace slice**
+
+```typescript
+// frontend/src/store/workspaceSlice.ts
+import { StateCreator } from "zustand"
+import { api } from "../api/client"
+import type { AppStore } from "./store"
+
+export interface CustomWorkspaceTenant {
+  id: string
+  tenant_workspace_id: string
+  tenant_id: string
+  tenant_name: string
+  added_at: string
+}
+
+export interface WorkspaceMember {
+  id: string
+  user_id: string
+  email: string
+  role: "owner" | "editor" | "viewer"
+  joined_at: string
+}
+
+export interface CustomWorkspace {
+  id: string
+  name: string
+  description: string
+  tenant_count: number
+  member_count: number
+  role: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CustomWorkspaceDetail extends Omit<CustomWorkspace, "tenant_count" | "member_count" | "role"> {
+  system_prompt: string
+  tenants: CustomWorkspaceTenant[]
+  members: WorkspaceMember[]
+}
+
+type WorkspaceMode = "tenant" | "custom"
+
+export interface WorkspaceSlice {
+  customWorkspaces: CustomWorkspace[]
+  activeCustomWorkspaceId: string | null
+  activeCustomWorkspace: CustomWorkspaceDetail | null
+  workspaceMode: WorkspaceMode
+  customWorkspacesStatus: "idle" | "loading" | "loaded" | "error"
+  customWorkspacesError: string | null
+  enterError: string | null
+  missingTenants: string[]
+  workspaceActions: {
+    fetchCustomWorkspaces: () => Promise<void>
+    enterCustomWorkspace: (id: string) => Promise<void>
+    exitCustomWorkspace: () => void
+    createCustomWorkspace: (data: {
+      name: string
+      description?: string
+      tenant_workspace_ids: string[]
+    }) => Promise<CustomWorkspaceDetail>
+  }
+}
+
+export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice> = (
+  set,
+  get
+) => ({
+  customWorkspaces: [],
+  activeCustomWorkspaceId: null,
+  activeCustomWorkspace: null,
+  workspaceMode: "tenant",
+  customWorkspacesStatus: "idle",
+  customWorkspacesError: null,
+  enterError: null,
+  missingTenants: [],
+  workspaceActions: {
+    fetchCustomWorkspaces: async () => {
+      set({ customWorkspacesStatus: "loading", customWorkspacesError: null })
+      try {
+        const data = await api.get<CustomWorkspace[]>("/api/custom-workspaces/")
+        set({ customWorkspaces: data, customWorkspacesStatus: "loaded" })
+      } catch (e) {
+        set({
+          customWorkspacesStatus: "error",
+          customWorkspacesError: e instanceof Error ? e.message : "Failed to fetch",
+        })
+      }
+    },
+    enterCustomWorkspace: async (id: string) => {
+      set({ enterError: null, missingTenants: [] })
+      try {
+        const data = await api.post<CustomWorkspaceDetail>(
+          `/api/custom-workspaces/${id}/enter/`
+        )
+        set({
+          activeCustomWorkspaceId: id,
+          activeCustomWorkspace: data,
+          workspaceMode: "custom",
+          enterError: null,
+          missingTenants: [],
+        })
+      } catch (e: any) {
+        const body = e?.body
+        if (body?.missing_tenants) {
+          set({ enterError: body.error, missingTenants: body.missing_tenants })
+        } else {
+          set({ enterError: e instanceof Error ? e.message : "Failed to enter workspace" })
+        }
+        throw e
+      }
+    },
+    exitCustomWorkspace: () => {
+      set({
+        activeCustomWorkspaceId: null,
+        activeCustomWorkspace: null,
+        workspaceMode: "tenant",
+        enterError: null,
+        missingTenants: [],
+      })
+    },
+    createCustomWorkspace: async (data) => {
+      const created = await api.post<CustomWorkspaceDetail>("/api/custom-workspaces/", data)
+      const { workspaceActions } = get()
+      await workspaceActions.fetchCustomWorkspaces()
+      return created
+    },
+  },
+})
+```
+
+**Step 2: Register in store**
+
+In `frontend/src/store/store.ts`, add the import and spread:
+
+```typescript
+import { WorkspaceSlice, createWorkspaceSlice } from "./workspaceSlice"
+
+export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & KnowledgeSlice & RecipeSlice & DomainSlice & WorkspaceSlice
+
+export const useAppStore = create<AppStore>()((...a) => ({
+  ...createArtifactSlice(...a),
+  ...createAuthSlice(...a),
+  ...createUiSlice(...a),
+  ...createDictionarySlice(...a),
+  ...createKnowledgeSlice(...a),
+  ...createRecipeSlice(...a),
+  ...createDomainSlice(...a),
+  ...createWorkspaceSlice(...a),
+}))
+```
+
+**Step 3: Add X-Custom-Workspace header to API client**
+
+In `frontend/src/api/client.ts`, modify the `request` function to include the header when in custom workspace mode. The cleanest approach is to export a function to get the current workspace ID and include it in headers:
+
+```typescript
+// Add to client.ts
+let activeCustomWorkspaceId: string | null = null
+
+export function setActiveCustomWorkspaceId(id: string | null) {
+  activeCustomWorkspaceId = id
+}
+
+// In the request function, add to headers:
+// ...(activeCustomWorkspaceId && { "X-Custom-Workspace": activeCustomWorkspaceId }),
+```
+
+Then in the workspaceSlice, call `setActiveCustomWorkspaceId` when entering/exiting.
+
+**Step 4: Run frontend lint**
+
+```bash
+cd frontend && bun run lint
+```
+
+**Step 5: Commit**
+
+```bash
+git add -A && git commit -m "feat: add workspaceSlice to frontend Zustand store"
+```
+
+---
+
+## Phase 6: Frontend Workspace Selector UI
+
+### Task 10: Create the full-width tabbed workspace selector
+
+**Files:**
+- Create: `frontend/src/components/WorkspaceSelector/WorkspaceSelector.tsx`
+- Modify: `frontend/src/components/Sidebar/Sidebar.tsx`
+
+**Step 1: Create the WorkspaceSelector component**
+
+This is a full-width modal/panel with three tabs: Custom, CommCare, Connect.
+
+```tsx
+// frontend/src/components/WorkspaceSelector/WorkspaceSelector.tsx
+import { useEffect, useMemo, useState } from "react"
+import { useAppStore } from "../../store/store"
+
+interface WorkspaceSelectorProps {
+  open: boolean
+  onClose: () => void
+}
+
+export function WorkspaceSelector({ open, onClose }: WorkspaceSelectorProps) {
+  const domains = useAppStore((s) => s.domains)
+  const customWorkspaces = useAppStore((s) => s.customWorkspaces)
+  const { fetchCustomWorkspaces, enterCustomWorkspace } = useAppStore(
+    (s) => s.workspaceActions
+  )
+  const { setActiveDomain } = useAppStore((s) => s.domainActions)
+  const enterError = useAppStore((s) => s.enterError)
+  const missingTenants = useAppStore((s) => s.missingTenants)
+
+  const [activeTab, setActiveTab] = useState<"custom" | "commcare" | "connect">("custom")
+  const [search, setSearch] = useState("")
+
+  useEffect(() => {
+    if (open) fetchCustomWorkspaces()
+  }, [open])
+
+  const groupedDomains = useMemo(() => {
+    const commcare = domains.filter((d) => d.provider === "commcare")
+    const connect = domains.filter((d) => d.provider === "commcare_connect")
+    return { commcare, connect }
+  }, [domains])
+
+  const filteredCustom = customWorkspaces.filter((w) =>
+    w.name.toLowerCase().includes(search.toLowerCase())
+  )
+  const filteredCommcare = groupedDomains.commcare.filter((d) =>
+    d.tenant_name.toLowerCase().includes(search.toLowerCase())
+  )
+  const filteredConnect = groupedDomains.connect.filter((d) =>
+    d.tenant_name.toLowerCase().includes(search.toLowerCase())
+  )
+
+  if (!open) return null
+
+  const tabs = [
+    { key: "custom" as const, label: "Custom", count: customWorkspaces.length },
+    { key: "commcare" as const, label: "CommCare", count: groupedDomains.commcare.length },
+    { key: "connect" as const, label: "Connect", count: groupedDomains.connect.length },
+  ]
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/50 flex items-start justify-center pt-16"
+         data-testid="workspace-selector-panel">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[70vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between p-4 border-b">
+          <h2 className="text-lg font-semibold">Select Workspace</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"
+                  data-testid="workspace-selector-close">✕</button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-1 p-2 border-b">
+          {tabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => { setActiveTab(tab.key); setSearch("") }}
+              className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === tab.key
+                  ? "bg-gray-900 text-white"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+              data-testid={`workspace-tab-${tab.key}`}
+            >
+              {tab.label} ({tab.count})
+            </button>
+          ))}
+        </div>
+
+        {/* Search */}
+        <div className="p-3 border-b">
+          <input
+            type="text"
+            placeholder="Search..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full px-3 py-2 border rounded-md text-sm"
+            data-testid="workspace-search"
+          />
+        </div>
+
+        {/* Error banner */}
+        {enterError && (
+          <div className="mx-3 mt-3 p-3 bg-red-50 border border-red-200 rounded-md text-sm text-red-700"
+               data-testid="workspace-enter-error">
+            <p className="font-medium">{enterError}</p>
+            {missingTenants.length > 0 && (
+              <ul className="mt-1 list-disc list-inside">
+                {missingTenants.map((t) => <li key={t}>{t}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto p-3">
+          {activeTab === "custom" && (
+            <div className="space-y-2">
+              {filteredCustom.map((ws) => (
+                <button
+                  key={ws.id}
+                  onClick={async () => {
+                    try {
+                      await enterCustomWorkspace(ws.id)
+                      onClose()
+                    } catch {}
+                  }}
+                  className="w-full text-left p-3 rounded-md border hover:bg-gray-50 transition-colors"
+                  data-testid={`workspace-item-${ws.id}`}
+                >
+                  <div className="font-medium">{ws.name}</div>
+                  <div className="text-sm text-gray-500">
+                    {ws.tenant_count} tenant{ws.tenant_count !== 1 ? "s" : ""} · {ws.member_count} member{ws.member_count !== 1 ? "s" : ""}
+                  </div>
+                </button>
+              ))}
+              {filteredCustom.length === 0 && (
+                <p className="text-sm text-gray-500 text-center py-4">No custom workspaces yet</p>
+              )}
+            </div>
+          )}
+
+          {activeTab === "commcare" && (
+            <div className="space-y-1">
+              {filteredCommcare.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => { setActiveDomain(d.id); onClose() }}
+                  className="w-full text-left px-3 py-2 rounded-md hover:bg-gray-50 transition-colors"
+                  data-testid={`workspace-domain-${d.tenant_id}`}
+                >
+                  {d.tenant_name}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {activeTab === "connect" && (
+            <div className="space-y-1">
+              {filteredConnect.map((d) => (
+                <button
+                  key={d.id}
+                  onClick={() => { setActiveDomain(d.id); onClose() }}
+                  className="w-full text-left px-3 py-2 rounded-md hover:bg-gray-50 transition-colors"
+                  data-testid={`workspace-domain-${d.tenant_id}`}
+                >
+                  {d.tenant_name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        {activeTab === "custom" && (
+          <div className="border-t p-3">
+            <button
+              className="w-full py-2 text-sm font-medium text-blue-600 hover:text-blue-700"
+              data-testid="workspace-create-btn"
+            >
+              + Create Custom Workspace
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+```
+
+**Step 2: Integrate into Sidebar**
+
+Replace the `<Select>` dropdown in `Sidebar.tsx` with a button that opens the WorkspaceSelector:
+
+```tsx
+// In Sidebar.tsx, replace the Select component with:
+const [selectorOpen, setSelectorOpen] = useState(false)
+const workspaceMode = useAppStore((s) => s.workspaceMode)
+const activeCustomWorkspace = useAppStore((s) => s.activeCustomWorkspace)
+
+// Display current selection
+const currentLabel = workspaceMode === "custom"
+  ? activeCustomWorkspace?.name ?? "Select Workspace"
+  : domains.find((d) => d.id === activeDomainId)?.tenant_name ?? "Select Workspace"
+
+// Render:
+<button
+  onClick={() => setSelectorOpen(true)}
+  className="mt-1 w-full text-left px-3 py-2 border rounded-md text-sm truncate"
+  data-testid="domain-selector"
+>
+  {currentLabel}
+</button>
+<WorkspaceSelector open={selectorOpen} onClose={() => setSelectorOpen(false)} />
+```
+
+**Step 3: Run lint**
+
+```bash
+cd frontend && bun run lint
+```
+
+**Step 4: Commit**
+
+```bash
+git add -A && git commit -m "feat: add full-width tabbed WorkspaceSelector component"
+```
+
+---
+
+## Phase 7: Content Provenance Badges
+
+### Task 11: Add source badges to knowledge views
+
+**Files:**
+- Modify: `frontend/src/pages/KnowledgePage/KnowledgePage.tsx` (or equivalent)
+
+This task adds visual source indicators when viewing knowledge within a CustomWorkspace. Each knowledge entry shows a badge indicating whether it comes from a member tenant or from the workspace itself.
+
+**Step 1: Add source field to knowledge API response**
+
+In the backend knowledge list view (`apps/knowledge/api/views.py`), when serving knowledge for a CustomWorkspace (detected via `X-Custom-Workspace` header), annotate each entry with a `source` field:
+
+```python
+# In the knowledge list view, after aggregating entries:
+for entry in entries:
+    if entry.custom_workspace_id:
+        entry.source = "workspace"
+        entry.source_name = "This Workspace"
+    elif entry.workspace_id:
+        entry.source = "tenant"
+        entry.source_name = entry.workspace.tenant_name
+```
+
+**Step 2: Render badge in frontend**
+
+```tsx
+{/* In knowledge list item */}
+{source && (
+  <span
+    className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+      source === "workspace"
+        ? "bg-blue-100 text-blue-700"
+        : "bg-gray-100 text-gray-600"
+    }`}
+    data-testid={`knowledge-source-${entry.id}`}
+  >
+    {sourceName}
+  </span>
+)}
+```
+
+**Step 3: Run lint and commit**
+
+```bash
+cd frontend && bun run lint
+git add -A && git commit -m "feat: add provenance badges to knowledge entries in custom workspace context"
+```
+
+---
+
+## Phase 8: Agent Context Assembly
+
+### Task 12: Build custom workspace context for the agent
+
+**Files:**
+- Modify: `apps/agents/graph/base.py`
+
+**Step 1: Add a context builder for CustomWorkspace**
+
+```python
+def _build_custom_workspace_context(workspace):
+    """Build aggregated agent context for a CustomWorkspace."""
+    from apps.knowledge.models import AgentLearning, KnowledgeEntry
+    from apps.workspace.models import TenantWorkspace
+
+    tenant_workspaces = TenantWorkspace.objects.filter(
+        custom_workspace_links__workspace=workspace
+    )
+
+    # Aggregate system prompts
+    prompts = []
+    if workspace.system_prompt:
+        prompts.append(f"[Workspace: {workspace.name}]\n{workspace.system_prompt}")
+    for tw in tenant_workspaces:
+        if tw.system_prompt:
+            prompts.append(f"[Tenant: {tw.tenant_name}]\n{tw.system_prompt}")
+
+    # Aggregate knowledge
+    from django.db.models import Q
+    knowledge = list(
+        KnowledgeEntry.objects.filter(
+            Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace)
+        ).values("title", "content", "tags")
+    )
+
+    # Aggregate learnings
+    learnings = list(
+        AgentLearning.objects.filter(
+            Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace),
+            is_active=True,
+        ).order_by("-confidence_score")
+    )
+
+    # Available tenant info
+    available_tenants = [
+        {
+            "tenant_id": tw.tenant_id,
+            "tenant_name": tw.tenant_name,
+            "has_data_dictionary": bool(tw.data_dictionary),
+        }
+        for tw in tenant_workspaces
+    ]
+
+    return {
+        "system_prompts": prompts,
+        "knowledge": knowledge,
+        "learnings": learnings,
+        "available_tenants": available_tenants,
+    }
+```
+
+**Step 2: Integrate into the agent graph**
+
+In the agent graph initialization, check for the `X-Custom-Workspace` header and use the custom context builder when present. The exact integration depends on how the graph currently receives workspace context — modify the existing `_build_context` or equivalent function to branch on workspace type.
+
+**Step 3: Run tests**
+
+```bash
+uv run pytest tests/ -x -q
+```
+
+**Step 4: Commit**
+
+```bash
+git add -A && git commit -m "feat: add custom workspace context assembly for LangGraph agent"
+```
+
+---
+
+## Summary of Tasks
+
+| # | Task | Phase | Depends On |
+|---|------|-------|------------|
+| 1 | Rename directory + AppConfig | 1 | — |
+| 2 | Update all imports + migration | 1 | 1 |
+| 3 | Write CustomWorkspace model tests | 2 | 2 |
+| 4 | Implement CustomWorkspace models | 2 | 3 |
+| 5 | Write dual FK tests | 3 | 4 |
+| 6 | Add dual FK to knowledge/chat | 3 | 5 |
+| 7 | Write API tests | 4 | 6 |
+| 8 | Implement API views/URLs | 4 | 7 |
+| 9 | Frontend workspaceSlice | 5 | 8 |
+| 10 | Workspace selector UI | 6 | 9 |
+| 11 | Content provenance badges | 7 | 10 |
+| 12 | Agent context assembly | 8 | 6 |
+
+Tasks 9-11 (frontend) and Task 12 (agent) can be parallelized after Task 8 completes.
