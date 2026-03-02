@@ -1,5 +1,7 @@
 """Tests for the agent graph builder."""
 
+import pytest
+
 
 class TestMcpToolNames:
     """Verify MCP_TOOL_NAMES contains all tools that need tenant_id injection."""
@@ -23,20 +25,24 @@ class TestMcpToolNames:
 class TestSystemPrompt:
     """Verify the system prompt includes data availability instructions."""
 
-    def test_data_availability_section_present(self, workspace, tenant_membership):
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_data_availability_section_present(self, workspace, tenant_membership):
         from apps.agents.graph.base import _build_system_prompt
 
-        prompt = _build_system_prompt(workspace, tenant_membership)
+        prompt = await _build_system_prompt(workspace, tenant_membership)
 
         assert "Data Availability" in prompt
         assert "get_schema_status" in prompt
         assert "run_materialization" in prompt
         assert "teardown_schema" in prompt
 
-    def test_data_availability_covers_not_provisioned_case(self, workspace, tenant_membership):
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_data_availability_covers_not_provisioned_case(self, workspace, tenant_membership):
         from apps.agents.graph.base import _build_system_prompt
 
-        prompt = _build_system_prompt(workspace, tenant_membership)
+        prompt = await _build_system_prompt(workspace, tenant_membership)
 
         # Agent must know to run materialization when no data exists
         assert "not_provisioned" in prompt or "loading" in prompt.lower()

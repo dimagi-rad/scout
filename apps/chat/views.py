@@ -586,7 +586,7 @@ async def chat_view(request):
     # Build agent (retry once with fresh checkpointer on connection errors)
     try:
         checkpointer = await _ensure_checkpointer()
-        agent = await sync_to_async(build_agent_graph)(
+        agent = await build_agent_graph(
             tenant_membership=tenant_membership,
             user=user,
             checkpointer=checkpointer,
@@ -598,7 +598,7 @@ async def chat_view(request):
         try:
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await _ensure_checkpointer(force_new=True)
-            agent = await sync_to_async(build_agent_graph)(
+            agent = await build_agent_graph(
                 tenant_membership=tenant_membership,
                 user=user,
                 checkpointer=checkpointer,

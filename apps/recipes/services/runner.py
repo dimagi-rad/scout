@@ -93,7 +93,7 @@ class RecipeRunner:
                 if "default" in var_def:
                     self.variable_values[var_name] = var_def["default"]
 
-    def _build_graph(self) -> CompiledStateGraph:
+    async def _build_graph(self) -> CompiledStateGraph:
         """Build or return the agent graph for execution."""
         if self._provided_graph is not None:
             return self._provided_graph
@@ -101,11 +101,11 @@ class RecipeRunner:
         if self._graph is None:
             from apps.users.models import TenantMembership
 
-            self._tenant_membership = TenantMembership.objects.filter(
+            self._tenant_membership = await TenantMembership.objects.filter(
                 user=self.user,
                 tenant_id=self.recipe.workspace.tenant_id,
-            ).first()
-            self._graph = build_agent_graph(
+            ).afirst()
+            self._graph = await build_agent_graph(
                 tenant_membership=self._tenant_membership,
                 user=self.user,
                 checkpointer=None,
@@ -180,11 +180,13 @@ class RecipeRunner:
 
     def execute(self) -> RecipeRun:
         """Execute the recipe and return the RecipeRun record."""
+        from asgiref.sync import async_to_sync
+
         self.validate_variables()
 
         self._run = self._create_run_record()
 
-        graph = self._build_graph()
+        graph = async_to_sync(self._build_graph)()
         config = {"configurable": {"thread_id": self._thread_id}}
 
         # Render the prompt
@@ -272,7 +274,7 @@ class RecipeRunner:
 
         self._thread_id = f"recipe-run-{self._run.id}"
 
-        graph = self._build_graph()
+        graph = await self._build_graph()
         config = {"configurable": {"thread_id": self._thread_id}}
 
         prompt = self.recipe.render_prompt(self.variable_values)

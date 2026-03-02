@@ -27,6 +27,7 @@ import copy
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
+from asgiref.sync import sync_to_async
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langgraph.graph import END, StateGraph
@@ -144,7 +145,7 @@ def _make_injecting_tool_node(
     return injecting_node
 
 
-def build_agent_graph(
+async def build_agent_graph(
     tenant_membership: TenantMembership,
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
@@ -191,7 +192,7 @@ def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = _build_system_prompt(workspace, tenant_membership)
+    system_prompt = await _build_system_prompt(workspace, tenant_membership)
     logger.debug(
         "System prompt assembled: %d characters for tenant:%s",
         len(system_prompt),
@@ -330,7 +331,9 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
     return tools
 
 
-def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMembership) -> str:
+async def _build_system_prompt(
+    workspace: TenantWorkspace, tenant_membership: TenantMembership
+) -> str:
     """
     Assemble the complete system prompt for a tenant workspace.
 
@@ -355,7 +358,7 @@ def _build_system_prompt(workspace: TenantWorkspace, tenant_membership: TenantMe
         sections.append(f"\n## Tenant-Specific Instructions\n\n{workspace.system_prompt}\n")
 
     retriever = KnowledgeRetriever(workspace)
-    knowledge_context = retriever.retrieve()
+    knowledge_context = await sync_to_async(retriever.retrieve)()
     if knowledge_context:
         sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
