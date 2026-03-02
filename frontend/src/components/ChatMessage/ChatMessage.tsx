@@ -5,6 +5,7 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight } from "lucide-react"
+import { renderToolOutput } from "./ToolOutput"
 
 interface ChatMessageProps {
   message: UIMessage
@@ -54,19 +55,27 @@ function formatToolOutput(output: unknown): string {
   return JSON.stringify(output, null, 2)
 }
 
-// Tools that emit MCP progress notifications and should auto-expand.
-// Mirrors _PROGRESS_TOOLS in apps/chat/stream.py — keep in sync when adding new tools.
-const PROGRESS_TOOLS = new Set(["run_materialization"])
+// Tools that auto-expand to show their output.
+// run_materialization is here because it emits MCP progress notifications.
+// The data tools auto-expand because their rich output is the main value.
+const AUTO_EXPAND_TOOLS = new Set([
+  "run_materialization",
+  "query",
+  "describe_table",
+  "list_tables",
+  "get_metadata",
+])
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ToolCallPart({ part, index }: { part: any; index: number }) {
   const toolName = getToolName(part)
-  const [expanded, setExpanded] = useState(() => PROGRESS_TOOLS.has(toolName))
+  const [expanded, setExpanded] = useState(() => AUTO_EXPAND_TOOLS.has(toolName))
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
-  const outputText = hasOutput && part.output != null
-    ? formatToolOutput(part.output)
-    : null
+
+  const richOutput = hasOutput && part.output != null ? renderToolOutput(toolName, part.output) : null
+  const fallbackText =
+    hasOutput && part.output != null && !richOutput ? formatToolOutput(part.output) : null
 
   return (
     <div key={index} className="rounded border bg-muted/30 my-1 text-xs">
@@ -87,11 +96,13 @@ function ToolCallPart({ part, index }: { part: any; index: number }) {
           {isLoading && "..."}
         </span>
       </button>
-      {expanded && outputText && (
-        <div className="border-t px-3 py-2 max-h-60 overflow-auto">
-          <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono">
-            {outputText.slice(0, 2000)}
-          </pre>
+      {expanded && (richOutput ?? fallbackText) && (
+        <div className="border-t px-3 py-2.5">
+          {richOutput ?? (
+            <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
+              {fallbackText!.slice(0, 2000)}
+            </pre>
+          )}
         </div>
       )}
     </div>
