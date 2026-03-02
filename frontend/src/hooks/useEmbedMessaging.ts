@@ -37,7 +37,7 @@ export function useEmbedMessaging(onCommand?: MessageHandler) {
     const trustedOrigin = parentOrigin.current
 
     function handleMessage(event: MessageEvent) {
-      if (trustedOrigin && event.origin !== trustedOrigin) return
+      if (!trustedOrigin || event.origin !== trustedOrigin) return
       const data = event.data
       if (!data || typeof data.type !== "string" || !data.type.startsWith("scout:")) return
       onCommand?.(data.type, data.payload || {})
