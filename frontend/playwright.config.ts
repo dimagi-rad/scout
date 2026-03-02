@@ -39,5 +39,10 @@ export default defineConfig({
             ],
           }),
     },
+    {
+      name: "connect-tenant",
+      testMatch: "connect-tenant.spec.ts",
+      use: { ...devices["Desktop Chrome"] },
+    },
   ],
 });

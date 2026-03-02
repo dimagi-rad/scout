@@ -9,6 +9,7 @@ import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
+import { useEmbedParams } from "@/hooks/useEmbedParams"
 
 const embedRouter = createBrowserRouter([
   {
@@ -30,15 +31,21 @@ const embedRouter = createBrowserRouter([
 export function EmbedPage() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
+  const ensureTenant = useAppStore((s) => s.domainActions.ensureTenant)
+  const { tenant, provider } = useEmbedParams()
 
   const handleCommand = useCallback((type: string, payload: Record<string, unknown>) => {
     if (type === "scout:set-tenant") {
-      console.log("[Scout Embed] set-tenant:", payload.tenant)
+      const tenantId = payload.tenant as string
+      const prov = (payload.provider as string) || "commcare_connect"
+      if (tenantId) {
+        ensureTenant(prov, tenantId)
+      }
     }
     if (type === "scout:set-mode") {
       console.log("[Scout Embed] set-mode:", payload.mode)
     }
-  }, [])
+  }, [ensureTenant])
 
   const { sendEvent } = useEmbedMessaging(handleCommand)
 
@@ -53,6 +60,13 @@ export function EmbedPage() {
       sendEvent("scout:auth-required")
     }
   }, [authStatus, sendEvent])
+
+  // Auto-select tenant from URL param after authentication
+  useEffect(() => {
+    if (authStatus === "authenticated" && tenant) {
+      ensureTenant(provider, tenant)
+    }
+  }, [authStatus, tenant, provider, ensureTenant])
 
   if (authStatus === "idle" || authStatus === "loading") {
     return (

@@ -14,6 +14,7 @@ from apps.chat.views import (
 from apps.users.views import (
     tenant_credential_detail_view,
     tenant_credential_list_view,
+    tenant_ensure_view,
     tenant_list_view,
     tenant_select_view,
 )
@@ -34,6 +35,7 @@ urlpatterns = [
     path("signup/", signup_view, name="signup"),
     path("tenants/", tenant_list_view, name="tenant-list"),
     path("tenants/select/", tenant_select_view, name="tenant-select"),
+    path("tenants/ensure/", tenant_ensure_view, name="tenant-ensure"),
     path("tenant-credentials/", tenant_credential_list_view, name="tenant-credential-list"),
     path(
         "tenant-credentials/<str:membership_id>/",

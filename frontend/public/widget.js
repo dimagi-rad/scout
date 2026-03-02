@@ -60,6 +60,7 @@
     var params = [];
     if (this.opts.mode) params.push("mode=" + encodeURIComponent(this.opts.mode));
     if (this.opts.tenant) params.push("tenant=" + encodeURIComponent(this.opts.tenant));
+    if (this.opts.provider) params.push("provider=" + encodeURIComponent(this.opts.provider));
     if (this.opts.theme) params.push("theme=" + encodeURIComponent(this.opts.theme));
     var src = SCOUT_ORIGIN + "/embed/" + (params.length ? "?" + params.join("&") : "");
 

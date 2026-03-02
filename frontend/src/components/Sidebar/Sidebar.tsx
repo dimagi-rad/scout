@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useMemo } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
@@ -16,7 +16,10 @@ import { Button } from "@/components/ui/button"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -34,6 +37,14 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
+
+  const groupedDomains = useMemo(() => {
+    const commcare = domains.filter((d) => d.provider === "commcare")
+    const connect = domains.filter((d) => d.provider === "commcare_connect")
+    return { commcare, connect }
+  }, [domains])
+
+  const hasMultipleProviders = groupedDomains.commcare.length > 0 && groupedDomains.connect.length > 0
 
   // Fetch domains on mount
   useEffect(() => {
@@ -56,24 +67,52 @@ export function Sidebar() {
         </Link>
       </div>
 
-      {/* Domain Selector */}
+      {/* Workspace Selector */}
       <div className="border-b p-4">
         <label className="text-xs font-medium text-muted-foreground">
-          Domain
+          Workspace
         </label>
         <Select
           value={activeDomainId ?? ""}
           onValueChange={(value) => { setActiveDomain(value); newThread() }}
         >
           <SelectTrigger className="mt-1 w-full" data-testid="domain-selector">
-            <SelectValue placeholder="Select domain" />
+            <SelectValue placeholder="Select workspace" />
           </SelectTrigger>
           <SelectContent>
-            {domains.map((d) => (
-              <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
-                {d.tenant_name}
-              </SelectItem>
-            ))}
+            {hasMultipleProviders ? (
+              <>
+                {groupedDomains.commcare.length > 0 && (
+                  <SelectGroup>
+                    <SelectLabel>CommCare Domains</SelectLabel>
+                    {groupedDomains.commcare.map((d) => (
+                      <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
+                        {d.tenant_name}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                )}
+                {groupedDomains.connect.length > 0 && (
+                  <>
+                    <SelectSeparator />
+                    <SelectGroup>
+                      <SelectLabel>Connect Opportunities</SelectLabel>
+                      {groupedDomains.connect.map((d) => (
+                        <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
+                          {d.tenant_name}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </>
+                )}
+              </>
+            ) : (
+              domains.map((d) => (
+                <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
+                  {d.tenant_name}
+                </SelectItem>
+              ))
+            )}
           </SelectContent>
         </Select>
       </div>

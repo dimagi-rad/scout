@@ -19,6 +19,8 @@ export interface DomainSlice {
   domainActions: {
     fetchDomains: () => Promise<void>
     setActiveDomain: (id: string) => void
+    setActiveDomainByTenantId: (provider: string, tenantId: string) => void
+    ensureTenant: (provider: string, tenantId: string) => Promise<void>
   }
 }
 
@@ -55,6 +57,28 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     setActiveDomain: (id: string) => {
       set({ activeDomainId: id })
       api.post("/api/auth/tenants/select/", { tenant_id: id }).catch(() => {})
+    },
+
+    setActiveDomainByTenantId: (provider: string, tenantId: string) => {
+      const match = get().domains.find(
+        (d) => d.provider === provider && d.tenant_id === tenantId
+      )
+      if (match) {
+        get().domainActions.setActiveDomain(match.id)
+      }
+    },
+
+    ensureTenant: async (provider: string, tenantId: string) => {
+      try {
+        await api.post("/api/auth/tenants/ensure/", {
+          provider,
+          tenant_id: tenantId,
+        })
+        await get().domainActions.fetchDomains()
+        get().domainActions.setActiveDomainByTenantId(provider, tenantId)
+      } catch (error) {
+        console.error("[Scout] Failed to ensure tenant:", error)
+      }
     },
   },
 })

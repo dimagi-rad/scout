@@ -417,23 +417,33 @@ async def run_materialization(
     from mcp_server.loaders.connect_base import ConnectAuthError
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
-        # ── Resolve pipeline config ───────────────────────────────────────────
+        # ── Resolve TenantMembership ──────────────────────────────────────────
         registry = get_registry()
+        try:
+            qs = TenantMembership.objects.select_related("user")
+            if tenant_membership_id:
+                tm = await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
+            else:
+                pipeline_config = registry.get(pipeline)
+                if pipeline_config is None:
+                    tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
+                    return tc["result"]
+                tm = await qs.aget(tenant_id=tenant_id, provider=pipeline_config.provider)
+        except TenantMembership.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
+            return tc["result"]
+
+        # ── Auto-select pipeline from TenantMembership provider ───────────────
+        # If the caller used the default pipeline but the tenant is a different
+        # provider, switch to the correct pipeline automatically.
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        correct_pipeline = provider_pipeline_map.get(tm.provider, pipeline)
+        if correct_pipeline != pipeline:
+            pipeline = correct_pipeline
+
         pipeline_config = registry.get(pipeline)
         if pipeline_config is None:
             tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
-            return tc["result"]
-
-        # ── Resolve TenantMembership ──────────────────────────────────────────
-        try:
-            qs = TenantMembership.objects.select_related("user")
-            tm = (
-                await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
-                if tenant_membership_id
-                else await qs.aget(tenant_id=tenant_id, provider=pipeline_config.provider)
-            )
-        except TenantMembership.DoesNotExist:
-            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
 
         # ── Resolve credential ────────────────────────────────────────────────

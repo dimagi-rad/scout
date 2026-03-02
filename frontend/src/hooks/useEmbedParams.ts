@@ -6,6 +6,7 @@ export type EmbedTheme = "light" | "dark" | "auto"
 export interface EmbedParams {
   mode: EmbedMode
   tenant: string | null
+  provider: string
   theme: EmbedTheme
   isEmbed: boolean
 }
@@ -17,6 +18,7 @@ export function useEmbedParams(): EmbedParams {
     return {
       mode: (params.get("mode") as EmbedMode) || "chat",
       tenant: params.get("tenant"),
+      provider: params.get("provider") || "commcare_connect",
       theme: (params.get("theme") as EmbedTheme) || "auto",
       isEmbed,
     }
