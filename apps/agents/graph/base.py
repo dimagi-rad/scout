@@ -164,7 +164,7 @@ async def build_agent_graph(
     """
     from apps.projects.models import TenantWorkspace
 
-    workspace, _ = TenantWorkspace.objects.get_or_create(
+    workspace, _ = await TenantWorkspace.objects.aget_or_create(
         tenant_id=tenant_membership.tenant_id,
         defaults={"tenant_name": tenant_membership.tenant_name},
     )
