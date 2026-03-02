@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
 from django.test import Client
 
@@ -26,14 +28,27 @@ class TestTenantEnsureAPI:
     def test_ensure_creates_connect_membership(self, user):
         self._create_connect_social_token(user)
 
+        # Mock the Connect API to return the requested opportunity
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "opportunities": [
+                {"id": 532, "name": "Opportunity 532"},
+            ],
+        }
+
         client = Client()
         client.force_login(user)
 
-        response = client.post(
-            "/api/auth/tenants/ensure/",
-            data={"provider": "commcare_connect", "tenant_id": "532"},
-            content_type="application/json",
-        )
+        with patch(
+            "apps.users.services.tenant_resolution.requests.get",
+            return_value=mock_response,
+        ):
+            response = client.post(
+                "/api/auth/tenants/ensure/",
+                data={"provider": "commcare_connect", "tenant_id": "532"},
+                content_type="application/json",
+            )
         assert response.status_code == 200
 
         data = response.json()
@@ -42,8 +57,36 @@ class TestTenantEnsureAPI:
         assert data["tenant_name"] == "Opportunity 532"
         assert "id" in data
 
-        tm = TenantMembership.objects.get(user=user, provider="commcare_connect", tenant_id="532")
+        tm = TenantMembership.objects.get(
+            user=user, provider="commcare_connect", tenant_id="532"
+        )
         assert tm.last_selected_at is not None
+
+    def test_ensure_returns_404_for_unauthorized_opportunity(self, user):
+        self._create_connect_social_token(user)
+
+        # Mock the Connect API to return a different opportunity (not 999)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "opportunities": [
+                {"id": 532, "name": "Opportunity 532"},
+            ],
+        }
+
+        client = Client()
+        client.force_login(user)
+
+        with patch(
+            "apps.users.services.tenant_resolution.requests.get",
+            return_value=mock_response,
+        ):
+            response = client.post(
+                "/api/auth/tenants/ensure/",
+                data={"provider": "commcare_connect", "tenant_id": "999"},
+                content_type="application/json",
+            )
+        assert response.status_code == 404
 
     def test_ensure_returns_existing_membership(self, user):
         self._create_connect_social_token(user)

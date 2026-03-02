@@ -312,22 +312,24 @@ async def tenant_ensure_view(request):
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
                     status=404,
                 )
-            from apps.users.models import TenantCredential
 
-            def _create():
-                tm_new, _ = TenantMembership.objects.update_or_create(
-                    user=user,
-                    provider=provider,
-                    tenant_id=tenant_id,
-                    defaults={"tenant_name": f"Opportunity {tenant_id}"},
-                )
-                TenantCredential.objects.get_or_create(
-                    tenant_membership=tm_new,
-                    defaults={"credential_type": TenantCredential.OAUTH},
-                )
-                return tm_new
+            # Resolve the user's actual opportunities from the Connect API
+            # to verify they have access to the requested tenant_id.
+            from apps.users.services.tenant_resolution import (
+                resolve_connect_opportunities,
+            )
 
-            tm = await sync_to_async(_create)()
+            memberships = await sync_to_async(resolve_connect_opportunities)(
+                user, connect_token
+            )
+            tm = next(
+                (m for m in memberships if m.tenant_id == tenant_id), None
+            )
+            if tm is None:
+                return JsonResponse(
+                    {"error": "Opportunity not found for this user"},
+                    status=404,
+                )
         else:
             return JsonResponse({"error": "Tenant not found"}, status=404)
 

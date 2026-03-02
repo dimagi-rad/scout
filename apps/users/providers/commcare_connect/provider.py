@@ -41,6 +41,10 @@ class CommCareConnectProvider(OAuth2Provider):
             return str(data["id"])
         url = data.get("url", "")
         pk = url.rstrip("/").rsplit("/", 1)[-1] if url else ""
+        if not pk:
+            raise ValueError(
+                f"Cannot determine UID from Connect profile response: {data!r}"
+            )
         return pk
 
     def extract_common_fields(self, data: dict) -> dict:
