@@ -299,9 +299,7 @@ def disconnect_provider_view(request, provider_id):
         return JsonResponse({"error": "Not authenticated"}, status=401)
 
     # Find tokens for this provider — check both provider class id and provider_id
-    tokens = SocialToken.objects.filter(
-        account__user=request.user, account__provider=provider_id
-    )
+    tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
     if not tokens.exists():
         app_provider_ids = list(
             SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)

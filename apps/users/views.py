@@ -44,12 +44,10 @@ def _get_commcare_token(user) -> str | None:
 
 def _get_connect_token(user) -> str | None:
     """Return the user's Connect OAuth access token, or None."""
-    token = (
-        SocialToken.objects.filter(
-            account__user=user,
-            account__provider="commcare_connect",
-        ).first()
-    )
+    token = SocialToken.objects.filter(
+        account__user=user,
+        account__provider="commcare_connect",
+    ).first()
     return token.token if token else None
 
 
@@ -217,6 +215,7 @@ async def tenant_credential_detail_view(request, membership_id):
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     if request.method == "DELETE":
+
         def _delete():
             try:
                 tm = TenantMembership.objects.get(id=membership_id, user=user)
@@ -319,12 +318,8 @@ async def tenant_ensure_view(request):
                 resolve_connect_opportunities,
             )
 
-            memberships = await sync_to_async(resolve_connect_opportunities)(
-                user, connect_token
-            )
-            tm = next(
-                (m for m in memberships if m.tenant_id == tenant_id), None
-            )
+            memberships = await sync_to_async(resolve_connect_opportunities)(user, connect_token)
+            tm = next((m for m in memberships if m.tenant_id == tenant_id), None)
             if tm is None:
                 return JsonResponse(
                     {"error": "Opportunity not found for this user"},

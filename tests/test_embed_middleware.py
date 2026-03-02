@@ -13,6 +13,7 @@ class TestEmbedFrameOptionsMiddleware:
 
     def _make_response(self, status=200):
         from django.http import HttpResponse
+
         self._response = HttpResponse("OK")
         self._response["X-Frame-Options"] = "DENY"
         return self._response

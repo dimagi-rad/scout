@@ -81,8 +81,7 @@ def _wait_for_oauth(base_url):
     # Go directly to the allauth login URL on Django — this ensures the
     # redirect_uri uses the Django port (matching the OAuth app config).
     oauth_url = (
-        f"{base_url}/accounts/commcare_connect/login/"
-        f"?process=connect&next=/api/auth/providers/"
+        f"{base_url}/accounts/commcare_connect/login/?process=connect&next=/api/auth/providers/"
     )
 
     print()
@@ -123,9 +122,7 @@ class TestConnectSync:
         """Resolve OAuth credential for a TenantMembership."""
         token = _get_connect_token(user=tm.user)
         if not token:
-            pytest.fail(
-                f"No SocialToken for user {tm.user.email} with provider commcare_connect."
-            )
+            pytest.fail(f"No SocialToken for user {tm.user.email} with provider commcare_connect.")
         return {"type": "oauth", "value": token.token}
 
     def _ensure_prerequisites(self, opp_id, scout_base_url):

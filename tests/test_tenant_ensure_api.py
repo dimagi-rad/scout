@@ -10,7 +10,7 @@ from apps.users.models import TenantMembership
 class TestTenantEnsureAPI:
     def _create_connect_social_token(self, user):
         """Create the allauth SocialApp, SocialAccount, and SocialToken for commcare_connect."""
-        from allauth.socialaccount.models import SocialApp, SocialAccount, SocialToken
+        from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 
         app = SocialApp.objects.create(
             provider="commcare_connect",
@@ -57,9 +57,7 @@ class TestTenantEnsureAPI:
         assert data["tenant_name"] == "Opportunity 532"
         assert "id" in data
 
-        tm = TenantMembership.objects.get(
-            user=user, provider="commcare_connect", tenant_id="532"
-        )
+        tm = TenantMembership.objects.get(user=user, provider="commcare_connect", tenant_id="532")
         assert tm.last_selected_at is not None
 
     def test_ensure_returns_404_for_unauthorized_opportunity(self, user):
@@ -112,9 +110,12 @@ class TestTenantEnsureAPI:
         assert data["tenant_id"] == "532"
         assert data["tenant_name"] == "Existing Opp"
 
-        assert TenantMembership.objects.filter(
-            user=user, provider="commcare_connect", tenant_id="532"
-        ).count() == 1
+        assert (
+            TenantMembership.objects.filter(
+                user=user, provider="commcare_connect", tenant_id="532"
+            ).count()
+            == 1
+        )
 
     def test_ensure_returns_404_without_oauth_token(self, user):
         client = Client()
