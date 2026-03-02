@@ -54,7 +54,7 @@ function tokenize(sql: string): Token[] {
 const TYPE_CLASSES: Record<Token["type"], string> = {
   keyword: "text-blue-400 font-semibold",
   string: "text-amber-400",
-  number: "text-emerald-400",
+  number: "text-emerald-300",
   comment: "text-muted-foreground/60 italic",
   plain: "",
 }
@@ -62,7 +62,7 @@ const TYPE_CLASSES: Record<Token["type"], string> = {
 export function SqlHighlighter({ sql }: { sql: string }) {
   const tokens = tokenize(sql)
   return (
-    <code className="font-mono text-xs leading-relaxed text-foreground/90">
+    <code className="font-mono text-xs leading-relaxed text-zinc-200">
       {tokens.map((t, i) => (
         <Fragment key={i}>
           {t.type === "plain" ? (
