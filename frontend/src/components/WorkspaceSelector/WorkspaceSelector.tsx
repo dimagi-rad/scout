@@ -3,6 +3,7 @@ import { Search, X, Plus, Users, Database, AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
+import { CreateWorkspaceForm } from "./CreateWorkspaceForm"
 
 type Tab = "custom" | "commcare" | "connect"
 
@@ -19,6 +20,7 @@ export function WorkspaceSelector({ open, onClose }: WorkspaceSelectorProps) {
 function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
   const [activeTab, setActiveTab] = useState<Tab>("custom")
   const [search, setSearch] = useState("")
+  const [createOpen, setCreateOpen] = useState(false)
 
   const domains = useAppStore((s) => s.domains)
   const customWorkspaces = useAppStore((s) => s.customWorkspaces)
@@ -26,6 +28,7 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
   const missingTenants = useAppStore((s) => s.missingTenants)
   const fetchCustomWorkspaces = useAppStore((s) => s.workspaceActions.fetchCustomWorkspaces)
   const enterCustomWorkspace = useAppStore((s) => s.workspaceActions.enterCustomWorkspace)
+  const createCustomWorkspace = useAppStore((s) => s.workspaceActions.createCustomWorkspace)
   const exitCustomWorkspace = useAppStore((s) => s.workspaceActions.exitCustomWorkspace)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
@@ -73,6 +76,20 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
   const handleEnterWorkspace = async (id: string) => {
     await enterCustomWorkspace(id)
     // Only close if there was no error (enterError will be set by the action if failed)
+    const currentError = useAppStore.getState().enterError
+    if (!currentError) {
+      newThread()
+      onClose()
+    }
+  }
+
+  const handleCreateWorkspace = async (data: { name: string; tenant_ids: string[] }) => {
+    const created = await createCustomWorkspace({
+      name: data.name,
+      tenant_ids: data.tenant_ids,
+    })
+    setCreateOpen(false)
+    await enterCustomWorkspace(created.id)
     const currentError = useAppStore.getState().enterError
     if (!currentError) {
       newThread()
@@ -169,6 +186,7 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
             <CustomTabContent
               workspaces={filteredCustomWorkspaces}
               onEnter={handleEnterWorkspace}
+              onCreate={() => setCreateOpen(true)}
             />
           )}
           {activeTab === "commcare" && (
@@ -186,6 +204,13 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
             />
           )}
         </div>
+
+        <CreateWorkspaceForm
+          open={createOpen}
+          onOpenChange={setCreateOpen}
+          domains={domains}
+          onSubmit={handleCreateWorkspace}
+        />
       </div>
     </div>
   )
@@ -194,9 +219,11 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
 function CustomTabContent({
   workspaces,
   onEnter,
+  onCreate,
 }: {
   workspaces: { id: string; name: string; tenant_count: number; member_count: number }[]
   onEnter: (id: string) => void
+  onCreate: () => void
 }) {
   return (
     <div className="space-y-2">
@@ -231,6 +258,7 @@ function CustomTabContent({
         variant="outline"
         className="mt-2 w-full"
         data-testid="workspace-create-btn"
+        onClick={onCreate}
       >
         <Plus className="mr-2 h-4 w-4" />
         Create Custom Workspace

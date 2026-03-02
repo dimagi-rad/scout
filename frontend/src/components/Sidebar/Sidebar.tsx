@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { NavItem } from "./NavItem"
+import { TenantManagement } from "./TenantManagement"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSelector } from "@/components/WorkspaceSelector/WorkspaceSelector"
 
@@ -80,6 +81,19 @@ export function Sidebar() {
         </button>
         <WorkspaceSelector open={selectorOpen} onClose={() => setSelectorOpen(false)} />
       </div>
+
+      {/* Tenant Management (custom workspace only) */}
+      {workspaceMode === "custom" && activeCustomWorkspace && (
+        <TenantManagement
+          workspace={activeCustomWorkspace}
+          domains={domains}
+          isOwner={
+            activeCustomWorkspace.members?.some(
+              (m) => m.email === user?.email && m.role === "owner",
+            ) ?? false
+          }
+        />
+      )}
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">

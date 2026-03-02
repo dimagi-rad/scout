@@ -53,8 +53,17 @@ export interface WorkspaceSlice {
     createCustomWorkspace: (data: {
       name: string
       description?: string
-      tenant_workspace_ids: string[]
+      tenant_workspace_ids?: string[]
+      tenant_ids?: string[]
     }) => Promise<CustomWorkspaceDetail>
+    addTenantToWorkspace: (
+      workspaceId: string,
+      tenantId: string,
+    ) => Promise<CustomWorkspaceTenant>
+    removeTenantFromWorkspace: (
+      workspaceId: string,
+      cwtId: string,
+    ) => Promise<void>
   }
 }
 
@@ -149,6 +158,42 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice, [], [], Workspac
         ],
       }))
       return detail
+    },
+
+    addTenantToWorkspace: async (workspaceId, tenantId) => {
+      const cwt = await api.post<CustomWorkspaceTenant>(
+        `/api/custom-workspaces/${workspaceId}/tenants/`,
+        { tenant_id: tenantId },
+      )
+      set((state) => {
+        const active = state.activeCustomWorkspace
+        if (active && active.id === workspaceId) {
+          return {
+            activeCustomWorkspace: {
+              ...active,
+              tenants: [...active.tenants, cwt],
+            },
+          }
+        }
+        return {}
+      })
+      return cwt
+    },
+
+    removeTenantFromWorkspace: async (workspaceId, cwtId) => {
+      await api.delete(`/api/custom-workspaces/${workspaceId}/tenants/${cwtId}/`)
+      set((state) => {
+        const active = state.activeCustomWorkspace
+        if (active && active.id === workspaceId) {
+          return {
+            activeCustomWorkspace: {
+              ...active,
+              tenants: active.tenants.filter((t) => t.id !== cwtId),
+            },
+          }
+        }
+        return {}
+      })
     },
   },
 })

@@ -533,13 +533,27 @@ class CustomWorkspaceListCreateView(APIView):
         serializer = CustomWorkspaceCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        tenant_workspace_ids = serializer.validated_data["tenant_workspace_ids"]
-        tenant_workspaces = TenantWorkspace.objects.filter(id__in=tenant_workspace_ids)
-        if tenant_workspaces.count() != len(tenant_workspace_ids):
-            raise ValidationError("One or more tenant workspaces not found.")
+        # Resolve tenant workspaces from UUIDs
+        tenant_workspaces_list = []
+        tenant_workspace_ids = serializer.validated_data.get("tenant_workspace_ids", [])
+        if tenant_workspace_ids:
+            tenant_workspaces_qs = TenantWorkspace.objects.filter(id__in=tenant_workspace_ids)
+            if tenant_workspaces_qs.count() != len(tenant_workspace_ids):
+                raise ValidationError("One or more tenant workspaces not found.")
+            tenant_workspaces_list.extend(tenant_workspaces_qs)
+
+        # Resolve tenant workspaces from tenant_id strings via get_or_create
+        tenant_ids_str = serializer.validated_data.get("tenant_ids", [])
+        if tenant_ids_str:
+            for tid in tenant_ids_str:
+                tw, _ = TenantWorkspace.objects.get_or_create(
+                    tenant_id=tid,
+                    defaults={"tenant_name": tid},
+                )
+                tenant_workspaces_list.append(tw)
 
         # Verify user has TenantMembership for all requested tenants
-        tenant_ids = set(tenant_workspaces.values_list("tenant_id", flat=True))
+        tenant_ids = set(tw.tenant_id for tw in tenant_workspaces_list)
         user_tenant_ids = set(
             TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
         )
@@ -552,7 +566,7 @@ class CustomWorkspaceListCreateView(APIView):
             description=serializer.validated_data.get("description", ""),
             created_by=request.user,
         )
-        for tw in tenant_workspaces:
+        for tw in tenant_workspaces_list:
             CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
         WorkspaceMembership.objects.create(workspace=workspace, user=request.user, role="owner")
 
@@ -634,10 +648,20 @@ class CustomWorkspaceTenantListCreateView(APIView):
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
         _check_workspace_role(request.user, workspace, ["owner"])
 
+        tw = None
         tw_id = request.data.get("tenant_workspace_id")
-        tw = TenantWorkspace.objects.filter(id=tw_id).first()
+        tenant_id_str = request.data.get("tenant_id")
+
+        if tw_id:
+            tw = TenantWorkspace.objects.filter(id=tw_id).first()
+        elif tenant_id_str:
+            tw, _ = TenantWorkspace.objects.get_or_create(
+                tenant_id=tenant_id_str,
+                defaults={"tenant_name": tenant_id_str},
+            )
+
         if not tw:
-            raise ValidationError("Tenant workspace not found.")
+            raise ValidationError("Tenant workspace not found. Provide tenant_workspace_id or tenant_id.")
 
         if not TenantMembership.objects.filter(user=request.user, tenant_id=tw.tenant_id).exists():
             raise ValidationError("You don't have access to this tenant.")
