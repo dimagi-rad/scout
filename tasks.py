@@ -11,7 +11,7 @@ def dev(c: Context) -> None:
 
 @task
 def deps(c: Context) -> None:
-    """Start Docker dependencies: platform-db, redis, mcp-server."""
+    """Start Docker dependencies: platform-db and redis (alternative to native installs)."""
     c.run("docker compose up platform-db redis mcp-server", pty=True)
 
 
@@ -86,6 +86,12 @@ def check(c: Context) -> None:
 def docker_up(c: Context) -> None:
     """Start all services via Docker Compose (api :8000, frontend :3000, mcp :8100)."""
     c.run("docker compose up", pty=True)
+
+
+@task
+def createsuperuser(c: Context) -> None:
+    """Create a Django superuser (prompts for email and password)."""
+    c.run("uv run python manage.py createsuperuser", pty=True)
 
 
 @task
