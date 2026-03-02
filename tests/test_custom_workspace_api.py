@@ -126,3 +126,91 @@ class TestCustomWorkspaceEnter:
         api_client.force_login(other_user)
         response = api_client.post(f"/api/custom-workspaces/{custom_workspace.id}/enter/")
         assert response.status_code == 403
+
+
+@pytest.mark.django_db
+class TestKnowledgeProvenance:
+    def test_knowledge_list_in_custom_workspace_shows_source(
+        self, api_client, owner, custom_workspace, tenant_workspace_a
+    ):
+        from apps.knowledge.models import KnowledgeEntry
+
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a,
+            title="Tenant Entry",
+            content="From tenant",
+        )
+        KnowledgeEntry.objects.create(
+            custom_workspace=custom_workspace,
+            title="Workspace Entry",
+            content="From workspace",
+        )
+
+        api_client.force_login(owner)
+        response = api_client.get(
+            "/api/knowledge/",
+            HTTP_X_CUSTOM_WORKSPACE=str(custom_workspace.id),
+        )
+        assert response.status_code == 200
+        entries = response.json()["results"]
+        sources = {e["title"]: e.get("source") for e in entries}
+        assert sources["Tenant Entry"] == "tenant"
+        assert sources["Workspace Entry"] == "workspace"
+
+    def test_knowledge_list_in_custom_workspace_shows_source_name(
+        self, api_client, owner, custom_workspace, tenant_workspace_a
+    ):
+        from apps.knowledge.models import KnowledgeEntry
+
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a,
+            title="Tenant Entry",
+            content="From tenant",
+        )
+        KnowledgeEntry.objects.create(
+            custom_workspace=custom_workspace,
+            title="Workspace Entry",
+            content="From workspace",
+        )
+
+        api_client.force_login(owner)
+        response = api_client.get(
+            "/api/knowledge/",
+            HTTP_X_CUSTOM_WORKSPACE=str(custom_workspace.id),
+        )
+        assert response.status_code == 200
+        entries = response.json()["results"]
+        source_names = {e["title"]: e.get("source_name") for e in entries}
+        assert source_names["Tenant Entry"] == "Domain A"
+        assert source_names["Workspace Entry"] == "This Workspace"
+
+    def test_knowledge_list_without_header_no_source_fields(
+        self, api_client, owner, custom_workspace, tenant_workspace_a, owner_memberships
+    ):
+        """Without X-Custom-Workspace header, source fields should not appear."""
+        from apps.knowledge.models import KnowledgeEntry
+
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a,
+            title="Regular Entry",
+            content="Normal mode",
+        )
+
+        api_client.force_login(owner)
+        response = api_client.get("/api/knowledge/")
+        assert response.status_code == 200
+        entries = response.json()["results"]
+        if entries:
+            assert "source" not in entries[0]
+            assert "source_name" not in entries[0]
+
+    def test_knowledge_list_custom_workspace_nonmember_denied(
+        self, api_client, other_user, custom_workspace
+    ):
+        """Non-members of the custom workspace should be denied."""
+        api_client.force_login(other_user)
+        response = api_client.get(
+            "/api/knowledge/",
+            HTTP_X_CUSTOM_WORKSPACE=str(custom_workspace.id),
+        )
+        assert response.status_code == 403

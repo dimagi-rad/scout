@@ -26,6 +26,7 @@ export function KnowledgePage() {
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const knowledgeFilter = useAppStore((s) => s.knowledgeFilter)
   const knowledgeSearch = useAppStore((s) => s.knowledgeSearch)
+  const workspaceMode = useAppStore((s) => s.workspaceMode)
   const {
     fetchKnowledge,
     createKnowledge,
@@ -187,6 +188,7 @@ export function KnowledgePage() {
           items={filteredItems}
           filter={knowledgeFilter}
           search={knowledgeSearch}
+          workspaceMode={workspaceMode}
           onFilterChange={handleFilterChange}
           onSearchChange={handleSearchChange}
           onEdit={handleEdit}
