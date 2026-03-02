@@ -100,11 +100,18 @@ async def test_fetch_schema_context_active_full(mock_tenant_membership):
         patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
+        patch("apps.agents.graph.base.load_tenant_context", new=AsyncMock(return_value=MagicMock())),
+        patch("apps.projects.models.TenantMetadata") as MockTM,
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        mock_s2a.return_value = AsyncMock(return_value=mock_tables)
+        # First sync_to_async call returns tables; subsequent calls (describe_table) return column dicts
+        mock_s2a.side_effect = [
+            AsyncMock(return_value=mock_tables),
+            AsyncMock(return_value={"columns": [{"name": "case_id", "type": "text"}]}),
+        ]
         mock_full.return_value = small_column_text
+        MockTM.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
         result = await _fetch_schema_context(mock_tenant_membership)
 

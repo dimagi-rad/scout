@@ -41,6 +41,10 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
+from apps.projects.models import SchemaState, TenantSchema
+from mcp_server.context import load_tenant_context
+from mcp_server.pipeline_registry import get_registry
+from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_tables
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -67,6 +71,131 @@ MCP_TOOL_NAMES = frozenset(
 # Configuration constants
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
+SCHEMA_CONTEXT_CHAR_BUDGET = 6000
+
+
+def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
+    """Render a compact schema block: table names, descriptions, row counts."""
+    lines = []
+    if last_materialized_at:
+        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
+    else:
+        lines.append("Data is loaded and ready.\n")
+
+    lines.append("### Available Tables\n")
+    lines.append("| Table | Description | Rows |")
+    lines.append("|---|---|---|")
+    for t in tables:
+        row_count = f"{t['row_count']:,}" if t.get("row_count") is not None else "unknown"
+        desc = t.get("description") or ""
+        lines.append(f"| {t['name']} | {desc} | {row_count} |")
+
+    lines.append("\nUse the `describe_table` tool for column details.")
+    return "\n".join(lines)
+
+
+def _render_full_schema(
+    tables: list[dict],
+    column_map: dict[str, list[dict]],
+    last_materialized_at: str | None,
+) -> str:
+    """Render a full schema block with column details per table."""
+    lines = []
+    if last_materialized_at:
+        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
+    else:
+        lines.append("Data is loaded and ready.\n")
+
+    lines.append("### Available Tables\n")
+    for t in tables:
+        row_count = f"{t['row_count']:,}" if t.get("row_count") is not None else "unknown"
+        desc = t.get("description") or ""
+        header = f"**{t['name']}**"
+        if desc:
+            header += f" — {desc}"
+        header += f" ({row_count} rows)"
+        lines.append(header)
+
+        cols = column_map.get(t["name"], [])
+        if cols:
+            lines.append("Columns:")
+            for col in cols:
+                col_desc = f" — {col['description']}" if col.get("description") else ""
+                lines.append(f"- {col['name']} ({col['type']}){col_desc}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+async def _fetch_schema_context(tenant_membership) -> str:
+    """Fetch database schema state and build a ## Data Availability prompt section.
+
+    Tries to build a full schema block (tables + columns). Falls back to a compact
+    block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
+    """
+    ts = await TenantSchema.objects.filter(
+        tenant_membership__tenant_id=tenant_membership.tenant_id,
+        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+    ).afirst()
+
+    if ts is None:
+        provider = tenant_membership.provider
+        if provider == "commcare_connect":
+            pipeline_name = "connect_sync"
+        else:
+            pipeline_name = "commcare_sync"
+        return (
+            "No data has been loaded yet. "
+            f'Call `run_materialization` with `pipeline="{pipeline_name}"` to load data.'
+        )
+
+    if ts.state == SchemaState.MATERIALIZING:
+        return (
+            "Data is currently loading — this usually takes a minute. "
+            "Ask the user to retry shortly. Do NOT trigger another data load."
+        )
+
+    # Schema is active: fetch table list
+    provider = tenant_membership.provider
+    if provider == "commcare_connect":
+        pipeline_name = "connect_sync"
+    else:
+        pipeline_name = "commcare_sync"
+
+    registry = get_registry()
+    pipeline_config = registry.get(pipeline_name) or registry.get("commcare_sync")
+
+    tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+    if not tables:
+        return "Data is loaded but no tables are available yet. The materialization may still be completing."
+
+    last_materialized_at = tables[0].get("materialized_at") if tables else None
+
+    # Try full schema with columns
+    try:
+        ctx = await load_tenant_context(tenant_membership.tenant_id)
+        from apps.projects.models import TenantMetadata
+
+        tenant_metadata = await TenantMetadata.objects.filter(
+            tenant_membership_id=ts.tenant_membership_id
+        ).afirst()
+
+        column_map: dict[str, list[dict]] = {}
+        for t in tables:
+            detail = await sync_to_async(pipeline_describe_table)(
+                t["name"], ctx, tenant_metadata, pipeline_config
+            )
+            if detail:
+                column_map[t["name"]] = detail.get("columns", [])
+
+        full_text = _render_full_schema(tables, column_map, last_materialized_at)
+        if len(full_text) <= SCHEMA_CONTEXT_CHAR_BUDGET:
+            return full_text
+    except Exception:
+        logger.debug("Could not fetch full schema for context injection, using compact", exc_info=True)
+
+    # Fall back to compact
+    return _render_compact_schema(tables, last_materialized_at)
 
 
 def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
