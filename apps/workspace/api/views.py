@@ -4,11 +4,27 @@ API views for data dictionary and workspace schema management.
 
 import logging
 
-from django.db.models import F
+from django.db.models import Count, F, OuterRef, Subquery
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.users.models import TenantMembership
+from apps.workspace.api.serializers import (
+    CustomWorkspaceCreateSerializer,
+    CustomWorkspaceDetailSerializer,
+    CustomWorkspaceListSerializer,
+    CustomWorkspaceTenantSerializer,
+    WorkspaceMembershipSerializer,
+)
+from apps.workspace.models import (
+    CustomWorkspace,
+    CustomWorkspaceTenant,
+    TenantWorkspace,
+    WorkspaceMembership,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -460,3 +476,273 @@ class TableDetailView(APIView):
         tk.save()
 
         return Response(_serialize_annotation(tk))
+
+
+# ---------------------------------------------------------------------------
+# CustomWorkspace API helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_workspace_role(user, workspace, required_roles):
+    """Check user has one of the required roles. Returns the membership or raises."""
+    membership = WorkspaceMembership.objects.filter(workspace=workspace, user=user).first()
+    if not membership:
+        raise PermissionDenied("Not a member of this workspace.")
+    if membership.role not in required_roles:
+        raise PermissionDenied(f"Requires role: {', '.join(required_roles)}")
+    return membership
+
+
+def _validate_tenant_access(user, workspace):
+    """Validate user has TenantMembership for all tenants in workspace. Returns missing list."""
+    tenant_ids = set(
+        workspace.custom_workspace_tenants.values_list("tenant_workspace__tenant_id", flat=True)
+    )
+    user_tenant_ids = set(
+        TenantMembership.objects.filter(user=user).values_list("tenant_id", flat=True)
+    )
+    return list(tenant_ids - user_tenant_ids)
+
+
+# ---------------------------------------------------------------------------
+# CustomWorkspace API views
+# ---------------------------------------------------------------------------
+
+
+class CustomWorkspaceListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        workspaces = (
+            CustomWorkspace.objects.filter(memberships__user=request.user)
+            .annotate(
+                tenant_count=Count("custom_workspace_tenants", distinct=True),
+                member_count=Count("memberships", distinct=True),
+                role=Subquery(
+                    WorkspaceMembership.objects.filter(
+                        workspace=OuterRef("pk"), user=request.user
+                    ).values("role")[:1]
+                ),
+            )
+            .order_by("name")
+        )
+        serializer = CustomWorkspaceListSerializer(workspaces, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = CustomWorkspaceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        tenant_workspace_ids = serializer.validated_data["tenant_workspace_ids"]
+        tenant_workspaces = TenantWorkspace.objects.filter(id__in=tenant_workspace_ids)
+        if tenant_workspaces.count() != len(tenant_workspace_ids):
+            raise ValidationError("One or more tenant workspaces not found.")
+
+        # Verify user has TenantMembership for all requested tenants
+        tenant_ids = set(tenant_workspaces.values_list("tenant_id", flat=True))
+        user_tenant_ids = set(
+            TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
+        )
+        missing = tenant_ids - user_tenant_ids
+        if missing:
+            raise ValidationError(f"No access to tenants: {', '.join(missing)}")
+
+        workspace = CustomWorkspace.objects.create(
+            name=serializer.validated_data["name"],
+            description=serializer.validated_data.get("description", ""),
+            created_by=request.user,
+        )
+        for tw in tenant_workspaces:
+            CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
+        WorkspaceMembership.objects.create(workspace=workspace, user=request.user, role="owner")
+
+        detail = CustomWorkspaceDetailSerializer(workspace)
+        return Response(detail.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+    def patch(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        for field in ["name", "description", "system_prompt"]:
+            if field in request.data:
+                setattr(workspace, field, request.data[field])
+        workspace.save()
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+    def delete(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+        workspace.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CustomWorkspaceEnterView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+
+        missing = _validate_tenant_access(request.user, workspace)
+        if missing:
+            return Response(
+                {
+                    "error": "Missing tenant access",
+                    "missing_tenants": missing,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+
+class CustomWorkspaceTenantListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        tenants = workspace.custom_workspace_tenants.select_related("tenant_workspace")
+        serializer = CustomWorkspaceTenantSerializer(tenants, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        tw_id = request.data.get("tenant_workspace_id")
+        tw = TenantWorkspace.objects.filter(id=tw_id).first()
+        if not tw:
+            raise ValidationError("Tenant workspace not found.")
+
+        if not TenantMembership.objects.filter(user=request.user, tenant_id=tw.tenant_id).exists():
+            raise ValidationError("You don't have access to this tenant.")
+
+        cwt, created = CustomWorkspaceTenant.objects.get_or_create(
+            workspace=workspace, tenant_workspace=tw
+        )
+        if not created:
+            raise ValidationError("Tenant already in workspace.")
+
+        serializer = CustomWorkspaceTenantSerializer(cwt)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceTenantDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, workspace_id, tenant_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+        deleted, _ = CustomWorkspaceTenant.objects.filter(
+            workspace=workspace, id=tenant_id
+        ).delete()
+        if not deleted:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceMemberListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        members = workspace.memberships.select_related("user")
+        serializer = WorkspaceMembershipSerializer(members, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        from django.contrib.auth import get_user_model
+
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        User = get_user_model()
+        user_id = request.data.get("user_id")
+        role = request.data.get("role", "viewer")
+        if role not in ["editor", "viewer"]:
+            raise ValidationError("Role must be 'editor' or 'viewer'.")
+
+        invitee = User.objects.filter(id=user_id).first()
+        if not invitee:
+            raise ValidationError("User not found.")
+
+        # Validate invitee has access to all tenants
+        missing = _validate_tenant_access(invitee, workspace)
+        if missing:
+            raise ValidationError(f"Invitee lacks access to tenants: {', '.join(missing)}")
+
+        membership, created = WorkspaceMembership.objects.get_or_create(
+            workspace=workspace,
+            user=invitee,
+            defaults={"role": role, "invited_by": request.user},
+        )
+        if not created:
+            raise ValidationError("User is already a member.")
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class WorkspaceMemberDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, workspace_id, member_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        membership = WorkspaceMembership.objects.filter(workspace=workspace, id=member_id).first()
+        if not membership:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        role = request.data.get("role")
+        if role and role in ["owner", "editor", "viewer"]:
+            membership.role = role
+            membership.save(update_fields=["role"])
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data)
+
+    def delete(self, request, workspace_id, member_id):
+        workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+        if not workspace:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        _check_workspace_role(request.user, workspace, ["owner"])
+
+        deleted, _ = WorkspaceMembership.objects.filter(workspace=workspace, id=member_id).delete()
+        if not deleted:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)

@@ -62,6 +62,7 @@ urlpatterns = [
     path("api/artifacts/", include("apps.artifacts.urls")),
     path("api/knowledge/", include("apps.knowledge.urls")),
     path("api/recipes/", include("apps.recipes.urls")),
+    path("api/custom-workspaces/", include("apps.workspace.api.custom_workspace_urls")),
     path("api/data-dictionary/", include("apps.workspace.api.urls")),
     path("api/refresh-schema/", RefreshSchemaView.as_view(), name="refresh_schema"),
     # Public share links (no auth required)
