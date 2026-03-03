@@ -51,7 +51,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
     """
 
     @tool
-    def save_as_recipe(
+    async def save_as_recipe(
         name: str,
         description: str,
         variables: list[dict[str, Any]],
@@ -209,7 +209,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
 
         # Create the recipe
         try:
-            recipe = Recipe.objects.create(
+            recipe = await Recipe.objects.acreate(
                 workspace=workspace,
                 name=name.strip(),
                 description=description.strip() if description else "",

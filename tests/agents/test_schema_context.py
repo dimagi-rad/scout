@@ -190,7 +190,7 @@ async def test_build_system_prompt_no_schema_status_call():
         patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
     ):
-        MockKR.return_value.retrieve.return_value = ""
+        MockKR.return_value.retrieve = AsyncMock(return_value="")
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_reg.return_value.get.return_value = MagicMock()
         mock_s2a.return_value = AsyncMock(return_value=[])

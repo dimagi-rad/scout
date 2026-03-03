@@ -732,7 +732,7 @@ class TestRecipeRunner:
 # ============================================================================
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 class TestSaveAsRecipeTool:
     """Tests for the save_as_recipe tool functionality."""
 
@@ -748,13 +748,14 @@ class TestSaveAsRecipeTool:
         assert hasattr(tool, "description")
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_creates_recipe(self, mock_build_graph, workspace, user):
+    @pytest.mark.asyncio
+    async def test_save_as_recipe_creates_recipe(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe tool creates a recipe."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke(
+        result = await tool.ainvoke(
             {
                 "name": "Customer Analysis",
                 "description": "Analyze customer behavior",
@@ -774,19 +775,22 @@ class TestSaveAsRecipeTool:
         assert "recipe_id" in result
 
         # Verify recipe was created
-        recipe = Recipe.objects.get(id=result["recipe_id"])
+        recipe = await Recipe.objects.aget(id=result["recipe_id"])
         assert recipe.name == "Customer Analysis"
         assert len(recipe.variables) == 1
         assert recipe.prompt == "Show {{segment}} customers"
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_with_prompt_and_variables(self, mock_build_graph, workspace, user):
+    @pytest.mark.asyncio
+    async def test_save_as_recipe_with_prompt_and_variables(
+        self, mock_build_graph, workspace, user
+    ):
         """Test saving recipe with prompt template and variables."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke(
+        result = await tool.ainvoke(
             {
                 "name": "Multi-Variable Analysis",
                 "description": "Analysis with multiple variables",
@@ -799,19 +803,20 @@ class TestSaveAsRecipeTool:
         )
 
         assert result["status"] == "created"
-        recipe = Recipe.objects.get(id=result["recipe_id"])
+        recipe = await Recipe.objects.aget(id=result["recipe_id"])
         assert recipe.prompt == "Get sales for {{year}} in {{region}} and create a visualization"
         assert len(recipe.variables) == 2
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_extracts_variables(self, mock_build_graph, workspace, user):
+    @pytest.mark.asyncio
+    async def test_save_as_recipe_extracts_variables(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe can extract variables from steps."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
         # Agent should identify variables in prompt templates
-        result = tool.invoke(
+        result = await tool.ainvoke(
             {
                 "name": "Variable Extraction Test",
                 "description": "Test variable extraction",
@@ -823,19 +828,20 @@ class TestSaveAsRecipeTool:
             }
         )
 
-        recipe = Recipe.objects.get(id=result["recipe_id"])
+        recipe = await Recipe.objects.aget(id=result["recipe_id"])
         variable_names = recipe.get_variable_names()
         assert "category" in variable_names
         assert "threshold" in variable_names
 
     @patch("apps.recipes.services.runner.build_agent_graph")
-    def test_save_as_recipe_sets_sharing(self, mock_build_graph, workspace, user):
+    @pytest.mark.asyncio
+    async def test_save_as_recipe_sets_sharing(self, mock_build_graph, workspace, user):
         """Test that save_as_recipe can set is_shared flag."""
         from apps.agents.tools.recipe_tool import create_recipe_tool
 
         tool = create_recipe_tool(workspace, user)
 
-        result = tool.invoke(
+        result = await tool.ainvoke(
             {
                 "name": "Shared Recipe",
                 "description": "Recipe shared with project",
@@ -845,5 +851,5 @@ class TestSaveAsRecipeTool:
             }
         )
 
-        recipe = Recipe.objects.get(id=result["recipe_id"])
+        recipe = await Recipe.objects.aget(id=result["recipe_id"])
         assert recipe.is_shared is True

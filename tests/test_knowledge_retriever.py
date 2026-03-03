@@ -10,6 +10,8 @@ Tests cover:
 - Retrieval filtering and prioritization
 """
 
+import pytest
+
 from apps.knowledge.models import (
     AgentLearning,
     KnowledgeEntry,
@@ -18,27 +20,32 @@ from apps.knowledge.models import (
 from apps.knowledge.services.retriever import KnowledgeRetriever
 
 
+@pytest.mark.django_db(transaction=True)
 class TestEmptyKnowledge:
     """Test retriever behavior with no knowledge."""
 
-    def test_empty_knowledge_returns_valid_string(self, workspace):
+    @pytest.mark.asyncio
+    async def test_empty_knowledge_returns_valid_string(self, workspace):
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
         assert isinstance(result, str)
         assert len(result) >= 0
 
-    def test_empty_knowledge_has_no_sections(self, workspace):
+    @pytest.mark.asyncio
+    async def test_empty_knowledge_has_no_sections(self, workspace):
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
         # No headers when empty
         assert "##" not in result
 
 
+@pytest.mark.django_db(transaction=True)
 class TestKnowledgeEntries:
     """Test retriever with knowledge entries."""
 
-    def test_single_entry(self, workspace, user):
-        KnowledgeEntry.objects.create(
+    @pytest.mark.asyncio
+    async def test_single_entry(self, workspace, user):
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="MRR",
             content="Monthly Recurring Revenue from active subscriptions\n\n```sql\nSELECT SUM(amount) FROM subscriptions WHERE status = 'active'\n```",
@@ -47,28 +54,29 @@ class TestKnowledgeEntries:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "MRR" in result
         assert "Monthly Recurring Revenue" in result
         assert "SUM(amount)" in result
 
-    def test_multiple_entries(self, workspace, user):
-        KnowledgeEntry.objects.create(
+    @pytest.mark.asyncio
+    async def test_multiple_entries(self, workspace, user):
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="MRR",
             content="Monthly Recurring Revenue",
             tags=["metric"],
             created_by=user,
         )
-        KnowledgeEntry.objects.create(
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="Soft Delete Rule",
             content="Always filter deleted_at IS NULL for active records",
             tags=["rule"],
             created_by=user,
         )
-        KnowledgeEntry.objects.create(
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="Daily Revenue Query",
             content="```sql\nSELECT DATE(created_at), SUM(amount) FROM orders GROUP BY 1\n```",
@@ -77,14 +85,15 @@ class TestKnowledgeEntries:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "MRR" in result
         assert "Soft Delete Rule" in result
         assert "Daily Revenue Query" in result
 
-    def test_entry_content_appears(self, workspace, user):
-        KnowledgeEntry.objects.create(
+    @pytest.mark.asyncio
+    async def test_entry_content_appears(self, workspace, user):
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="Revenue excludes cancelled orders",
             content="When calculating revenue, always exclude orders with status 'cancelled' or 'refunded'.",
@@ -93,17 +102,19 @@ class TestKnowledgeEntries:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "Revenue excludes cancelled orders" in result
         assert "cancelled" in result
 
 
+@pytest.mark.django_db(transaction=True)
 class TestTableKnowledge:
     """Test retriever with table knowledge."""
 
-    def test_single_table_knowledge(self, workspace, user):
-        TableKnowledge.objects.create(
+    @pytest.mark.asyncio
+    async def test_single_table_knowledge(self, workspace, user):
+        await TableKnowledge.objects.acreate(
             workspace=workspace,
             table_name="orders",
             description="Customer orders with payment and fulfillment status",
@@ -116,14 +127,15 @@ class TestTableKnowledge:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "orders" in result.lower()
         assert "Customer orders" in result or "orders" in result.lower()
 
-    def test_multiple_table_knowledge(self, workspace, user):
+    @pytest.mark.asyncio
+    async def test_multiple_table_knowledge(self, workspace, user):
         for i in range(10):
-            TableKnowledge.objects.create(
+            await TableKnowledge.objects.acreate(
                 workspace=workspace,
                 table_name=f"table_{i}",
                 description=f"Test table {i}",
@@ -132,13 +144,14 @@ class TestTableKnowledge:
             )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         for i in range(10):
             assert f"table_{i}" in result.lower()
 
-    def test_table_with_related_tables(self, workspace, user):
-        TableKnowledge.objects.create(
+    @pytest.mark.asyncio
+    async def test_table_with_related_tables(self, workspace, user):
+        await TableKnowledge.objects.acreate(
             workspace=workspace,
             table_name="orders",
             description="Customer orders",
@@ -150,18 +163,20 @@ class TestTableKnowledge:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "orders" in result.lower()
         if "users" in result:
             assert "related" in result.lower() or "user_id" in result
 
 
+@pytest.mark.django_db(transaction=True)
 class TestAgentLearnings:
     """Test retriever with agent learnings."""
 
-    def test_single_learning(self, workspace, user):
-        AgentLearning.objects.create(
+    @pytest.mark.asyncio
+    async def test_single_learning(self, workspace, user):
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Amount column is in cents, not dollars. Divide by 100.",
             category="type_mismatch",
@@ -175,12 +190,13 @@ class TestAgentLearnings:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "cents" in result.lower() or "divide by 100" in result.lower()
 
-    def test_multiple_learnings_ordered_by_confidence(self, workspace, user):
-        AgentLearning.objects.create(
+    @pytest.mark.asyncio
+    async def test_multiple_learnings_ordered_by_confidence(self, workspace, user):
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Low confidence learning",
             category="other",
@@ -189,7 +205,7 @@ class TestAgentLearnings:
             is_active=True,
             discovered_by_user=user,
         )
-        AgentLearning.objects.create(
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="High confidence learning",
             category="other",
@@ -198,7 +214,7 @@ class TestAgentLearnings:
             is_active=True,
             discovered_by_user=user,
         )
-        AgentLearning.objects.create(
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Medium confidence learning",
             category="other",
@@ -209,15 +225,16 @@ class TestAgentLearnings:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         if "High confidence" in result and "Low confidence" in result:
             high_pos = result.index("High confidence")
             low_pos = result.index("Low confidence")
             assert high_pos < low_pos
 
-    def test_inactive_learnings_excluded(self, workspace, user):
-        AgentLearning.objects.create(
+    @pytest.mark.asyncio
+    async def test_inactive_learnings_excluded(self, workspace, user):
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Active learning",
             category="other",
@@ -225,7 +242,7 @@ class TestAgentLearnings:
             is_active=True,
             discovered_by_user=user,
         )
-        AgentLearning.objects.create(
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Inactive learning",
             category="other",
@@ -235,13 +252,14 @@ class TestAgentLearnings:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "Active learning" in result
         assert "Inactive learning" not in result
 
-    def test_learning_with_evidence(self, workspace, user):
-        AgentLearning.objects.create(
+    @pytest.mark.asyncio
+    async def test_learning_with_evidence(self, workspace, user):
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Status column uses codes not names",
             category="naming",
@@ -255,16 +273,18 @@ class TestAgentLearnings:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "status" in result.lower()
 
 
+@pytest.mark.django_db(transaction=True)
 class TestFullAssembly:
     """Test retriever with all knowledge types together."""
 
-    def test_all_knowledge_types_present(self, workspace, user):
-        KnowledgeEntry.objects.create(
+    @pytest.mark.asyncio
+    async def test_all_knowledge_types_present(self, workspace, user):
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="MRR",
             content="Monthly Recurring Revenue\n\n```sql\nSELECT SUM(amount) FROM subscriptions WHERE status = 'active'\n```",
@@ -272,7 +292,7 @@ class TestFullAssembly:
             created_by=user,
         )
 
-        KnowledgeEntry.objects.create(
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="Soft Delete Rule",
             content="Always filter deleted_at IS NULL",
@@ -280,7 +300,7 @@ class TestFullAssembly:
             created_by=user,
         )
 
-        TableKnowledge.objects.create(
+        await TableKnowledge.objects.acreate(
             workspace=workspace,
             table_name="orders",
             description="Customer orders",
@@ -288,7 +308,7 @@ class TestFullAssembly:
             updated_by=user,
         )
 
-        AgentLearning.objects.create(
+        await AgentLearning.objects.acreate(
             workspace=workspace,
             description="Amount is in cents",
             category="type_mismatch",
@@ -298,15 +318,16 @@ class TestFullAssembly:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert "MRR" in result
         assert "Soft Delete" in result or "deleted_at" in result
         assert "orders" in result.lower()
         assert "cents" in result.lower()
 
-    def test_knowledge_sections_clearly_separated(self, workspace, user):
-        KnowledgeEntry.objects.create(
+    @pytest.mark.asyncio
+    async def test_knowledge_sections_clearly_separated(self, workspace, user):
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="MRR",
             content="Monthly Recurring Revenue\n\n```sql\nSELECT SUM(amount) FROM subscriptions\n```",
@@ -314,7 +335,7 @@ class TestFullAssembly:
             created_by=user,
         )
 
-        KnowledgeEntry.objects.create(
+        await KnowledgeEntry.objects.acreate(
             workspace=workspace,
             title="Test Rule",
             content="Test description",
@@ -323,19 +344,21 @@ class TestFullAssembly:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert len(result) > 0
         assert isinstance(result, str)
 
-    def test_knowledge_context_is_string(self, workspace):
+    @pytest.mark.asyncio
+    async def test_knowledge_context_is_string(self, workspace):
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
         assert isinstance(result, str)
 
-    def test_large_knowledge_base(self, workspace, user):
+    @pytest.mark.asyncio
+    async def test_large_knowledge_base(self, workspace, user):
         for i in range(20):
-            KnowledgeEntry.objects.create(
+            await KnowledgeEntry.objects.acreate(
                 workspace=workspace,
                 title=f"Entry {i}",
                 content=f"Content for entry {i}",
@@ -344,7 +367,7 @@ class TestFullAssembly:
             )
 
         for i in range(20):
-            TableKnowledge.objects.create(
+            await TableKnowledge.objects.acreate(
                 workspace=workspace,
                 table_name=f"table_{i}",
                 description=f"Table {i}",
@@ -352,24 +375,26 @@ class TestFullAssembly:
             )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
 
         assert isinstance(result, str)
         assert len(result) > 0
 
 
+@pytest.mark.django_db(transaction=True)
 class TestRetrievalFiltering:
     """Test knowledge filtering and prioritization."""
 
-    def test_question_based_table_filtering(self, workspace, user):
-        TableKnowledge.objects.create(
+    @pytest.mark.asyncio
+    async def test_question_based_table_filtering(self, workspace, user):
+        await TableKnowledge.objects.acreate(
             workspace=workspace,
             table_name="users",
             description="User accounts and profiles",
             use_cases=["User analysis", "Authentication"],
             updated_by=user,
         )
-        TableKnowledge.objects.create(
+        await TableKnowledge.objects.acreate(
             workspace=workspace,
             table_name="orders",
             description="Customer orders and purchases",
@@ -378,9 +403,9 @@ class TestRetrievalFiltering:
         )
 
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve(user_question="What is the total revenue?")
+        result = await retriever.retrieve(user_question="What is the total revenue?")
 
-        if TableKnowledge.objects.filter(workspace=workspace).count() > 1:
+        if await TableKnowledge.objects.filter(workspace=workspace).acount() > 1:
             assert "orders" in result.lower()
 
     def test_retriever_initialization(self, workspace):
@@ -388,7 +413,8 @@ class TestRetrievalFiltering:
         assert retriever.workspace == workspace
         assert hasattr(retriever, "retrieve")
 
-    def test_empty_workspace_knowledge(self, workspace):
+    @pytest.mark.asyncio
+    async def test_empty_workspace_knowledge(self, workspace):
         retriever = KnowledgeRetriever(workspace)
-        result = retriever.retrieve()
+        result = await retriever.retrieve()
         assert isinstance(result, str)
