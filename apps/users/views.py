@@ -45,36 +45,50 @@ def _get_connect_token(user) -> str | None:
     return token.token if token else None
 
 
+TENANT_RESOLUTION_TTL = 5 * 60  # 5 minutes
+
+
 @require_http_methods(["GET"])
 async def tenant_list_view(request):
     """GET /api/auth/tenants/ — List the user's tenant memberships.
 
-    Always resolves tenants from external provider APIs when the user
-    has an active OAuth token, then returns the full membership list.
+    Resolves tenants from external provider APIs at most once per
+    TENANT_RESOLUTION_TTL (default 5 min).  Pass ?refresh=1 to force.
     """
     user = await _get_user_if_authenticated(request)
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    # Resolve domains from CommCare if the user has an OAuth token
-    access_token = await sync_to_async(_get_commcare_token)(user)
-    if access_token:
-        try:
-            from apps.users.services.tenant_resolution import resolve_commcare_domains
+    force_refresh = request.GET.get("refresh") == "1"
 
-            await sync_to_async(resolve_commcare_domains)(user, access_token)
-        except Exception:
-            logger.warning("Failed to refresh CommCare domains", exc_info=True)
+    # Check if resolution was done recently for this user
+    from django.core.cache import cache
 
-    # Resolve opportunities from Connect if the user has a Connect OAuth token
-    connect_token = await sync_to_async(_get_connect_token)(user)
-    if connect_token:
-        try:
-            from apps.users.services.tenant_resolution import resolve_connect_opportunities
+    cache_key = f"tenant_resolved:{user.pk}"
+    recently_resolved = await sync_to_async(cache.get)(cache_key)
 
-            await sync_to_async(resolve_connect_opportunities)(user, connect_token)
-        except Exception:
-            logger.warning("Failed to refresh Connect opportunities", exc_info=True)
+    if not recently_resolved or force_refresh:
+        # Resolve domains from CommCare if the user has an OAuth token
+        access_token = await sync_to_async(_get_commcare_token)(user)
+        if access_token:
+            try:
+                from apps.users.services.tenant_resolution import resolve_commcare_domains
+
+                await sync_to_async(resolve_commcare_domains)(user, access_token)
+            except Exception:
+                logger.warning("Failed to refresh CommCare domains", exc_info=True)
+
+        # Resolve opportunities from Connect if the user has a Connect OAuth token
+        connect_token = await sync_to_async(_get_connect_token)(user)
+        if connect_token:
+            try:
+                from apps.users.services.tenant_resolution import resolve_connect_opportunities
+
+                await sync_to_async(resolve_connect_opportunities)(user, connect_token)
+            except Exception:
+                logger.warning("Failed to refresh Connect opportunities", exc_info=True)
+
+        await sync_to_async(cache.set)(cache_key, True, TENANT_RESOLUTION_TTL)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(user=user):

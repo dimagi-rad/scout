@@ -60,9 +60,14 @@ export function EmbedPage() {
   useEffect(() => {
     fetchMe()
 
-    // Re-check auth when the iframe regains visibility (e.g. after popup login)
+    // Re-check auth when the iframe regains visibility (e.g. after popup login).
+    // Only re-fetch if we're not already authenticated — avoids re-triggering
+    // the tenant setup chain (and the "Switching workspace" overlay) on alt-tab.
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
+      if (
+        document.visibilityState === "visible" &&
+        useAppStore.getState().authStatus !== "authenticated"
+      ) {
         fetchMe()
       }
     }
@@ -90,9 +95,11 @@ export function EmbedPage() {
     }
   }, [workspaceSwitching])
 
-  // Auto-select tenant from URL param after authentication
+  // Auto-select tenant from URL param after authentication (run once)
+  const tenantSetupDone = useRef(false)
   useEffect(() => {
-    if (authStatus === "authenticated" && tenant) {
+    if (authStatus === "authenticated" && tenant && !tenantSetupDone.current) {
+      tenantSetupDone.current = true
       setWorkspaceSwitching(true)
       ensureTenant(provider, tenant).then(() => ensureWorkspaceForTenant(tenant))
     }

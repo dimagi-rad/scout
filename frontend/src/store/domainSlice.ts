@@ -39,6 +39,8 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
   domainsError: null,
   domainActions: {
     fetchDomains: async () => {
+      // Skip if already loading (prevents duplicate fetches from Sidebar + EmbedPage)
+      if (get().domainsStatus === "loading") return
       set({ domainsStatus: "loading", domainsError: null })
       try {
         const domains = await api.get<TenantMembership[]>("/api/auth/tenants/")
