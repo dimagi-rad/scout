@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { tenantDisplayName } from "@/store/domainSlice"
+import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { NavItem } from "./NavItem"
 import { TenantManagement } from "./TenantManagement"
 import { Button } from "@/components/ui/button"
@@ -33,6 +34,8 @@ export function Sidebar() {
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const workspaceMode = useAppStore((s) => s.workspaceMode)
   const activeCustomWorkspace = useAppStore((s) => s.activeCustomWorkspace)
+  const { isEmbed } = useEmbedParams()
+  const prefix = isEmbed ? "/embed" : ""
 
   // Compute display label
   const workspaceLabel = (() => {
@@ -62,7 +65,7 @@ export function Sidebar() {
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
       {/* Logo */}
       <div className="flex h-14 items-center border-b px-4">
-        <Link to="/" className="flex items-center gap-2 font-semibold">
+        <Link to={`${prefix}/`} className="flex items-center gap-2 font-semibold">
           <span className="text-lg">Scout</span>
         </Link>
       </div>
@@ -98,12 +101,12 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">
-        <NavItem to="/" icon={MessageSquare} label="Chat" />
-        <NavItem to="/artifacts" icon={LayoutDashboard} label="Artifacts" />
-        <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
-        <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
-        <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
-        <NavItem to="/settings/connections" icon={Link2} label="Connections" />
+        <NavItem to={`${prefix}/`} icon={MessageSquare} label="Chat" />
+        <NavItem to={`${prefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
+        <NavItem to={`${prefix}/knowledge`} icon={BookOpen} label="Knowledge" />
+        <NavItem to={`${prefix}/recipes`} icon={ChefHat} label="Recipes" />
+        {!isEmbed && <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />}
+        {!isEmbed && <NavItem to="/settings/connections" icon={Link2} label="Connections" />}
       </nav>
 
       {/* Thread History */}
@@ -116,7 +119,7 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={() => { newThread(); navigate("/chat") }}
+            onClick={() => { newThread(); navigate(`${prefix}/chat`) }}
             data-testid="sidebar-new-chat"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -126,7 +129,7 @@ export function Sidebar() {
           {threads.map((thread) => (
             <button
               key={thread.id}
-              onClick={() => { selectThread(thread.id); navigate("/chat") }}
+              onClick={() => { selectThread(thread.id); navigate(`${prefix}/chat`) }}
               data-testid={`sidebar-thread-${thread.id}`}
               className={`w-full rounded-md px-3 py-1.5 text-left text-sm truncate transition-colors ${
                 thread.id === threadId
