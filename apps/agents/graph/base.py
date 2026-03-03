@@ -41,7 +41,7 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.projects.models import SchemaState, TenantSchema
+from apps.workspace.models import SchemaState, TenantSchema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_tables
@@ -174,7 +174,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
     # Try full schema with columns
     try:
         ctx = await load_tenant_context(tenant_membership.tenant_id)
-        from apps.projects.models import TenantMetadata
+        from apps.workspace.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
             tenant_membership_id=ts.tenant_membership_id

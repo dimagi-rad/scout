@@ -32,7 +32,7 @@ async def test_fetch_schema_context_not_provisioned(mock_tenant_membership):
 @pytest.mark.django_db
 async def test_fetch_schema_context_materializing(mock_tenant_membership):
     """Returns 'currently loading' block when schema state is materializing."""
-    from apps.projects.models import SchemaState
+    from apps.workspace.models import SchemaState
 
     mock_ts = MagicMock()
     mock_ts.state = SchemaState.MATERIALIZING
@@ -49,7 +49,7 @@ async def test_fetch_schema_context_materializing(mock_tenant_membership):
 @pytest.mark.django_db
 async def test_fetch_schema_context_active_compact(mock_tenant_membership):
     """Returns compact table list (no columns) when full schema exceeds budget."""
-    from apps.projects.models import SchemaState
+    from apps.workspace.models import SchemaState
 
     mock_ts = MagicMock()
     mock_ts.state = SchemaState.ACTIVE
@@ -95,7 +95,7 @@ async def test_fetch_schema_context_active_compact(mock_tenant_membership):
 @pytest.mark.django_db
 async def test_fetch_schema_context_active_full(mock_tenant_membership):
     """Returns full schema with columns when it fits within the 6000-char budget."""
-    from apps.projects.models import SchemaState
+    from apps.workspace.models import SchemaState
 
     mock_ts = MagicMock()
     mock_ts.state = SchemaState.ACTIVE
@@ -121,7 +121,7 @@ async def test_fetch_schema_context_active_full(mock_tenant_membership):
         patch(
             "apps.agents.graph.base.load_tenant_context", new=AsyncMock(return_value=MagicMock())
         ),
-        patch("apps.projects.models.TenantMetadata") as MockTM,
+        patch("apps.workspace.models.TenantMetadata") as MockTM,
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
@@ -143,7 +143,7 @@ async def test_fetch_schema_context_active_full(mock_tenant_membership):
 @pytest.mark.django_db
 async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant_membership):
     """The returned text must NOT instruct the agent to call get_schema_status."""
-    from apps.projects.models import SchemaState
+    from apps.workspace.models import SchemaState
 
     mock_ts = MagicMock()
     mock_ts.state = SchemaState.ACTIVE
@@ -170,7 +170,7 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
 async def test_build_system_prompt_no_schema_status_call():
     """The assembled system prompt must not instruct the agent to call get_schema_status."""
     from apps.agents.graph.base import _build_system_prompt
-    from apps.projects.models import SchemaState
+    from apps.workspace.models import SchemaState
 
     mock_workspace = MagicMock()
     mock_workspace.system_prompt = None
