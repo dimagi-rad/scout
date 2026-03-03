@@ -31,6 +31,7 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
           if (wasOfflineRef.current) {
             wasOfflineRef.current = false
             setStatus("reconnecting")
+            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
             reconnectTimerRef.current = setTimeout(() => {
               setStatus("online")
             }, RECONNECT_DISPLAY_MS)
