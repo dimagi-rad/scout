@@ -10,6 +10,7 @@ import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
+import { BASE_PATH } from "@/config"
 
 const embedRouter = createBrowserRouter([
   {
@@ -26,7 +27,7 @@ const embedRouter = createBrowserRouter([
       { path: "recipes/:id", element: <RecipesPage /> },
     ],
   },
-])
+], { basename: BASE_PATH || undefined })
 
 export function EmbedPage() {
   const authStatus = useAppStore((s) => s.authStatus)
