@@ -13,7 +13,7 @@ export function DataDictionaryPage() {
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
     useAppStore((s) => s.dictionaryActions)
 
-  const { isOnline } = useNetworkStatus()
+  const { status: networkStatus } = useNetworkStatus()
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   // Fetch dictionary on mount
@@ -52,7 +52,7 @@ export function DataDictionaryPage() {
   }
 
   // Error state
-  if (dictionaryStatus === "error" && isOnline) {
+  if (dictionaryStatus === "error" && networkStatus === "online") {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">

@@ -38,7 +38,7 @@ export function KnowledgePage() {
     setSearch,
   } = useAppStore((s) => s.knowledgeActions)
 
-  const { isOnline } = useNetworkStatus()
+  const { status: networkStatus } = useNetworkStatus()
   const [formOpen, setFormOpen] = useState(false)
   const [editItem, setEditItem] = useState<KnowledgeItem | null>(null)
   const [deleteItem, setDeleteItem] = useState<KnowledgeItem | null>(null)
@@ -177,7 +177,7 @@ export function KnowledgePage() {
       )}
 
       {/* Error state */}
-      {knowledgeStatus === "error" && isOnline && (
+      {knowledgeStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load knowledge items. Please try again.
         </div>

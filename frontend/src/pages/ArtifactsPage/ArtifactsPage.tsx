@@ -16,7 +16,7 @@ export function ArtifactsPage() {
     setArtifactSearch,
   } = useAppStore((s) => s.artifactActions)
 
-  const { isOnline } = useNetworkStatus()
+  const { status: networkStatus } = useNetworkStatus()
 
   useEffect(() => {
     fetchArtifacts({
@@ -55,7 +55,7 @@ export function ArtifactsPage() {
       )}
 
       {/* Error state */}
-      {artifactsStatus === "error" && isOnline && (
+      {artifactsStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load artifacts. Please try again.
         </div>
