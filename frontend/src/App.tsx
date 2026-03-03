@@ -7,9 +7,16 @@ import { router } from "@/router"
 import { PublicRecipeRunPage } from "@/pages/PublicRecipeRunPage"
 import { PublicThreadPage } from "@/pages/PublicThreadPage"
 import { EmbedPage } from "@/pages/EmbedPage"
+import { BASE_PATH } from "@/config"
+
+// Strip the base path prefix to get the app-relative path
+function appPath(): string {
+  const p = window.location.pathname
+  return BASE_PATH && p.startsWith(BASE_PATH) ? p.slice(BASE_PATH.length) : p
+}
 
 function getPublicPageComponent(): React.ReactNode | null {
-  const path = window.location.pathname
+  const path = appPath()
   if (/^\/shared\/runs\/[^/]+\/?$/.test(path)) return <PublicRecipeRunPage />
   if (/^\/shared\/threads\/[^/]+\/?$/.test(path)) return <PublicThreadPage />
   return null
@@ -18,8 +25,9 @@ function getPublicPageComponent(): React.ReactNode | null {
 export default function App() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
-  const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(window.location.pathname)
-  const isEmbedPage = window.location.pathname.startsWith("/embed")
+  const relPath = appPath()
+  const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(relPath)
+  const isEmbedPage = relPath.startsWith("/embed")
 
   useEffect(() => {
     if (!isPublicPage && !isEmbedPage) {
