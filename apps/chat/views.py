@@ -375,7 +375,7 @@ def providers_view(request):
         entry = {
             "id": app.provider,
             "name": PROVIDER_DISPLAY.get(app.provider, app.name),
-            "login_url": f"/accounts/{app.provider}/login/",
+            "login_url": f"{request.META.get('SCRIPT_NAME', '')}/accounts/{app.provider}/login/",
         }
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
