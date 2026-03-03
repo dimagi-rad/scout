@@ -64,6 +64,7 @@ export interface WorkspaceSlice {
       workspaceId: string,
       cwtId: string,
     ) => Promise<void>
+    ensureWorkspaceForTenant: (tenantId: string) => Promise<void>
   }
 }
 
@@ -194,6 +195,25 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice, [], [], Workspac
         }
         return {}
       })
+    },
+
+    ensureWorkspaceForTenant: async (tenantId: string) => {
+      try {
+        const detail = await api.post<CustomWorkspaceDetail>(
+          "/api/custom-workspaces/ensure-for-tenant/",
+          { tenant_id: tenantId },
+        )
+        setActiveCustomWorkspaceId(detail.id)
+        set({
+          activeCustomWorkspaceId: detail.id,
+          activeCustomWorkspace: detail,
+          workspaceMode: "custom",
+          enterError: null,
+          missingTenants: [],
+        })
+      } catch (error) {
+        console.error("[workspace] ensureWorkspaceForTenant failed:", error)
+      }
     },
   },
 })

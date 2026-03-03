@@ -6,6 +6,7 @@ from apps.workspace.api.views import (
     CustomWorkspaceListCreateView,
     CustomWorkspaceTenantDeleteView,
     CustomWorkspaceTenantListCreateView,
+    EnsureWorkspaceForTenantView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListCreateView,
 )
@@ -14,6 +15,11 @@ app_name = "custom_workspaces"
 
 urlpatterns = [
     path("", CustomWorkspaceListCreateView.as_view(), name="list-create"),
+    path(
+        "ensure-for-tenant/",
+        EnsureWorkspaceForTenantView.as_view(),
+        name="ensure-for-tenant",
+    ),
     path("<uuid:workspace_id>/", CustomWorkspaceDetailView.as_view(), name="detail"),
     path("<uuid:workspace_id>/enter/", CustomWorkspaceEnterView.as_view(), name="enter"),
     path(

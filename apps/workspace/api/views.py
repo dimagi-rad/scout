@@ -770,3 +770,77 @@ class WorkspaceMemberDetailView(APIView):
         if not deleted:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EnsureWorkspaceForTenantView(APIView):
+    """
+    POST /api/custom-workspaces/ensure-for-tenant/
+
+    Find-or-create a single-tenant CustomWorkspace for a given tenant.
+    Used by the embed SDK to automatically place users into custom workspace mode.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tenant_id = request.data.get("tenant_id")
+        if not tenant_id:
+            return Response(
+                {"error": "tenant_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verify user has TenantMembership for this tenant
+        membership = TenantMembership.objects.filter(
+            user=request.user, tenant_id=tenant_id
+        ).first()
+        if not membership:
+            return Response(
+                {"error": "No access to this tenant."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Ensure TenantWorkspace exists
+        tw, _ = TenantWorkspace.objects.get_or_create(
+            tenant_id=tenant_id,
+            defaults={"tenant_name": membership.tenant_name},
+        )
+
+        # Look for existing single-tenant workspace owned by this user.
+        # Use a Subquery for the total count to avoid the JOIN from the
+        # tenant_workspace filter collapsing the count to 1.
+        existing = (
+            CustomWorkspace.objects.filter(
+                memberships__user=request.user,
+                memberships__role="owner",
+                custom_workspace_tenants__tenant_workspace=tw,
+            )
+            .annotate(
+                tenant_count=Subquery(
+                    CustomWorkspaceTenant.objects.filter(workspace_id=OuterRef("pk"))
+                    .order_by()
+                    .values("workspace_id")
+                    .annotate(cnt=Count("id"))
+                    .values("cnt")[:1]
+                )
+            )
+            .filter(tenant_count=1)
+            .first()
+        )
+
+        if existing:
+            serializer = CustomWorkspaceDetailSerializer(existing)
+            return Response(serializer.data)
+
+        # Create new workspace
+        workspace = CustomWorkspace.objects.create(
+            name=membership.tenant_name,
+            created_by=request.user,
+        )
+        CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=request.user, role="owner"
+        )
+
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)

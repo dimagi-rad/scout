@@ -1,11 +1,9 @@
-import { useEffect, useMemo, useState } from "react"
-import { Search, X, Plus, Users, Database, AlertTriangle } from "lucide-react"
+import { useEffect, useState } from "react"
+import { X, Plus, Users, Database, AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { CreateWorkspaceForm } from "./CreateWorkspaceForm"
-
-type Tab = "custom" | "commcare" | "connect"
+import { DomainPicker } from "./DomainPicker"
 
 interface WorkspaceSelectorProps {
   open: boolean
@@ -18,8 +16,6 @@ export function WorkspaceSelector({ open, onClose }: WorkspaceSelectorProps) {
 }
 
 function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<Tab>("custom")
-  const [search, setSearch] = useState("")
   const [createOpen, setCreateOpen] = useState(false)
 
   const domains = useAppStore((s) => s.domains)
@@ -33,38 +29,10 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const newThread = useAppStore((s) => s.uiActions.newThread)
 
-  const commcareDomains = useMemo(
-    () => domains.filter((d) => d.provider === "commcare"),
-    [domains],
-  )
-  const connectDomains = useMemo(
-    () => domains.filter((d) => d.provider === "commcare_connect"),
-    [domains],
-  )
-
   // Fetch custom workspaces on mount
   useEffect(() => {
     fetchCustomWorkspaces()
   }, [fetchCustomWorkspaces])
-
-  // Filter items based on search
-  const filteredCustomWorkspaces = useMemo(() => {
-    if (!search) return customWorkspaces
-    const lower = search.toLowerCase()
-    return customWorkspaces.filter((w) => w.name.toLowerCase().includes(lower))
-  }, [customWorkspaces, search])
-
-  const filteredCommcareDomains = useMemo(() => {
-    if (!search) return commcareDomains
-    const lower = search.toLowerCase()
-    return commcareDomains.filter((d) => d.tenant_name.toLowerCase().includes(lower))
-  }, [commcareDomains, search])
-
-  const filteredConnectDomains = useMemo(() => {
-    if (!search) return connectDomains
-    const lower = search.toLowerCase()
-    return connectDomains.filter((d) => d.tenant_name.toLowerCase().includes(lower))
-  }, [connectDomains, search])
 
   const handleSelectDomain = (id: string) => {
     exitCustomWorkspace()
@@ -96,12 +64,6 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
       onClose()
     }
   }
-
-  const tabs: { key: Tab; label: string; count: number }[] = [
-    { key: "custom", label: "Custom", count: customWorkspaces.length },
-    { key: "commcare", label: "CommCare", count: commcareDomains.length },
-    { key: "connect", label: "Connect", count: connectDomains.length },
-  ]
 
   return (
     <div
@@ -145,65 +107,22 @@ function WorkspaceSelectorPanel({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {/* Tabs */}
-        <div className="flex gap-1 border-b px-6 pt-4">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              onClick={() => {
-                setActiveTab(tab.key)
-                setSearch("")
-              }}
-              data-testid={`workspace-tab-${tab.key}`}
-              className={`rounded-t-md px-4 py-2 text-sm font-medium transition-colors ${
-                activeTab === tab.key
-                  ? "border-b-2 border-primary text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {tab.label} ({tab.count})
-            </button>
-          ))}
-        </div>
-
-        {/* Search */}
-        <div className="px-6 pt-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder={`Search ${tabs.find((t) => t.key === activeTab)?.label ?? ""}...`}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-9"
-              data-testid="workspace-search"
-            />
-          </div>
-        </div>
-
-        {/* Content */}
-        <div className="max-h-80 overflow-y-auto px-6 py-4">
-          {activeTab === "custom" && (
-            <CustomTabContent
-              workspaces={filteredCustomWorkspaces}
-              onEnter={handleEnterWorkspace}
-              onCreate={() => setCreateOpen(true)}
-            />
-          )}
-          {activeTab === "commcare" && (
-            <DomainTabContent
-              domains={filteredCommcareDomains}
-              onSelect={handleSelectDomain}
-              emptyMessage="No CommCare domains found."
-            />
-          )}
-          {activeTab === "connect" && (
-            <DomainTabContent
-              domains={filteredConnectDomains}
-              onSelect={handleSelectDomain}
-              emptyMessage="No Connect opportunities found."
-            />
-          )}
-        </div>
+        <DomainPicker
+          domains={domains}
+          mode="single"
+          onSelect={handleSelectDomain}
+          customTab={{
+            label: "Custom",
+            count: customWorkspaces.length,
+            content: (
+              <CustomTabContent
+                workspaces={customWorkspaces}
+                onEnter={handleEnterWorkspace}
+                onCreate={() => setCreateOpen(true)}
+              />
+            ),
+          }}
+        />
 
         <CreateWorkspaceForm
           open={createOpen}
@@ -263,34 +182,6 @@ function CustomTabContent({
         <Plus className="mr-2 h-4 w-4" />
         Create Custom Workspace
       </Button>
-    </div>
-  )
-}
-
-function DomainTabContent({
-  domains,
-  onSelect,
-  emptyMessage,
-}: {
-  domains: { id: string; tenant_id: string; tenant_name: string }[]
-  onSelect: (id: string) => void
-  emptyMessage: string
-}) {
-  return (
-    <div className="space-y-1">
-      {domains.length === 0 && (
-        <p className="py-4 text-center text-sm text-muted-foreground">{emptyMessage}</p>
-      )}
-      {domains.map((d) => (
-        <button
-          key={d.id}
-          onClick={() => onSelect(d.id)}
-          data-testid={`workspace-domain-${d.tenant_id}`}
-          className="flex w-full items-center rounded-md px-4 py-2.5 text-left text-sm transition-colors hover:bg-accent"
-        >
-          {d.tenant_name}
-        </button>
-      ))}
     </div>
   )
 }

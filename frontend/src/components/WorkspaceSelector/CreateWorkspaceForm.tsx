@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react"
+import { useState } from "react"
 import { Loader2 } from "lucide-react"
 import {
   Dialog,
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import type { TenantMembership } from "@/store/domainSlice"
+import { DomainPicker } from "./DomainPicker"
 
 interface CreateWorkspaceFormProps {
   open: boolean
@@ -30,15 +31,6 @@ export function CreateWorkspaceForm({
   const [selectedTenantIds, setSelectedTenantIds] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const commcareDomains = useMemo(
-    () => domains.filter((d) => d.provider === "commcare"),
-    [domains],
-  )
-  const connectDomains = useMemo(
-    () => domains.filter((d) => d.provider === "commcare_connect"),
-    [domains],
-  )
 
   const toggleTenant = (tenantId: string) => {
     setSelectedTenantIds((prev) => {
@@ -127,28 +119,13 @@ export function CreateWorkspaceForm({
                 Select which tenants to include in this workspace.
               </p>
 
-              <div className="max-h-48 overflow-y-auto rounded-md border p-3 space-y-3">
-                {commcareDomains.length > 0 && (
-                  <TenantGroup
-                    label="CommCare"
-                    domains={commcareDomains}
-                    selectedIds={selectedTenantIds}
-                    onToggle={toggleTenant}
-                  />
-                )}
-                {connectDomains.length > 0 && (
-                  <TenantGroup
-                    label="Connect"
-                    domains={connectDomains}
-                    selectedIds={selectedTenantIds}
-                    onToggle={toggleTenant}
-                  />
-                )}
-                {commcareDomains.length === 0 && connectDomains.length === 0 && (
-                  <p className="py-2 text-center text-sm text-muted-foreground">
-                    No tenants available.
-                  </p>
-                )}
+              <div className="rounded-md border">
+                <DomainPicker
+                  domains={domains}
+                  mode="multi"
+                  selectedIds={selectedTenantIds}
+                  onToggle={toggleTenant}
+                />
               </div>
             </div>
           </div>
@@ -174,40 +151,5 @@ export function CreateWorkspaceForm({
         </form>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function TenantGroup({
-  label,
-  domains,
-  selectedIds,
-  onToggle,
-}: {
-  label: string
-  domains: TenantMembership[]
-  selectedIds: Set<string>
-  onToggle: (tenantId: string) => void
-}) {
-  return (
-    <div>
-      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
-      <div className="space-y-1">
-        {domains.map((d) => (
-          <label
-            key={d.id}
-            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-accent"
-            data-testid={`create-workspace-tenant-${d.tenant_id}`}
-          >
-            <input
-              type="checkbox"
-              checked={selectedIds.has(d.tenant_id)}
-              onChange={() => onToggle(d.tenant_id)}
-              className="h-4 w-4 rounded border-input"
-            />
-            {d.tenant_name}
-          </label>
-        ))}
-      </div>
-    </div>
   )
 }

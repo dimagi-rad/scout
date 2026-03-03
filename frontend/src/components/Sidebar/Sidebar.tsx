@@ -102,7 +102,7 @@ export function Sidebar() {
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
-        <NavItem to="/datasources" icon={Database} label="Connections" />
+        <NavItem to="/settings/connections" icon={Link2} label="Connections" />
       </nav>
 
       {/* Thread History */}
@@ -144,18 +144,6 @@ export function Sidebar() {
         <div className="mb-2 truncate text-sm text-muted-foreground">
           {user?.email}
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          asChild
-          data-testid="sidebar-connections"
-        >
-          <Link to="/settings/connections">
-            <Link2 className="mr-2 h-4 w-4" />
-            Connected Accounts
-          </Link>
-        </Button>
         <Button
           variant="ghost"
           size="sm"

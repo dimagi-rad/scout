@@ -214,3 +214,87 @@ class TestKnowledgeProvenance:
             HTTP_X_CUSTOM_WORKSPACE=str(custom_workspace.id),
         )
         assert response.status_code == 403
+
+
+@pytest.mark.django_db
+class TestEnsureWorkspaceForTenant:
+    url = "/api/custom-workspaces/ensure-for-tenant/"
+
+    def test_creates_workspace_when_none_exists(
+        self, api_client, owner, tenant_workspace_a, owner_memberships
+    ):
+        api_client.force_login(owner)
+        response = api_client.post(
+            self.url,
+            data={"tenant_id": "domain-a"},
+            content_type="application/json",
+        )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["name"] == "Domain A"
+        assert len(data["tenants"]) == 1
+        assert data["tenants"][0]["tenant_id"] == "domain-a"
+
+    def test_returns_existing_single_tenant_workspace(
+        self, api_client, owner, tenant_workspace_a, owner_memberships
+    ):
+        """Idempotent: second call returns the same workspace."""
+        api_client.force_login(owner)
+        r1 = api_client.post(
+            self.url,
+            data={"tenant_id": "domain-a"},
+            content_type="application/json",
+        )
+        r2 = api_client.post(
+            self.url,
+            data={"tenant_id": "domain-a"},
+            content_type="application/json",
+        )
+        assert r1.json()["id"] == r2.json()["id"]
+        assert r2.status_code == 200
+
+    def test_ignores_multi_tenant_workspaces(
+        self, api_client, owner, custom_workspace, tenant_workspace_a, owner_memberships
+    ):
+        """custom_workspace has 2 tenants — ensure-for-tenant should create a new one."""
+        api_client.force_login(owner)
+        response = api_client.post(
+            self.url,
+            data={"tenant_id": "domain-a"},
+            content_type="application/json",
+        )
+        assert response.status_code == 201
+        assert response.json()["id"] != str(custom_workspace.id)
+
+    def test_404_when_no_tenant_membership(self, api_client, other_user, tenant_workspace_a):
+        api_client.force_login(other_user)
+        response = api_client.post(
+            self.url,
+            data={"tenant_id": "domain-a"},
+            content_type="application/json",
+        )
+        assert response.status_code == 404
+
+    def test_400_when_tenant_id_missing(self, api_client, owner, owner_memberships):
+        api_client.force_login(owner)
+        response = api_client.post(
+            self.url,
+            data={},
+            content_type="application/json",
+        )
+        assert response.status_code == 400
+
+    def test_repeated_calls_return_same_workspace(
+        self, api_client, owner, tenant_workspace_a, owner_memberships
+    ):
+        """Three sequential calls should all return the same workspace id."""
+        api_client.force_login(owner)
+        ids = []
+        for _ in range(3):
+            r = api_client.post(
+                self.url,
+                data={"tenant_id": "domain-a"},
+                content_type="application/json",
+            )
+            ids.append(r.json()["id"])
+        assert len(set(ids)) == 1
