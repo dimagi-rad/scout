@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -35,6 +36,7 @@ export function RecipesPage() {
     updateRecipeRun,
   } = useAppStore((s) => s.recipeActions)
 
+  const { isOnline } = useNetworkStatus()
   const [runnerOpen, setRunnerOpen] = useState(false)
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
@@ -224,7 +226,7 @@ export function RecipesPage() {
       )}
 
       {/* Error state */}
-      {recipeStatus === "error" && (
+      {recipeStatus === "error" && isOnline && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load recipes. Please try again.
         </div>

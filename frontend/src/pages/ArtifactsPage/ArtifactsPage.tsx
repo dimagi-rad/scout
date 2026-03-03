@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from "react"
 import { Loader2 } from "lucide-react"
 import { useAppStore } from "@/store/store"
+import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { ArtifactList } from "./ArtifactList"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 
@@ -14,6 +15,8 @@ export function ArtifactsPage() {
     deleteArtifact,
     setArtifactSearch,
   } = useAppStore((s) => s.artifactActions)
+
+  const { isOnline } = useNetworkStatus()
 
   useEffect(() => {
     fetchArtifacts({
@@ -52,7 +55,7 @@ export function ArtifactsPage() {
       )}
 
       {/* Error state */}
-      {artifactsStatus === "error" && (
+      {artifactsStatus === "error" && isOnline && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load artifacts. Please try again.
         </div>

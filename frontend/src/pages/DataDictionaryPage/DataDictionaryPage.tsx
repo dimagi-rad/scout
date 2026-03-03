@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { RefreshCw, Database } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
+import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { SchemaTree } from "./SchemaTree"
 import { TableDetail } from "./TableDetail"
 
@@ -12,6 +13,7 @@ export function DataDictionaryPage() {
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
     useAppStore((s) => s.dictionaryActions)
 
+  const { isOnline } = useNetworkStatus()
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   // Fetch dictionary on mount
@@ -50,7 +52,7 @@ export function DataDictionaryPage() {
   }
 
   // Error state
-  if (dictionaryStatus === "error") {
+  if (dictionaryStatus === "error" && isOnline) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
