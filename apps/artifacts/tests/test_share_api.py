@@ -18,8 +18,8 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from apps.artifacts.models import AccessLevel, Artifact, ArtifactType, SharedArtifact
-from apps.projects.models import TenantWorkspace
 from apps.users.models import User
+from apps.workspace.models import TenantWorkspace
 
 
 class ArtifactShareAPITestCase(TestCase):

@@ -28,7 +28,14 @@ class TableKnowledge(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "workspace.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="table_knowledge",
+        null=True,
+        blank=True,
+    )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
         on_delete=models.CASCADE,
         related_name="table_knowledge",
         null=True,
@@ -73,7 +80,15 @@ class TableKnowledge(models.Model):
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
-        unique_together = ["workspace", "table_name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="table_knowledge_one_workspace",
+            ),
+        ]
         ordering = ["table_name"]
         verbose_name_plural = "Table knowledge"
 
@@ -92,7 +107,14 @@ class KnowledgeEntry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "workspace.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="knowledge_entries",
+        null=True,
+        blank=True,
+    )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
         on_delete=models.CASCADE,
         related_name="knowledge_entries",
         null=True,
@@ -108,6 +130,15 @@ class KnowledgeEntry(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="knowledge_entry_one_workspace",
+            ),
+        ]
         ordering = ["-updated_at"]
         verbose_name_plural = "Knowledge entries"
 
@@ -137,7 +168,14 @@ class AgentLearning(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "workspace.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="learnings",
+        null=True,
+        blank=True,
+    )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
         on_delete=models.CASCADE,
         related_name="learnings",
         null=True,
@@ -181,6 +219,15 @@ class AgentLearning(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="agent_learning_one_workspace",
+            ),
+        ]
         ordering = ["-confidence_score", "-times_applied"]
         indexes = [
             models.Index(fields=["workspace", "is_active", "-confidence_score"]),

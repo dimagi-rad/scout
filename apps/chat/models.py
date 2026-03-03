@@ -16,6 +16,13 @@ class Thread(models.Model):
         null=True,
         blank=True,
     )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="threads",
+        null=True,
+        blank=True,
+    )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

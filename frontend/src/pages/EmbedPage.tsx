@@ -32,6 +32,9 @@ export function EmbedPage() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const ensureTenant = useAppStore((s) => s.domainActions.ensureTenant)
+  const ensureWorkspaceForTenant = useAppStore(
+    (s) => s.workspaceActions.ensureWorkspaceForTenant,
+  )
   const { tenant, provider } = useEmbedParams()
 
   const handleCommand = useCallback((type: string, payload: Record<string, unknown>) => {
@@ -39,13 +42,13 @@ export function EmbedPage() {
       const tenantId = payload.tenant as string
       const prov = (payload.provider as string) || "commcare_connect"
       if (tenantId) {
-        ensureTenant(prov, tenantId)
+        ensureTenant(prov, tenantId).then(() => ensureWorkspaceForTenant(tenantId))
       }
     }
     if (type === "scout:set-mode") {
       console.log("[Scout Embed] set-mode:", payload.mode)
     }
-  }, [ensureTenant])
+  }, [ensureTenant, ensureWorkspaceForTenant])
 
   const { sendEvent } = useEmbedMessaging(handleCommand)
 
@@ -64,9 +67,9 @@ export function EmbedPage() {
   // Auto-select tenant from URL param after authentication
   useEffect(() => {
     if (authStatus === "authenticated" && tenant) {
-      ensureTenant(provider, tenant)
+      ensureTenant(provider, tenant).then(() => ensureWorkspaceForTenant(tenant))
     }
-  }, [authStatus, tenant, provider, ensureTenant])
+  }, [authStatus, tenant, provider, ensureTenant, ensureWorkspaceForTenant])
 
   if (authStatus === "idle" || authStatus === "loading") {
     return (

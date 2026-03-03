@@ -40,8 +40,8 @@ def _resolve_workspace(request):
     """Resolve the active TenantWorkspace for the authenticated user."""
     from django.db.models import F
 
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
+    from apps.workspace.models import TenantWorkspace
 
     membership = (
         TenantMembership.objects.filter(user=request.user)
@@ -60,6 +60,101 @@ def _resolve_workspace(request):
     return workspace, None
 
 
+def _resolve_custom_workspace(request):
+    """Check for X-Custom-Workspace header and resolve the CustomWorkspace.
+
+    Returns (custom_workspace, error_response). If the header is absent,
+    returns (None, None) so callers can fall back to the tenant workspace path.
+    """
+    from apps.workspace.models import CustomWorkspace, WorkspaceMembership
+
+    header_value = request.META.get("HTTP_X_CUSTOM_WORKSPACE")
+    if not header_value:
+        return None, None
+
+    workspace = CustomWorkspace.objects.filter(id=header_value).first()
+    if not workspace:
+        return None, Response(
+            {"error": "Custom workspace not found."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    # Verify the user is a member of this workspace
+    if not WorkspaceMembership.objects.filter(workspace=workspace, user=request.user).exists():
+        return None, Response(
+            {"error": "Not a member of this workspace."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    return workspace, None
+
+
+def _get_custom_workspace_knowledge(custom_workspace, type_filter, search_query):
+    """Aggregate knowledge entries from all member tenants plus workspace-specific entries.
+
+    Each item dict is annotated with ``source`` and ``source_name`` fields.
+    """
+    if type_filter and type_filter in KNOWLEDGE_TYPES:
+        types_to_query = [type_filter]
+    else:
+        types_to_query = list(KNOWLEDGE_TYPES.keys())
+
+    # Build a mapping of member tenant workspace IDs → tenant names
+    tenant_links = custom_workspace.custom_workspace_tenants.select_related("tenant_workspace")
+    tenant_ws_map = {
+        link.tenant_workspace_id: link.tenant_workspace.tenant_name for link in tenant_links
+    }
+
+    all_items = []
+
+    for type_name in types_to_query:
+        type_config = KNOWLEDGE_TYPES[type_name]
+        model = type_config["model"]
+        serializer_class = type_config["serializer"]
+
+        # Entries from member tenant workspaces
+        if tenant_ws_map:
+            tenant_qs = model.objects.filter(workspace_id__in=tenant_ws_map.keys())
+            if search_query:
+                search_q = Q()
+                for field in type_config["search_fields"]:
+                    search_q |= Q(**{f"{field}__icontains": search_query})
+                tenant_qs = tenant_qs.filter(search_q)
+
+            serialized = serializer_class(tenant_qs, many=True).data
+            for item in serialized:
+                # Look up the workspace FK on the actual model instance
+                item["source"] = "tenant"
+                item["source_name"] = "Unknown"
+            # Need to annotate per-item with the correct tenant name
+            # Re-query with workspace_id to map correctly
+            for obj in tenant_qs:
+                ws_id = obj.workspace_id
+                tenant_name = tenant_ws_map.get(ws_id, "Unknown")
+                # Find the matching serialized item by id
+                for item in serialized:
+                    if str(item["id"]) == str(obj.pk):
+                        item["source_name"] = tenant_name
+                        break
+            all_items.extend(serialized)
+
+        # Entries directly on this custom workspace
+        ws_qs = model.objects.filter(custom_workspace=custom_workspace)
+        if search_query:
+            search_q = Q()
+            for field in type_config["search_fields"]:
+                search_q |= Q(**{f"{field}__icontains": search_query})
+            ws_qs = ws_qs.filter(search_q)
+
+        ws_serialized = serializer_class(ws_qs, many=True).data
+        for item in ws_serialized:
+            item["source"] = "workspace"
+            item["source_name"] = "This Workspace"
+        all_items.extend(ws_serialized)
+
+    return all_items
+
+
 class KnowledgeListCreateView(APIView):
     """
     GET  /api/knowledge/
@@ -69,9 +164,10 @@ class KnowledgeListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        workspace, err = _resolve_workspace(request)
-        if err:
-            return err
+        # Check for custom workspace mode first
+        custom_workspace, cw_err = _resolve_custom_workspace(request)
+        if cw_err:
+            return cw_err
 
         type_filter = request.query_params.get("type")
         search_query = request.query_params.get("search", "").strip()
@@ -89,28 +185,37 @@ class KnowledgeListCreateView(APIView):
         except (ValueError, TypeError):
             page_size = DEFAULT_PAGE_SIZE
 
-        if type_filter and type_filter in KNOWLEDGE_TYPES:
-            types_to_query = [type_filter]
+        if custom_workspace:
+            all_items = _get_custom_workspace_knowledge(
+                custom_workspace, type_filter, search_query
+            )
         else:
-            types_to_query = list(KNOWLEDGE_TYPES.keys())
+            workspace, err = _resolve_workspace(request)
+            if err:
+                return err
 
-        all_items = []
+            if type_filter and type_filter in KNOWLEDGE_TYPES:
+                types_to_query = [type_filter]
+            else:
+                types_to_query = list(KNOWLEDGE_TYPES.keys())
 
-        for type_name in types_to_query:
-            type_config = KNOWLEDGE_TYPES[type_name]
-            model = type_config["model"]
-            serializer_class = type_config["serializer"]
+            all_items = []
 
-            queryset = model.objects.filter(workspace=workspace)
+            for type_name in types_to_query:
+                type_config = KNOWLEDGE_TYPES[type_name]
+                model = type_config["model"]
+                serializer_class = type_config["serializer"]
 
-            if search_query:
-                search_q = Q()
-                for field in type_config["search_fields"]:
-                    search_q |= Q(**{f"{field}__icontains": search_query})
-                queryset = queryset.filter(search_q)
+                queryset = model.objects.filter(workspace=workspace)
 
-            serializer = serializer_class(queryset, many=True)
-            all_items.extend(serializer.data)
+                if search_query:
+                    search_q = Q()
+                    for field in type_config["search_fields"]:
+                        search_q |= Q(**{f"{field}__icontains": search_query})
+                    queryset = queryset.filter(search_q)
+
+                serializer = serializer_class(queryset, many=True)
+                all_items.extend(serializer.data)
 
         all_items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
 

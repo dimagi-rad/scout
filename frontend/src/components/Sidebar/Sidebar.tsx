@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react"
+import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
@@ -9,27 +9,20 @@ import {
   LogOut,
   Plus,
   Link2,
+  ChevronsUpDown,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { NavItem } from "./NavItem"
+import { TenantManagement } from "./TenantManagement"
 import { Button } from "@/components/ui/button"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectSeparator,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { WorkspaceSelector } from "@/components/WorkspaceSelector/WorkspaceSelector"
 
 export function Sidebar() {
   const navigate = useNavigate()
+  const [selectorOpen, setSelectorOpen] = useState(false)
   const user = useAppStore((s) => s.user)
   const domains = useAppStore((s) => s.domains)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
-  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const logout = useAppStore((s) => s.authActions.logout)
   const threadId = useAppStore((s) => s.threadId)
@@ -37,14 +30,20 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
+  const workspaceMode = useAppStore((s) => s.workspaceMode)
+  const activeCustomWorkspace = useAppStore((s) => s.activeCustomWorkspace)
 
-  const groupedDomains = useMemo(() => {
-    const commcare = domains.filter((d) => d.provider === "commcare")
-    const connect = domains.filter((d) => d.provider === "commcare_connect")
-    return { commcare, connect }
-  }, [domains])
-
-  const hasMultipleProviders = groupedDomains.commcare.length > 0 && groupedDomains.connect.length > 0
+  // Compute display label
+  const workspaceLabel = (() => {
+    if (workspaceMode === "custom" && activeCustomWorkspace) {
+      return activeCustomWorkspace.name
+    }
+    if (activeDomainId) {
+      const domain = domains.find((d) => d.id === activeDomainId)
+      return domain?.tenant_name ?? "Select Workspace"
+    }
+    return "Select Workspace"
+  })()
 
   // Fetch domains on mount
   useEffect(() => {
@@ -72,50 +71,29 @@ export function Sidebar() {
         <label className="text-xs font-medium text-muted-foreground">
           Workspace
         </label>
-        <Select
-          value={activeDomainId ?? ""}
-          onValueChange={(value) => { setActiveDomain(value); newThread() }}
+        <button
+          onClick={() => setSelectorOpen(true)}
+          className="mt-1 flex w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors hover:bg-accent"
+          data-testid="domain-selector"
         >
-          <SelectTrigger className="mt-1 w-full" data-testid="domain-selector">
-            <SelectValue placeholder="Select workspace" />
-          </SelectTrigger>
-          <SelectContent>
-            {hasMultipleProviders ? (
-              <>
-                {groupedDomains.commcare.length > 0 && (
-                  <SelectGroup>
-                    <SelectLabel>CommCare Domains</SelectLabel>
-                    {groupedDomains.commcare.map((d) => (
-                      <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
-                        {d.tenant_name}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                )}
-                {groupedDomains.connect.length > 0 && (
-                  <>
-                    <SelectSeparator />
-                    <SelectGroup>
-                      <SelectLabel>Connect Opportunities</SelectLabel>
-                      {groupedDomains.connect.map((d) => (
-                        <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
-                          {d.tenant_name}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </>
-                )}
-              </>
-            ) : (
-              domains.map((d) => (
-                <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.tenant_id}`}>
-                  {d.tenant_name}
-                </SelectItem>
-              ))
-            )}
-          </SelectContent>
-        </Select>
+          <span className="truncate">{workspaceLabel}</span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </button>
+        <WorkspaceSelector open={selectorOpen} onClose={() => setSelectorOpen(false)} />
       </div>
+
+      {/* Tenant Management (custom workspace only) */}
+      {workspaceMode === "custom" && activeCustomWorkspace && (
+        <TenantManagement
+          workspace={activeCustomWorkspace}
+          domains={domains}
+          isOwner={
+            activeCustomWorkspace.members?.some(
+              (m) => m.email === user?.email && m.role === "owner",
+            ) ?? false
+          }
+        />
+      )}
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">
@@ -124,7 +102,7 @@ export function Sidebar() {
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
-        <NavItem to="/datasources" icon={Database} label="Connections" />
+        <NavItem to="/settings/connections" icon={Link2} label="Connections" />
       </nav>
 
       {/* Thread History */}
@@ -166,18 +144,6 @@ export function Sidebar() {
         <div className="mb-2 truncate text-sm text-muted-foreground">
           {user?.email}
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          asChild
-          data-testid="sidebar-connections"
-        >
-          <Link to="/settings/connections">
-            <Link2 className="mr-2 h-4 w-4" />
-            Connected Accounts
-          </Link>
-        </Button>
         <Button
           variant="ghost"
           size="sm"
