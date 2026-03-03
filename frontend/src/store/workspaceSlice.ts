@@ -46,6 +46,8 @@ export interface WorkspaceSlice {
   customWorkspacesError: string | null
   enterError: string | null
   missingTenants: string[]
+  /** True while ensureWorkspaceForTenant is running (embed tenant switch). */
+  workspaceSwitching: boolean
   workspaceActions: {
     fetchCustomWorkspaces: () => Promise<void>
     enterCustomWorkspace: (id: string) => Promise<void>
@@ -65,6 +67,7 @@ export interface WorkspaceSlice {
       cwtId: string,
     ) => Promise<void>
     ensureWorkspaceForTenant: (tenantId: string) => Promise<void>
+    setWorkspaceSwitching: (value: boolean) => void
   }
 }
 
@@ -79,6 +82,7 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice, [], [], Workspac
   customWorkspacesError: null,
   enterError: null,
   missingTenants: [],
+  workspaceSwitching: false,
   workspaceActions: {
     fetchCustomWorkspaces: async () => {
       set({ customWorkspacesStatus: "loading", customWorkspacesError: null })
@@ -198,6 +202,7 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice, [], [], Workspac
     },
 
     ensureWorkspaceForTenant: async (tenantId: string) => {
+      set({ workspaceSwitching: true })
       try {
         const detail = await api.post<CustomWorkspaceDetail>(
           "/api/custom-workspaces/ensure-for-tenant/",
@@ -210,10 +215,16 @@ export const createWorkspaceSlice: StateCreator<WorkspaceSlice, [], [], Workspac
           workspaceMode: "custom",
           enterError: null,
           missingTenants: [],
+          workspaceSwitching: false,
         })
       } catch (error) {
         console.error("[workspace] ensureWorkspaceForTenant failed:", error)
+        set({ workspaceSwitching: false })
       }
+    },
+
+    setWorkspaceSwitching: (value: boolean) => {
+      set({ workspaceSwitching: value })
     },
   },
 })

@@ -2,6 +2,7 @@ import { useEffect, useCallback } from "react"
 import { RouterProvider, createBrowserRouter } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Loader2 } from "lucide-react"
 import { EmbedLayout } from "@/components/EmbedLayout/EmbedLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
@@ -35,20 +36,24 @@ export function EmbedPage() {
   const ensureWorkspaceForTenant = useAppStore(
     (s) => s.workspaceActions.ensureWorkspaceForTenant,
   )
+  const workspaceSwitching = useAppStore((s) => s.workspaceSwitching)
   const { tenant, provider } = useEmbedParams()
+
+  const setWorkspaceSwitching = useAppStore((s) => s.workspaceActions.setWorkspaceSwitching)
 
   const handleCommand = useCallback((type: string, payload: Record<string, unknown>) => {
     if (type === "scout:set-tenant") {
       const tenantId = payload.tenant as string
       const prov = (payload.provider as string) || "commcare_connect"
       if (tenantId) {
+        setWorkspaceSwitching(true)
         ensureTenant(prov, tenantId).then(() => ensureWorkspaceForTenant(tenantId))
       }
     }
     if (type === "scout:set-mode") {
       console.log("[Scout Embed] set-mode:", payload.mode)
     }
-  }, [ensureTenant, ensureWorkspaceForTenant])
+  }, [ensureTenant, ensureWorkspaceForTenant, setWorkspaceSwitching])
 
   const { sendEvent } = useEmbedMessaging(handleCommand)
 
@@ -76,9 +81,10 @@ export function EmbedPage() {
   // Auto-select tenant from URL param after authentication
   useEffect(() => {
     if (authStatus === "authenticated" && tenant) {
+      setWorkspaceSwitching(true)
       ensureTenant(provider, tenant).then(() => ensureWorkspaceForTenant(tenant))
     }
-  }, [authStatus, tenant, provider, ensureTenant, ensureWorkspaceForTenant])
+  }, [authStatus, tenant, provider, ensureTenant, ensureWorkspaceForTenant, setWorkspaceSwitching])
 
   if (authStatus === "idle" || authStatus === "loading") {
     return (
@@ -105,5 +111,17 @@ export function EmbedPage() {
     )
   }
 
-  return <RouterProvider router={embedRouter} />
+  return (
+    <div className="relative h-screen">
+      <RouterProvider router={embedRouter} />
+      {workspaceSwitching && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Switching workspace…
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
