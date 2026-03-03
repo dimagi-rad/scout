@@ -137,7 +137,7 @@ export function EmbedPage() {
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-background/80">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            Switching workspace…
+            Loading workspace…
           </div>
         </div>
       )}
