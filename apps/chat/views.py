@@ -707,9 +707,9 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 if tr:
-                    tool_part["output"] = (
-                        tr.content if isinstance(tr.content, str) else str(tr.content)
-                    )
+                    from apps.chat.stream import _tool_content_to_str
+
+                    tool_part["output"] = _tool_content_to_str(tr)
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
 
