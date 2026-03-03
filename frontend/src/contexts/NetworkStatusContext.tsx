@@ -42,6 +42,10 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
           throw new Error("not ok")
         }
       } catch {
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current)
+          reconnectTimerRef.current = null
+        }
         wasOfflineRef.current = true
         setStatus("offline")
       }
@@ -58,6 +62,10 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
 
     const handleOnline = () => checkHealth()
     const handleOffline = () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current)
+        reconnectTimerRef.current = null
+      }
       wasOfflineRef.current = true
       setStatus("offline")
     }
