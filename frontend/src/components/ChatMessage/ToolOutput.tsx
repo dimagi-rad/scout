@@ -28,7 +28,7 @@ function Badge({
 
 // ---- query tool ----
 
-interface QueryOutput {
+export interface QueryOutput {
   success: boolean
   data?: {
     columns: string[]
@@ -167,7 +167,7 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
 
 // ---- describe_table tool ----
 
-interface DescribeTableOutput {
+export interface DescribeTableOutput {
   success: boolean
   data?: {
     name: string
@@ -244,7 +244,7 @@ export function DescribeTableOutput({ output }: { output: DescribeTableOutput })
 
 // ---- list_tables tool ----
 
-interface ListTablesOutput {
+export interface ListTablesOutput {
   success: boolean
   data?: {
     tables: Array<{ name: string; type?: string; description?: string; row_count?: number }>
@@ -289,7 +289,7 @@ export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
 
 // ---- get_metadata tool ----
 
-interface GetMetadataOutput {
+export interface GetMetadataOutput {
   success: boolean
   data?: { tables: unknown[] }
   timing_ms?: number
@@ -321,56 +321,3 @@ export function GetMetadataOutput({ output }: { output: GetMetadataOutput }) {
   )
 }
 
-// ---- output parser ----
-
-function parseOutput(output: unknown): unknown {
-  if (typeof output === "string") {
-    // MCP wraps results as [{'type':'text','text':'...json...'}] with single quotes
-    try {
-      // Replace Python-style single-quote dict with JSON
-      const jsonLike = output.replace(/'/g, '"')
-      const arr = JSON.parse(jsonLike)
-      if (Array.isArray(arr) && arr[0]?.text) return JSON.parse(arr[0].text)
-    } catch {
-      /* ignore */
-    }
-    try {
-      return JSON.parse(output)
-    } catch {
-      return output
-    }
-  }
-  // Handle the MCP envelope array directly (already parsed objects)
-  if (
-    Array.isArray(output) &&
-    output[0]?.type === "text" &&
-    typeof output[0]?.text === "string"
-  ) {
-    try {
-      return JSON.parse(output[0].text)
-    } catch {
-      return output
-    }
-  }
-  return output
-}
-
-// ---- dispatch ----
-
-export function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode | null {
-  const output = parseOutput(rawOutput)
-  if (output == null || typeof output !== "object") return null
-
-  switch (toolName) {
-    case "query":
-      return <QueryToolOutput output={output as QueryOutput} />
-    case "describe_table":
-      return <DescribeTableOutput output={output as DescribeTableOutput} />
-    case "list_tables":
-      return <ListTablesOutput output={output as ListTablesOutput} />
-    case "get_metadata":
-      return <GetMetadataOutput output={output as GetMetadataOutput} />
-    default:
-      return null
-  }
-}
