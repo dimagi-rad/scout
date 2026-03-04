@@ -766,9 +766,9 @@ class WorkspaceMemberDetailView(APIView):
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
         role = request.data.get("role")
-        if role and role in ["owner", "editor", "viewer"]:
+        if role and role in ["editor", "viewer"]:
             # Prevent demoting the last owner
-            if membership.role == "owner" and role != "owner":
+            if membership.role == "owner":
                 remaining = (
                     WorkspaceMembership.objects.filter(workspace=workspace, role="owner")
                     .exclude(id=member_id)
