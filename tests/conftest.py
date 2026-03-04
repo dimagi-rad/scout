@@ -31,12 +31,19 @@ def admin_user(db):
 
 
 @pytest.fixture
-def tenant_membership(db, user):
+def tenant(db):
+    from apps.users.models import Tenant
+
+    return Tenant.objects.create(
+        provider="commcare", external_id="test-domain", canonical_name="Test Domain"
+    )
+
+
+@pytest.fixture
+def tenant_membership(db, user, tenant):
     from apps.users.models import TenantMembership
 
-    return TenantMembership.objects.create(
-        user=user, provider="commcare", tenant_id="test-domain", tenant_name="Test Domain"
-    )
+    return TenantMembership.objects.create(user=user, tenant=tenant)
 
 
 @pytest.fixture
@@ -49,10 +56,11 @@ def other_user(db):
 
 
 @pytest.fixture
-def workspace(db):
+def workspace(db, tenant):
     from apps.projects.models import TenantWorkspace
 
+    # Temporarily still uses tenant_id CharField — will be updated in Task 3
     return TenantWorkspace.objects.create(
-        tenant_id="test-domain",
-        tenant_name="Test Domain",
+        tenant_id=tenant.external_id,
+        tenant_name=tenant.canonical_name,
     )

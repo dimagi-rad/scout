@@ -102,9 +102,7 @@ class Tenant(models.Model):
 
 
 class TenantMembership(models.Model):
-    """Links users to tenants discovered from OAuth providers."""
-
-    PROVIDER_CHOICES = PROVIDER_CHOICES  # reference module-level constant
+    """Links a user to a verified Tenant."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -112,24 +110,29 @@ class TenantMembership(models.Model):
         on_delete=models.CASCADE,
         related_name="tenant_memberships",
     )
-    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
-    tenant_id = models.CharField(
-        max_length=255,
-        help_text="Domain name (CommCare) or organization ID (Connect)",
-    )
-    tenant_name = models.CharField(
-        max_length=255,
-        help_text="Human-readable tenant name",
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="memberships",
     )
     last_selected_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ["user", "provider", "tenant_id"]
-        ordering = ["-last_selected_at", "tenant_name"]
+        unique_together = [["user", "tenant"]]
+        ordering = ["-last_selected_at", "tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.user.email} - {self.provider}:{self.tenant_id}"
+        return f"{self.user.email} - {self.tenant}"
+
+    # Convenience properties to avoid updating all callsites at once
+    @property
+    def provider(self):
+        return self.tenant.provider
+
+    @property
+    def tenant_name(self):
+        return self.tenant.canonical_name
 
 
 class TenantCredential(models.Model):

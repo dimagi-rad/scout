@@ -4,6 +4,15 @@ from django.test import Client
 from apps.users.models import TenantMembership
 
 
+def _make_membership(user, external_id="dimagi", canonical_name="Dimagi", provider="commcare"):
+    from apps.users.models import Tenant
+
+    tenant = Tenant.objects.create(
+        provider=provider, external_id=external_id, canonical_name=canonical_name
+    )
+    return TenantMembership.objects.create(user=user, tenant=tenant)
+
+
 @pytest.mark.django_db
 class TestTenantCredentialDeleteAPI:
     def test_delete_removes_domain_from_tenants_list(self, user):
@@ -11,9 +20,7 @@ class TestTenantCredentialDeleteAPI:
         from apps.users.adapters import encrypt_credential
         from apps.users.models import TenantCredential
 
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="sk-test", tenant_name="sk-test"
-        )
+        tm = _make_membership(user, external_id="sk-test", canonical_name="sk-test")
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.API_KEY,
@@ -43,9 +50,7 @@ class TestTenantCredentialDeleteAPI:
 @pytest.mark.django_db
 class TestTenantListAPI:
     def test_list_tenants(self, user):
-        TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        _make_membership(user)
         client = Client()
         client.force_login(user)
         response = client.get("/api/auth/tenants/")
@@ -63,9 +68,7 @@ class TestTenantListAPI:
 @pytest.mark.django_db
 class TestTenantSelectAPI:
     def test_select_tenant(self, user):
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(user)
         client = Client()
         client.force_login(user)
         response = client.post(
@@ -84,9 +87,7 @@ class TestTenantCredentialUpdateAPI:
         from apps.users.adapters import encrypt_credential
         from apps.users.models import TenantCredential
 
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(user)
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.API_KEY,
@@ -104,8 +105,8 @@ class TestTenantCredentialUpdateAPI:
             content_type="application/json",
         )
         assert response.status_code == 200
-        tm.refresh_from_db()
-        assert tm.tenant_name == "Dimagi Updated"
+        tm.tenant.refresh_from_db()
+        assert tm.tenant.canonical_name == "Dimagi Updated"
         tm.credential.refresh_from_db()
         assert tm.credential.encrypted_credential != encrypt_credential("old@example.com:oldkey")
 
@@ -119,9 +120,7 @@ class TestTenantCredentialUpdateAPI:
         assert response.status_code == 401
 
     def test_patch_returns_404_for_wrong_user(self, user, other_user):
-        tm = TenantMembership.objects.create(
-            user=other_user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(other_user)
         client = Client()
         client.force_login(user)
         response = client.patch(
