@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Scout Embed PostMessage Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; }
+    #log { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 8px;
+           font-family: monospace; font-size: 13px; height: 300px; overflow-y: auto; }
+    .ok  { color: #4ec9b0; }
+    .err { color: #f14c4c; }
+    .warn { color: #cca700; }
+    .info { color: #569cd6; }
+    iframe { width: 100%; height: 400px; border: 1px solid #ccc; border-radius: 8px; margin-top: 1rem; }
+    h1 { margin: 0 0 1rem; }
+    .controls { margin: 1rem 0; display: flex; gap: 0.5rem; }
+    button { padding: 0.5rem 1rem; border-radius: 6px; border: 1px solid #ccc; cursor: pointer; }
+    button:hover { background: #f0f0f0; }
+  </style>
+</head>
+<body>
+  <h1>Scout Embed PostMessage Diagnostics</h1>
+
+  <div class="controls">
+    <button onclick="clearLog()">Clear Log</button>
+    <button onclick="sendTestMessage()">Send Test Message to iframe</button>
+    <button onclick="checkWidgetState()">Check Widget State</button>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="embed-container" style="height: 400px;"></div>
+
+  <script>
+    // === Config ===
+    var SCOUT_URL = prompt("Enter Scout URL (e.g. https://labs.connect.dimagi.com/scout):", "https://labs.connect.dimagi.com/scout");
+    if (!SCOUT_URL) SCOUT_URL = "https://labs.connect.dimagi.com/scout";
+    var SCOUT_ORIGIN = new URL(SCOUT_URL).origin;
+
+    // === Logging ===
+    var logEl = document.getElementById("log");
+    function log(msg, cls) {
+      var line = document.createElement("div");
+      line.className = cls || "";
+      line.textContent = "[" + new Date().toISOString().slice(11,23) + "] " + msg;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function clearLog() { logEl.innerHTML = ""; }
+
+    // === Listen for ALL postMessages ===
+    window.addEventListener("message", function(event) {
+      log("postMessage received:", "info");
+      log("  origin: " + event.origin, event.origin === SCOUT_ORIGIN ? "ok" : "err");
+      log("  data: " + JSON.stringify(event.data), "info");
+
+      if (event.origin !== SCOUT_ORIGIN) {
+        log("  ORIGIN MISMATCH — expected: " + SCOUT_ORIGIN, "err");
+        return;
+      }
+
+      var data = event.data;
+      if (!data || typeof data.type !== "string") {
+        log("  Not a Scout event (no type field)", "warn");
+        return;
+      }
+
+      if (data.type === "scout:ready") {
+        log("  ✓ scout:ready — Widget is authenticated and ready!", "ok");
+      } else if (data.type === "scout:auth-required") {
+        log("  ✓ scout:auth-required — Auth prompt should appear now", "ok");
+        log("  ACTION: Parent should show login popup", "warn");
+      } else {
+        log("  Scout event: " + data.type, "info");
+      }
+    });
+
+    // === Load widget.js ===
+    log("Loading widget.js from: " + SCOUT_URL + "/widget.js", "info");
+
+    // Stub for queuing
+    window.ScoutWidget = window.ScoutWidget || { _q: [] };
+    var origInit = ScoutWidget.init;
+    ScoutWidget.init = function(opts) {
+      if (ScoutWidget._q) ScoutWidget._q.push(["init", opts]);
+      else origInit(opts);
+    };
+
+    var script = document.createElement("script");
+    script.src = SCOUT_URL + "/widget.js";
+    script.onload = function() {
+      log("widget.js loaded successfully", "ok");
+      log("SCOUT_BASE (from widget.js): check console for value", "info");
+    };
+    script.onerror = function() {
+      log("FAILED to load widget.js!", "err");
+    };
+    document.head.appendChild(script);
+
+    // === Init widget ===
+    log("Initializing ScoutWidget...", "info");
+    ScoutWidget.init({
+      container: "#embed-container",
+      mode: "full",
+      theme: "light",
+      onReady: function() {
+        log("onReady callback fired — widget is authenticated!", "ok");
+      },
+      onEvent: function(event) {
+        log("onEvent callback fired: " + JSON.stringify(event), "ok");
+        if (event.type === "scout:auth-required") {
+          log("AUTH REQUIRED — would show popup in production", "warn");
+        }
+      }
+    });
+
+    // === Test helpers ===
+    function sendTestMessage() {
+      var iframe = document.querySelector("iframe");
+      if (!iframe) {
+        log("No iframe found yet", "err");
+        return;
+      }
+      log("Sending test message to iframe...", "info");
+      iframe.contentWindow.postMessage(
+        { type: "scout:test-ping", payload: { ts: Date.now() } },
+        SCOUT_ORIGIN
+      );
+    }
+
+    function checkWidgetState() {
+      log("=== Widget State ===", "info");
+      log("window.ScoutWidget exists: " + !!window.ScoutWidget, "info");
+      log("ScoutWidget._q: " + JSON.stringify(window.ScoutWidget && window.ScoutWidget._q), "info");
+      var iframe = document.querySelector("iframe");
+      log("iframe exists: " + !!iframe, "info");
+      if (iframe) {
+        log("iframe src: " + iframe.src, "info");
+        log("iframe origin: " + new URL(iframe.src).origin, "info");
+      }
+      log("Expected SCOUT_ORIGIN: " + SCOUT_ORIGIN, "info");
+    }
+
+    log("Waiting for postMessage events from iframe...", "warn");
+    log("Expected flow: scout:auth-required (unauthenticated) or scout:ready (authenticated)", "info");
+  </script>
+</body>
+</html>

@@ -30,34 +30,34 @@ class KnowledgeRetriever:
     def __init__(self, workspace: TenantWorkspace) -> None:
         self.workspace = workspace
 
-    def retrieve(self, user_question: str = "") -> str:
+    async def retrieve(self, user_question: str = "") -> str:
         """Retrieve and format all relevant knowledge as markdown."""
         sections: list[str] = []
 
-        entries_section = self._format_knowledge_entries()
+        entries_section = await self._format_knowledge_entries()
         if entries_section:
             sections.append(entries_section)
 
-        tables_section = self._format_table_knowledge()
+        tables_section = await self._format_table_knowledge()
         if tables_section:
             sections.append(tables_section)
 
-        learnings_section = self._format_agent_learnings()
+        learnings_section = await self._format_agent_learnings()
         if learnings_section:
             sections.append(learnings_section)
 
         return "\n\n".join(sections)
 
-    def _format_knowledge_entries(self) -> str:
+    async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
         entries = KnowledgeEntry.objects.filter(workspace=self.workspace).order_by("title")
 
-        if not entries.exists():
+        if not await entries.aexists():
             return ""
 
         lines: list[str] = ["## Knowledge Base", ""]
 
-        for entry in entries:
+        async for entry in entries:
             lines.append(f"### {entry.title}")
             lines.append("")
             lines.append(entry.content)
@@ -65,16 +65,16 @@ class KnowledgeRetriever:
 
         return "\n".join(lines).rstrip()
 
-    def _format_table_knowledge(self) -> str:
+    async def _format_table_knowledge(self) -> str:
         """Format table knowledge with column notes and data quality notes."""
         tables = TableKnowledge.objects.filter(workspace=self.workspace).order_by("table_name")
 
-        if not tables.exists():
+        if not await tables.aexists():
             return ""
 
         lines: list[str] = ["## Table Context (beyond schema)", ""]
 
-        for table in tables:
+        async for table in tables:
             lines.append(f"### {table.table_name}")
             lines.append("")
             lines.append(table.description)
@@ -112,19 +112,19 @@ class KnowledgeRetriever:
 
         return "\n".join(lines).rstrip()
 
-    def _format_agent_learnings(self) -> str:
+    async def _format_agent_learnings(self) -> str:
         """Format active agent learnings as a bullet list."""
         learnings = AgentLearning.objects.filter(
             workspace=self.workspace,
             is_active=True,
         ).order_by("-confidence_score", "-times_applied")[: self.MAX_AGENT_LEARNINGS]
 
-        if not learnings.exists():
+        if not await learnings.aexists():
             return ""
 
         lines: list[str] = ["## Learned Corrections", ""]
 
-        for learning in learnings:
+        async for learning in learnings:
             lines.append(f"- {learning.description}")
 
             if learning.applies_to_tables:

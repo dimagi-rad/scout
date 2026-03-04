@@ -74,7 +74,7 @@ def create_artifact_tools(
     """
 
     @tool(args_schema=CreateArtifactInput)
-    def create_artifact(
+    async def create_artifact(
         title, artifact_type, code, description="", data=None, source_queries=None
     ) -> dict[str, Any]:
         """
@@ -185,7 +185,7 @@ def create_artifact_tools(
             }
 
         try:
-            artifact = Artifact.objects.create(
+            artifact = await Artifact.objects.acreate(
                 workspace=workspace,
                 created_by=user,
                 title=title.strip(),
@@ -233,7 +233,7 @@ def create_artifact_tools(
             }
 
     @tool(args_schema=UpdateArtifactInput)
-    def update_artifact(
+    async def update_artifact(
         artifact_id, code, title=None, data=None, source_queries=None
     ) -> dict[str, Any]:
         """
@@ -284,7 +284,7 @@ def create_artifact_tools(
         try:
             # Find the existing artifact
             try:
-                original = Artifact.objects.get(id=artifact_id, workspace=workspace)
+                original = await Artifact.objects.aget(id=artifact_id, workspace=workspace)
             except Artifact.DoesNotExist:
                 return {
                     "artifact_id": None,
@@ -297,19 +297,22 @@ def create_artifact_tools(
                 }
 
             # Create a new version linked to the original
-            updates = {
-                "code": code,
-                "created_by": user,
-                "conversation_id": original.conversation_id,
-            }
-            if title is not None:
-                updates["title"] = title.strip()
-            if data is not None:
-                updates["data"] = data
-            if source_queries is not None:
-                updates["source_queries"] = source_queries
-
-            new_artifact = original.create_new_version(**updates)
+            new_artifact = Artifact(
+                workspace=workspace,
+                created_by=user,
+                title=title.strip() if title is not None else original.title,
+                description=original.description,
+                artifact_type=original.artifact_type,
+                code=code,
+                data=data if data is not None else original.data,
+                version=original.version + 1,
+                parent_artifact=original,
+                conversation_id=original.conversation_id,
+                source_queries=source_queries
+                if source_queries is not None
+                else original.source_queries,
+            )
+            await new_artifact.asave()
 
             logger.info(
                 "Created artifact version %s (v%d) from %s for workspace %s",

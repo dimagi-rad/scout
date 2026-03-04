@@ -537,18 +537,19 @@ class TestSharedArtifactView:
 # ============================================================================
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 class TestArtifactTools:
     """Tests for artifact creation and update tools."""
 
-    def test_create_artifact_tool(self, user, workspace):
+    @pytest.mark.asyncio
+    async def test_create_artifact_tool(self, user, workspace):
         """Test create_artifact tool creates an artifact correctly."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
         tools = create_artifact_tools(workspace, user)
         create_artifact_tool = tools[0]
 
-        result = create_artifact_tool.invoke(
+        result = await create_artifact_tool.ainvoke(
             {
                 "title": "Revenue Chart",
                 "artifact_type": "react",
@@ -567,7 +568,7 @@ class TestArtifactTools:
         assert "/render" in result["render_url"]
 
         # Verify artifact was created in database
-        artifact = Artifact.objects.get(id=result["artifact_id"])
+        artifact = await Artifact.objects.aget(id=result["artifact_id"])
         assert artifact.title == "Revenue Chart"
         assert artifact.artifact_type == "react"
         assert artifact.code == "export default function Chart() { return <div>Chart</div>; }"
@@ -578,7 +579,8 @@ class TestArtifactTools:
         assert artifact.version == 1
         assert artifact.parent_artifact is None
 
-    def test_update_artifact_tool(self, user, workspace, artifact, tenant_membership):
+    @pytest.mark.asyncio
+    async def test_update_artifact_tool(self, user, workspace, artifact, tenant_membership):
         """Test update_artifact tool creates a new version of an artifact."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
@@ -588,7 +590,7 @@ class TestArtifactTools:
         original_version = artifact.version
         new_code = "export default function Chart() { return <div>Updated Chart</div>; }"
 
-        result = update_artifact_tool.invoke(
+        result = await update_artifact_tool.ainvoke(
             {
                 "artifact_id": str(artifact.id),
                 "code": new_code,
@@ -602,13 +604,14 @@ class TestArtifactTools:
         assert result["version"] == original_version + 1
 
         # Update creates a NEW artifact (not in-place), verify the new one
-        new_artifact = Artifact.objects.get(id=result["artifact_id"])
+        new_artifact = await Artifact.objects.aget(id=result["artifact_id"])
         assert new_artifact.version == original_version + 1
         assert new_artifact.code == new_code
         assert new_artifact.title == "Updated Chart Title"
         assert new_artifact.data == {"rows": [{"x": 2, "y": 4}]}
 
-    def test_update_creates_new_version(self, user, workspace, artifact, tenant_membership):
+    @pytest.mark.asyncio
+    async def test_update_creates_new_version(self, user, workspace, artifact, tenant_membership):
         """Test that update_artifact creates new artifacts with incrementing versions."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
 
@@ -618,7 +621,7 @@ class TestArtifactTools:
         original_version = artifact.version
 
         # First update - creates new artifact from original
-        result1 = update_artifact_tool.invoke(
+        result1 = await update_artifact_tool.ainvoke(
             {
                 "artifact_id": str(artifact.id),
                 "code": "export default function Chart() { return <div>Version 2</div>; }",
@@ -629,7 +632,7 @@ class TestArtifactTools:
         assert result1["version"] == original_version + 1
 
         # Second update - creates new artifact from the v2 artifact
-        result2 = update_artifact_tool.invoke(
+        result2 = await update_artifact_tool.ainvoke(
             {
                 "artifact_id": result1["artifact_id"],
                 "code": "export default function Chart() { return <div>Version 3</div>; }",

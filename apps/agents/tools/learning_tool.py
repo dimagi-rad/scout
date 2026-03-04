@@ -72,7 +72,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
     """
 
     @tool
-    def save_learning(
+    async def save_learning(
         description: str,
         category: str,
         tables: list[str],
@@ -179,17 +179,17 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
                 # Don't fail - the table might be valid but not in the cached dictionary
 
         # Check for duplicate learnings (same description for same tables)
-        existing = AgentLearning.objects.filter(
+        existing = await AgentLearning.objects.filter(
             workspace=workspace,
             is_active=True,
             description__iexact=description.strip(),
-        ).first()
+        ).afirst()
 
         if existing:
             # Update the existing learning instead of creating a duplicate
             existing.confidence_score = min(1.0, existing.confidence_score + 0.1)
             existing.times_applied += 1
-            existing.save(update_fields=["confidence_score", "times_applied"])
+            await existing.asave(update_fields=["confidence_score", "times_applied"])
 
             logger.info(
                 "Updated existing learning %s (confidence: %.2f)",
@@ -207,7 +207,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
 
         # Create the new learning
         try:
-            learning = AgentLearning.objects.create(
+            learning = await AgentLearning.objects.acreate(
                 workspace=workspace,
                 description=description.strip(),
                 category=category,

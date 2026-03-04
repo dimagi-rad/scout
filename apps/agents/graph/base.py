@@ -336,7 +336,7 @@ async def build_agent_graph(
 
     # --- Define graph nodes ---
 
-    def agent_node(state: AgentState) -> dict[str, Any]:
+    async def agent_node(state: AgentState) -> dict[str, Any]:
         """
         Call the LLM with the current conversation and system prompt.
 
@@ -347,7 +347,7 @@ async def build_agent_graph(
         # Filter out any prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
         messages = [SystemMessage(content=system_prompt)] + state_messages
-        response = llm_with_tools.invoke(messages)
+        response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
@@ -489,7 +489,7 @@ async def _build_system_prompt(
         sections.append(f"\n## Tenant-Specific Instructions\n\n{workspace.system_prompt}\n")
 
     retriever = KnowledgeRetriever(workspace)
-    knowledge_context = await sync_to_async(retriever.retrieve)()
+    knowledge_context = await retriever.retrieve()
     if knowledge_context:
         sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 

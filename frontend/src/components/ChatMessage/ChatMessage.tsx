@@ -5,7 +5,67 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight } from "lucide-react"
-import { renderToolOutput } from "./ToolOutput"
+import {
+  QueryToolOutput,
+  DescribeTableOutput as DescribeTableOutputComponent,
+  ListTablesOutput as ListTablesOutputComponent,
+  GetMetadataOutput as GetMetadataOutputComponent,
+} from "./ToolOutput"
+import type {
+  QueryOutput,
+  DescribeTableOutput,
+  ListTablesOutput,
+  GetMetadataOutput,
+} from "./ToolOutput"
+
+function parseOutput(output: unknown): unknown {
+  if (typeof output === "string") {
+    // MCP wraps results as [{'type':'text','text':'...json...'}] with single quotes
+    try {
+      const jsonLike = output.replace(/'/g, '"')
+      const arr = JSON.parse(jsonLike)
+      if (Array.isArray(arr) && arr[0]?.text) return JSON.parse(arr[0].text)
+    } catch {
+      /* ignore */
+    }
+    try {
+      return JSON.parse(output)
+    } catch {
+      return output
+    }
+  }
+  // Handle the MCP envelope array directly (already parsed objects)
+  if (
+    Array.isArray(output) &&
+    output[0]?.type === "text" &&
+    typeof output[0]?.text === "string"
+  ) {
+    try {
+      return JSON.parse(output[0].text)
+    } catch {
+      return output
+    }
+  }
+  return output
+}
+
+function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode | null {
+  const output = parseOutput(rawOutput)
+  if (output == null || typeof output !== "object") return null
+
+  switch (toolName) {
+    case "query":
+      return <QueryToolOutput output={output as QueryOutput} />
+    case "describe_table":
+      return <DescribeTableOutputComponent output={output as DescribeTableOutput} />
+    case "list_tables":
+      return <ListTablesOutputComponent output={output as ListTablesOutput} />
+    case "get_metadata":
+      return <GetMetadataOutputComponent output={output as GetMetadataOutput} />
+    default:
+      return null
+  }
+}
 
 interface ChatMessageProps {
   message: UIMessage
