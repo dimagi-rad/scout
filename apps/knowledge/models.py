@@ -10,8 +10,23 @@ Provides semantic knowledge beyond the auto-generated data dictionary:
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
+
+class WorkspaceContextQuerySet(models.QuerySet):
+    def for_workspace_context(self, context):
+        """Filter by workspace context — handles TenantWorkspace and CustomWorkspace.
+
+        All consumers (retriever, agent tools, views) MUST use this method instead
+        of writing raw Q(workspace=...) | Q(custom_workspace=...) unions.
+        """
+        from apps.workspace.models import CustomWorkspace
+
+        if isinstance(context, CustomWorkspace):
+            return self.filter(custom_workspace=context)
+        return self.filter(workspace=context)
 
 
 class TableKnowledge(models.Model):
@@ -25,6 +40,8 @@ class TableKnowledge(models.Model):
     - Ownership and freshness information
     - Relationships not captured by foreign keys
     """
+
+    objects = WorkspaceContextQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
@@ -92,6 +109,12 @@ class TableKnowledge(models.Model):
         ordering = ["table_name"]
         verbose_name_plural = "Table knowledge"
 
+    def clean(self):
+        if not self.workspace and not self.custom_workspace:
+            raise ValidationError("Either workspace or custom_workspace must be set.")
+        if self.workspace and self.custom_workspace:
+            raise ValidationError("Only one of workspace or custom_workspace may be set.")
+
     def __str__(self):
         label = self.workspace.tenant_name if self.workspace else self.custom_workspace.name
         return f"{self.table_name} ({label})"
@@ -105,6 +128,8 @@ class KnowledgeEntry(models.Model):
     models with a single flexible model. Use tags to categorize entries
     (e.g. "metric", "query", "rule").
     """
+
+    objects = WorkspaceContextQuerySet.as_manager()
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
@@ -143,6 +168,12 @@ class KnowledgeEntry(models.Model):
         ordering = ["-updated_at"]
         verbose_name_plural = "Knowledge entries"
 
+    def clean(self):
+        if not self.workspace and not self.custom_workspace:
+            raise ValidationError("Either workspace or custom_workspace must be set.")
+        if self.workspace and self.custom_workspace:
+            raise ValidationError("Only one of workspace or custom_workspace may be set.")
+
     def __str__(self):
         label = self.workspace.tenant_name if self.workspace else self.custom_workspace.name
         return f"{self.title} ({label})"
@@ -156,6 +187,8 @@ class AgentLearning(models.Model):
     investigates, fixes the issue, and saves the pattern so it
     doesn't repeat the same mistake.
     """
+
+    objects = WorkspaceContextQuerySet.as_manager()
 
     CATEGORY_CHOICES = [
         ("type_mismatch", "Column type mismatch"),
@@ -234,6 +267,12 @@ class AgentLearning(models.Model):
         indexes = [
             models.Index(fields=["workspace", "is_active", "-confidence_score"]),
         ]
+
+    def clean(self):
+        if not self.workspace and not self.custom_workspace:
+            raise ValidationError("Either workspace or custom_workspace must be set.")
+        if self.workspace and self.custom_workspace:
+            raise ValidationError("Only one of workspace or custom_workspace may be set.")
 
     def __str__(self):
         return f"Learning: {self.description[:80]}..."

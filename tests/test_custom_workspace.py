@@ -2,6 +2,7 @@
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 
 from apps.users.models import TenantMembership
@@ -188,3 +189,93 @@ class TestThreadCustomWorkspaceFK:
         )
         assert thread.custom_workspace == ws
         assert thread.tenant_membership is None
+
+
+@pytest.mark.django_db
+class TestCleanValidation:
+    """Test clean() methods enforce XOR constraint at the application layer."""
+
+    def test_knowledge_entry_clean_no_workspace_raises(self):
+        from apps.knowledge.models import KnowledgeEntry
+
+        entry = KnowledgeEntry(title="Orphan", content="No workspace")
+        with pytest.raises(ValidationError):
+            entry.clean()
+
+    def test_knowledge_entry_clean_both_workspaces_raises(self, owner, tenant_workspace_a):
+        from apps.knowledge.models import KnowledgeEntry
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        entry = KnowledgeEntry(
+            workspace=tenant_workspace_a, custom_workspace=ws, title="Both", content="Bad"
+        )
+        with pytest.raises(ValidationError):
+            entry.clean()
+
+    def test_table_knowledge_clean_no_workspace_raises(self):
+        from apps.knowledge.models import TableKnowledge
+
+        tk = TableKnowledge(table_name="orphan", description="No workspace")
+        with pytest.raises(ValidationError):
+            tk.clean()
+
+    def test_agent_learning_clean_no_workspace_raises(self):
+        from apps.knowledge.models import AgentLearning
+
+        al = AgentLearning(description="Orphan learning")
+        with pytest.raises(ValidationError):
+            al.clean()
+
+    def test_thread_clean_no_context_raises(self, owner):
+        from apps.chat.models import Thread
+
+        thread = Thread(user=owner, title="Orphan thread")
+        with pytest.raises(ValidationError):
+            thread.clean()
+
+    def test_thread_clean_both_contexts_raises(self, owner, tenant_membership_a):
+        from apps.chat.models import Thread
+
+        ws = CustomWorkspace.objects.create(name="Test", created_by=owner)
+        thread = Thread(
+            user=owner, tenant_membership=tenant_membership_a, custom_workspace=ws, title="Both"
+        )
+        with pytest.raises(ValidationError):
+            thread.clean()
+
+
+@pytest.mark.django_db
+class TestWorkspaceContextQuerySet:
+    """Test the shared WorkspaceContextQuerySet.for_workspace_context() manager."""
+
+    def test_filter_by_tenant_workspace(self, tenant_workspace_a, owner):
+        from apps.knowledge.models import KnowledgeEntry
+
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a, title="Tenant entry", content="x"
+        )
+        qs = KnowledgeEntry.objects.for_workspace_context(tenant_workspace_a)
+        assert qs.count() == 1
+        assert qs.first().title == "Tenant entry"
+
+    def test_filter_by_custom_workspace(self, owner):
+        from apps.knowledge.models import KnowledgeEntry
+
+        ws = CustomWorkspace.objects.create(name="CW", created_by=owner)
+        KnowledgeEntry.objects.create(custom_workspace=ws, title="Custom entry", content="x")
+        qs = KnowledgeEntry.objects.for_workspace_context(ws)
+        assert qs.count() == 1
+        assert qs.first().title == "Custom entry"
+
+    def test_filter_excludes_other_workspace(self, tenant_workspace_a, tenant_workspace_b):
+        from apps.knowledge.models import KnowledgeEntry
+
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_a, title="A entry", content="x"
+        )
+        KnowledgeEntry.objects.create(
+            workspace=tenant_workspace_b, title="B entry", content="x"
+        )
+        qs = KnowledgeEntry.objects.for_workspace_context(tenant_workspace_a)
+        assert qs.count() == 1
+        assert qs.first().title == "A entry"
