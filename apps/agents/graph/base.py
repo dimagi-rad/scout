@@ -134,7 +134,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
     block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
     """
     ts = await TenantSchema.objects.filter(
-        tenant_membership__tenant_id=tenant_membership.tenant_id,
+        tenant_membership__tenant=tenant_membership.tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 
@@ -173,7 +173,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
 
     # Try full schema with columns
     try:
-        ctx = await load_tenant_context(tenant_membership.tenant_id)
+        ctx = await load_tenant_context(tenant_membership.tenant.external_id)
         from apps.projects.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
@@ -296,15 +296,14 @@ async def build_agent_graph(
     from apps.projects.models import TenantWorkspace
 
     workspace, _ = await TenantWorkspace.objects.aget_or_create(
-        tenant_id=tenant_membership.tenant_id,
-        defaults={"tenant_name": tenant_membership.tenant_name},
+        tenant=tenant_membership.tenant,
     )
 
-    logger.info("Building agent graph for tenant:%s", tenant_membership.tenant_id)
+    logger.info("Building agent graph for tenant:%s", tenant_membership.tenant.external_id)
 
     # --- Build tools ---
     tools = _build_tools(workspace, user, mcp_tools or [])
-    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant_id)
+    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant.external_id)
 
     # --- Inject tenant_id and tenant_membership_id into MCP tool calls ---
     injections = {
@@ -327,7 +326,7 @@ async def build_agent_graph(
     logger.debug(
         "System prompt assembled: %d characters for tenant:%s",
         len(system_prompt),
-        tenant_membership.tenant_id,
+        tenant_membership.tenant.external_id,
     )
 
     # --- Create tool node with context ID injection ---
@@ -424,7 +423,7 @@ async def build_agent_graph(
 
     logger.info(
         "Agent graph compiled for tenant:%s (checkpointer: %s)",
-        tenant_membership.tenant_id,
+        tenant_membership.tenant.external_id,
         type(checkpointer).__name__ if checkpointer else "None",
     )
 
@@ -502,7 +501,7 @@ async def _build_system_prompt(
     sections.append(f"""
 ## Tenant Context
 
-- Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant_id})
+- Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant.external_id})
 - Provider: {provider}
 - Pipeline: {pipeline_name}
 

@@ -9,8 +9,8 @@ from .models import MaterializationRun, TenantSchema, TenantWorkspace
 
 @admin.register(TenantWorkspace)
 class TenantWorkspaceAdmin(admin.ModelAdmin):
-    list_display = ["tenant_name", "tenant_id", "created_at", "updated_at"]
-    search_fields = ["tenant_name", "tenant_id"]
+    list_display = ["__str__", "created_at", "updated_at"]
+    search_fields = ["tenant__canonical_name", "tenant__external_id"]
     readonly_fields = ["id", "created_at", "updated_at"]
 
 
