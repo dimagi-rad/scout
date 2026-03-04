@@ -110,7 +110,7 @@
 
     if (data.type === "scout:resize" && typeof data.height === "number") {
       if (this.opts.autoResize !== false && this.iframe) {
-        this.iframe.style.height = data.height + "px";
+        this.iframe.style.minHeight = data.height + "px";
       }
     }
 
