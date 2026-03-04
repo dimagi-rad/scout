@@ -9,6 +9,7 @@ import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
+import { useAutoResize } from "@/hooks/useAutoResize"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { BASE_PATH } from "@/config"
 
@@ -56,6 +57,7 @@ export function EmbedPage() {
   }, [ensureTenant, ensureWorkspaceForTenant, setWorkspaceSwitching])
 
   const { sendEvent } = useEmbedMessaging(handleCommand)
+  useAutoResize()
 
   useEffect(() => {
     fetchMe()

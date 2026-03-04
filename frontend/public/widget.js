@@ -108,6 +108,12 @@
       if (typeof this.opts.onReady === "function") this.opts.onReady();
     }
 
+    if (data.type === "scout:resize" && typeof data.height === "number") {
+      if (this.opts.autoResize !== false && this.iframe) {
+        this.iframe.style.height = data.height + "px";
+      }
+    }
+
     if (typeof this.opts.onEvent === "function") {
       this.opts.onEvent(data);
     }
