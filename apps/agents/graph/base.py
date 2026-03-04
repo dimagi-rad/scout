@@ -72,6 +72,8 @@ MCP_TOOL_NAMES = frozenset(
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
+_CONTEXT_KNOWLEDGE_LIMIT = 200
+_CONTEXT_LEARNINGS_LIMIT = 200
 
 
 def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
@@ -543,7 +545,7 @@ def _build_custom_workspace_context_sync(workspace):
     knowledge = list(
         KnowledgeEntry.objects.filter(
             Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace)
-        ).values("title", "content", "tags")
+        ).values("title", "content", "tags")[:_CONTEXT_KNOWLEDGE_LIMIT]
     )
 
     # Aggregate learnings
@@ -551,7 +553,7 @@ def _build_custom_workspace_context_sync(workspace):
         AgentLearning.objects.filter(
             Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace),
             is_active=True,
-        ).order_by("-confidence_score")
+        ).order_by("-confidence_score")[:_CONTEXT_LEARNINGS_LIMIT]
     )
 
     # Available tenant info
