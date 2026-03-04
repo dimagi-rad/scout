@@ -74,13 +74,37 @@ class User(AbstractUser):
         return full_name or self.email
 
 
+PROVIDER_CHOICES = [
+    ("commcare", "CommCare HQ"),
+    ("commcare_connect", "CommCare Connect"),
+]
+
+
+class Tenant(models.Model):
+    """Canonical tenant identity record, created only after provider verification."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    external_id = models.CharField(
+        max_length=255,
+        help_text="Provider-assigned identifier (CommCare domain name or Connect org ID).",
+    )
+    canonical_name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [["provider", "external_id"]]
+        ordering = ["canonical_name"]
+
+    def __str__(self):
+        return f"{self.provider}:{self.external_id} ({self.canonical_name})"
+
+
 class TenantMembership(models.Model):
     """Links users to tenants discovered from OAuth providers."""
 
-    PROVIDER_CHOICES = [
-        ("commcare", "CommCare HQ"),
-        ("commcare_connect", "CommCare Connect"),
-    ]
+    PROVIDER_CHOICES = PROVIDER_CHOICES  # reference module-level constant
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
