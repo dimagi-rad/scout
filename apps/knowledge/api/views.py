@@ -86,12 +86,15 @@ def _resolve_custom_workspace(request):
             status=status.HTTP_404_NOT_FOUND,
         )
 
-    # Verify the user is a member of this workspace
-    if not WorkspaceMembership.objects.filter(workspace=workspace, user=request.user).exists():
+    # Verify the user is a member of this workspace and get their role
+    membership = WorkspaceMembership.objects.filter(workspace=workspace, user=request.user).first()
+    if not membership:
         return None, Response(
             {"error": "Not a member of this workspace."},
             status=status.HTTP_403_FORBIDDEN,
         )
+    # Attach role to workspace for downstream role checks
+    workspace._user_role = membership.role
 
     # Verify user has TenantMembership for all member tenants
     missing = _validate_tenant_access(request.user, workspace)
@@ -265,6 +268,12 @@ class KnowledgeListCreateView(APIView):
                 return err
         else:
             workspace = None
+            # Enforce write permission for custom workspace
+            if getattr(custom_workspace, "_user_role", None) == "viewer":
+                return Response(
+                    {"error": "Viewers cannot create knowledge entries."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
 
         item_type = request.data.get("type")
         if not item_type or item_type not in KNOWLEDGE_TYPES:
@@ -312,7 +321,14 @@ class KnowledgeDetailView(APIView):
             model = type_config["model"]
             try:
                 if custom_workspace:
-                    item = model.objects.get(pk=item_id, custom_workspace=custom_workspace)
+                    try:
+                        item = model.objects.get(pk=item_id, custom_workspace=custom_workspace)
+                    except model.DoesNotExist:
+                        # Fall back to searching member tenant workspaces
+                        tenant_ws_ids = custom_workspace.custom_workspace_tenants.values_list(
+                            "tenant_workspace_id", flat=True
+                        )
+                        item = model.objects.get(pk=item_id, workspace_id__in=tenant_ws_ids)
                 else:
                     item = model.objects.get(pk=item_id, workspace=workspace)
                 return item, type_name, type_config["serializer"]
@@ -353,6 +369,12 @@ class KnowledgeDetailView(APIView):
         if err:
             return err
 
+        if custom_workspace and getattr(custom_workspace, "_user_role", None) == "viewer":
+            return Response(
+                {"error": "Viewers cannot update knowledge entries."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         item, type_name, serializer_class = self._find_item(
             workspace, item_id, custom_workspace=custom_workspace
         )
@@ -377,6 +399,12 @@ class KnowledgeDetailView(APIView):
         workspace, custom_workspace, err = self._resolve_workspace_or_custom(request)
         if err:
             return err
+
+        if custom_workspace and getattr(custom_workspace, "_user_role", None) == "viewer":
+            return Response(
+                {"error": "Viewers cannot delete knowledge entries."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         item, type_name, serializer_class = self._find_item(
             workspace, item_id, custom_workspace=custom_workspace
