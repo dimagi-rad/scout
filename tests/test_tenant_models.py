@@ -37,8 +37,8 @@ class TestTenantMembership:
         )
         tm = TenantMembership.objects.create(user=user, tenant=tenant)
         assert tm.tenant.external_id == "dimagi"
-        assert tm.provider == "commcare"  # via property
-        assert tm.tenant_name == "Dimagi"  # via property
+        assert tm.tenant.provider == "commcare"
+        assert tm.tenant.canonical_name == "Dimagi"
         assert str(tm) == f"{user.email} - commcare:dimagi (Dimagi)"
 
     def test_unique_constraint(self, db, user):

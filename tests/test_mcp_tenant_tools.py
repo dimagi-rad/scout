@@ -773,7 +773,7 @@ class TestGetMaterializationStatus:
         mock_run.started_at.isoformat.return_value = "2026-02-24T10:00:00+00:00"
         mock_run.completed_at.isoformat.return_value = "2026-02-24T10:05:00+00:00"
         mock_run.result = {"sources": {"cases": {"rows": 100}}}
-        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
@@ -817,7 +817,7 @@ class TestCancelMaterialization:
         mock_run.id = uuid.UUID(run_id)
         mock_run.state = "loading"
         mock_run.result = {}
-        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
@@ -843,7 +843,7 @@ class TestCancelMaterialization:
         run_id = str(uuid.uuid4())
         mock_run = MagicMock()
         mock_run.state = "completed"
-        mock_run.tenant_schema.tenant_membership.tenant_id = "dimagi"
+        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:

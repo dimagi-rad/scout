@@ -139,7 +139,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
     ).afirst()
 
     if ts is None:
-        provider = tenant_membership.provider
+        provider = tenant_membership.tenant.provider
         if provider == "commcare_connect":
             pipeline_name = "connect_sync"
         else:
@@ -156,7 +156,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
         )
 
     # Schema is active: fetch table list
-    provider = tenant_membership.provider
+    provider = tenant_membership.tenant.provider
     if provider == "commcare_connect":
         pipeline_name = "connect_sync"
     else:
@@ -492,7 +492,7 @@ async def _build_system_prompt(
     if knowledge_context:
         sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
-    provider = tenant_membership.provider
+    provider = tenant_membership.tenant.provider
     if provider == "commcare_connect":
         pipeline_name = "connect_sync"
     else:
@@ -501,7 +501,7 @@ async def _build_system_prompt(
     sections.append(f"""
 ## Tenant Context
 
-- Tenant: {tenant_membership.tenant_name} ({tenant_membership.tenant.external_id})
+- Tenant: {tenant_membership.tenant.canonical_name} ({tenant_membership.tenant.external_id})
 - Provider: {provider}
 - Pipeline: {pipeline_name}
 

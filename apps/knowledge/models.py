@@ -78,7 +78,7 @@ class TableKnowledge(models.Model):
         verbose_name_plural = "Table knowledge"
 
     def __str__(self):
-        return f"{self.table_name} ({self.workspace.tenant_name})"
+        return f"{self.table_name} ({self.workspace.tenant.canonical_name})"
 
 
 class KnowledgeEntry(models.Model):
@@ -112,7 +112,7 @@ class KnowledgeEntry(models.Model):
         verbose_name_plural = "Knowledge entries"
 
     def __str__(self):
-        return f"{self.title} ({self.workspace.tenant_name})"
+        return f"{self.title} ({self.workspace.tenant.canonical_name})"
 
 
 class AgentLearning(models.Model):

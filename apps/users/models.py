@@ -125,15 +125,6 @@ class TenantMembership(models.Model):
     def __str__(self):
         return f"{self.user.email} - {self.tenant}"
 
-    # Convenience properties to avoid updating all callsites at once
-    @property
-    def provider(self):
-        return self.tenant.provider
-
-    @property
-    def tenant_name(self):
-        return self.tenant.canonical_name
-
 
 class TenantCredential(models.Model):
     """Stores credentials for a tenant — either OAuth pointer or encrypted API key.

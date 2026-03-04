@@ -322,7 +322,7 @@ async def get_materialization_status(run_id: str) -> dict:
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
-        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        tenant_id = run.tenant_schema.tenant_membership.tenant.external_id
         schema = run.tenant_schema.schema_name
 
         tc["result"] = success_response(
@@ -381,7 +381,7 @@ async def cancel_materialization(run_id: str) -> dict:
         run.result = {**(run.result or {}), "cancelled": True}
         await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
 
-        tenant_id = run.tenant_schema.tenant_membership.tenant_id
+        tenant_id = run.tenant_schema.tenant_membership.tenant.external_id
         schema = run.tenant_schema.schema_name
         logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
 
@@ -420,7 +420,7 @@ async def run_materialization(
         # ── Resolve TenantMembership ──────────────────────────────────────────
         registry = get_registry()
         try:
-            qs = TenantMembership.objects.select_related("user")
+            qs = TenantMembership.objects.select_related("user", "tenant")
             if tenant_membership_id:
                 tm = await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
             else:
@@ -440,7 +440,7 @@ async def run_materialization(
         # If the caller used the default pipeline but the tenant is a different
         # provider, switch to the correct pipeline automatically.
         provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-        correct_pipeline = provider_pipeline_map.get(tm.provider, pipeline)
+        correct_pipeline = provider_pipeline_map.get(tm.tenant.provider, pipeline)
         if correct_pipeline != pipeline:
             pipeline = correct_pipeline
 
@@ -473,7 +473,7 @@ async def run_materialization(
         else:
             from allauth.socialaccount.models import SocialToken
 
-            if tm.provider == "commcare_connect":
+            if tm.tenant.provider == "commcare_connect":
                 token_obj = await SocialToken.objects.filter(
                     account__user=tm.user,
                     account__provider__startswith="commcare_connect",
@@ -490,7 +490,7 @@ async def run_materialization(
             if not token_obj:
                 tc["result"] = error_response(
                     "AUTH_TOKEN_MISSING",
-                    f"No OAuth token found for provider '{tm.provider}'",
+                    f"No OAuth token found for provider '{tm.tenant.provider}'",
                 )
                 return tc["result"]
             credential = {"type": "oauth", "value": token_obj.token}

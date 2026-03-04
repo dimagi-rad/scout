@@ -145,4 +145,4 @@ class TenantMetadata(models.Model):
         verbose_name_plural = "Tenant Metadata"
 
     def __str__(self) -> str:
-        return f"Metadata for {self.tenant_membership.tenant_id}"
+        return f"Metadata for {self.tenant_membership.tenant}"
