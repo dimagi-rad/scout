@@ -59,8 +59,4 @@ def other_user(db):
 def workspace(db, tenant):
     from apps.projects.models import TenantWorkspace
 
-    # Temporarily still uses tenant_id CharField — will be updated in Task 3
-    return TenantWorkspace.objects.create(
-        tenant_id=tenant.external_id,
-        tenant_name=tenant.canonical_name,
-    )
+    return TenantWorkspace.objects.create(tenant=tenant)

@@ -77,12 +77,11 @@ class TenantWorkspace(models.Model):
     """Per-tenant workspace holding agent config and serving as FK target for workspace models."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant_id = models.CharField(
-        max_length=255,
-        unique=True,
-        help_text="Domain name (CommCare) or organization ID. One workspace per tenant.",
+    tenant = models.OneToOneField(
+        "users.Tenant",
+        on_delete=models.CASCADE,
+        related_name="workspace",
     )
-    tenant_name = models.CharField(max_length=255)
     system_prompt = models.TextField(
         blank=True,
         help_text="Tenant-specific system prompt. Merged with the base agent prompt.",
@@ -97,10 +96,19 @@ class TenantWorkspace(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["tenant_name"]
+        ordering = ["tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.tenant_name} ({self.tenant_id})"
+        return f"{self.tenant.canonical_name} ({self.tenant.external_id})"
+
+    # Convenience properties to avoid updating all callsites at once
+    @property
+    def tenant_id(self):
+        return self.tenant.external_id
+
+    @property
+    def tenant_name(self):
+        return self.tenant.canonical_name
 
 
 class TenantMetadata(models.Model):
