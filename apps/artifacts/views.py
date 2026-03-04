@@ -639,7 +639,7 @@ class ArtifactSandboxView(View):
             from apps.users.models import TenantMembership
 
             has_access = TenantMembership.objects.filter(
-                user=request.user, tenant_id=artifact.workspace.tenant_id
+                user=request.user, tenant=artifact.workspace.tenant
             ).exists()
             if not has_access:
                 return HttpResponse("Access denied", status=403)
@@ -695,7 +695,7 @@ class ArtifactDataView(View):
             from apps.users.models import TenantMembership
 
             has_access = TenantMembership.objects.filter(
-                user=request.user, tenant_id=artifact.workspace.tenant_id
+                user=request.user, tenant=artifact.workspace.tenant
             ).exists()
             if not has_access:
                 return JsonResponse(
@@ -746,7 +746,9 @@ class ArtifactQueryDataView(View):
         from django.http import Http404
 
         try:
-            artifact = await Artifact.objects.select_related("workspace").aget(pk=artifact_id)
+            artifact = await Artifact.objects.select_related("workspace__tenant").aget(
+                pk=artifact_id
+            )
         except Artifact.DoesNotExist:
             raise Http404 from None
 
@@ -760,7 +762,7 @@ class ArtifactQueryDataView(View):
             from apps.users.models import TenantMembership
 
             has_access = await TenantMembership.objects.filter(
-                user=user, tenant_id=artifact.workspace.tenant_id
+                user=user, tenant=artifact.workspace.tenant
             ).aexists()
             if not has_access:
                 return JsonResponse({"error": "Access denied"}, status=403)
@@ -772,7 +774,7 @@ class ArtifactQueryDataView(View):
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
         try:
-            ctx = await load_tenant_context(artifact.workspace.tenant_id)
+            ctx = await load_tenant_context(artifact.workspace.tenant.external_id)
         except Exception as e:
             error_msg = str(e)
             results = [
@@ -850,7 +852,7 @@ class SharedArtifactView(View):
                 from apps.users.models import TenantMembership
 
                 if not TenantMembership.objects.filter(
-                    user=request.user, tenant_id=workspace.tenant_id
+                    user=request.user, tenant=workspace.tenant
                 ).exists():
                     return JsonResponse(
                         {"error": "You must be a workspace member to access this artifact."},
@@ -909,7 +911,7 @@ class SharedArtifactView(View):
                 from apps.users.models import TenantMembership
 
                 if not TenantMembership.objects.filter(
-                    user=request.user, tenant_id=workspace.tenant_id
+                    user=request.user, tenant=workspace.tenant
                 ).exists():
                     return JsonResponse(
                         {"error": "You must be a workspace member."},
@@ -951,8 +953,7 @@ class ArtifactListView(View):
             return JsonResponse({"results": []})
 
         workspace, _ = TenantWorkspace.objects.get_or_create(
-            tenant_id=membership.tenant_id,
-            defaults={"tenant_name": membership.tenant_name},
+            tenant=membership.tenant,
         )
 
         from django.db.models import Q
@@ -994,7 +995,7 @@ class ArtifactDetailView(View):
             from apps.users.models import TenantMembership
 
             has_access = TenantMembership.objects.filter(
-                user=request.user, tenant_id=artifact.workspace.tenant_id
+                user=request.user, tenant=artifact.workspace.tenant
             ).exists()
             if not has_access:
                 return None, JsonResponse({"error": "Access denied"}, status=403)
@@ -1059,7 +1060,7 @@ class ArtifactExportView(View):
             from apps.users.models import TenantMembership
 
             has_access = TenantMembership.objects.filter(
-                user=request.user, tenant_id=artifact.workspace.tenant_id
+                user=request.user, tenant=artifact.workspace.tenant
             ).exists()
             if not has_access:
                 return JsonResponse(

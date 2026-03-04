@@ -43,8 +43,7 @@ def _resolve_workspace(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     workspace, _ = TenantWorkspace.objects.get_or_create(
-        tenant_id=membership.tenant_id,
-        defaults={"tenant_name": membership.tenant_name},
+        tenant=membership.tenant,
     )
     return workspace, None
 

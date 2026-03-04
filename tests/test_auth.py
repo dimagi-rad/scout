@@ -786,13 +786,11 @@ class TestLoginOnboardingComplete:
         assert resp.json()["onboarding_complete"] is False
 
     def test_login_includes_onboarding_complete_true_when_connections_exist(self, client, db):
+        from apps.users.models import Tenant
+
         user = User.objects.create_user(email="u2@example.com", password="pass")
-        tm = TenantMembership.objects.create(
-            user=user,
-            provider="commcare",
-            tenant_id="d1",
-            tenant_name="D1",
-        )
+        tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
+        tm = TenantMembership.objects.create(user=user, tenant=tenant)
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.OAUTH,
@@ -815,13 +813,11 @@ class TestMeOnboardingComplete:
         assert resp.json()["onboarding_complete"] is False
 
     def test_true_with_membership_and_credential(self, client, db):
+        from apps.users.models import Tenant
+
         user = User.objects.create_user(email="u2@example.com", password="pass")
-        tm = TenantMembership.objects.create(
-            user=user,
-            provider="commcare",
-            tenant_id="d1",
-            tenant_name="D1",
-        )
+        tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
+        tm = TenantMembership.objects.create(user=user, tenant=tenant)
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.OAUTH,

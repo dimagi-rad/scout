@@ -332,7 +332,7 @@ async def tenant_ensure_view(request):
 
     # Try to find existing membership
     try:
-        tm = await TenantMembership.objects.aget(
+        tm = await TenantMembership.objects.select_related("tenant").aget(
             user=user, tenant__provider=provider, tenant__external_id=tenant_id
         )
     except TenantMembership.DoesNotExist:

@@ -545,7 +545,9 @@ async def chat_view(request):
     from apps.users.models import TenantMembership
 
     try:
-        tenant_membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
+        tenant_membership = await TenantMembership.objects.select_related("tenant").aget(
+            id=tenant_id, user=user
+        )
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
 
@@ -617,8 +619,8 @@ async def chat_view(request):
 
     input_state = {
         "messages": [HumanMessage(content=user_content)],
-        "tenant_id": tenant_membership.tenant_id,
-        "tenant_name": tenant_membership.tenant_name,
+        "tenant_id": tenant_membership.tenant.external_id,
+        "tenant_name": tenant_membership.tenant.canonical_name,
         "tenant_membership_id": str(tenant_membership.id),
         "user_id": str(user.id),
         "user_role": "analyst",

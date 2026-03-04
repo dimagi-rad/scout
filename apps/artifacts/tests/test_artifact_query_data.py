@@ -17,16 +17,18 @@ from apps.users.models import TenantMembership, User
 
 @pytest.fixture
 def workspace(db):
-    return TenantWorkspace.objects.create(
-        tenant_id="test-domain",
-        tenant_name="Test Domain",
+    from apps.users.models import Tenant
+
+    tenant = Tenant.objects.create(
+        provider="commcare", external_id="test-domain", canonical_name="Test Domain"
     )
+    return TenantWorkspace.objects.create(tenant=tenant)
 
 
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="member@example.com", password="pass")
-    TenantMembership.objects.create(user=user, tenant_id=workspace.tenant_id)
+    TenantMembership.objects.create(user=user, tenant=workspace.tenant)
     return user
 
 
