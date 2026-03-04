@@ -196,14 +196,13 @@ async def tenant_credential_list_view(request):
     cc_username, cc_api_key = credential.split(":", 1)
 
     try:
-        verified = await sync_to_async(verify_commcare_credential)(
+        await sync_to_async(verify_commcare_credential)(
             domain=tenant_id, username=cc_username, api_key=cc_api_key
         )
     except CommCareVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    # Use verified name if available, fall back to user-supplied name
-    verified_name = verified.get("domain") or tenant_name
+    verified_name = tenant_name
 
     from django.db import transaction
 
@@ -265,45 +264,47 @@ async def tenant_credential_detail_view(request, membership_id):
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    tenant_name = body.get("tenant_name", "").strip()
     credential = body.get("credential", "").strip()
 
-    if not tenant_name and not credential:
+    if not credential:
+        return JsonResponse({"error": "credential is required"}, status=400)
+
+    if ":" not in credential:
         return JsonResponse(
-            {"error": "At least one of tenant_name or credential is required"}, status=400
+            {"error": "credential must be in the format 'username:apikey'"},
+            status=400,
         )
+    cc_username, cc_api_key = credential.split(":", 1)
+
+    # Fetch membership to get tenant domain for verification
+    try:
+        tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
+            id=membership_id, user=user
+        )
+    except TenantMembership.DoesNotExist:
+        return JsonResponse({"error": "Not found"}, status=404)
+
+    try:
+        await sync_to_async(verify_commcare_credential)(
+            domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
+        )
+    except CommCareVerificationError as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
     from apps.users.adapters import encrypt_credential
 
-    encrypted = None
-    if credential:
-        try:
-            encrypted = await sync_to_async(encrypt_credential)(credential)
-        except ValueError as e:
-            return JsonResponse({"error": str(e)}, status=500)
+    try:
+        encrypted = await sync_to_async(encrypt_credential)(credential)
+    except ValueError as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
-    def _update():
-        try:
-            tm = TenantMembership.objects.select_related("credential", "tenant").get(
-                id=membership_id, user=user
-            )
-        except TenantMembership.DoesNotExist:
-            return None
-
-        if tenant_name:
-            tm.tenant.canonical_name = tenant_name
-            tm.tenant.save(update_fields=["canonical_name"])
-
-        if encrypted and hasattr(tm, "credential"):
+    def _save_credential(tm):
+        if hasattr(tm, "credential"):
             tm.credential.encrypted_credential = encrypted
             tm.credential.save(update_fields=["encrypted_credential"])
-
         return tm
 
-    tm = await sync_to_async(_update)()
-    if tm is None:
-        return JsonResponse({"error": "Not found"}, status=404)
-
+    tm = await sync_to_async(_save_credential)(tm)
     return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant.canonical_name})
 
 

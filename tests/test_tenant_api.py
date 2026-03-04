@@ -91,33 +91,60 @@ class TestTenantCredentialUpdateAPI:
         from apps.users.models import TenantCredential
 
         tm = _make_membership(user)
+        old_encrypted = encrypt_credential("old@example.com:oldkey")
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.API_KEY,
-            encrypted_credential=encrypt_credential("old@example.com:oldkey"),
+            encrypted_credential=old_encrypted,
         )
 
         client = Client()
         client.force_login(user)
-        response = client.patch(
-            f"/api/auth/tenant-credentials/{tm.id}/",
-            data={
-                "tenant_name": "Dimagi Updated",
-                "credential": "new@example.com:newkey",
-            },
-            content_type="application/json",
-        )
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            return_value={},
+        ):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "new@example.com:newkey"},
+                content_type="application/json",
+            )
         assert response.status_code == 200
+        # canonical_name on the shared Tenant is NOT changed by PATCH
         tm.tenant.refresh_from_db()
-        assert tm.tenant.canonical_name == "Dimagi Updated"
+        assert tm.tenant.canonical_name == "Dimagi"
         tm.credential.refresh_from_db()
-        assert tm.credential.encrypted_credential != encrypt_credential("old@example.com:oldkey")
+        assert tm.credential.encrypted_credential != old_encrypted
+
+    def test_patch_rejects_unverified_credential(self, user):
+        """PATCH must call verify_commcare_credential; invalid key is rejected."""
+        from apps.users.models import TenantCredential
+
+        tm = _make_membership(user)
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.API_KEY,
+            encrypted_credential="x",
+        )
+
+        client = Client()
+        client.force_login(user)
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            side_effect=CommCareVerificationError("Bad key"),
+        ):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "bad@evil.com:badkey"},
+                content_type="application/json",
+            )
+        assert response.status_code == 400
 
     def test_patch_requires_auth(self):
         client = Client()
         response = client.patch(
             "/api/auth/tenant-credentials/00000000-0000-0000-0000-000000000000/",
-            data={"tenant_name": "x"},
+            data={"credential": "x:y"},
             content_type="application/json",
         )
         assert response.status_code == 401
@@ -126,11 +153,12 @@ class TestTenantCredentialUpdateAPI:
         tm = _make_membership(other_user)
         client = Client()
         client.force_login(user)
-        response = client.patch(
-            f"/api/auth/tenant-credentials/{tm.id}/",
-            data={"tenant_name": "hijacked"},
-            content_type="application/json",
-        )
+        with patch("apps.users.views.verify_commcare_credential", return_value={}):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "a:b"},
+                content_type="application/json",
+            )
         assert response.status_code == 404
 
 
