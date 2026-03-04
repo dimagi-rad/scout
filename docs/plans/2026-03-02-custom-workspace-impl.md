@@ -628,7 +628,30 @@ Update the existing index to also include the new field. Add to Meta constraints
         ]
 ```
 
-**Step 4: Add `custom_workspace` FK to Thread**
+**Step 4: Add `WorkspaceContextQuerySet` manager to knowledge models**
+
+In `apps/knowledge/models.py`, define a shared queryset above the model classes:
+
+```python
+class WorkspaceContextQuerySet(models.QuerySet):
+    def for_workspace_context(self, context):
+        """Filter by workspace context — handles TenantWorkspace and CustomWorkspace.
+
+        All consumers (retriever, agent tools, views) MUST use this method instead
+        of writing raw Q(workspace=...) | Q(custom_workspace=...) unions.
+        """
+        from apps.workspace.models import CustomWorkspace
+
+        if isinstance(context, CustomWorkspace):
+            return self.filter(custom_workspace=context)
+        return self.filter(workspace=context)
+```
+
+Add `objects = WorkspaceContextQuerySet.as_manager()` to `TableKnowledge`, `KnowledgeEntry`, and `AgentLearning`. This is the **single authorised entry point** for workspace-scoped knowledge queries — existing consumers (retriever, agent tools, recipe views, artifact views) must be updated to call `.for_workspace_context(ctx)` so new workspace types only require a change here.
+
+---
+
+**Step 5: Add `custom_workspace` FK to Thread**
 
 In `apps/chat/models.py`, after the `tenant_membership` FK (line 18), add:
 
@@ -642,14 +665,14 @@ In `apps/chat/models.py`, after the `tenant_membership` FK (line 18), add:
     )
 ```
 
-**Step 5: Generate and run migrations**
+**Step 6: Generate and run migrations**
 
 ```bash
 uv run python manage.py makemigrations knowledge chat --name add_custom_workspace_fk
 uv run python manage.py migrate
 ```
 
-**Step 6: Run tests**
+**Step 7: Run tests**
 
 ```bash
 uv run pytest tests/test_custom_workspace.py -x -v
@@ -657,7 +680,7 @@ uv run pytest tests/test_custom_workspace.py -x -v
 
 Expected: All pass.
 
-**Step 7: Commit**
+**Step 8: Commit**
 
 ```bash
 git add -A && git commit -m "feat: add custom_workspace FK to knowledge and chat models with check constraints"
@@ -908,8 +931,23 @@ from apps.workspace.models import (
 )
 
 
-def _check_workspace_role(user, workspace, required_roles):
-    """Check user has one of the required roles. Returns the membership or raises."""
+ROLE_PERMISSIONS = {
+    "view": ["owner", "editor", "viewer"],
+    "edit_content": ["owner", "editor"],
+    "manage_tenants": ["owner"],
+    "manage_members": ["owner"],
+    "edit_settings": ["owner"],
+    "delete": ["owner"],
+}
+
+
+def _require_permission(user, workspace, action):
+    """Check user has permission for the given action. Returns the membership or raises.
+
+    Use action keys from ROLE_PERMISSIONS — never pass raw role lists into views.
+    Owner role is granted only at workspace creation; it cannot be set via the invite endpoint.
+    """
+    required_roles = ROLE_PERMISSIONS[action]
     membership = WorkspaceMembership.objects.filter(workspace=workspace, user=user).first()
     if not membership:
         raise PermissionDenied("Not a member of this workspace.")
@@ -938,8 +976,10 @@ class CustomWorkspaceListCreateView(APIView):
         workspaces = (
             CustomWorkspace.objects.filter(memberships__user=request.user)
             .annotate(
-                tenant_count=Count("custom_workspace_tenants"),
-                member_count=Count("memberships"),
+                # distinct=True is required: the memberships JOIN used for filtering
+                # inflates Count results without it.
+                tenant_count=Count("custom_workspace_tenants", distinct=True),
+                member_count=Count("memberships", distinct=True),
                 role=models.Subquery(
                     WorkspaceMembership.objects.filter(
                         workspace=models.OuterRef("pk"), user=request.user
@@ -993,7 +1033,7 @@ class CustomWorkspaceDetailView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        _require_permission(request.user, workspace, "view")
         serializer = CustomWorkspaceDetailSerializer(workspace)
         return Response(serializer.data)
 
@@ -1001,7 +1041,7 @@ class CustomWorkspaceDetailView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "edit_settings")
 
         for field in ["name", "description", "system_prompt"]:
             if field in request.data:
@@ -1014,7 +1054,7 @@ class CustomWorkspaceDetailView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "delete")
         workspace.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -1026,7 +1066,7 @@ class CustomWorkspaceEnterView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        _require_permission(request.user, workspace, "view")
 
         missing = _validate_tenant_access(request.user, workspace)
         if missing:
@@ -1038,6 +1078,10 @@ class CustomWorkspaceEnterView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # select_related to avoid N+1 on tenant details in the serializer
+        workspace = CustomWorkspace.objects.prefetch_related(
+            "custom_workspace_tenants__tenant_workspace", "memberships__user"
+        ).get(pk=workspace.pk)
         serializer = CustomWorkspaceDetailSerializer(workspace)
         return Response(serializer.data)
 
@@ -1049,7 +1093,7 @@ class CustomWorkspaceTenantListCreateView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        _require_permission(request.user, workspace, "view")
         tenants = workspace.custom_workspace_tenants.select_related("tenant_workspace")
         serializer = CustomWorkspaceTenantSerializer(tenants, many=True)
         return Response(serializer.data)
@@ -1058,7 +1102,7 @@ class CustomWorkspaceTenantListCreateView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "manage_tenants")
 
         tw_id = request.data.get("tenant_workspace_id")
         tw = TenantWorkspace.objects.filter(id=tw_id).first()
@@ -1087,7 +1131,7 @@ class CustomWorkspaceTenantDeleteView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "manage_tenants")
         deleted, _ = CustomWorkspaceTenant.objects.filter(
             workspace=workspace, id=tenant_id
         ).delete()
@@ -1103,7 +1147,7 @@ class WorkspaceMemberListCreateView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner", "editor", "viewer"])
+        _require_permission(request.user, workspace, "view")
         members = workspace.memberships.select_related("user")
         serializer = WorkspaceMembershipSerializer(members, many=True)
         return Response(serializer.data)
@@ -1114,11 +1158,12 @@ class WorkspaceMemberListCreateView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "manage_members")
 
         User = get_user_model()
         user_id = request.data.get("user_id")
         role = request.data.get("role", "viewer")
+        # "owner" cannot be assigned via invite — it is set only at workspace creation.
         if role not in ["editor", "viewer"]:
             raise ValidationError("Role must be 'editor' or 'viewer'.")
 
@@ -1152,7 +1197,7 @@ class WorkspaceMemberDetailView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "manage_members")
 
         membership = WorkspaceMembership.objects.filter(
             workspace=workspace, id=member_id
@@ -1161,9 +1206,12 @@ class WorkspaceMemberDetailView(APIView):
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
         role = request.data.get("role")
-        if role and role in ["owner", "editor", "viewer"]:
+        # "owner" cannot be assigned via role change — only at workspace creation.
+        if role and role in ["editor", "viewer"]:
             membership.role = role
             membership.save(update_fields=["role"])
+        elif role:
+            raise ValidationError("Role must be 'editor' or 'viewer'.")
 
         serializer = WorkspaceMembershipSerializer(membership)
         return Response(serializer.data)
@@ -1172,7 +1220,7 @@ class WorkspaceMemberDetailView(APIView):
         workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
         if not workspace:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        _check_workspace_role(request.user, workspace, ["owner"])
+        _require_permission(request.user, workspace, "manage_members")
 
         deleted, _ = WorkspaceMembership.objects.filter(
             workspace=workspace, id=member_id
@@ -1812,6 +1860,199 @@ git add -A && git commit -m "feat: add custom workspace context assembly for Lan
 
 ---
 
+## Phase 9: Tests for Context Assembly and Retriever
+
+### Task 13: Unit tests for `_build_custom_workspace_context`
+
+**Files:**
+- Add to: `tests/test_custom_workspace.py`
+
+These are **pure unit tests — no `@pytest.mark.django_db`**. All ORM calls are mocked. The goal is to verify the aggregation logic (prompt ordering, knowledge union, tenant list) without a live database.
+
+**Step 1: Write the tests**
+
+```python
+from unittest.mock import MagicMock, patch
+
+
+class TestBuildCustomWorkspaceContext:
+    def _make_workspace(self, name="Test WS", system_prompt="WS prompt"):
+        ws = MagicMock()
+        ws.name = name
+        ws.system_prompt = system_prompt
+        return ws
+
+    def _make_tenant_workspace(self, name, system_prompt="", tenant_id="t1", data_dictionary=None):
+        tw = MagicMock()
+        tw.tenant_name = name
+        tw.system_prompt = system_prompt
+        tw.tenant_id = tenant_id
+        tw.data_dictionary = data_dictionary
+        return tw
+
+    @patch("apps.agents.graph.base.TenantWorkspace")
+    @patch("apps.agents.graph.base.AgentLearning")
+    @patch("apps.agents.graph.base.KnowledgeEntry")
+    def test_workspace_prompt_comes_before_tenant_prompts(
+        self, mock_ke, mock_al, mock_tw_model
+    ):
+        from apps.agents.graph.base import _build_custom_workspace_context
+
+        workspace = self._make_workspace(system_prompt="workspace prompt")
+        tw1 = self._make_tenant_workspace("Tenant A", system_prompt="tenant prompt")
+        mock_tw_model.objects.filter.return_value = [tw1]
+        mock_ke.objects.filter.return_value.values.return_value = []
+        mock_al.objects.filter.return_value.order_by.return_value = []
+
+        result = _build_custom_workspace_context(workspace)
+
+        prompts = result["system_prompts"]
+        assert len(prompts) == 2
+        assert "workspace prompt" in prompts[0]
+        assert "tenant prompt" in prompts[1]
+
+    @patch("apps.agents.graph.base.TenantWorkspace")
+    @patch("apps.agents.graph.base.AgentLearning")
+    @patch("apps.agents.graph.base.KnowledgeEntry")
+    def test_empty_workspace_prompt_excluded(self, mock_ke, mock_al, mock_tw_model):
+        from apps.agents.graph.base import _build_custom_workspace_context
+
+        workspace = self._make_workspace(system_prompt="")  # empty
+        mock_tw_model.objects.filter.return_value = []
+        mock_ke.objects.filter.return_value.values.return_value = []
+        mock_al.objects.filter.return_value.order_by.return_value = []
+
+        result = _build_custom_workspace_context(workspace)
+
+        assert result["system_prompts"] == []
+
+    @patch("apps.agents.graph.base.TenantWorkspace")
+    @patch("apps.agents.graph.base.AgentLearning")
+    @patch("apps.agents.graph.base.KnowledgeEntry")
+    def test_available_tenants_list(self, mock_ke, mock_al, mock_tw_model):
+        from apps.agents.graph.base import _build_custom_workspace_context
+
+        workspace = self._make_workspace(system_prompt="")
+        tw1 = self._make_tenant_workspace("Tenant A", tenant_id="a", data_dictionary={"x": 1})
+        tw2 = self._make_tenant_workspace("Tenant B", tenant_id="b", data_dictionary=None)
+        mock_tw_model.objects.filter.return_value = [tw1, tw2]
+        mock_ke.objects.filter.return_value.values.return_value = []
+        mock_al.objects.filter.return_value.order_by.return_value = []
+
+        result = _build_custom_workspace_context(workspace)
+
+        tenants = result["available_tenants"]
+        assert len(tenants) == 2
+        assert tenants[0]["has_data_dictionary"] is True
+        assert tenants[1]["has_data_dictionary"] is False
+```
+
+**Step 2: Run tests (no DB — should be fast)**
+
+```bash
+uv run pytest tests/test_custom_workspace.py::TestBuildCustomWorkspaceContext -v
+```
+
+Expected: All pass. If they hit the DB, the mocking is wrong — fix it.
+
+**Step 3: Commit**
+
+```bash
+git add -A && git commit -m "test: add unit tests for _build_custom_workspace_context (mocked, no DB)"
+```
+
+---
+
+### Task 14: Integration tests for knowledge retriever in custom workspace context
+
+**Files:**
+- Create: `tests/test_custom_workspace_retriever.py`
+
+These tests verify that the knowledge retriever and `WorkspaceContextQuerySet.for_workspace_context()` return entries from both `TenantWorkspace`-scoped and `CustomWorkspace`-scoped knowledge. They require the DB (via `@pytest.mark.django_db`) since they test ORM behaviour.
+
+**Step 1: Write the tests**
+
+```python
+import pytest
+from django.contrib.auth import get_user_model
+
+from apps.knowledge.models import AgentLearning, KnowledgeEntry
+from apps.workspace.models import CustomWorkspace, TenantWorkspace
+
+User = get_user_model()
+
+
+@pytest.fixture
+def owner(db):
+    return User.objects.create_user(email="retriever_owner@test.com", password="pass")
+
+
+@pytest.fixture
+def tenant_ws(db):
+    return TenantWorkspace.objects.create(tenant_id="retriever-domain", tenant_name="Retriever Domain")
+
+
+@pytest.fixture
+def custom_ws(db, owner):
+    from apps.workspace.models import CustomWorkspaceTenant
+    cws = CustomWorkspace.objects.create(name="Retriever WS", created_by=owner)
+    CustomWorkspaceTenant.objects.create(workspace=cws, tenant_workspace=tenant_ws)
+    return cws
+
+
+class TestWorkspaceContextQuerySet:
+    @pytest.mark.django_db
+    def test_for_tenant_workspace_returns_tenant_entries(self, tenant_ws):
+        entry = KnowledgeEntry.objects.create(
+            workspace=tenant_ws, title="Tenant Entry", content="content"
+        )
+        results = KnowledgeEntry.objects.for_workspace_context(tenant_ws)
+        assert entry in results
+
+    @pytest.mark.django_db
+    def test_for_custom_workspace_returns_custom_entries(self, owner):
+        cws = CustomWorkspace.objects.create(name="CWS", created_by=owner)
+        entry = KnowledgeEntry.objects.create(
+            custom_workspace=cws, title="Custom Entry", content="content"
+        )
+        results = KnowledgeEntry.objects.for_workspace_context(cws)
+        assert entry in results
+
+    @pytest.mark.django_db
+    def test_tenant_entries_not_returned_for_custom_workspace(self, tenant_ws, owner):
+        """Entries scoped to a TenantWorkspace must not appear when querying a CustomWorkspace."""
+        cws = CustomWorkspace.objects.create(name="CWS2", created_by=owner)
+        tenant_entry = KnowledgeEntry.objects.create(
+            workspace=tenant_ws, title="Tenant-only", content="content"
+        )
+        results = KnowledgeEntry.objects.for_workspace_context(cws)
+        assert tenant_entry not in results
+
+    @pytest.mark.django_db
+    def test_agent_learning_for_workspace_context(self, tenant_ws):
+        learning = AgentLearning.objects.create(
+            workspace=tenant_ws, description="Tenant learning", is_active=True
+        )
+        results = AgentLearning.objects.for_workspace_context(tenant_ws)
+        assert learning in results
+```
+
+**Step 2: Run tests**
+
+```bash
+uv run pytest tests/test_custom_workspace_retriever.py -v
+```
+
+Expected: All pass.
+
+**Step 3: Commit**
+
+```bash
+git add -A && git commit -m "test: add integration tests for WorkspaceContextQuerySet.for_workspace_context"
+```
+
+---
+
 ## Summary of Tasks
 
 | # | Task | Phase | Depends On |
@@ -1821,12 +2062,14 @@ git add -A && git commit -m "feat: add custom workspace context assembly for Lan
 | 3 | Write CustomWorkspace model tests | 2 | 2 |
 | 4 | Implement CustomWorkspace models | 2 | 3 |
 | 5 | Write dual FK tests | 3 | 4 |
-| 6 | Add dual FK to knowledge/chat | 3 | 5 |
+| 6 | Add dual FK to knowledge/chat + WorkspaceContextQuerySet manager | 3 | 5 |
 | 7 | Write API tests | 4 | 6 |
-| 8 | Implement API views/URLs | 4 | 7 |
+| 8 | Implement API views/URLs (ROLE_PERMISSIONS, distinct counts, prefetch) | 4 | 7 |
 | 9 | Frontend workspaceSlice | 5 | 8 |
 | 10 | Workspace selector UI | 6 | 9 |
 | 11 | Content provenance badges | 7 | 10 |
 | 12 | Agent context assembly | 8 | 6 |
+| 13 | Unit tests for `_build_custom_workspace_context` (mocked, no DB) | 9 | 12 |
+| 14 | Integration tests for WorkspaceContextQuerySet retriever | 9 | 6 |
 
-Tasks 9-11 (frontend) and Task 12 (agent) can be parallelized after Task 8 completes.
+Tasks 9-11 (frontend), Task 12 (agent context), and Task 14 (retriever tests) can be parallelized after Task 8 completes. Task 13 depends on Task 12.
