@@ -284,6 +284,9 @@ async def tenant_credential_detail_view(request, membership_id):
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Not found"}, status=404)
 
+    if not hasattr(tm, "credential"):
+        return JsonResponse({"error": "Not found"}, status=404)
+
     try:
         await sync_to_async(verify_commcare_credential)(
             domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
@@ -299,9 +302,8 @@ async def tenant_credential_detail_view(request, membership_id):
         return JsonResponse({"error": str(e)}, status=500)
 
     def _save_credential(tm):
-        if hasattr(tm, "credential"):
-            tm.credential.encrypted_credential = encrypted
-            tm.credential.save(update_fields=["encrypted_credential"])
+        tm.credential.encrypted_credential = encrypted
+        tm.credential.save(update_fields=["encrypted_credential"])
         return tm
 
     tm = await sync_to_async(_save_credential)(tm)
