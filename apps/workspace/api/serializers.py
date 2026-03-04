@@ -67,9 +67,7 @@ class CustomWorkspaceCreateSerializer(serializers.Serializer):
     tenant_workspace_ids = serializers.ListField(
         child=serializers.UUIDField(), required=False, default=list
     )
-    tenant_ids = serializers.ListField(
-        child=serializers.CharField(), required=False, default=list
-    )
+    tenant_ids = serializers.ListField(child=serializers.CharField(), required=False, default=list)
 
     def validate(self, data):
         if not data.get("tenant_workspace_ids") and not data.get("tenant_ids"):
@@ -77,3 +75,9 @@ class CustomWorkspaceCreateSerializer(serializers.Serializer):
                 "Either tenant_workspace_ids or tenant_ids is required."
             )
         return data
+
+
+class CustomWorkspaceUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=255, required=False)
+    description = serializers.CharField(required=False, allow_blank=True)
+    system_prompt = serializers.CharField(required=False, allow_blank=True)

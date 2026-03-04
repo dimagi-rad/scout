@@ -210,3 +210,113 @@ class TestEnsureWorkspaceForTenant:
             )
             ids.append(r.json()["id"])
         assert len(set(ids)) == 1
+
+
+@pytest.mark.django_db
+class TestOwnerRoleProtection:
+    """Test that owner-only actions are properly restricted."""
+
+    def test_viewer_cannot_delete_workspace(
+        self, api_client, other_user, custom_workspace, other_user_partial_access
+    ):
+        # Give other_user full tenant access + viewer role
+        TenantMembership.objects.get_or_create(
+            user=other_user,
+            provider="commcare",
+            tenant_id="domain-b",
+            defaults={"tenant_name": "Domain B"},
+        )
+        WorkspaceMembership.objects.create(
+            workspace=custom_workspace, user=other_user, role="viewer"
+        )
+        api_client.force_login(other_user)
+        response = api_client.delete(f"/api/custom-workspaces/{custom_workspace.id}/")
+        assert response.status_code == 403
+
+    def test_editor_cannot_delete_workspace(
+        self, api_client, other_user, custom_workspace, other_user_partial_access
+    ):
+        TenantMembership.objects.get_or_create(
+            user=other_user,
+            provider="commcare",
+            tenant_id="domain-b",
+            defaults={"tenant_name": "Domain B"},
+        )
+        WorkspaceMembership.objects.create(
+            workspace=custom_workspace, user=other_user, role="editor"
+        )
+        api_client.force_login(other_user)
+        response = api_client.delete(f"/api/custom-workspaces/{custom_workspace.id}/")
+        assert response.status_code == 403
+
+    def test_viewer_cannot_add_member(
+        self, api_client, other_user, custom_workspace, other_user_partial_access
+    ):
+        TenantMembership.objects.get_or_create(
+            user=other_user,
+            provider="commcare",
+            tenant_id="domain-b",
+            defaults={"tenant_name": "Domain B"},
+        )
+        WorkspaceMembership.objects.create(
+            workspace=custom_workspace, user=other_user, role="viewer"
+        )
+        api_client.force_login(other_user)
+        response = api_client.post(
+            f"/api/custom-workspaces/{custom_workspace.id}/members/",
+            data={"user_id": str(other_user.id), "role": "viewer"},
+            content_type="application/json",
+        )
+        assert response.status_code == 403
+
+    def test_editor_can_update_workspace(
+        self, api_client, other_user, custom_workspace, other_user_partial_access
+    ):
+        TenantMembership.objects.get_or_create(
+            user=other_user,
+            provider="commcare",
+            tenant_id="domain-b",
+            defaults={"tenant_name": "Domain B"},
+        )
+        WorkspaceMembership.objects.create(
+            workspace=custom_workspace, user=other_user, role="editor"
+        )
+        api_client.force_login(other_user)
+        response = api_client.patch(
+            f"/api/custom-workspaces/{custom_workspace.id}/",
+            data={"name": "Updated Name"},
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        assert response.json()["name"] == "Updated Name"
+
+
+@pytest.mark.django_db
+class TestCanPerformAction:
+    """Test the ROLE_PERMISSIONS map."""
+
+    def test_owner_can_do_everything(self):
+        from apps.workspace.api.views import _can_perform_action
+
+        for action in ("read", "write", "manage_members", "manage_tenants", "delete"):
+            assert _can_perform_action("owner", action)
+
+    def test_editor_can_read_and_write(self):
+        from apps.workspace.api.views import _can_perform_action
+
+        assert _can_perform_action("editor", "read")
+        assert _can_perform_action("editor", "write")
+        assert not _can_perform_action("editor", "manage_members")
+        assert not _can_perform_action("editor", "delete")
+
+    def test_viewer_can_only_read(self):
+        from apps.workspace.api.views import _can_perform_action
+
+        assert _can_perform_action("viewer", "read")
+        assert not _can_perform_action("viewer", "write")
+        assert not _can_perform_action("viewer", "manage_members")
+
+    def test_unknown_role_has_no_permissions(self):
+        from apps.workspace.api.views import _can_perform_action
+
+        assert not _can_perform_action("unknown", "read")
