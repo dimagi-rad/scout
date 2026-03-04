@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0012_add_tenant_workspace"),
+        ("workspace", "0012_add_tenant_workspace"),
         ("recipes", "0004_migrate_steps_to_prompt"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
@@ -33,7 +33,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="recipes",
-                to="projects.tenantworkspace",
+                to="workspace.tenantworkspace",
             ),
         ),
         migrations.AddIndex(

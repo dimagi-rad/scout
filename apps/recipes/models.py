@@ -35,7 +35,7 @@ class Recipe(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "workspace.TenantWorkspace",
         on_delete=models.CASCADE,
         related_name="recipes",
         null=True,

@@ -9,6 +9,14 @@ export interface TenantMembership {
   last_selected_at: string | null
 }
 
+/** Display label for a tenant — Connect opps are prefixed with the opp ID. */
+export function tenantDisplayName(d: TenantMembership): string {
+  if (d.provider === "commcare_connect") {
+    return `${d.tenant_id} – ${d.tenant_name}`
+  }
+  return d.tenant_name
+}
+
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 
 export interface DomainSlice {
@@ -31,6 +39,8 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
   domainsError: null,
   domainActions: {
     fetchDomains: async () => {
+      // Skip if already loading (prevents duplicate fetches from Sidebar + ConnectionsPage)
+      if (get().domainsStatus === "loading") return
       set({ domainsStatus: "loading", domainsError: null })
       try {
         const domains = await api.get<TenantMembership[]>("/api/auth/tenants/")

@@ -41,7 +41,7 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.projects.models import SchemaState, TenantSchema
+from apps.workspace.models import SchemaState, TenantSchema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_tables
@@ -49,8 +49,8 @@ from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership, User
+    from apps.workspace.models import TenantWorkspace
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,8 @@ MCP_TOOL_NAMES = frozenset(
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
+_CONTEXT_KNOWLEDGE_LIMIT = 200
+_CONTEXT_LEARNINGS_LIMIT = 200
 
 
 def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
@@ -174,7 +176,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
     # Try full schema with columns
     try:
         ctx = await load_tenant_context(tenant_membership.tenant_id)
-        from apps.projects.models import TenantMetadata
+        from apps.workspace.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
             tenant_membership_id=ts.tenant_membership_id
@@ -293,7 +295,7 @@ async def build_agent_graph(
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
     """
-    from apps.projects.models import TenantWorkspace
+    from apps.workspace.models import TenantWorkspace
 
     workspace, _ = await TenantWorkspace.objects.aget_or_create(
         tenant_id=tenant_membership.tenant_id,
@@ -522,6 +524,72 @@ When results are truncated, suggest adding filters or using aggregations to redu
     return "\n".join(sections)
 
 
+def _build_custom_workspace_context_sync(workspace):
+    """Synchronous implementation — use ``_build_custom_workspace_context`` from async code."""
+    from django.db.models import Q
+
+    from apps.knowledge.models import AgentLearning, KnowledgeEntry
+    from apps.workspace.models import TenantWorkspace
+
+    tenant_workspaces = TenantWorkspace.objects.filter(custom_workspace_links__workspace=workspace)
+
+    # Aggregate system prompts
+    prompts = []
+    if workspace.system_prompt:
+        prompts.append(f"[Workspace: {workspace.name}]\n{workspace.system_prompt}")
+    for tw in tenant_workspaces:
+        if tw.system_prompt:
+            prompts.append(f"[Tenant: {tw.tenant_name}]\n{tw.system_prompt}")
+
+    # Aggregate knowledge
+    knowledge = list(
+        KnowledgeEntry.objects.filter(
+            Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace)
+        ).values("title", "content", "tags")[:_CONTEXT_KNOWLEDGE_LIMIT]
+    )
+
+    # Aggregate learnings
+    learnings = list(
+        AgentLearning.objects.filter(
+            Q(workspace__in=tenant_workspaces) | Q(custom_workspace=workspace),
+            is_active=True,
+        ).order_by("-confidence_score")[:_CONTEXT_LEARNINGS_LIMIT]
+    )
+
+    # Available tenant info
+    available_tenants = [
+        {
+            "tenant_id": tw.tenant_id,
+            "tenant_name": tw.tenant_name,
+            "has_data_dictionary": bool(tw.data_dictionary),
+        }
+        for tw in tenant_workspaces
+    ]
+
+    return {
+        "system_prompts": prompts,
+        "knowledge": knowledge,
+        "learnings": learnings,
+        "available_tenants": available_tenants,
+    }
+
+
+async def _build_custom_workspace_context(workspace):
+    """Build aggregated agent context for a CustomWorkspace.
+
+    Collects system prompts, knowledge entries, and agent learnings from all
+    member TenantWorkspaces plus workspace-specific additions.  Returns a dict
+    suitable for downstream prompt assembly when the agent operates within a
+    CustomWorkspace.
+
+    This is an async wrapper around the synchronous ORM implementation to avoid
+    blocking the event loop when called from ASGI/LangGraph async code.
+    """
+    return await sync_to_async(_build_custom_workspace_context_sync)(workspace)
+
+
 __all__ = [
     "build_agent_graph",
+    "_build_custom_workspace_context",
+    "_build_custom_workspace_context_sync",
 ]

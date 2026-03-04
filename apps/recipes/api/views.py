@@ -29,8 +29,8 @@ def _resolve_workspace(request):
     """Resolve the active TenantWorkspace for the authenticated user."""
     from django.db.models import F
 
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
+    from apps.workspace.models import TenantWorkspace
 
     membership = (
         TenantMembership.objects.filter(user=request.user)

@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("chat", "0002_add_thread_sharing_fields"),
-        ("projects", "0011_tenantschema_materializationrun"),
+        ("workspace", "0011_tenantschema_materializationrun"),
         ("users", "0003_tenantmembership"),
     ]
 
@@ -31,7 +31,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="threads",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
     ]
