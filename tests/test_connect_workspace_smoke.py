@@ -102,9 +102,7 @@ class TestConnectResolutionPipeline:
                 tenant_membership=tm, credential_type=TenantCredential.OAUTH
             ).exists(), f"Missing OAuth credential for membership {tm.tenant_id}"
 
-    def test_layer2_tenant_list_returns_memberships(
-        self, client, user, connect_social_token
-    ):
+    def test_layer2_tenant_list_returns_memberships(self, client, user, connect_social_token):
         """Layer 2: GET /api/auth/tenants/ returns resolved Connect memberships."""
         client.force_login(user)
 
@@ -136,9 +134,7 @@ class TestConnectResolutionPipeline:
                 sociallogin=mock_sociallogin,
             )
 
-        count = TenantMembership.objects.filter(
-            user=user, provider="commcare_connect"
-        ).count()
+        count = TenantMembership.objects.filter(user=user, provider="commcare_connect").count()
         assert count == 2, (
             f"Signal should have created 2 memberships, found {count}. "
             "Check that apps.users.signals.resolve_tenant_on_social_login is connected."
@@ -178,9 +174,9 @@ class TestConnectDisconnectReconnectLifecycle:
         )
 
         # Verify: token deleted
-        assert not SocialToken.objects.filter(
-            account=connect_social_account
-        ).exists(), "STEP 2 FAILED: SocialToken still exists after disconnect."
+        assert not SocialToken.objects.filter(account=connect_social_account).exists(), (
+            "STEP 2 FAILED: SocialToken still exists after disconnect."
+        )
 
         # Verify: OAuth-based memberships cleaned up
         oauth_memberships = TenantMembership.objects.filter(

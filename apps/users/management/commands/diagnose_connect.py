@@ -56,25 +56,33 @@ class Command(BaseCommand):
 
         connect_accounts = accounts.filter(provider="commcare_connect")
         if not connect_accounts.exists():
-            self.stdout.write(self.style.ERROR(
-                "  FAIL: No CommCare Connect SocialAccount. User needs to OAuth with Connect first."
-            ))
+            self.stdout.write(
+                self.style.ERROR(
+                    "  FAIL: No CommCare Connect SocialAccount. User needs to OAuth with Connect first."
+                )
+            )
             return
 
-        self.stdout.write(self.style.SUCCESS(
-            f"  OK: {connect_accounts.count()} CommCare Connect SocialAccount(s)"
-        ))
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"  OK: {connect_accounts.count()} CommCare Connect SocialAccount(s)"
+            )
+        )
 
         # ── Layer 3: SocialToken ──
-        self.stdout.write(self.style.MIGRATE_HEADING("\n=== Layer 3: SocialToken (OAuth token) ==="))
+        self.stdout.write(
+            self.style.MIGRATE_HEADING("\n=== Layer 3: SocialToken (OAuth token) ===")
+        )
         tokens = SocialToken.objects.filter(
             account__user=user, account__provider="commcare_connect"
         )
         if not tokens.exists():
-            self.stdout.write(self.style.ERROR(
-                "  FAIL: No SocialToken for CommCare Connect. "
-                "Provider will show 'Not connected' on the Connections page."
-            ))
+            self.stdout.write(
+                self.style.ERROR(
+                    "  FAIL: No SocialToken for CommCare Connect. "
+                    "Provider will show 'Not connected' on the Connections page."
+                )
+            )
             return
 
         token = tokens.first()
@@ -96,55 +104,51 @@ class Command(BaseCommand):
             self.stdout.write(f"  HTTP {resp.status_code}")
 
             if resp.status_code in (401, 403):
-                self.stdout.write(self.style.ERROR(
-                    f"  FAIL: Auth error ({resp.status_code}). Token may be expired. "
-                    "User should disconnect and reconnect on the Connections page."
-                ))
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"  FAIL: Auth error ({resp.status_code}). Token may be expired. "
+                        "User should disconnect and reconnect on the Connections page."
+                    )
+                )
                 self.stdout.write(f"  Response body: {resp.text[:500]}")
                 return
 
             if resp.status_code != 200:
-                self.stdout.write(self.style.ERROR(
-                    f"  FAIL: Unexpected status {resp.status_code}"
-                ))
+                self.stdout.write(self.style.ERROR(f"  FAIL: Unexpected status {resp.status_code}"))
                 self.stdout.write(f"  Response body: {resp.text[:500]}")
                 return
 
             data = resp.json()
             opportunities = data.get("opportunities", [])
-            self.stdout.write(self.style.SUCCESS(
-                f"  OK: API returned {len(opportunities)} opportunities"
-            ))
+            self.stdout.write(
+                self.style.SUCCESS(f"  OK: API returned {len(opportunities)} opportunities")
+            )
             if opportunities:
                 self.stdout.write(
                     f"  First 5: {[o.get('name', o.get('id')) for o in opportunities[:5]]}"
                 )
 
             if not opportunities:
-                self.stdout.write(self.style.WARNING(
-                    "  WARN: API returned 0 opportunities. Check if the user has access "
-                    "to any opportunities in CommCare Connect."
-                ))
+                self.stdout.write(
+                    self.style.WARNING(
+                        "  WARN: API returned 0 opportunities. Check if the user has access "
+                        "to any opportunities in CommCare Connect."
+                    )
+                )
                 # Check the full response shape
                 self.stdout.write(f"  Response keys: {list(data.keys())}")
                 self.stdout.write(f"  Full response (first 500 chars): {resp.text[:500]}")
 
         except requests.Timeout:
-            self.stdout.write(self.style.ERROR(
-                f"  FAIL: Timeout connecting to {api_url}"
-            ))
+            self.stdout.write(self.style.ERROR(f"  FAIL: Timeout connecting to {api_url}"))
             return
         except requests.ConnectionError as e:
-            self.stdout.write(self.style.ERROR(
-                f"  FAIL: Connection error: {e}"
-            ))
+            self.stdout.write(self.style.ERROR(f"  FAIL: Connection error: {e}"))
             return
 
         # ── Layer 5: TenantMembership records ──
         self.stdout.write(self.style.MIGRATE_HEADING("\n=== Layer 5: TenantMembership records ==="))
-        memberships = TenantMembership.objects.filter(
-            user=user, provider="commcare_connect"
-        )
+        memberships = TenantMembership.objects.filter(user=user, provider="commcare_connect")
         self.stdout.write(f"  DB records: {memberships.count()}")
         for tm in memberships[:5]:
             has_cred = hasattr(tm, "credential")
@@ -152,23 +156,23 @@ class Command(BaseCommand):
             self.stdout.write(f"  - {tm.tenant_id} ({tm.tenant_name}) credential={cred_type}")
 
         if memberships.count() == 0 and len(opportunities) > 0:
-            self.stdout.write(self.style.ERROR(
-                f"  FAIL: API returned {len(opportunities)} opportunities but DB has 0 memberships."
-                "\n    Resolution did not persist. The _last_refresh cache may have prevented it,"
-                "\n    or the signal/view resolution failed silently."
-            ))
+            self.stdout.write(
+                self.style.ERROR(
+                    f"  FAIL: API returned {len(opportunities)} opportunities but DB has 0 memberships."
+                    "\n    Resolution did not persist. The _last_refresh cache may have prevented it,"
+                    "\n    or the signal/view resolution failed silently."
+                )
+            )
 
         # ── Layer 6: Optionally run resolution ──
         if options["resolve"] and len(opportunities) > 0:
-            self.stdout.write(self.style.MIGRATE_HEADING(
-                "\n=== Running resolve_connect_opportunities... ==="
-            ))
+            self.stdout.write(
+                self.style.MIGRATE_HEADING("\n=== Running resolve_connect_opportunities... ===")
+            )
             from apps.users.services.tenant_resolution import resolve_connect_opportunities
 
             result = resolve_connect_opportunities(user, token.token)
-            self.stdout.write(self.style.SUCCESS(
-                f"  OK: Resolved {len(result)} memberships"
-            ))
+            self.stdout.write(self.style.SUCCESS(f"  OK: Resolved {len(result)} memberships"))
 
         # ── Summary ──
         self.stdout.write(self.style.MIGRATE_HEADING("\n=== Summary ==="))
@@ -176,11 +180,15 @@ class Command(BaseCommand):
             user=user, provider="commcare_connect"
         ).count()
         if final_count > 0:
-            self.stdout.write(self.style.SUCCESS(
-                f"  OK: {final_count} Connect workspace(s) available for workspace selector"
-            ))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  OK: {final_count} Connect workspace(s) available for workspace selector"
+                )
+            )
         else:
-            self.stdout.write(self.style.ERROR(
-                "  FAIL: 0 Connect workspaces. The workspace selector will show nothing.\n"
-                "    Run with --resolve to attempt resolution, or check the layers above."
-            ))
+            self.stdout.write(
+                self.style.ERROR(
+                    "  FAIL: 0 Connect workspaces. The workspace selector will show nothing.\n"
+                    "    Run with --resolve to attempt resolution, or check the layers above."
+                )
+            )

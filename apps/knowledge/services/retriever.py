@@ -116,9 +116,13 @@ class KnowledgeRetriever:
 
     async def _format_agent_learnings(self) -> str:
         """Format active agent learnings as a bullet list."""
-        learnings = AgentLearning.objects.for_workspace_context(self.workspace).filter(
-            is_active=True,
-        ).order_by("-confidence_score", "-times_applied")[: self.MAX_AGENT_LEARNINGS]
+        learnings = (
+            AgentLearning.objects.for_workspace_context(self.workspace)
+            .filter(
+                is_active=True,
+            )
+            .order_by("-confidence_score", "-times_applied")[: self.MAX_AGENT_LEARNINGS]
+        )
 
         if not await learnings.aexists():
             return ""

@@ -38,6 +38,7 @@ from apps.agents.graph.state import AgentState
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.tools.artifact_tool import create_artifact_tools
+from apps.agents.tools.commcare_knowledge_tool import create_commcare_knowledge_tool
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
@@ -305,8 +306,13 @@ async def build_agent_graph(
     logger.info("Building agent graph for tenant:%s", tenant_membership.tenant_id)
 
     # --- Build tools ---
-    tools = _build_tools(workspace, user, mcp_tools or [])
-    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant_id)
+    tools = _build_tools(workspace, user, mcp_tools or [], tenant_membership=tenant_membership)
+    logger.info(
+        "Created %d tools for tenant:%s: %s",
+        len(tools),
+        tenant_membership.tenant_id,
+        [t.name for t in tools],
+    )
 
     # --- Inject tenant_id and tenant_membership_id into MCP tool calls ---
     injections = {
@@ -433,7 +439,12 @@ async def build_agent_graph(
     return compiled
 
 
-def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list) -> list:
+def _build_tools(
+    workspace: TenantWorkspace,
+    user: User | None,
+    mcp_tools: list,
+    tenant_membership: TenantMembership | None = None,
+) -> list:
     """
     Build the tool list for the agent.
 
@@ -448,11 +459,13 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
     - create_artifact: For creating interactive visualizations
     - update_artifact: For updating existing artifacts
     - save_as_recipe: For creating replayable analysis workflows
+    - download_commcare_knowledge: For fetching CommCare form definitions as knowledge
 
     Args:
         workspace: The TenantWorkspace model instance.
         user: Optional User for tracking learning discovery.
         mcp_tools: LangChain tools loaded from the MCP server.
+        tenant_membership: Optional TenantMembership for provider-specific tools.
 
     Returns:
         List of LangChain tool functions.
@@ -461,6 +474,8 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
     tools.append(create_save_learning_tool(workspace, user))
     tools.extend(create_artifact_tools(workspace, user))
     tools.append(create_recipe_tool(workspace, user))
+    if tenant_membership is not None:
+        tools.append(create_commcare_knowledge_tool(workspace, user, tenant_membership))
     return tools
 
 

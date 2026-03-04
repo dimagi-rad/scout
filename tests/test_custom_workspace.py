@@ -270,12 +270,8 @@ class TestWorkspaceContextQuerySet:
     def test_filter_excludes_other_workspace(self, tenant_workspace_a, tenant_workspace_b):
         from apps.knowledge.models import KnowledgeEntry
 
-        KnowledgeEntry.objects.create(
-            workspace=tenant_workspace_a, title="A entry", content="x"
-        )
-        KnowledgeEntry.objects.create(
-            workspace=tenant_workspace_b, title="B entry", content="x"
-        )
+        KnowledgeEntry.objects.create(workspace=tenant_workspace_a, title="A entry", content="x")
+        KnowledgeEntry.objects.create(workspace=tenant_workspace_b, title="B entry", content="x")
         qs = KnowledgeEntry.objects.for_workspace_context(tenant_workspace_a)
         assert qs.count() == 1
         assert qs.first().title == "A entry"

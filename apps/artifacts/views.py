@@ -196,6 +196,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
     <script id="artifact-data" type="application/json" nonce="{{CSP_NONCE}}">{{ARTIFACT_DATA}}</script>
 
     <script nonce="{{CSP_NONCE}}">
+        const BASE_PATH = '{{BASE_PATH}}';
+
         // Artifact rendering system
         const ArtifactRenderer = {
             container: null,
@@ -221,7 +223,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 if (artifact.has_live_queries) {
                     this.showLoading('Querying database...');
                     try {
-                        const resp = await fetch('/api/artifacts/' + artifact.id + '/query-data/', {
+                        const resp = await fetch(BASE_PATH + '/api/artifacts/' + artifact.id + '/query-data/', {
                             credentials: 'include',
                         });
                         if (!resp.ok) {
@@ -399,6 +401,31 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         const ArrowUp = _lucideIcon('ArrowUp');
                         const ArrowDown = _lucideIcon('ArrowDown');
                         const Star = _lucideIcon('Star');
+
+                        // Pre-define common icons for convenience
+                        const createLucideIcon = _lucideIcon;
+                        const Calendar = createLucideIcon("Calendar");
+                        const Clock = createLucideIcon("Clock");
+                        const MapPin = createLucideIcon("MapPin");
+                        const CheckCircle = createLucideIcon("CheckCircle");
+                        const XCircle = createLucideIcon("XCircle");
+                        const AlertTriangle = createLucideIcon("AlertTriangle");
+                        const Info = createLucideIcon("Info");
+                        const Search = createLucideIcon("Search");
+                        const Filter = createLucideIcon("Filter");
+                        const Download = createLucideIcon("Download");
+                        const Eye = createLucideIcon("Eye");
+                        const Heart = createLucideIcon("Heart");
+                        const Home = createLucideIcon("Home");
+                        const Settings = createLucideIcon("Settings");
+                        const ChevronRight = createLucideIcon("ChevronRight");
+                        const ChevronDown = createLucideIcon("ChevronDown");
+                        const ExternalLink = createLucideIcon("ExternalLink");
+                        const FileText = createLucideIcon("FileText");
+                        const Hash = createLucideIcon("Hash");
+                        const Percent = createLucideIcon("Percent");
+                        const Target = createLucideIcon("Target");
+                        const Zap = createLucideIcon("Zap");
 
                         ${transformed}
 
@@ -664,8 +691,12 @@ class ArtifactSandboxView(View):
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
 
-        # Inject the nonce and artifact data into the template
+        # Inject the nonce, base path, and artifact data into the template
+        from django.conf import settings
+
+        base_path = (getattr(settings, "FORCE_SCRIPT_NAME", "") or "").rstrip("/")
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
+        html_content = html_content.replace("{{BASE_PATH}}", base_path)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")

@@ -49,9 +49,7 @@ class Thread(models.Model):
         if not self.tenant_membership and not self.custom_workspace:
             raise ValidationError("Either tenant_membership or custom_workspace must be set.")
         if self.tenant_membership and self.custom_workspace:
-            raise ValidationError(
-                "Only one of tenant_membership or custom_workspace may be set."
-            )
+            raise ValidationError("Only one of tenant_membership or custom_workspace may be set.")
 
     def save(self, *args, **kwargs):
         if self.is_public and not self.share_token:
