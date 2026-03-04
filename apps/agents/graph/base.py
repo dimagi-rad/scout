@@ -305,7 +305,12 @@ async def build_agent_graph(
 
     # --- Build tools ---
     tools = _build_tools(workspace, user, mcp_tools or [], tenant_membership=tenant_membership)
-    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant_id)
+    logger.info(
+        "Created %d tools for tenant:%s: %s",
+        len(tools),
+        tenant_membership.tenant_id,
+        [t.name for t in tools],
+    )
 
     # --- Inject tenant_id and tenant_membership_id into MCP tool calls ---
     injections = {
