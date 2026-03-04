@@ -105,6 +105,16 @@ class TableKnowledge(models.Model):
                 ),
                 name="table_knowledge_one_workspace",
             ),
+            models.UniqueConstraint(
+                fields=["workspace", "table_name"],
+                condition=models.Q(workspace__isnull=False),
+                name="unique_table_knowledge_per_workspace",
+            ),
+            models.UniqueConstraint(
+                fields=["custom_workspace", "table_name"],
+                condition=models.Q(custom_workspace__isnull=False),
+                name="unique_table_knowledge_per_custom_workspace",
+            ),
         ]
         ordering = ["table_name"]
         verbose_name_plural = "Table knowledge"
