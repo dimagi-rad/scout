@@ -13,6 +13,10 @@ from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.tenant_verification import (
+    CommCareVerificationError,
+    verify_commcare_credential,
+)
 
 # Only refresh tenant lists from external APIs once per hour
 _REFRESH_INTERVAL = timedelta(hours=1)
@@ -160,7 +164,7 @@ async def tenant_credential_list_view(request):
             )
         return JsonResponse(results, safe=False)
 
-    # POST — create API-key-backed membership
+    # POST — create API-key-backed membership with provider verification
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -177,6 +181,30 @@ async def tenant_credential_list_view(request):
             status=400,
         )
 
+    if provider != "commcare":
+        return JsonResponse(
+            {"error": f"API-key credentials are not supported for provider '{provider}'"},
+            status=400,
+        )
+
+    # credential must be "username:apikey"
+    if ":" not in credential:
+        return JsonResponse(
+            {"error": "credential must be in the format 'username:apikey'"},
+            status=400,
+        )
+    cc_username, cc_api_key = credential.split(":", 1)
+
+    try:
+        verified = await sync_to_async(verify_commcare_credential)(
+            domain=tenant_id, username=cc_username, api_key=cc_api_key
+        )
+    except CommCareVerificationError as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
+    # Use verified name if available, fall back to user-supplied name
+    verified_name = verified.get("domain") or tenant_name
+
     from django.db import transaction
 
     from apps.users.adapters import encrypt_credential
@@ -192,7 +220,7 @@ async def tenant_credential_list_view(request):
             tenant, _ = Tenant.objects.update_or_create(
                 provider=provider,
                 external_id=tenant_id,
-                defaults={"canonical_name": tenant_name},
+                defaults={"canonical_name": verified_name},
             )
             tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
             TenantCredential.objects.update_or_create(
