@@ -4,11 +4,38 @@ from __future__ import annotations
 
 import logging
 
+import requests
+
 from mcp_server.loaders.commcare_base import CommCareBaseLoader
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.commcarehq.org"
+
+
+def fetch_app_by_id(
+    domain: str,
+    app_id: str,
+    session: requests.Session | None = None,
+    timeout: tuple[int, int] = (10, 60),
+) -> dict | None:
+    """Fetch a single CommCare HQ application by domain and app_id.
+
+    Uses an unauthenticated GET by default. Returns the app dict on success,
+    None on any failure (network error, non-200 status, etc.).
+    """
+    url = f"{_BASE_URL}/a/{domain}/api/v0.5/application/{app_id}/"
+    logger.info("fetch_app_by_id: GET %s (authenticated=%s)", url, session is not None)
+    try:
+        if session is not None:
+            resp = session.get(url, timeout=timeout)
+        else:
+            resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        logger.warning("Failed to fetch app %s from domain %s", app_id, domain, exc_info=True)
+        return None
 
 
 class CommCareMetadataLoader(CommCareBaseLoader):
@@ -29,8 +56,8 @@ class CommCareMetadataLoader(CommCareBaseLoader):
 
     def load(self) -> dict:
         apps = self._fetch_apps()
-        case_types = _extract_case_types(apps)
-        form_definitions = _extract_form_definitions(apps)
+        case_types = extract_case_types(apps)
+        form_definitions = extract_form_definitions(apps)
         logger.info(
             "Discovered %d apps, %d case types, %d forms for domain %s",
             len(apps),
@@ -56,7 +83,7 @@ class CommCareMetadataLoader(CommCareBaseLoader):
         return apps
 
 
-def _extract_case_types(apps: list[dict]) -> list[dict]:
+def extract_case_types(apps: list[dict]) -> list[dict]:
     """Extract unique case types from application module definitions."""
     seen: set[str] = set()
     case_types: list[dict] = []
@@ -76,7 +103,7 @@ def _extract_case_types(apps: list[dict]) -> list[dict]:
     return case_types
 
 
-def _extract_form_definitions(apps: list[dict]) -> dict[str, dict]:
+def extract_form_definitions(apps: list[dict]) -> dict[str, dict]:
     """Extract form definitions keyed by form xmlns."""
     forms: dict[str, dict] = {}
     for app in apps:
