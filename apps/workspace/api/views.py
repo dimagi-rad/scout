@@ -26,7 +26,7 @@ def _resolve_membership(request):
 
 def _resolve_workspace(request):
     """Resolve the active TenantWorkspace for the authenticated user."""
-    from apps.projects.models import TenantWorkspace
+    from apps.workspace.models import TenantWorkspace
 
     membership = _resolve_membership(request)
     if not membership:
@@ -47,7 +47,7 @@ def _resolve_tenant_schema(membership):
     Matches by tenant_id rather than the specific membership FK so that multiple
     users in the same tenant see the same shared schema.
     """
-    from apps.projects.models import SchemaState, TenantSchema
+    from apps.workspace.models import SchemaState, TenantSchema
 
     return TenantSchema.objects.filter(
         tenant_membership__tenant_id=membership.tenant_id,
@@ -61,7 +61,7 @@ def _get_all_columns(schema_name: str) -> dict[str, list[dict]]:
     Returns a mapping of table_name → list of column dicts.
     Returns an empty dict on any connection error.
     """
-    from apps.projects.services.schema_manager import get_managed_db_connection
+    from apps.workspace.services.schema_manager import get_managed_db_connection
 
     try:
         conn = get_managed_db_connection()
@@ -100,7 +100,7 @@ def _get_table_columns(schema_name: str, table_name: str) -> list[dict]:
 
     Returns an empty list on any connection error or if the table doesn't exist.
     """
-    from apps.projects.services.schema_manager import get_managed_db_connection
+    from apps.workspace.services.schema_manager import get_managed_db_connection
 
     try:
         conn = get_managed_db_connection()
@@ -182,7 +182,7 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
 
 def _get_tenant_metadata(tenant_id: str):
     """Return TenantMetadata for any membership in the given tenant, or None."""
-    from apps.projects.models import TenantMetadata
+    from apps.workspace.models import TenantMetadata
 
     return TenantMetadata.objects.filter(tenant_membership__tenant_id=tenant_id).first()
 
@@ -241,7 +241,7 @@ class DataDictionaryView(APIView):
         return self._get_from_legacy(workspace)
 
     def _get_from_pipeline(self, workspace, tenant_schema):
-        from apps.projects.models import MaterializationRun
+        from apps.workspace.models import MaterializationRun
         from mcp_server.pipeline_registry import get_registry
         from mcp_server.services.metadata import pipeline_list_tables
 
@@ -365,7 +365,7 @@ class TableDetailView(APIView):
         """Return table data from pipeline models, or None if not found or hidden."""
         if table_name.startswith("stg_"):
             return None
-        from apps.projects.models import MaterializationRun
+        from apps.workspace.models import MaterializationRun
         from mcp_server.pipeline_registry import get_registry
         from mcp_server.services.metadata import pipeline_list_tables
 

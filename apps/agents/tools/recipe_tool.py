@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
     from apps.users.models import User
+    from apps.workspace.models import TenantWorkspace
 
 logger = logging.getLogger(__name__)
 

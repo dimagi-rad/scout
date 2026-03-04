@@ -1,5 +1,5 @@
 """
-Views for projects app.
+Views for workspace app.
 """
 
 from django.http import JsonResponse

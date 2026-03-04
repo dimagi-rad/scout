@@ -941,8 +941,8 @@ class ArtifactListView(View):
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        from apps.projects.models import TenantWorkspace
         from apps.users.models import TenantMembership
+        from apps.workspace.models import TenantWorkspace
 
         membership = (
             TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()

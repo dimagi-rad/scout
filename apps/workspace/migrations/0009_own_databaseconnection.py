@@ -1,7 +1,7 @@
 """
-Declare DatabaseConnection as owned by projects app.
+Declare DatabaseConnection as owned by workspace app.
 
-The model class now lives in apps.projects.models with
+The model class now lives in apps.workspace.models with
 Meta.db_table = "datasources_databaseconnection".
 
 On existing databases the table already exists (from the old datasources app)
@@ -22,7 +22,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0005_remove_savedquery_and_conversationlog"),
+        ("workspace", "0005_remove_savedquery_and_conversationlog"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

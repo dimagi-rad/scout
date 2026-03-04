@@ -7,7 +7,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0003_project_is_active_project_readonly_role"),
+        ("workspace", "0003_project_is_active_project_readonly_role"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

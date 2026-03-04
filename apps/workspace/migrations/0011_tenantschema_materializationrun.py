@@ -8,7 +8,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0010_drop_datasource_tables"),
+        ("workspace", "0010_drop_datasource_tables"),
         ("users", "0003_tenantmembership"),
     ]
 
@@ -49,6 +49,7 @@ class Migration(migrations.Migration):
                 ),
             ],
             options={
+                "db_table": "projects_tenantschema",
                 "ordering": ["-last_accessed_at"],
             },
         ),
@@ -84,11 +85,12 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="materialization_runs",
-                        to="projects.tenantschema",
+                        to="workspace.tenantschema",
                     ),
                 ),
             ],
             options={
+                "db_table": "projects_materializationrun",
                 "ordering": ["-started_at"],
             },
         ),

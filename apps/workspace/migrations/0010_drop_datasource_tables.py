@@ -10,7 +10,7 @@ from django.db import migrations
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0008_require_database_connection"),
+        ("workspace", "0008_require_database_connection"),
     ]
 
     operations = [

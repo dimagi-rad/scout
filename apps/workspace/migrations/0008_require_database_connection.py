@@ -11,7 +11,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0007_remove_legacy_db_fields"),
+        ("workspace", "0007_remove_legacy_db_fields"),
     ]
 
     operations = [
@@ -21,7 +21,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.PROTECT,
                 related_name="projects",
-                to="projects.databaseconnection",
+                to="workspace.databaseconnection",
             ),
         ),
     ]

@@ -8,7 +8,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0013_remove_project_models"),
+        ("workspace", "0013_remove_project_models"),
         ("users", "0004_add_tenantcredential"),
     ]
 
@@ -52,6 +52,7 @@ class Migration(migrations.Migration):
                 ),
             ],
             options={
+                "db_table": "projects_tenantmetadata",
                 "verbose_name": "Tenant Metadata",
                 "verbose_name_plural": "Tenant Metadata",
             },

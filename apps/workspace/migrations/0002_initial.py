@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ("projects", "0001_initial"),
+        ("workspace", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -37,7 +37,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="conversations",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -46,7 +46,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="memberships",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddField(
@@ -71,7 +71,7 @@ class Migration(migrations.Migration):
             field=models.ForeignKey(
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="saved_queries",
-                to="projects.project",
+                to="workspace.project",
             ),
         ),
         migrations.AddIndex(

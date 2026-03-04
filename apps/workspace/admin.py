@@ -1,5 +1,5 @@
 """
-Admin configuration for projects app.
+Admin configuration for workspace app.
 """
 
 from django.contrib import admin

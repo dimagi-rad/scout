@@ -13,8 +13,8 @@ def migrate_legacy_credentials(apps, schema_editor):
     For any Project with legacy db_host but no database_connection,
     create a DatabaseConnection and link it.
     """
-    Project = apps.get_model("projects", "Project")
-    DatabaseConnection = apps.get_model("projects", "DatabaseConnection")
+    Project = apps.get_model("workspace", "Project")
+    DatabaseConnection = apps.get_model("workspace", "DatabaseConnection")
 
     for project in Project.objects.filter(
         database_connection__isnull=True,
@@ -39,7 +39,7 @@ class Migration(migrations.Migration):
     atomic = False
 
     dependencies = [
-        ("projects", "0006_add_database_connection_fk"),
+        ("workspace", "0006_add_database_connection_fk"),
     ]
 
     operations = [

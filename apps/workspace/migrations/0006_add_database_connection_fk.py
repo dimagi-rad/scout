@@ -6,7 +6,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     dependencies = [
-        ("projects", "0009_own_databaseconnection"),
+        ("workspace", "0009_own_databaseconnection"),
     ]
 
     operations = [
@@ -18,7 +18,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.PROTECT,
                 related_name="projects",
-                to="projects.databaseconnection",
+                to="workspace.databaseconnection",
             ),
         ),
         migrations.AlterField(
