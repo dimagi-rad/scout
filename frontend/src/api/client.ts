@@ -1,6 +1,13 @@
 /**
  * Thin fetch wrapper that handles CSRF tokens and session cookies.
  */
+import { BASE_PATH } from "@/config"
+
+let activeCustomWorkspaceId: string | null = null
+
+export function setActiveCustomWorkspaceId(id: string | null) {
+  activeCustomWorkspaceId = id
+}
 
 export function getCsrfToken(): string {
   const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
@@ -17,6 +24,7 @@ async function request<T>(
   const headers: Record<string, string> = {
     // Skip Content-Type for FormData — the browser sets the multipart boundary
     ...(rawBody ? {} : { "Content-Type": "application/json" }),
+    ...(activeCustomWorkspaceId && { "X-Custom-Workspace": activeCustomWorkspaceId }),
     ...(fetchOptions.headers as Record<string, string> | undefined),
   }
 
@@ -25,7 +33,7 @@ async function request<T>(
     headers["X-CSRFToken"] = getCsrfToken()
   }
 
-  const res = await fetch(url, {
+  const res = await fetch(`${BASE_PATH}${url}`, {
     ...fetchOptions,
     headers,
     credentials: "include",
@@ -33,7 +41,7 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText)
+    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText, body)
   }
 
   // Handle 204 No Content (common for DELETE responses)
@@ -46,11 +54,13 @@ async function request<T>(
 
 export class ApiError extends Error {
   status: number
+  body: Record<string, unknown> | null
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, body?: Record<string, unknown>) {
     super(message)
     this.name = "ApiError"
     this.status = status
+    this.body = body ?? null
   }
 }
 
@@ -66,7 +76,7 @@ export const api = {
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
   getBlob: async (url: string): Promise<Blob> => {
-    const res = await fetch(url, { credentials: "include" })
+    const res = await fetch(`${BASE_PATH}${url}`, { credentials: "include" })
     if (!res.ok) {
       throw new ApiError(res.status, res.statusText)
     }

@@ -18,7 +18,19 @@ logger = logging.getLogger(__name__)
 
 
 class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
-    """Adapter that Fernet-encrypts SocialToken fields at rest."""
+    """Adapter that Fernet-encrypts SocialToken fields at rest
+    and auto-creates users from OAuth without showing a signup form."""
+
+    def is_auto_signup_allowed(self, request, sociallogin):
+        """Always auto-signup from OAuth — never show the intermediate signup form."""
+        return True
+
+    def populate_user(self, request, sociallogin, data):
+        """Populate user from OAuth data, setting an unusable password."""
+        user = super().populate_user(request, sociallogin, data)
+        if not user.email and data.get("email"):
+            user.email = data["email"]
+        return user
 
     def _get_fernet(self) -> Fernet:
         key = settings.DB_CREDENTIAL_KEY

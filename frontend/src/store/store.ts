@@ -6,8 +6,9 @@ import { createDictionarySlice, type DictionarySlice } from "./dictionarySlice"
 import { createKnowledgeSlice, type KnowledgeSlice } from "./knowledgeSlice"
 import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
+import { createWorkspaceSlice, type WorkspaceSlice } from "./workspaceSlice"
 
-export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & KnowledgeSlice & RecipeSlice & DomainSlice
+export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & KnowledgeSlice & RecipeSlice & DomainSlice & WorkspaceSlice
 
 export const useAppStore = create<AppStore>()((...a) => ({
   ...createArtifactSlice(...a),
@@ -17,4 +18,5 @@ export const useAppStore = create<AppStore>()((...a) => ({
   ...createKnowledgeSlice(...a),
   ...createRecipeSlice(...a),
   ...createDomainSlice(...a),
+  ...createWorkspaceSlice(...a),
 }))

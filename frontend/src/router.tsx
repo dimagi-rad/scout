@@ -7,6 +7,7 @@ import { DataSourcesPage } from "@/pages/DataSourcesPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
+import { BASE_PATH } from "@/config"
 
 export const router = createBrowserRouter([
   {
@@ -28,4 +29,4 @@ export const router = createBrowserRouter([
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
-])
+], { basename: BASE_PATH || undefined })

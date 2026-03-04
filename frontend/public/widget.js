@@ -1,17 +1,22 @@
 (function () {
   "use strict";
 
-  var SCOUT_ORIGIN = (function () {
+  // Detect base URL from the script src, including any path prefix (e.g. /scout)
+  var SCOUT_BASE = (function () {
     var scripts = document.getElementsByTagName("script");
     for (var i = 0; i < scripts.length; i++) {
       var src = scripts[i].src || "";
       if (src.indexOf("widget.js") !== -1) {
         var url = new URL(src);
-        return url.origin;
+        var basePath = url.pathname.replace(/\/widget\.js$/, "");
+        return url.origin + basePath;
       }
     }
     return window.location.origin;
   })();
+
+  // Origin-only for postMessage security checks
+  var SCOUT_ORIGIN = new URL(SCOUT_BASE).origin;
 
   var instances = {};
   var instanceId = 0;
@@ -62,7 +67,7 @@
     if (this.opts.tenant) params.push("tenant=" + encodeURIComponent(this.opts.tenant));
     if (this.opts.provider) params.push("provider=" + encodeURIComponent(this.opts.provider));
     if (this.opts.theme) params.push("theme=" + encodeURIComponent(this.opts.theme));
-    var src = SCOUT_ORIGIN + "/embed/" + (params.length ? "?" + params.join("&") : "");
+    var src = SCOUT_BASE + "/embed/" + (params.length ? "?" + params.join("&") : "");
 
     // Create iframe
     this.iframe = document.createElement("iframe");

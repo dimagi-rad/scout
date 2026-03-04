@@ -14,6 +14,7 @@ interface KnowledgeListProps {
   items: KnowledgeItem[]
   filter: KnowledgeType | null
   search: string
+  workspaceMode?: "tenant" | "custom"
   onFilterChange: (type: KnowledgeType | null) => void
   onSearchChange: (search: string) => void
   onEdit: (item: KnowledgeItem) => void
@@ -51,6 +52,7 @@ export function KnowledgeList({
   items,
   filter,
   search,
+  workspaceMode,
   onFilterChange,
   onSearchChange,
   onEdit,
@@ -108,6 +110,18 @@ export function KnowledgeList({
                       >
                         {item.type}
                       </Badge>
+                      {workspaceMode === "custom" && item.source && (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                            item.source === "workspace"
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-gray-100 text-gray-600"
+                          }`}
+                          data-testid={`knowledge-source-${item.id}`}
+                        >
+                          {item.source_name}
+                        </span>
+                      )}
                       {learningItem?.confidence_score !== undefined && (
                         <span className="text-xs text-muted-foreground">
                           {Math.round(learningItem.confidence_score * 100)}% confidence

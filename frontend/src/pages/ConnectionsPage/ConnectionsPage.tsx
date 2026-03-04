@@ -74,7 +74,9 @@ export function ConnectionsPage() {
   useEffect(() => {
     fetchProviders()
     fetchDomains()
-  }, [fetchProviders, fetchDomains])
+    // Refresh the global store domains too (e.g. after an OAuth redirect back to this page)
+    void fetchStoreDomains()
+  }, [fetchProviders, fetchDomains, fetchStoreDomains])
 
   function openAddForm() {
     setFormDomain("")
@@ -171,6 +173,8 @@ export function ConnectionsPage() {
     try {
       await api.post(`/api/auth/providers/${providerId}/disconnect/`)
       await fetchProviders()
+      // Refresh store domains so workspace selector reflects the removal
+      void fetchStoreDomains()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to disconnect provider.")
     } finally {
