@@ -76,7 +76,7 @@ def run_pipeline(
             progress_callback(step, total_steps, message)
 
     # ── 1. PROVISION ──────────────────────────────────────────────────────────
-    report(f"Provisioning schema for {tenant_membership.tenant_id}...")
+    report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
     tenant_schema = SchemaManager().provision(tenant_membership)
     schema_name = tenant_schema.schema_name
 
@@ -203,18 +203,20 @@ def _run_discover_phase(
 
     if pipeline.provider == "commcare_connect":
         loader = ConnectMetadataLoader(
-            opportunity_id=int(tenant_membership.tenant_id),
+            opportunity_id=int(tenant_membership.tenant.external_id),
             credential=credential,
         )
     else:
-        loader = CommCareMetadataLoader(domain=tenant_membership.tenant_id, credential=credential)
+        loader = CommCareMetadataLoader(
+            domain=tenant_membership.tenant.external_id, credential=credential
+        )
     metadata = loader.load()
 
     TenantMetadata.objects.update_or_create(
         tenant_membership=tenant_membership,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
-    logger.info("Stored metadata for tenant %s", tenant_membership.tenant_id)
+    logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
 
 
 def _load_source(
@@ -228,7 +230,7 @@ def _load_source(
     if provider == "commcare_connect":
         return _load_connect_source(source_name, tenant_membership, credential, schema_name, conn)
     # Existing CommCare dispatch
-    domain = tenant_membership.tenant_id
+    domain = tenant_membership.tenant.external_id
     if source_name == "cases":
         loader = CommCareCaseLoader(domain=domain, credential=credential)
         return _write_cases(loader.load_pages(), schema_name, conn)
@@ -245,7 +247,7 @@ def _load_connect_source(
     schema_name: str,
     conn: Any,
 ) -> int:
-    opp_id = int(tenant_membership.tenant_id)
+    opp_id = int(tenant_membership.tenant.external_id)
     loader_map = {
         "visits": (ConnectVisitLoader, _write_connect_visits),
         "users": (ConnectUserLoader, _write_connect_users),
