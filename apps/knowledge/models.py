@@ -34,6 +34,13 @@ class TableKnowledge(models.Model):
         null=True,
         blank=True,
     )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="table_knowledge",
+        null=True,
+        blank=True,
+    )
 
     table_name = models.CharField(max_length=255)
     description = models.TextField(
@@ -73,12 +80,21 @@ class TableKnowledge(models.Model):
     updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
-        unique_together = ["workspace", "table_name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="table_knowledge_one_workspace",
+            ),
+        ]
         ordering = ["table_name"]
         verbose_name_plural = "Table knowledge"
 
     def __str__(self):
-        return f"{self.table_name} ({self.workspace.tenant_name})"
+        label = self.workspace.tenant_name if self.workspace else self.custom_workspace.name
+        return f"{self.table_name} ({label})"
 
 
 class KnowledgeEntry(models.Model):
@@ -98,6 +114,13 @@ class KnowledgeEntry(models.Model):
         null=True,
         blank=True,
     )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
+        on_delete=models.CASCADE,
+        related_name="knowledge_entries",
+        null=True,
+        blank=True,
+    )
 
     title = models.CharField(max_length=255)
     content = models.TextField(help_text="Markdown content for this knowledge entry.")
@@ -108,11 +131,21 @@ class KnowledgeEntry(models.Model):
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="knowledge_entry_one_workspace",
+            ),
+        ]
         ordering = ["-updated_at"]
         verbose_name_plural = "Knowledge entries"
 
     def __str__(self):
-        return f"{self.title} ({self.workspace.tenant_name})"
+        label = self.workspace.tenant_name if self.workspace else self.custom_workspace.name
+        return f"{self.title} ({label})"
 
 
 class AgentLearning(models.Model):
@@ -138,6 +171,13 @@ class AgentLearning(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
         "workspace.TenantWorkspace",
+        on_delete=models.CASCADE,
+        related_name="learnings",
+        null=True,
+        blank=True,
+    )
+    custom_workspace = models.ForeignKey(
+        "workspace.CustomWorkspace",
         on_delete=models.CASCADE,
         related_name="learnings",
         null=True,
@@ -181,6 +221,15 @@ class AgentLearning(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(workspace__isnull=False, custom_workspace__isnull=True)
+                    | models.Q(workspace__isnull=True, custom_workspace__isnull=False)
+                ),
+                name="agent_learning_one_workspace",
+            ),
+        ]
         ordering = ["-confidence_score", "-times_applied"]
         indexes = [
             models.Index(fields=["workspace", "is_active", "-confidence_score"]),
