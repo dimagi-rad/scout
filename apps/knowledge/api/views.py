@@ -75,7 +75,7 @@ def _resolve_custom_workspace(request):
 
     try:
         workspace = CustomWorkspace.objects.filter(id=header_value).first()
-    except (ValueError, Exception):
+    except ValueError:
         return None, Response(
             {"error": "Invalid workspace ID."},
             status=status.HTTP_400_BAD_REQUEST,
