@@ -422,7 +422,7 @@ async def run_materialization(
         try:
             qs = TenantMembership.objects.select_related("user", "tenant")
             if tenant_membership_id:
-                tm = await qs.aget(id=tenant_membership_id, tenant_id=tenant_id)
+                tm = await qs.aget(id=tenant_membership_id, tenant__external_id=tenant_id)
             else:
                 pipeline_config = registry.get(pipeline)
                 if pipeline_config is None:
@@ -431,7 +431,9 @@ async def run_materialization(
                         f"Pipeline '{pipeline}' not found in registry",
                     )
                     return tc["result"]
-                tm = await qs.aget(tenant_id=tenant_id, provider=pipeline_config.provider)
+                tm = await qs.aget(
+                    tenant__external_id=tenant_id, tenant__provider=pipeline_config.provider
+                )
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
