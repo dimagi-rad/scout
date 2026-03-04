@@ -323,11 +323,9 @@ def disconnect_provider_view(request, provider_id):
         credential__credential_type=TenantCredential.OAUTH,
     ).delete()
 
-    # Clear the in-memory tenant resolution cache so the next tenant list
+    # Clear the tenant resolution cache so the next tenant list
     # request triggers fresh resolution from the provider API.
-    from apps.users.views import _last_refresh
-
-    _last_refresh.pop((request.user.id, provider_id), None)
+    cache.delete(f"tenant_resolved:{request.user.pk}")
 
     return JsonResponse({"status": "disconnected"})
 
@@ -381,7 +379,7 @@ def providers_view(request):
         entry = {
             "id": app.provider,
             "name": PROVIDER_DISPLAY.get(app.provider, app.name),
-            "login_url": f"/accounts/{app.provider}/login/",
+            "login_url": f"{request.META.get('SCRIPT_NAME', '')}/accounts/{app.provider}/login/",
         }
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),

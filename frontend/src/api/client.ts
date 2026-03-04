@@ -1,6 +1,7 @@
 /**
  * Thin fetch wrapper that handles CSRF tokens and session cookies.
  */
+import { BASE_PATH } from "@/config"
 
 let activeCustomWorkspaceId: string | null = null
 
@@ -32,7 +33,7 @@ async function request<T>(
     headers["X-CSRFToken"] = getCsrfToken()
   }
 
-  const res = await fetch(url, {
+  const res = await fetch(`${BASE_PATH}${url}`, {
     ...fetchOptions,
     headers,
     credentials: "include",
@@ -75,7 +76,7 @@ export const api = {
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
   getBlob: async (url: string): Promise<Blob> => {
-    const res = await fetch(url, { credentials: "include" })
+    const res = await fetch(`${BASE_PATH}${url}`, { credentials: "include" })
     if (!res.ok) {
       throw new ApiError(res.status, res.statusText)
     }

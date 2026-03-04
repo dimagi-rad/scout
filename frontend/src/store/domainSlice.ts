@@ -39,7 +39,7 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
   domainsError: null,
   domainActions: {
     fetchDomains: async () => {
-      // Skip if already loading (prevents duplicate fetches from Sidebar + ConnectionsPage)
+      // Skip if already loading (prevents duplicate fetches from Sidebar + EmbedPage)
       if (get().domainsStatus === "loading") return
       set({ domainsStatus: "loading", domainsError: null })
       try {
@@ -80,12 +80,14 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
 
     ensureTenant: async (provider: string, tenantId: string) => {
       try {
-        await api.post("/api/auth/tenants/ensure/", {
+        const result = await api.post<TenantMembership>("/api/auth/tenants/ensure/", {
           provider,
           tenant_id: tenantId,
         })
+        // Set activeDomainId immediately from the response to avoid race
+        // conditions with the dedup guard in fetchDomains.
+        set({ activeDomainId: result.id })
         await get().domainActions.fetchDomains()
-        get().domainActions.setActiveDomainByTenantId(provider, tenantId)
       } catch (error) {
         console.error("[Scout] Failed to ensure tenant:", error)
       }

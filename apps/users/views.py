@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import timedelta
 
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
@@ -13,11 +12,6 @@ from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
 from apps.users.models import TenantMembership
-
-# Only refresh tenant lists from external APIs once per hour
-_REFRESH_INTERVAL = timedelta(hours=1)
-# In-memory cache: {(user_id, provider): last_refresh_datetime}
-_last_refresh: dict[tuple[int, str], timezone.datetime] = {}
 
 logger = logging.getLogger(__name__)
 
@@ -51,46 +45,50 @@ def _get_connect_token(user) -> str | None:
     return token.token if token else None
 
 
+TENANT_RESOLUTION_TTL = 5 * 60  # 5 minutes
+
+
 @require_http_methods(["GET"])
 async def tenant_list_view(request):
     """GET /api/auth/tenants/ — List the user's tenant memberships.
 
-    If the user has a CommCare OAuth token, refreshes domain list from
-    CommCare API before returning results.
+    Resolves tenants from external provider APIs at most once per
+    TENANT_RESOLUTION_TTL (default 5 min).  Pass ?refresh=1 to force.
     """
     user = await _get_user_if_authenticated(request)
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    now = timezone.now()
+    force_refresh = request.GET.get("refresh") == "1"
 
-    # Refresh domains from CommCare if the user has an OAuth token
-    commcare_key = (user.id, "commcare")
-    last_commcare = _last_refresh.get(commcare_key)
-    if last_commcare is None or (now - last_commcare) > _REFRESH_INTERVAL:
+    # Check if resolution was done recently for this user
+    from django.core.cache import cache
+
+    cache_key = f"tenant_resolved:{user.pk}"
+    recently_resolved = await sync_to_async(cache.get)(cache_key)
+
+    if not recently_resolved or force_refresh:
+        # Resolve domains from CommCare if the user has an OAuth token
         access_token = await sync_to_async(_get_commcare_token)(user)
         if access_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_commcare_domains
 
                 await sync_to_async(resolve_commcare_domains)(user, access_token)
-                _last_refresh[commcare_key] = now
             except Exception:
                 logger.warning("Failed to refresh CommCare domains", exc_info=True)
 
-    # Refresh opportunities from Connect if the user has a Connect OAuth token
-    connect_key = (user.id, "commcare_connect")
-    last_connect = _last_refresh.get(connect_key)
-    if last_connect is None or (now - last_connect) > _REFRESH_INTERVAL:
+        # Resolve opportunities from Connect if the user has a Connect OAuth token
         connect_token = await sync_to_async(_get_connect_token)(user)
         if connect_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_connect_opportunities
 
                 await sync_to_async(resolve_connect_opportunities)(user, connect_token)
-                _last_refresh[connect_key] = now
             except Exception:
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
+
+        await sync_to_async(cache.set)(cache_key, True, TENANT_RESOLUTION_TTL)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(user=user):

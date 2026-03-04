@@ -210,8 +210,10 @@ class TestConnectDisconnectReconnectLifecycle:
         assert new_token.pk, "STEP 3 FAILED: Could not create new SocialToken."
 
         # ── Step 4: Fetch tenants — should re-resolve ────────────────
+        # Use ?refresh=1 to force resolution since the Django-cache TTL
+        # may have been set by the verification call in Step 2.
         with _mock_connect_api(opportunity_count=150):
-            resp = client.get("/api/auth/tenants/")
+            resp = client.get("/api/auth/tenants/?refresh=1")
         assert resp.status_code == 200
         data = resp.json()
         connect_entries = [d for d in data if d["provider"] == "commcare_connect"]
