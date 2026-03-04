@@ -202,8 +202,6 @@ async def tenant_credential_list_view(request):
     except CommCareVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    verified_name = tenant_name
-
     from django.db import transaction
 
     from apps.users.adapters import encrypt_credential
@@ -216,10 +214,12 @@ async def tenant_credential_list_view(request):
 
     def _create():
         with transaction.atomic():
-            tenant, _ = Tenant.objects.update_or_create(
+            # Use get_or_create so that an existing Tenant's canonical_name is never
+            # overwritten by a user-supplied string (which feeds into the LLM system prompt).
+            tenant, _ = Tenant.objects.get_or_create(
                 provider=provider,
                 external_id=tenant_id,
-                defaults={"canonical_name": verified_name},
+                defaults={"canonical_name": tenant_name},
             )
             tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
             TenantCredential.objects.update_or_create(
