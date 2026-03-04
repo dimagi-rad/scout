@@ -78,7 +78,7 @@ class Command(BaseCommand):
             return
 
         token = tokens.first()
-        token_preview = token.token[:20] + "..." if len(token.token) > 20 else token.token
+        token_preview = "****..." + token.token[-4:] if len(token.token) > 4 else "****"
         self.stdout.write(self.style.SUCCESS(f"  OK: Token found: {token_preview}"))
 
         # ── Layer 4: Connect API call ──
