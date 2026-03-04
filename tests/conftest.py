@@ -50,7 +50,7 @@ def other_user(db):
 
 @pytest.fixture
 def workspace(db):
-    from apps.projects.models import TenantWorkspace
+    from apps.workspace.models import TenantWorkspace
 
     return TenantWorkspace.objects.create(
         tenant_id="test-domain",

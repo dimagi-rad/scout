@@ -312,6 +312,23 @@ def disconnect_provider_view(request, provider_id):
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
     tokens.delete()
+
+    # Remove OAuth-based tenant memberships for this provider (they'll be
+    # re-created on reconnect when resolution runs again).
+    from apps.users.models import TenantCredential, TenantMembership
+
+    TenantMembership.objects.filter(
+        user=request.user,
+        provider=provider_id,
+        credential__credential_type=TenantCredential.OAUTH,
+    ).delete()
+
+    # Clear the in-memory tenant resolution cache so the next tenant list
+    # request triggers fresh resolution from the provider API.
+    from apps.users.views import _last_refresh
+
+    _last_refresh.pop((request.user.id, provider_id), None)
+
     return JsonResponse({"status": "disconnected"})
 
 

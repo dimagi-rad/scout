@@ -3,6 +3,7 @@ import { Outlet } from "react-router-dom"
 import { Sidebar } from "@/components/Sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
+import { ConnectionPromptDialog } from "@/components/ConnectionPromptDialog/ConnectionPromptDialog"
 import { OfflineBanner } from "@/components/OfflineBanner/OfflineBanner"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useAppStore } from "@/store/store"
@@ -53,6 +54,7 @@ export function AppLayout() {
         </ErrorBoundary>
       </main>
       <ArtifactPanel />
+      <ConnectionPromptDialog />
       <OfflineBanner />
     </div>
   )
