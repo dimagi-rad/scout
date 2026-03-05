@@ -393,10 +393,12 @@ class TestArtifactDataView:
         from apps.projects.models import TenantWorkspace
 
         # Create artifact in a workspace that user is NOT a member of
-        other_workspace = TenantWorkspace.objects.create(
-            tenant_id="other-domain",
-            tenant_name="Other Domain",
+        from apps.users.models import Tenant
+
+        other_tenant = Tenant.objects.create(
+            provider="commcare", external_id="other-domain", canonical_name="Other Domain"
         )
+        other_workspace = TenantWorkspace.objects.create(tenant=other_tenant)
         other_artifact = Artifact.objects.create(
             workspace=other_workspace,
             created_by=user,
@@ -460,12 +462,7 @@ class TestSharedArtifactView:
         assert response.status_code == 403
 
         # With authentication and tenant membership - should succeed
-        TenantMembership.objects.create(
-            user=user,
-            provider="commcare",
-            tenant_id=workspace.tenant_id,
-            tenant_name=workspace.tenant_name,
-        )
+        TenantMembership.objects.create(user=user, tenant=workspace.tenant)
         client.force_login(user)
         response = client.get(f"/api/artifacts/shared/{tenant_share.share_token}/")
         assert response.status_code == 200

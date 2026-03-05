@@ -10,9 +10,9 @@ from apps.agents.graph.base import _fetch_schema_context
 @pytest.fixture
 def mock_tenant_membership():
     m = MagicMock()
-    m.tenant_id = "test-domain"
-    m.tenant_name = "Test Domain"
-    m.provider = "commcare"
+    m.tenant.external_id = "test-domain"
+    m.tenant.canonical_name = "Test Domain"
+    m.tenant.provider = "commcare"
     return m
 
 
@@ -176,9 +176,9 @@ async def test_build_system_prompt_no_schema_status_call():
     mock_workspace.system_prompt = None
 
     mock_membership = MagicMock()
-    mock_membership.tenant_id = "test-domain"
-    mock_membership.tenant_name = "Test"
-    mock_membership.provider = "commcare"
+    mock_membership.tenant.external_id = "test-domain"
+    mock_membership.tenant.canonical_name = "Test"
+    mock_membership.tenant.provider = "commcare"
 
     mock_ts = MagicMock()
     mock_ts.state = SchemaState.ACTIVE

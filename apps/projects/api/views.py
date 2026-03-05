@@ -35,8 +35,7 @@ def _resolve_workspace(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     workspace, _ = TenantWorkspace.objects.get_or_create(
-        tenant_id=membership.tenant_id,
-        defaults={"tenant_name": membership.tenant_name},
+        tenant=membership.tenant,
     )
     return workspace, None
 
@@ -44,13 +43,12 @@ def _resolve_workspace(request):
 def _resolve_tenant_schema(membership):
     """Return the active TenantSchema for the given TenantMembership, or None.
 
-    Matches by tenant_id rather than the specific membership FK so that multiple
-    users in the same tenant see the same shared schema.
+    Matches by tenant FK so that multiple users in the same tenant see the same shared schema.
     """
     from apps.projects.models import SchemaState, TenantSchema
 
     return TenantSchema.objects.filter(
-        tenant_membership__tenant_id=membership.tenant_id,
+        tenant_membership__tenant=membership.tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).first()
 
@@ -180,11 +178,11 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
     return None
 
 
-def _get_tenant_metadata(tenant_id: str):
+def _get_tenant_metadata(tenant):
     """Return TenantMetadata for any membership in the given tenant, or None."""
     from apps.projects.models import TenantMetadata
 
-    return TenantMetadata.objects.filter(tenant_membership__tenant_id=tenant_id).first()
+    return TenantMetadata.objects.filter(tenant_membership__tenant=tenant).first()
 
 
 def _serialize_annotation(tk):
@@ -267,8 +265,8 @@ class DataDictionaryView(APIView):
 
         schema_name = tenant_schema.schema_name
         all_columns = _get_all_columns(schema_name)
-        tenant_id = tenant_schema.tenant_membership.tenant_id
-        tenant_metadata = _get_tenant_metadata(tenant_id)
+        tenant = tenant_schema.tenant_membership.tenant
+        tenant_metadata = _get_tenant_metadata(tenant)
 
         enriched_tables = {}
         for table_info in tables_list:
@@ -384,8 +382,8 @@ class TableDetailView(APIView):
         if table_name not in known:
             return None
 
-        tenant_id = tenant_schema.tenant_membership.tenant_id
-        tenant_metadata = _get_tenant_metadata(tenant_id)
+        tenant = tenant_schema.tenant_membership.tenant
+        tenant_metadata = _get_tenant_metadata(tenant)
         source_metadata = _build_source_metadata(table_name, tenant_metadata)
 
         entry = {

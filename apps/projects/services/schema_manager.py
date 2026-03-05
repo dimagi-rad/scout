@@ -37,7 +37,7 @@ class SchemaManager:
         """
         from django.db import IntegrityError
 
-        schema_name = self._sanitize_schema_name(tenant_membership.tenant_id)
+        schema_name = self._sanitize_schema_name(tenant_membership.tenant.external_id)
 
         existing = TenantSchema.objects.filter(
             schema_name=schema_name,
@@ -87,7 +87,7 @@ class SchemaManager:
         logger.info(
             "Provisioned schema '%s' for tenant '%s'",
             schema_name,
-            tenant_membership.tenant_id,
+            tenant_membership.tenant.external_id,
         )
         return ts
 

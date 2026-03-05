@@ -328,7 +328,7 @@ class SharedArtifact(models.Model):
             from apps.users.models import TenantMembership
 
             return TenantMembership.objects.filter(
-                user=user, tenant_id=self.artifact.workspace.tenant_id
+                user=user, tenant=self.artifact.workspace.tenant
             ).exists()
 
         if self.access_level == AccessLevel.SPECIFIC:

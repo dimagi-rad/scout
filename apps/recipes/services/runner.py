@@ -103,7 +103,7 @@ class RecipeRunner:
 
             self._tenant_membership = await TenantMembership.objects.filter(
                 user=self.user,
-                tenant_id=self.recipe.workspace.tenant_id,
+                tenant=self.recipe.workspace.tenant,
             ).afirst()
             self._graph = await build_agent_graph(
                 tenant_membership=self._tenant_membership,

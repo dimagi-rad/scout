@@ -11,7 +11,7 @@ class TestRunPipeline:
 
     def _make_tm(self, tenant_id="dimagi"):
         tm = MagicMock()
-        tm.tenant_id = tenant_id
+        tm.tenant.external_id = tenant_id
         return tm
 
     def _setup_run_mock(self, mock_run_cls):
