@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import type { DomainSlice } from "./domainSlice"
 
 export type KnowledgeType = "entry" | "learning"
 
@@ -89,7 +90,7 @@ export interface KnowledgeSlice {
   }
 }
 
-export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], KnowledgeSlice> = (set, get) => ({
+export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice, [], [], KnowledgeSlice> = (set, get) => ({
   knowledgeItems: [],
   knowledgeStatus: "idle",
   knowledgeError: null,
@@ -100,13 +101,15 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
     fetchKnowledge: async (options?) => {
       set({ knowledgeStatus: "loading", knowledgeError: null })
       try {
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
         const params = new URLSearchParams()
         if (options?.type) params.set("type", options.type)
         if (options?.search) params.set("search", options.search)
         if (options?.page) params.set("page", String(options.page))
         if (options?.pageSize) params.set("page_size", String(options.pageSize))
         const queryString = params.toString()
-        const url = `/api/knowledge/${queryString ? `?${queryString}` : ""}`
+        const url = `/api/knowledge/${activeDomainId}/${queryString ? `?${queryString}` : ""}`
         const response = await api.get<PaginatedKnowledgeResponse>(url)
         set({
           knowledgeItems: response.results,
@@ -124,27 +127,35 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
     },
 
     createKnowledge: async (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
-      const item = await api.post<KnowledgeItem>(`/api/knowledge/`, data)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      const item = await api.post<KnowledgeItem>(`/api/knowledge/${activeDomainId}/`, data)
       const items = get().knowledgeItems
       set({ knowledgeItems: [item, ...items] })
       return item
     },
 
     updateKnowledge: async (id: string, data: Partial<KnowledgeItem>) => {
-      const item = await api.put<KnowledgeItem>(`/api/knowledge/${id}/`, data)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      const item = await api.put<KnowledgeItem>(`/api/knowledge/${activeDomainId}/${id}/`, data)
       const items = get().knowledgeItems.map((i) => (i.id === id ? item : i))
       set({ knowledgeItems: items })
       return item
     },
 
     deleteKnowledge: async (id: string) => {
-      await api.delete<void>(`/api/knowledge/${id}/`)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      await api.delete<void>(`/api/knowledge/${activeDomainId}/${id}/`)
       const items = get().knowledgeItems.filter((i) => i.id !== id)
       set({ knowledgeItems: items })
     },
 
     exportKnowledge: async () => {
-      const blob = await api.getBlob(`/api/knowledge/export/`)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      const blob = await api.getBlob(`/api/knowledge/${activeDomainId}/export/`)
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url
@@ -156,9 +167,11 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice, [], [], Knowledg
     },
 
     importKnowledge: async (file: File) => {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
       const formData = new FormData()
       formData.append("file", file)
-      await api.upload(`/api/knowledge/import/`, formData)
+      await api.upload(`/api/knowledge/${activeDomainId}/import/`, formData)
       // Re-fetch to get updated list
       await get().knowledgeActions.fetchKnowledge()
     },

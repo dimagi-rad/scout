@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import type { DomainSlice } from "./domainSlice"
 
 export interface Column {
   name: string
@@ -158,7 +159,7 @@ function transformBackendResponse(raw: BackendDictionaryResponse): DataDictionar
 }
 
 export const createDictionarySlice: StateCreator<
-  DictionarySlice,
+  DictionarySlice & DomainSlice,
   [],
   [],
   DictionarySlice
@@ -171,8 +172,10 @@ export const createDictionarySlice: StateCreator<
     fetchDictionary: async () => {
       set({ dictionaryStatus: "loading", dictionaryError: null })
       try {
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/data-dictionary/`
+          `/api/data-dictionary/${activeDomainId}/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -187,10 +190,12 @@ export const createDictionarySlice: StateCreator<
     refreshSchema: async () => {
       set({ dictionaryStatus: "loading", dictionaryError: null })
       try {
-        await api.post(`/api/refresh-schema/`)
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        await api.post(`/api/refresh-schema/${activeDomainId}/`)
         // Re-fetch the full dictionary after refresh
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/data-dictionary/`
+          `/api/data-dictionary/${activeDomainId}/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -203,8 +208,10 @@ export const createDictionarySlice: StateCreator<
     },
 
     fetchTable: async (schema: string, table: string) => {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
       const raw = await api.get<BackendTableDetailResponse>(
-        `/api/data-dictionary/tables/${schema}.${table}/`
+        `/api/data-dictionary/${activeDomainId}/tables/${schema}.${table}/`
       )
       const data: TableDetail = {
         schema: raw.schema,
@@ -236,8 +243,10 @@ export const createDictionarySlice: StateCreator<
       table: string,
       annotations: Partial<TableAnnotations>
     ) => {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
       const updated = await api.put<TableAnnotations>(
-        `/api/data-dictionary/tables/${schema}.${table}/`,
+        `/api/data-dictionary/${activeDomainId}/tables/${schema}.${table}/`,
         annotations
       )
       // Update selected table

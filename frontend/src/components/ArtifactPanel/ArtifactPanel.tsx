@@ -26,6 +26,7 @@ const MAX_WIDTH_RATIO = 0.75
 
 export function ArtifactPanel() {
   const artifactId = useAppStore((s) => s.activeArtifactId)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const closeArtifact = useAppStore((s) => s.uiActions.closeArtifact)
   const isOpen = artifactId !== null
 
@@ -38,17 +39,18 @@ export function ArtifactPanel() {
   const panelRef = useRef<HTMLElement>(null)
 
   const fetchQueryData = useCallback(async (id: string) => {
+    if (!activeDomainId) return
     setDataLoading(true)
     setDataError(null)
     try {
-      const data = await api.get<QueryDataResponse>(`/api/artifacts/${id}/query-data/`)
+      const data = await api.get<QueryDataResponse>(`/api/artifacts/${activeDomainId}/${id}/query-data/`)
       setQueryData(data)
     } catch (e) {
       setDataError(e instanceof Error ? e.message : "Failed to load query data")
     } finally {
       setDataLoading(false)
     }
-  }, [])
+  }, [activeDomainId])
 
   useEffect(() => {
     if (artifactId && activeTab === "data") {
@@ -162,7 +164,7 @@ export function ArtifactPanel() {
           {activeTab === "view" && (
             <iframe
               key={artifactId}
-              src={`/api/artifacts/${artifactId}/sandbox/`}
+              src={activeDomainId ? `/api/artifacts/${activeDomainId}/${artifactId}/sandbox/` : ""}
               className="flex-1 w-full"
               sandbox="allow-scripts allow-same-origin"
               title="Artifact"

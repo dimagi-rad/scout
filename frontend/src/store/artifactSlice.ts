@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import type { DomainSlice } from "./domainSlice"
 
 export type ArtifactType = "react" | "html" | "markdown" | "plotly" | "svg"
 
@@ -33,7 +34,7 @@ export interface ArtifactSlice {
   }
 }
 
-export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSlice> = (set) => ({
+export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], [], ArtifactSlice> = (set, get) => ({
   artifacts: [],
   artifactsStatus: "idle",
   artifactsError: null,
@@ -42,10 +43,12 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
     fetchArtifacts: async (options) => {
       set({ artifactsStatus: "loading", artifactsError: null })
       try {
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
         const params = new URLSearchParams()
         if (options?.search) params.set("search", options.search)
         const qs = params.toString()
-        const url = `/api/artifacts/${qs ? `?${qs}` : ""}`
+        const url = `/api/artifacts/${activeDomainId}/${qs ? `?${qs}` : ""}`
         const response = await api.get<ArtifactListResponse>(url)
         set({
           artifacts: response.results,
@@ -60,8 +63,10 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
       }
     },
     updateArtifact: async (artifactId, data) => {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
       const updated = await api.patch<{ id: string; title: string; description: string }>(
-        `/api/artifacts/${artifactId}/`,
+        `/api/artifacts/${activeDomainId}/${artifactId}/`,
         data,
       )
       set((state) => ({
@@ -71,7 +76,9 @@ export const createArtifactSlice: StateCreator<ArtifactSlice, [], [], ArtifactSl
       }))
     },
     deleteArtifact: async (artifactId) => {
-      await api.delete(`/api/artifacts/${artifactId}/`)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      await api.delete(`/api/artifacts/${activeDomainId}/${artifactId}/`)
       set((state) => ({
         artifacts: state.artifacts.filter((a) => a.id !== artifactId),
       }))

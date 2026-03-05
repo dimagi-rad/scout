@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import type { DomainSlice } from "./domainSlice"
 
 export interface RecipeVariable {
   name: string
@@ -70,7 +71,7 @@ export interface RecipeSlice {
   }
 }
 
-export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> = (set, get) => ({
+export const createRecipeSlice: StateCreator<RecipeSlice & DomainSlice, [], [], RecipeSlice> = (set, get) => ({
   recipes: [],
   recipeStatus: "idle",
   recipeError: null,
@@ -80,7 +81,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
     fetchRecipes: async () => {
       set({ recipeStatus: "loading", recipeError: null })
       try {
-        const recipes = await api.get<Recipe[]>(`/api/recipes/`)
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const recipes = await api.get<Recipe[]>(`/api/recipes/${activeDomainId}/`)
         set({ recipes, recipeStatus: "loaded", recipeError: null })
       } catch (error) {
         set({
@@ -92,7 +95,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
 
     fetchRecipe: async (recipeId: string) => {
       try {
-        const recipe = await api.get<Recipe>(`/api/recipes/${recipeId}/`)
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const recipe = await api.get<Recipe>(`/api/recipes/${activeDomainId}/${recipeId}/`)
         set({ currentRecipe: recipe })
         return recipe
       } catch (error) {
@@ -102,7 +107,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
     },
 
     updateRecipe: async (recipeId: string, data: Partial<Recipe>) => {
-      const recipe = await api.put<Recipe>(`/api/recipes/${recipeId}/`, data)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      const recipe = await api.put<Recipe>(`/api/recipes/${activeDomainId}/${recipeId}/`, data)
       const recipes = get().recipes.map((r) => (r.id === recipeId ? recipe : r))
       set({
         recipes,
@@ -112,7 +119,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
     },
 
     deleteRecipe: async (recipeId: string) => {
-      await api.delete<void>(`/api/recipes/${recipeId}/`)
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      await api.delete<void>(`/api/recipes/${activeDomainId}/${recipeId}/`)
       const recipes = get().recipes.filter((r) => r.id !== recipeId)
       set({
         recipes,
@@ -121,7 +130,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
     },
 
     runRecipe: async (recipeId: string, variables: Record<string, string>) => {
-      const run = await api.post<RecipeRun>(`/api/recipes/${recipeId}/run/`, {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
+      const run = await api.post<RecipeRun>(`/api/recipes/${activeDomainId}/${recipeId}/run/`, {
         variable_values: variables,
       })
       const runs = get().recipeRuns
@@ -131,7 +142,9 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
 
     fetchRuns: async (recipeId: string) => {
       try {
-        const runs = await api.get<RecipeRun[]>(`/api/recipes/${recipeId}/runs/`)
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const runs = await api.get<RecipeRun[]>(`/api/recipes/${activeDomainId}/${recipeId}/runs/`)
         set({ recipeRuns: runs })
       } catch {
         set({ recipeRuns: [] })
@@ -143,8 +156,10 @@ export const createRecipeSlice: StateCreator<RecipeSlice, [], [], RecipeSlice> =
       runId: string,
       data: { is_shared?: boolean; is_public?: boolean },
     ) => {
+      const activeDomainId = get().activeDomainId
+      if (!activeDomainId) throw new Error("No active domain selected.")
       const updated = await api.patch<RecipeRun>(
-        `/api/recipes/${recipeId}/runs/${runId}/`,
+        `/api/recipes/${activeDomainId}/${recipeId}/runs/${runId}/`,
         data,
       )
       const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))
