@@ -42,6 +42,21 @@ def other_user(db):
     return User.objects.create_user(email="other@example.com", password="pass")
 
 
+@pytest.fixture
+def other_workspace(db):
+    from apps.users.models import Tenant
+
+    tenant = Tenant.objects.create(
+        provider="commcare", external_id="other-domain", canonical_name="Other Domain"
+    )
+    return TenantWorkspace.objects.create(tenant=tenant)
+
+
+@pytest.fixture
+def other_membership(db, other_workspace, other_user):
+    return TenantMembership.objects.create(user=other_user, tenant=other_workspace.tenant)
+
+
 def _make_auth_client(user):
     """Return an AsyncClient logged in as user, with update_last_login signal disconnected."""
     client = AsyncClient()
@@ -179,14 +194,14 @@ async def test_unauthenticated_returns_401(live_artifact, membership):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_non_member_returns_403(live_artifact, other_client, membership):
-    """User without workspace membership returns 403."""
+async def test_non_member_returns_404(live_artifact, other_client, other_membership):
+    """User from a different workspace cannot access artifacts scoped to this workspace."""
     url = reverse(
         "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": live_artifact.id},
+        kwargs={"tenant_id": other_membership.id, "artifact_id": live_artifact.id},
     )
     response = await other_client.get(url)
-    assert response.status_code == 403
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db(transaction=True)

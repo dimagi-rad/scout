@@ -52,6 +52,12 @@ class ArtifactShareAPITestCase(TestCase):
         cls.creator_membership = TenantMembership.objects.create(
             user=cls.creator, tenant=cls.tenant
         )
+        cls.other_membership = TenantMembership.objects.create(
+            user=cls.other_user, tenant=cls.tenant
+        )
+        cls.regular_membership = TenantMembership.objects.create(
+            user=cls.regular_user, tenant=cls.tenant
+        )
 
         # Create an artifact (only creator can manage its shares)
         cls.artifact = Artifact.objects.create(
@@ -93,7 +99,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
 
         url = reverse(
             "artifacts:create_share",
-            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+            kwargs={"tenant_id": self.other_membership.id, "artifact_id": self.artifact.id},
         )
         response = self.client.post(url, {"access_level": "public"})
 
@@ -105,7 +111,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
 
         url = reverse(
             "artifacts:create_share",
-            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+            kwargs={"tenant_id": self.regular_membership.id, "artifact_id": self.artifact.id},
         )
         response = self.client.post(url, {"access_level": "public"})
 
@@ -258,7 +264,7 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
 
         url = reverse(
             "artifacts:list_shares",
-            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+            kwargs={"tenant_id": self.other_membership.id, "artifact_id": self.artifact.id},
         )
         response = self.client.get(url)
 
@@ -270,7 +276,7 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
 
         url = reverse(
             "artifacts:list_shares",
-            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+            kwargs={"tenant_id": self.regular_membership.id, "artifact_id": self.artifact.id},
         )
         response = self.client.get(url)
 
@@ -343,7 +349,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
-                "tenant_id": self.creator_membership.id,
+                "tenant_id": self.other_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
@@ -360,7 +366,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
-                "tenant_id": self.creator_membership.id,
+                "tenant_id": self.regular_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
