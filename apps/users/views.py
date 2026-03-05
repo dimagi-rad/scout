@@ -113,6 +113,9 @@ async def tenant_list_view(request):
     return JsonResponse(memberships, safe=False)
 
 
+# last_selected_at is a UX ordering hint only.
+# It does NOT affect API workspace resolution — all resource endpoints
+# use explicit tenant_id path parameters.
 @require_http_methods(["POST"])
 async def tenant_select_view(request):
     """POST /api/auth/tenants/select/ — Mark a tenant as the active selection."""
