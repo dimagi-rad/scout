@@ -45,15 +45,9 @@ class ArtifactSharePermissionMixin:
         Returns:
             tuple: (has_permission: bool, error_response: Response or None)
         """
-        # Superusers always have access
-        if request.user.is_superuser:
-            return True, None
-
-        # Check if user is the artifact creator
         if artifact.created_by_id == request.user.id:
             return True, None
 
-        # No permission
         return False, Response(
             {"error": "You must be the artifact creator to manage share links."},
             status=status.HTTP_403_FORBIDDEN,
