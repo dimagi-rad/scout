@@ -11,7 +11,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ("projects", "0002_initial"),
+        ("workspace", "0002_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -58,7 +58,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         on_delete=django.db.models.deletion.CASCADE,
                         related_name="recipes",
-                        to="projects.project",
+                        to="workspace.project",
                     ),
                 ),
             ],

@@ -1,6 +1,7 @@
 import { useState, useEffect, type FormEvent } from "react"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
+import { BASE_PATH } from "@/config"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -98,7 +99,7 @@ export function LoginForm() {
                     asChild
                     data-testid={`oauth-login-${provider.id}`}
                   >
-                    <a href={`${provider.login_url}?next=/`}>
+                    <a href={`${provider.login_url}?next=${BASE_PATH}/`}>
                       {provider.name}
                     </a>
                   </Button>

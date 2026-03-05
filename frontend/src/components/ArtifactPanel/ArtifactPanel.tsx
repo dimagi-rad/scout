@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { useAppStore } from "@/store/store"
 import { X, Eye, Database, RefreshCw, Loader2 } from "lucide-react"
 import { api } from "@/api/client"
+import { BASE_PATH } from "@/config"
 
 interface QueryResult {
   name: string
@@ -162,7 +163,7 @@ export function ArtifactPanel() {
           {activeTab === "view" && (
             <iframe
               key={artifactId}
-              src={`/api/artifacts/${artifactId}/sandbox/`}
+              src={`${BASE_PATH}/api/artifacts/${artifactId}/sandbox/`}
               className="flex-1 w-full"
               sandbox="allow-scripts allow-same-origin"
               title="Artifact"

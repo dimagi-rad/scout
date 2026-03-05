@@ -12,10 +12,16 @@ Run smoke tests against the real platform database:
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
+import sys
 
 import environ
 import pytest
+
+# On Windows the default ProactorEventLoop is incompatible with psycopg async.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Load smoke-specific .env (not the main project .env)
 _smoke_dir = pathlib.Path(__file__).parent

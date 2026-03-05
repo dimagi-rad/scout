@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { useEmbedParams } from "@/hooks/useEmbedParams"
+import { BASE_PATH } from "@/config"
 
 interface OAuthProvider {
   id: string
@@ -25,6 +27,8 @@ interface ApiKeyDomain {
 type FormMode = "hidden" | "add" | { editing: ApiKeyDomain }
 
 export function ConnectionsPage() {
+  const { isEmbed } = useEmbedParams()
+  const prefix = isEmbed ? "/embed" : ""
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -74,7 +78,9 @@ export function ConnectionsPage() {
   useEffect(() => {
     fetchProviders()
     fetchDomains()
-  }, [fetchProviders, fetchDomains])
+    // Refresh the global store domains too (e.g. after an OAuth redirect back to this page)
+    void fetchStoreDomains()
+  }, [fetchProviders, fetchDomains, fetchStoreDomains])
 
   function openAddForm() {
     setFormDomain("")
@@ -171,6 +177,8 @@ export function ConnectionsPage() {
     try {
       await api.post(`/api/auth/providers/${providerId}/disconnect/`)
       await fetchProviders()
+      // Refresh store domains so workspace selector reflects the removal
+      void fetchStoreDomains()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to disconnect provider.")
     } finally {
@@ -449,10 +457,27 @@ export function ConnectionsPage() {
                     {disconnecting === provider.id ? "Disconnecting..." : "Disconnect"}
                   </Button>
                 ) : (
-                  <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
-                    <a href={`${provider.login_url}?process=connect&next=/settings/connections`}>
-                      {provider.status === "expired" ? "Reconnect" : "Connect"}
-                    </a>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid={`connect-${provider.id}`}
+                    onClick={() => {
+                      const next = encodeURIComponent(`${BASE_PATH}${prefix}/settings/connections?popup_close=1`)
+                      const url = `${provider.login_url}?process=connect&next=${next}`
+                      const popup = window.open(url, "scout-oauth", "width=600,height=700")
+                      if (popup) {
+                        const check = setInterval(() => {
+                          if (popup.closed) {
+                            clearInterval(check)
+                            fetchProviders()
+                            fetchDomains()
+                            void fetchStoreDomains()
+                          }
+                        }, 500)
+                      }
+                    }}
+                  >
+                    {provider.status === "expired" ? "Reconnect" : "Connect"}
                   </Button>
                 )}
               </CardContent>
