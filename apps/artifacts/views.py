@@ -656,7 +656,7 @@ class ArtifactSandboxView(View):
 
         workspace, err = _resolve_workspace(request, tenant_id)
         if err:
-            return err
+            return HttpResponse("Access denied", status=403)
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
         # Generate CSP nonce for inline scripts
