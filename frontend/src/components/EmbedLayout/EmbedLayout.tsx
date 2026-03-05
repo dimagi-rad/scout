@@ -10,7 +10,7 @@ export function EmbedLayout() {
   const showArtifacts = mode === "full" || mode === "chat+artifacts"
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen min-h-[600px]">
       {showSidebar && <Sidebar />}
       <main className="flex-1 min-w-0 overflow-auto">
         <ErrorBoundary>

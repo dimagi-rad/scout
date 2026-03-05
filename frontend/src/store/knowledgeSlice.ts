@@ -12,6 +12,8 @@ export interface KnowledgeEntryItem {
   title: string
   content: string
   tags: string[]
+  source?: "tenant" | "workspace"
+  source_name?: string
   created_at: string
   updated_at: string
 }
@@ -31,6 +33,8 @@ export interface LearningItem {
   confidence_score?: number
   times_applied?: number
   is_active?: boolean
+  source?: "tenant" | "workspace"
+  source_name?: string
   created_at: string
 }
 

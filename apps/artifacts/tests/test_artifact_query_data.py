@@ -11,8 +11,8 @@ from django.test import AsyncClient
 from django.urls import reverse
 
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.projects.models import TenantWorkspace
 from apps.users.models import TenantMembership, User
+from apps.workspace.models import TenantWorkspace
 
 
 @pytest.fixture

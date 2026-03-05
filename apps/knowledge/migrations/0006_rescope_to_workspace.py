@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("knowledge", "0005_simplify_knowledge"),
-        ("projects", "0012_add_tenant_workspace"),
+        ("workspace", "0012_add_tenant_workspace"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -58,7 +58,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="learnings",
-                to="projects.tenantworkspace",
+                to="workspace.tenantworkspace",
             ),
         ),
         migrations.AddField(
@@ -69,7 +69,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="knowledge_entries",
-                to="projects.tenantworkspace",
+                to="workspace.tenantworkspace",
             ),
         ),
         migrations.AddField(
@@ -80,7 +80,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="table_knowledge",
-                to="projects.tenantworkspace",
+                to="workspace.tenantworkspace",
             ),
         ),
         migrations.AlterUniqueTogether(

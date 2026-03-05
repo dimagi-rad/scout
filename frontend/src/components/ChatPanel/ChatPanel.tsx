@@ -2,6 +2,7 @@ import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
 import { useCallback, useEffect, useRef, useState } from "react"
 import { getCsrfToken, api } from "@/api/client"
+import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
 import { Button } from "@/components/ui/button"
@@ -128,7 +129,7 @@ export function ChatPanel() {
   const [transport] = useState(
     () =>
       new DefaultChatTransport({
-        api: "/api/chat/",
+        api: `${BASE_PATH}/api/chat/`,
         credentials: "include",
         headers: () => ({ "X-CSRFToken": getCsrfToken() }),
         body: () => ({ data: contextRef.current }),

@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
     dependencies = [
         ("artifacts", "0002_alter_artifact_version_and_more"),
-        ("projects", "0012_add_tenant_workspace"),
+        ("workspace", "0012_add_tenant_workspace"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -30,7 +30,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="artifacts",
-                to="projects.tenantworkspace",
+                to="workspace.tenantworkspace",
             ),
         ),
         migrations.AlterField(

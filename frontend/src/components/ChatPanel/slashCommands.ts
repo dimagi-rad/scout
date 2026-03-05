@@ -25,4 +25,14 @@ export const SLASH_COMMANDS: SlashCommand[] = [
       return args ? `${base}\n\n${args}` : base
     },
   },
+  {
+    name: "download-commcare-knowledge",
+    description: "Download CommCare app form definitions as knowledge",
+    buildPrompt: (args) => {
+      const base =
+        "Download CommCare app form definitions and save them as knowledge entries " +
+        "using the download_commcare_knowledge tool."
+      return args ? `${base}\n\n${args}` : base
+    },
+  },
 ]
