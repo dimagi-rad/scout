@@ -4,13 +4,37 @@ API views for data dictionary and workspace schema management.
 
 import logging
 
-from django.db.models import F
+from django.db.models import Count, F, OuterRef, Subquery
+from django.http import Http404
 from rest_framework import status
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.users.models import TenantMembership
+from apps.workspace.api.serializers import (
+    CustomWorkspaceCreateSerializer,
+    CustomWorkspaceDetailSerializer,
+    CustomWorkspaceListSerializer,
+    CustomWorkspaceTenantSerializer,
+    CustomWorkspaceUpdateSerializer,
+    WorkspaceMembershipSerializer,
+)
+from apps.workspace.models import (
+    CustomWorkspace,
+    CustomWorkspaceTenant,
+    TenantWorkspace,
+    WorkspaceMembership,
+)
+
 logger = logging.getLogger(__name__)
+
+ROLE_PERMISSIONS = {
+    "owner": {"read", "write", "manage_members", "manage_tenants", "delete"},
+    "editor": {"read", "write"},
+    "viewer": {"read"},
+}
 
 
 def _resolve_membership(request):
@@ -460,3 +484,396 @@ class TableDetailView(APIView):
         tk.save()
 
         return Response(_serialize_annotation(tk))
+
+
+# ---------------------------------------------------------------------------
+# CustomWorkspace API helpers
+# ---------------------------------------------------------------------------
+
+
+def _can_perform_action(role, action):
+    """Check if a role has permission to perform an action."""
+    return action in ROLE_PERMISSIONS.get(role, set())
+
+
+def _require_permission(user, workspace, action):
+    """Check user has permission for an action. Returns membership or raises PermissionDenied."""
+    membership = WorkspaceMembership.objects.filter(workspace=workspace, user=user).first()
+    if not membership:
+        raise PermissionDenied("Not a member of this workspace.")
+    if not _can_perform_action(membership.role, action):
+        raise PermissionDenied(f"Role '{membership.role}' cannot perform '{action}'.")
+    return membership
+
+
+def _get_workspace_or_404(request, workspace_id, action):
+    """Lookup workspace + check permission. Raises Http404 or PermissionDenied."""
+    workspace = CustomWorkspace.objects.filter(id=workspace_id).first()
+    if not workspace:
+        raise Http404("Workspace not found.")
+    _require_permission(request.user, workspace, action)
+    return workspace
+
+
+def _validate_tenant_access(user, workspace):
+    """Validate user has TenantMembership for all tenants in workspace. Returns missing list."""
+    tenant_ids = set(
+        workspace.custom_workspace_tenants.values_list("tenant_workspace__tenant_id", flat=True)
+    )
+    if not tenant_ids:
+        return []
+    user_tenant_ids = set(
+        TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).values_list(
+            "tenant_id", flat=True
+        )
+    )
+    return list(tenant_ids - user_tenant_ids)
+
+
+def resolve_workspace_from_request(request):
+    """Return the active workspace context (TenantWorkspace or CustomWorkspace) from the request.
+
+    Checks for X-Custom-Workspace header first, falling back to tenant workspace resolution.
+    """
+    custom_ws_id = request.headers.get("X-Custom-Workspace")
+    if custom_ws_id:
+        ws = CustomWorkspace.objects.filter(id=custom_ws_id).first()
+        if ws:
+            _require_permission(request.user, ws, "read")
+            return ws
+    workspace, _ = _resolve_workspace(request)
+    return workspace
+
+
+# ---------------------------------------------------------------------------
+# CustomWorkspace API views
+# ---------------------------------------------------------------------------
+
+
+class CustomWorkspaceListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        workspaces = (
+            CustomWorkspace.objects.filter(memberships__user=request.user)
+            .annotate(
+                tenant_count=Count("custom_workspace_tenants", distinct=True),
+                member_count=Count("memberships", distinct=True),
+                role=Subquery(
+                    WorkspaceMembership.objects.filter(
+                        workspace=OuterRef("pk"), user=request.user
+                    ).values("role")[:1]
+                ),
+            )
+            .order_by("name")
+            .prefetch_related("custom_workspace_tenants", "memberships")
+        )
+        serializer = CustomWorkspaceListSerializer(workspaces, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = CustomWorkspaceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Resolve tenant workspaces from UUIDs
+        tenant_workspaces_list = []
+        tenant_workspace_ids = serializer.validated_data.get("tenant_workspace_ids", [])
+        if tenant_workspace_ids:
+            tenant_workspaces_qs = TenantWorkspace.objects.filter(id__in=tenant_workspace_ids)
+            if tenant_workspaces_qs.count() != len(tenant_workspace_ids):
+                raise ValidationError("One or more tenant workspaces not found.")
+            tenant_workspaces_list.extend(tenant_workspaces_qs)
+
+        # Resolve tenant workspaces from tenant_id strings via get_or_create
+        tenant_ids_str = serializer.validated_data.get("tenant_ids", [])
+        if tenant_ids_str:
+            for tid in tenant_ids_str:
+                tw, _ = TenantWorkspace.objects.get_or_create(
+                    tenant_id=tid,
+                    defaults={"tenant_name": tid},
+                )
+                tenant_workspaces_list.append(tw)
+
+        # Verify user has TenantMembership for all requested tenants
+        tenant_ids = set(tw.tenant_id for tw in tenant_workspaces_list)
+        user_tenant_ids = set(
+            TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
+        )
+        missing = tenant_ids - user_tenant_ids
+        if missing:
+            raise ValidationError(f"No access to tenants: {', '.join(missing)}")
+
+        workspace = CustomWorkspace.objects.create(
+            name=serializer.validated_data["name"],
+            description=serializer.validated_data.get("description", ""),
+            created_by=request.user,
+        )
+        for tw in tenant_workspaces_list:
+            CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
+        WorkspaceMembership.objects.create(workspace=workspace, user=request.user, role="owner")
+
+        detail = CustomWorkspaceDetailSerializer(workspace)
+        return Response(detail.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "read")
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+    def patch(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "write")
+        serializer = CustomWorkspaceUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        for field, value in serializer.validated_data.items():
+            setattr(workspace, field, value)
+        workspace.save()
+        return Response(CustomWorkspaceDetailSerializer(workspace).data)
+
+    def delete(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "delete")
+        workspace.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CustomWorkspaceEnterView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "read")
+
+        missing = _validate_tenant_access(request.user, workspace)
+        if missing:
+            return Response(
+                {
+                    "error": "Missing tenant access",
+                    "missing_tenants": missing,
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data)
+
+
+class CustomWorkspaceTenantListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "read")
+        tenants = workspace.custom_workspace_tenants.select_related("tenant_workspace")
+        serializer = CustomWorkspaceTenantSerializer(tenants, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "manage_tenants")
+
+        tw = None
+        tw_id = request.data.get("tenant_workspace_id")
+        tenant_id_str = request.data.get("tenant_id")
+
+        if tw_id:
+            tw = TenantWorkspace.objects.filter(id=tw_id).first()
+        elif tenant_id_str:
+            tw, _ = TenantWorkspace.objects.get_or_create(
+                tenant_id=tenant_id_str,
+                defaults={"tenant_name": tenant_id_str},
+            )
+
+        if not tw:
+            raise ValidationError(
+                "Tenant workspace not found. Provide tenant_workspace_id or tenant_id."
+            )
+
+        if not TenantMembership.objects.filter(user=request.user, tenant_id=tw.tenant_id).exists():
+            raise ValidationError("You don't have access to this tenant.")
+
+        cwt, created = CustomWorkspaceTenant.objects.get_or_create(
+            workspace=workspace, tenant_workspace=tw
+        )
+        if not created:
+            raise ValidationError("Tenant already in workspace.")
+
+        serializer = CustomWorkspaceTenantSerializer(cwt)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class CustomWorkspaceTenantDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, workspace_id, tenant_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "manage_tenants")
+        deleted, _ = CustomWorkspaceTenant.objects.filter(
+            workspace=workspace, id=tenant_id
+        ).delete()
+        if not deleted:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceMemberListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "read")
+        members = workspace.memberships.select_related("user")
+        serializer = WorkspaceMembershipSerializer(members, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, workspace_id):
+        from django.contrib.auth import get_user_model
+
+        workspace = _get_workspace_or_404(request, workspace_id, "manage_members")
+
+        User = get_user_model()
+        user_id = request.data.get("user_id")
+        role = request.data.get("role", "viewer")
+        if role not in ["editor", "viewer"]:
+            raise ValidationError("Role must be 'editor' or 'viewer'.")
+
+        invitee = User.objects.filter(id=user_id).first()
+        if not invitee:
+            raise ValidationError("User not found.")
+
+        # Validate invitee has access to all tenants
+        missing = _validate_tenant_access(invitee, workspace)
+        if missing:
+            raise ValidationError(f"Invitee lacks access to tenants: {', '.join(missing)}")
+
+        membership, created = WorkspaceMembership.objects.get_or_create(
+            workspace=workspace,
+            user=invitee,
+            defaults={"role": role, "invited_by": request.user},
+        )
+        if not created:
+            raise ValidationError("User is already a member.")
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class WorkspaceMemberDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, workspace_id, member_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "manage_members")
+
+        membership = WorkspaceMembership.objects.filter(workspace=workspace, id=member_id).first()
+        if not membership:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        role = request.data.get("role")
+        if role and role in ["editor", "viewer"]:
+            # Prevent demoting the last owner
+            if membership.role == "owner":
+                remaining = (
+                    WorkspaceMembership.objects.filter(workspace=workspace, role="owner")
+                    .exclude(id=member_id)
+                    .exists()
+                )
+                if not remaining:
+                    return Response(
+                        {"error": "Cannot demote the last owner of a workspace."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            membership.role = role
+            membership.save(update_fields=["role"])
+
+        serializer = WorkspaceMembershipSerializer(membership)
+        return Response(serializer.data)
+
+    def delete(self, request, workspace_id, member_id):
+        workspace = _get_workspace_or_404(request, workspace_id, "manage_members")
+
+        membership = WorkspaceMembership.objects.filter(workspace=workspace, id=member_id).first()
+        if not membership:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Prevent removing the last owner
+        if membership.role == "owner":
+            remaining = (
+                WorkspaceMembership.objects.filter(workspace=workspace, role="owner")
+                .exclude(id=member_id)
+                .exists()
+            )
+            if not remaining:
+                return Response(
+                    {"error": "Cannot remove the last owner of a workspace."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        membership.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class EnsureWorkspaceForTenantView(APIView):
+    """
+    POST /api/custom-workspaces/ensure-for-tenant/
+
+    Find-or-create a single-tenant CustomWorkspace for a given tenant.
+    Used by the embed SDK to automatically place users into custom workspace mode.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        tenant_id = request.data.get("tenant_id")
+        if not tenant_id:
+            return Response(
+                {"error": "tenant_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Verify user has TenantMembership for this tenant
+        membership = TenantMembership.objects.filter(user=request.user, tenant_id=tenant_id).first()
+        if not membership:
+            return Response(
+                {"error": "No access to this tenant."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Ensure TenantWorkspace exists
+        tw, _ = TenantWorkspace.objects.get_or_create(
+            tenant_id=tenant_id,
+            defaults={"tenant_name": membership.tenant_name},
+        )
+
+        # Look for existing single-tenant workspace owned by this user.
+        # Use a Subquery for the total count to avoid the JOIN from the
+        # tenant_workspace filter collapsing the count to 1.
+        existing = (
+            CustomWorkspace.objects.filter(
+                memberships__user=request.user,
+                memberships__role="owner",
+                custom_workspace_tenants__tenant_workspace=tw,
+            )
+            .annotate(
+                tenant_count=Subquery(
+                    CustomWorkspaceTenant.objects.filter(workspace_id=OuterRef("pk"))
+                    .order_by()
+                    .values("workspace_id")
+                    .annotate(cnt=Count("id"))
+                    .values("cnt")[:1]
+                )
+            )
+            .filter(tenant_count=1)
+            .first()
+        )
+
+        if existing:
+            serializer = CustomWorkspaceDetailSerializer(existing)
+            return Response(serializer.data)
+
+        # Create new workspace
+        workspace = CustomWorkspace.objects.create(
+            name=membership.tenant_name,
+            created_by=request.user,
+        )
+        CustomWorkspaceTenant.objects.create(workspace=workspace, tenant_workspace=tw)
+        WorkspaceMembership.objects.create(workspace=workspace, user=request.user, role="owner")
+
+        serializer = CustomWorkspaceDetailSerializer(workspace)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
