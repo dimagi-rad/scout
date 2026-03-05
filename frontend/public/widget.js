@@ -1,6 +1,8 @@
 (function () {
   "use strict";
 
+  var SCOUT_WIDGET_VERSION = "0.2.0";
+
   // Detect base URL from the script src, including any path prefix (e.g. /scout)
   var SCOUT_BASE = (function () {
     var scripts = document.getElementsByTagName("script");
@@ -146,6 +148,7 @@
 
   // Public API
   var ScoutWidget = {
+    version: SCOUT_WIDGET_VERSION,
     init: function (opts) {
       return new ScoutWidgetInstance(opts || {});
     },
