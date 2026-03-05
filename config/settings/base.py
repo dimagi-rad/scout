@@ -235,6 +235,11 @@ DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 
+# Langfuse observability (optional)
+LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
+LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")
+LANGFUSE_BASE_URL = env("LANGFUSE_BASE_URL", default="")
+
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
