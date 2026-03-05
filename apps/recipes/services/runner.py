@@ -212,7 +212,7 @@ class RecipeRunner:
             workspace = self.recipe.workspace
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "tenant_id": workspace.tenant_id if workspace else "",
+                "tenant_id": workspace.external_tenant_id if workspace else "",
                 "tenant_name": workspace.tenant_name if workspace else "",
                 "tenant_membership_id": str(self._tenant_membership.id)
                 if self._tenant_membership
@@ -299,7 +299,7 @@ class RecipeRunner:
             workspace = self.recipe.workspace
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "tenant_id": workspace.tenant_id if workspace else "",
+                "tenant_id": workspace.external_tenant_id if workspace else "",
                 "tenant_name": workspace.tenant_name if workspace else "",
                 "tenant_membership_id": str(self._tenant_membership.id)
                 if self._tenant_membership
