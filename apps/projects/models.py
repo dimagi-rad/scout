@@ -101,9 +101,8 @@ class TenantWorkspace(models.Model):
     def __str__(self):
         return f"{self.tenant.canonical_name} ({self.tenant.external_id})"
 
-    # Convenience properties to avoid updating all callsites at once
     @property
-    def tenant_id(self):
+    def external_tenant_id(self):
         return self.tenant.external_id
 
     @property
