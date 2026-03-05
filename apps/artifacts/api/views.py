@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.artifacts.models import Artifact, SharedArtifact
+from apps.projects.workspace_resolver import resolve_workspace
 
 from .serializers import (
     CreateShareSerializer,
@@ -26,19 +27,11 @@ class ArtifactSharePermissionMixin:
     Only artifact creators or project admins can create/revoke share links.
     """
 
-    def get_artifact(self, tenant_id, artifact_id, user):
-        """Retrieve the artifact scoped to the tenant, or raise 404."""
-        from apps.projects.models import TenantWorkspace
-        from apps.users.models import TenantMembership
-
-        try:
-            membership = TenantMembership.objects.get(id=tenant_id, user=user)
-        except TenantMembership.DoesNotExist:
-            return None, Response(
-                {"error": "Tenant not found or access denied."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
+    def get_artifact(self, request, tenant_id, artifact_id):
+        """Retrieve the artifact scoped to the tenant."""
+        workspace, err = resolve_workspace(request, tenant_id)
+        if err:
+            return None, err
         return get_object_or_404(
             Artifact.objects.select_related("created_by"),
             pk=artifact_id,
@@ -86,7 +79,7 @@ class CreateShareView(ArtifactSharePermissionMixin, APIView):
 
     def post(self, request, tenant_id, artifact_id):
         """Create a new share link for the artifact."""
-        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        artifact, err = self.get_artifact(request, tenant_id, artifact_id)
         if err:
             return err
 
@@ -123,7 +116,7 @@ class ListSharesView(ArtifactSharePermissionMixin, APIView):
 
     def get(self, request, tenant_id, artifact_id):
         """List all share links for the artifact."""
-        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        artifact, err = self.get_artifact(request, tenant_id, artifact_id)
         if err:
             return err
 
@@ -156,7 +149,7 @@ class RevokeShareView(ArtifactSharePermissionMixin, APIView):
 
     def delete(self, request, tenant_id, artifact_id, share_token):
         """Revoke a share link by deleting the SharedArtifact record."""
-        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        artifact, err = self.get_artifact(request, tenant_id, artifact_id)
         if err:
             return err
 

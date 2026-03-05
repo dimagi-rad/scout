@@ -10,6 +10,7 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.projects.workspace_resolver import resolve_workspace
 from apps.recipes.models import Recipe, RecipeRun
 
 from .serializers import (
@@ -25,35 +26,13 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
-def _resolve_workspace(request, tenant_id):
-    """Resolve TenantWorkspace from the tenant_id URL path parameter.
-
-    tenant_id is the TenantMembership.id (UUID). It must belong to the
-    requesting user. Returns (workspace, None) on success or (None, Response)
-    on error.
-    """
-    from apps.projects.models import TenantWorkspace
-    from apps.users.models import TenantMembership
-
-    try:
-        membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
-    except TenantMembership.DoesNotExist:
-        return None, Response(
-            {"error": "Tenant not found or access denied."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
-    workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
-    return workspace, None
-
-
 class RecipeListView(APIView):
     """
     GET /api/recipes/ - List recipes for the active workspace.
     """
 
     def get(self, request, tenant_id):
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = resolve_workspace(request, tenant_id)
         if err:
             return err
         recipes = Recipe.objects.filter(workspace=workspace)
@@ -69,7 +48,7 @@ class RecipeDetailView(APIView):
     """
 
     def _get_recipe(self, request, tenant_id, recipe_id):
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = resolve_workspace(request, tenant_id)
         if err:
             return None, err
         try:
@@ -108,7 +87,7 @@ class RecipeRunView(APIView):
     """
 
     def post(self, request, tenant_id, recipe_id):
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = resolve_workspace(request, tenant_id)
         if err:
             return err
         try:
@@ -140,7 +119,7 @@ class RecipeRunListView(APIView):
     """
 
     def get(self, request, tenant_id, recipe_id):
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = resolve_workspace(request, tenant_id)
         if err:
             return err
         try:
@@ -157,7 +136,7 @@ class RecipeRunDetailView(APIView):
     """
 
     def patch(self, request, tenant_id, recipe_id, run_id):
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = resolve_workspace(request, tenant_id)
         if err:
             return err
         try:
