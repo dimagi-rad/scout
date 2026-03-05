@@ -748,7 +748,9 @@ class ArtifactQueryDataView(View):
         from apps.users.models import TenantMembership
 
         try:
-            membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
+            membership = await TenantMembership.objects.select_related("tenant").aget(
+                id=tenant_id, user=user
+            )
         except TenantMembership.DoesNotExist:
             return JsonResponse({"error": "Tenant not found or access denied."}, status=403)
 

@@ -19,7 +19,7 @@ from rest_framework.test import APIClient
 
 from apps.artifacts.models import AccessLevel, Artifact, ArtifactType, SharedArtifact
 from apps.projects.models import TenantWorkspace
-from apps.users.models import User
+from apps.users.models import TenantMembership, User
 
 
 class ArtifactShareAPITestCase(TestCase):
@@ -49,6 +49,9 @@ class ArtifactShareAPITestCase(TestCase):
             provider="commcare", external_id="test-domain", canonical_name="Test Domain"
         )
         cls.workspace = TenantWorkspace.objects.create(tenant=cls.tenant)
+        cls.creator_membership = TenantMembership.objects.create(
+            user=cls.creator, tenant=cls.tenant
+        )
 
         # Create an artifact (only creator can manage its shares)
         cls.artifact = Artifact.objects.create(
@@ -73,7 +76,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Artifact creator can create a share link."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -85,7 +91,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Non-creator users cannot create share links."""
         self.client.force_authenticate(user=self.other_user)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -94,14 +103,20 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Regular users who are not the creator cannot create share links."""
         self.client.force_authenticate(user=self.regular_user)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_create_share_unauthenticated(self):
         """Unauthenticated users cannot create share links."""
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -111,7 +126,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         self.client.force_authenticate(user=self.creator)
 
         expires_at = timezone.now() + timedelta(days=7)
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(
             url,
             {
@@ -128,7 +146,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         self.client.force_authenticate(user=self.creator)
 
         expires_at = timezone.now() - timedelta(days=1)
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(
             url,
             {
@@ -143,7 +164,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Specific access level requires allowed_users."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "specific"})
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -153,7 +177,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Specific access level with allowed users succeeds."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(
             url,
             {
@@ -170,7 +197,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         """Default access level is 'tenant'."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {})
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
@@ -181,7 +211,10 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         self.client.force_authenticate(user=self.creator)
 
         fake_id = uuid.uuid4()
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": fake_id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": fake_id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
@@ -210,7 +243,10 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
         """Artifact creator can list share links."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:list_shares", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:list_shares",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -220,7 +256,10 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
         """Non-creator users cannot list share links."""
         self.client.force_authenticate(user=self.other_user)
 
-        url = reverse("artifacts:list_shares", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:list_shares",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -229,14 +268,20 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
         """Regular users who are not the creator cannot list share links."""
         self.client.force_authenticate(user=self.regular_user)
 
-        url = reverse("artifacts:list_shares", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:list_shares",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_list_shares_unauthenticated(self):
         """Unauthenticated users cannot list share links."""
-        url = reverse("artifacts:list_shares", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:list_shares",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
@@ -245,7 +290,10 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
         """List response includes expected fields."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:list_shares", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:list_shares",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -278,6 +326,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
+                "tenant_id": self.creator_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
@@ -294,6 +343,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
+                "tenant_id": self.creator_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
@@ -310,6 +360,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
+                "tenant_id": self.creator_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
@@ -324,6 +375,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
+                "tenant_id": self.creator_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": self.share.share_token,
             },
@@ -339,6 +391,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
         url = reverse(
             "artifacts:revoke_share",
             kwargs={
+                "tenant_id": self.creator_membership.id,
                 "artifact_id": self.artifact.id,
                 "share_token": "nonexistent-token",
             },
@@ -355,7 +408,10 @@ class ShareTokenGenerationTests(ArtifactShareAPITestCase):
         """Each share link gets a unique token."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
 
         tokens = set()
         for _ in range(5):
@@ -370,7 +426,10 @@ class ShareTokenGenerationTests(ArtifactShareAPITestCase):
         """Share tokens have sufficient length for security."""
         self.client.force_authenticate(user=self.creator)
 
-        url = reverse("artifacts:create_share", kwargs={"artifact_id": self.artifact.id})
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
         response = self.client.post(url, {"access_level": "public"})
 
         # secrets.token_urlsafe(32) produces ~43 character tokens
