@@ -1,0 +1,1353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Custom Workspace — Revised Implementation Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============ THEME: Blueprint ============ */
+:root {
+  --font-body: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'Fira Code', 'SF Mono', Consolas, monospace;
+
+  --bg: #0d1520;
+  --surface: #131e2e;
+  --surface2: #192538;
+  --surface-elevated: #1e2d42;
+  --border: rgba(100, 160, 220, 0.10);
+  --border-bright: rgba(100, 160, 220, 0.22);
+  --text: #d4e3f5;
+  --text-dim: #6e8fb0;
+
+  /* Blueprint accent palette: teal-cyan + amber + sage */
+  --accent: #38bdf8;
+  --accent-dim: rgba(56, 189, 248, 0.10);
+  --amber: #f59e0b;
+  --amber-dim: rgba(245, 158, 11, 0.10);
+  --sage: #4ade80;
+  --sage-dim: rgba(74, 222, 128, 0.10);
+  --rose: #fb7185;
+  --rose-dim: rgba(251, 113, 133, 0.10);
+  --lavender: #a78bfa;
+  --lavender-dim: rgba(167, 139, 250, 0.10);
+
+  /* Phase colors */
+  --phase1: #38bdf8;
+  --phase1-dim: rgba(56, 189, 248, 0.08);
+  --phase2: #4ade80;
+  --phase2-dim: rgba(74, 222, 128, 0.08);
+  --phase3: #a78bfa;
+  --phase3-dim: rgba(167, 139, 250, 0.08);
+  --phase4: #f59e0b;
+  --phase4-dim: rgba(245, 158, 11, 0.08);
+  --phase5: #fb7185;
+  --phase5-dim: rgba(251, 113, 133, 0.08);
+  --phase6: #34d399;
+  --phase6-dim: rgba(52, 211, 153, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f0f4f9;
+    --surface: #ffffff;
+    --surface2: #f5f8fc;
+    --surface-elevated: #ffffff;
+    --border: rgba(30, 80, 140, 0.10);
+    --border-bright: rgba(30, 80, 140, 0.20);
+    --text: #0f1f33;
+    --text-dim: #4a6380;
+    --accent: #0369a1;
+    --accent-dim: rgba(3, 105, 161, 0.08);
+    --amber: #b45309;
+    --amber-dim: rgba(180, 83, 9, 0.08);
+    --sage: #15803d;
+    --sage-dim: rgba(21, 128, 61, 0.08);
+    --rose: #be123c;
+    --rose-dim: rgba(190, 18, 60, 0.08);
+    --lavender: #6d28d9;
+    --lavender-dim: rgba(109, 40, 217, 0.08);
+    --phase1: #0369a1;
+    --phase1-dim: rgba(3, 105, 161, 0.07);
+    --phase2: #15803d;
+    --phase2-dim: rgba(21, 128, 61, 0.07);
+    --phase3: #6d28d9;
+    --phase3-dim: rgba(109, 40, 217, 0.07);
+    --phase4: #b45309;
+    --phase4-dim: rgba(180, 83, 9, 0.07);
+    --phase5: #be123c;
+    --phase5-dim: rgba(190, 18, 60, 0.07);
+    --phase6: #065f46;
+    --phase6-dim: rgba(6, 95, 70, 0.07);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background-color: var(--bg);
+  /* Blueprint grid overlay */
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px),
+    radial-gradient(ellipse at 50% 0%, rgba(56,189,248,0.06) 0%, transparent 55%);
+  background-size: 40px 40px, 40px 40px, 100% 100%;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 48px 24px 80px;
+}
+
+/* ============ HERO ============ */
+.hero {
+  margin-bottom: 56px;
+  animation: fadeUp 0.5s ease both;
+}
+
+.hero__eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hero__eyebrow::before {
+  content: '';
+  display: inline-block;
+  width: 28px;
+  height: 1px;
+  background: var(--accent);
+}
+
+.hero__title {
+  font-size: 38px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.hero__subtitle {
+  font-size: 16px;
+  color: var(--text-dim);
+  max-width: 680px;
+  line-height: 1.7;
+}
+
+/* ============ SECTION HEADER ============ */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 24px;
+  margin-top: 56px;
+}
+
+.section-header:first-of-type {
+  margin-top: 0;
+}
+
+.section-num {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  padding: 2px 8px;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.section-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* ============ DECISIONS TABLE ============ */
+.decisions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  animation: fadeUp 0.5s ease 0.1s both;
+}
+
+@media (max-width: 640px) {
+  .decisions-grid { grid-template-columns: 1fr; }
+}
+
+.decision-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.decision-card__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.decision-card__value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.decision-card--hero {
+  background: color-mix(in srgb, var(--surface) 85%, var(--accent) 15%);
+  border-color: var(--border-bright);
+  grid-column: span 2;
+}
+
+@media (max-width: 640px) {
+  .decision-card--hero { grid-column: span 1; }
+}
+
+/* ============ MODEL EVOLUTION ============ */
+.model-evolution {
+  display: grid;
+  grid-template-columns: 1fr 60px 1fr;
+  gap: 0;
+  align-items: center;
+  animation: fadeUp 0.5s ease 0.15s both;
+}
+
+.model-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.model-box__header {
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 16px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.model-box__body {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-field {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.4;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.model-field--removed {
+  color: var(--rose);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.model-field--new {
+  color: var(--sage);
+}
+
+.model-field--changed {
+  color: var(--amber);
+}
+
+.model-field__type {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.evolution-arrow {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.evolution-arrow__line {
+  width: 2px;
+  height: 40px;
+  background: linear-gradient(to bottom, var(--accent), var(--sage));
+  opacity: 0.5;
+}
+
+.evolution-arrow__label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.3;
+}
+
+/* ============ NEW MODELS ============ */
+.new-models-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  animation: fadeUp 0.5s ease 0.2s both;
+}
+
+@media (max-width: 800px) {
+  .new-models-grid { grid-template-columns: 1fr; }
+}
+
+.new-model-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.new-model-card__header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.new-model-card__name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.new-model-card__badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 20px;
+  font-weight: 500;
+  letter-spacing: 0.5px;
+}
+
+.badge--new {
+  background: var(--sage-dim);
+  color: var(--sage);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.badge--evolved {
+  background: var(--amber-dim);
+  color: var(--amber);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.new-model-card__fields {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.new-model-card__desc {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  line-height: 1.5;
+}
+
+/* ============ CALLSITE TABLE ============ */
+.callsite-table-wrap {
+  overflow-x: auto;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  animation: fadeUp 0.5s ease 0.2s both;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+thead th {
+  background: var(--surface2);
+  padding: 10px 14px;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-bright);
+  white-space: nowrap;
+}
+
+tbody tr {
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s;
+}
+
+tbody tr:last-child {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: var(--surface2);
+}
+
+tbody td {
+  padding: 9px 14px;
+  vertical-align: top;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.td-file {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.td-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.td-change {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--amber);
+  word-break: break-all;
+}
+
+/* ============ PHASES ============ */
+.phases-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  animation: fadeUp 0.5s ease 0.2s both;
+}
+
+@media (max-width: 700px) {
+  .phases-grid { grid-template-columns: 1fr; }
+}
+
+.phase-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  position: relative;
+}
+
+.phase-card__top {
+  padding: 16px 20px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.phase-card__num {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.phase-card__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+.phase-card__tasks {
+  padding: 14px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.task-num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-top: 1px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  min-width: 28px;
+  text-align: center;
+}
+
+.task-name {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.task-step {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  display: inline-block;
+  margin-top: 3px;
+}
+
+.phase-1 .phase-card__num { color: var(--phase1); }
+.phase-1 .task-num { background: var(--phase1-dim); color: var(--phase1); }
+.phase-2 .phase-card__num { color: var(--phase2); }
+.phase-2 .task-num { background: var(--phase2-dim); color: var(--phase2); }
+.phase-3 .phase-card__num { color: var(--phase3); }
+.phase-3 .task-num { background: var(--phase3-dim); color: var(--phase3); }
+.phase-4 .phase-card__num { color: var(--phase4); }
+.phase-4 .task-num { background: var(--phase4-dim); color: var(--phase4); }
+.phase-5 .phase-card__num { color: var(--phase5); }
+.phase-5 .task-num { background: var(--phase5-dim); color: var(--phase5); }
+.phase-6 .phase-card__num { color: var(--phase6); }
+.phase-6 .task-num { background: var(--phase6-dim); color: var(--phase6); }
+
+.phase-card__footer {
+  padding: 10px 20px;
+  background: var(--surface2);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+/* ============ DEPENDENCY GRAPH (Mermaid) ============ */
+.mermaid-wrap {
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  overflow: hidden;
+  animation: fadeUp 0.5s ease 0.25s both;
+  min-height: 420px;
+}
+
+.zoom-controls {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+  z-index: 10;
+}
+
+.zoom-btn {
+  background: var(--surface2);
+  border: 1px solid var(--border-bright);
+  color: var(--text-dim);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: var(--font-mono);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.zoom-btn:hover {
+  background: var(--surface-elevated);
+  color: var(--text);
+}
+
+.mermaid-viewport {
+  overflow: hidden;
+  display: flex;
+  justify-content: center;
+}
+
+.mermaid-inner {
+  transform-origin: center top;
+  transition: transform 0.2s ease;
+}
+
+/* ============ ASSUMPTION CALLOUT ============ */
+.callout {
+  background: var(--amber-dim);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-left: 3px solid var(--amber);
+  border-radius: 8px;
+  padding: 14px 18px;
+  font-size: 13.5px;
+  color: var(--text);
+  line-height: 1.6;
+  margin-top: 20px;
+  animation: fadeUp 0.5s ease 0.1s both;
+}
+
+.callout strong {
+  color: var(--amber);
+}
+
+/* ============ PARALLELIZATION NOTE ============ */
+.parallel-note {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  animation: fadeUp 0.5s ease 0.3s both;
+}
+
+.parallel-note strong {
+  color: var(--text);
+}
+
+/* ============ LEGEND ============ */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+  animation: fadeUp 0.5s ease 0.35s both;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ============ ANIMATIONS ============ */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="hero__eyebrow">sk/workspaces &bull; 2026-03-05</div>
+    <h1 class="hero__title">Custom Workspace<br>Implementation Plan</h1>
+    <p class="hero__subtitle">Evolve <code>TenantWorkspace</code> in-place — OneToOne&nbsp;&rarr;&nbsp;M2M tenants, add a <code>workspace_type</code> discriminator, unified <code>WorkspaceMembership</code>, and a full CRUD API for user-created multi-tenant workspaces.</p>
+  </div>
+
+  <!-- ARCHITECTURE DECISIONS -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.05s both;">
+    <span class="section-num">01</span>
+    <h2 class="section-title">Architecture Decisions</h2>
+  </div>
+
+  <div class="decisions-grid">
+    <div class="decision-card decision-card--hero">
+      <div class="decision-card__label">Goal</div>
+      <div class="decision-card__value">Introduce <strong>CustomWorkspace</strong> — user-created workspaces grouping multiple CommCare tenants — by evolving <code>TenantWorkspace</code> rather than introducing a parallel hierarchy.</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-card__label">App rename</div>
+      <div class="decision-card__value">Deferred — keep <code>apps/projects</code></div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-card__label">Model design</div>
+      <div class="decision-card__value">Evolve <code>TenantWorkspace</code> in-place: OneToOne&nbsp;&rarr;&nbsp;M2M tenants, add <code>workspace_type</code> discriminator</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-card__label">Access control</div>
+      <div class="decision-card__value">Unified <code>WorkspaceMembership</code> for all workspace types; synced from <code>TenantMembership</code> via signal</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-card__label">Transport</div>
+      <div class="decision-card__value"><code>workspace_id</code> in URL path (aligned with parallel URL refactor)</div>
+    </div>
+    <div class="decision-card">
+      <div class="decision-card__label">Permission enforcement</div>
+      <div class="decision-card__value">DRF <code>WorkspacePermission</code> permission class</div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>Assumption:</strong> A parallel refactor adds <code>workspace_id</code> to URL paths (e.g., <code>/api/knowledge/&lt;workspace_id&gt;/</code>). Phase&nbsp;3 <code>WorkspacePermission</code> slots into that URL structure. Phases&nbsp;1&ndash;2 are independent and can proceed before the URL refactor lands.
+  </div>
+
+  <!-- MODEL EVOLUTION -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.1s both;">
+    <span class="section-num">02</span>
+    <h2 class="section-title">Model Evolution</h2>
+  </div>
+
+  <div class="model-evolution" style="animation: fadeUp 0.5s ease 0.15s both;">
+    <!-- BEFORE -->
+    <div class="model-box">
+      <div class="model-box__header" style="color: var(--rose);">TenantWorkspace &mdash; BEFORE</div>
+      <div class="model-box__body">
+        <div class="model-field"><span class="model-field__type">UUID</span>&nbsp;&nbsp;id</div>
+        <div class="model-field model-field--removed"><span class="model-field__type">O2O</span>&nbsp;&nbsp;tenant &rarr; Tenant</div>
+        <div class="model-field"><span class="model-field__type">Text</span>&nbsp;&nbsp;system_prompt</div>
+        <div class="model-field"><span class="model-field__type">JSON</span>&nbsp;&nbsp;data_dictionary</div>
+        <div class="model-field"><span class="model-field__type">DT</span>&nbsp;&nbsp;created_at / updated_at</div>
+        <div class="model-field" style="margin-top:6px;color:var(--text-dim);font-size:11px;">ordering: [tenant__canonical_name]</div>
+      </div>
+    </div>
+
+    <!-- ARROW -->
+    <div class="evolution-arrow">
+      <svg width="40" height="24" viewBox="0 0 40 24" fill="none">
+        <line x1="4" y1="12" x2="32" y2="12" stroke="var(--accent)" stroke-width="1.5"/>
+        <polyline points="26,6 34,12 26,18" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+      </svg>
+      <div class="evolution-arrow__label">Migration<br>A&ndash;D</div>
+    </div>
+
+    <!-- AFTER -->
+    <div class="model-box">
+      <div class="model-box__header" style="color: var(--sage);">TenantWorkspace &mdash; AFTER</div>
+      <div class="model-box__body">
+        <div class="model-field"><span class="model-field__type">UUID</span>&nbsp;&nbsp;id</div>
+        <div class="model-field model-field--new"><span class="model-field__type">Char</span>&nbsp;&nbsp;workspace_type <span style="color:var(--text-dim)">(tenant|custom)</span></div>
+        <div class="model-field model-field--new"><span class="model-field__type">Char</span>&nbsp;&nbsp;name</div>
+        <div class="model-field model-field--new"><span class="model-field__type">Text</span>&nbsp;&nbsp;description</div>
+        <div class="model-field model-field--new"><span class="model-field__type">FK</span>&nbsp;&nbsp;created_by &rarr; User <span style="color:var(--text-dim)">(null for tenant type)</span></div>
+        <div class="model-field model-field--new"><span class="model-field__type">M2M</span>&nbsp;&nbsp;tenants &rarr; Tenant <span style="color:var(--text-dim)">(via WorkspaceTenant)</span></div>
+        <div class="model-field"><span class="model-field__type">Text</span>&nbsp;&nbsp;system_prompt</div>
+        <div class="model-field"><span class="model-field__type">JSON</span>&nbsp;&nbsp;data_dictionary</div>
+        <div class="model-field"><span class="model-field__type">DT</span>&nbsp;&nbsp;created_at / updated_at</div>
+        <div class="model-field" style="margin-top:6px;color:var(--text-dim);font-size:11px;">ordering: [name]</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- NEW MODELS -->
+  <div class="new-models-grid" style="margin-top:20px;">
+    <div class="new-model-card">
+      <div class="new-model-card__header">
+        <span class="new-model-card__name" style="color:var(--accent);">WorkspaceTenant</span>
+        <span class="new-model-card__badge badge--new">NEW</span>
+      </div>
+      <div class="new-model-card__fields">
+        <div class="model-field"><span class="model-field__type">FK&nbsp;</span>&nbsp;workspace &rarr; TenantWorkspace</div>
+        <div class="model-field"><span class="model-field__type">FK&nbsp;</span>&nbsp;tenant &rarr; Tenant</div>
+        <div class="model-field"><span class="model-field__type">DT&nbsp;</span>&nbsp;added_at</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">unique_together: (workspace, tenant)</div>
+      </div>
+      <div class="new-model-card__desc">Through table for the M2M relationship. Tracks when each tenant was linked to the workspace.</div>
+    </div>
+
+    <div class="new-model-card">
+      <div class="new-model-card__header">
+        <span class="new-model-card__name" style="color:var(--sage);">WorkspaceMembership</span>
+        <span class="new-model-card__badge badge--new">NEW</span>
+      </div>
+      <div class="new-model-card__fields">
+        <div class="model-field"><span class="model-field__type">UUID</span>&nbsp;id</div>
+        <div class="model-field"><span class="model-field__type">FK&nbsp;</span>&nbsp;workspace &rarr; TenantWorkspace</div>
+        <div class="model-field"><span class="model-field__type">FK&nbsp;</span>&nbsp;user &rarr; User</div>
+        <div class="model-field"><span class="model-field__type">Char</span>&nbsp;role <span style="color:var(--text-dim)">(owner|editor|viewer)</span></div>
+        <div class="model-field"><span class="model-field__type">FK&nbsp;</span>&nbsp;invited_by &rarr; User <span style="color:var(--text-dim)">(null)</span></div>
+        <div class="model-field"><span class="model-field__type">DT&nbsp;</span>&nbsp;joined_at</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">unique_together: (workspace, user)</div>
+      </div>
+      <div class="new-model-card__desc">Auto-synced from TenantMembership via signal for type='tenant'. Managed explicitly for type='custom'.</div>
+    </div>
+
+    <div class="new-model-card">
+      <div class="new-model-card__header">
+        <span class="new-model-card__name" style="color:var(--lavender);">WorkspacePermission</span>
+        <span class="new-model-card__badge badge--new">NEW</span>
+      </div>
+      <div class="new-model-card__fields">
+        <div class="model-field" style="color:var(--text-dim);font-size:12px;font-family:var(--font-mono);">extends BasePermission</div>
+        <div class="model-field"><span style="color:var(--lavender)">has_permission</span>(request, view)</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;margin-top:4px;">1. Reads workspace_id from URL kwargs</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">2. 404 if workspace not found</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">3. 403 if no WorkspaceMembership</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">4. For custom: re-validates TenantMembership</div>
+        <div class="model-field" style="color:var(--text-dim);font-size:11px;">5. Sets request.workspace (avoids 2nd fetch)</div>
+      </div>
+      <div class="new-model-card__desc">DRF permission class. Requires Phase 3 URL refactor (<code>workspace_id</code> in URL path).</div>
+    </div>
+  </div>
+
+  <!-- FACTORY METHODS -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.15s both; margin-top: 40px;">
+    <span class="section-num">03</span>
+    <h2 class="section-title">New Factory Methods &amp; Callsite Changes</h2>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;animation: fadeUp 0.5s ease 0.2s both;">
+    <div class="model-box">
+      <div class="model-box__header" style="color:var(--amber);">Factory Methods (new)</div>
+      <div class="model-box__body" style="gap:10px;">
+        <div>
+          <div class="model-field model-field--new" style="font-size:13px;">create_for_tenant(tenant)</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:3px;padding-left:16px;">Creates workspace_type='tenant', links M2M, sets name from canonical_name</div>
+        </div>
+        <div>
+          <div class="model-field model-field--new" style="font-size:13px;">get_or_create_for_tenant(tenant)</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:3px;padding-left:16px;">Idempotent — returns (workspace, created). Replaces get_or_create(tenant=...)</div>
+        </div>
+        <div>
+          <div class="model-field model-field--new" style="font-size:13px;">primary_tenant()</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:3px;padding-left:16px;">Returns sole Tenant for type='tenant'. Raises ValueError for type='custom'</div>
+        </div>
+        <div>
+          <div class="model-field model-field--changed" style="font-size:13px;">tenant_id / tenant_name</div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:3px;padding-left:16px;">Now delegate to primary_tenant(). Type='tenant' only</div>
+        </div>
+      </div>
+    </div>
+    <div class="model-box">
+      <div class="model-box__header" style="color:var(--rose);">Callsite Patterns to Update</div>
+      <div class="model-box__body" style="gap:9px;">
+        <div style="font-size:12.5px;"><code style="color:var(--rose)">TenantWorkspace.objects.create(tenant=...)</code><br><span style="color:var(--text-dim);font-size:11.5px;">&rarr; <code>TenantWorkspace.create_for_tenant(tenant)</code></span></div>
+        <div style="font-size:12.5px;"><code style="color:var(--rose)">TenantWorkspace.objects.get_or_create(tenant=...)</code><br><span style="color:var(--text-dim);font-size:11.5px;">&rarr; <code>TenantWorkspace.get_or_create_for_tenant(tenant)</code></span></div>
+        <div style="font-size:12.5px;"><code style="color:var(--rose)">workspace.tenant.canonical_name</code><br><span style="color:var(--text-dim);font-size:11.5px;">&rarr; <code>workspace.name</code></span></div>
+        <div style="font-size:12.5px;"><code style="color:var(--rose)">workspace.tenant</code> (as object)<br><span style="color:var(--text-dim);font-size:11.5px;">&rarr; <code>workspace.primary_tenant()</code></span></div>
+        <div style="font-size:11.5px;color:var(--text-dim);margin-top:4px;">Affected: views.py (projects, recipes, artifacts, knowledge), models.py (recipes, artifacts), runner.py, conftest.py, test files</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CALLSITE TABLE -->
+  <div style="margin-top:20px;">
+    <div class="callsite-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Lines</th>
+            <th>Change Required</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="td-file">apps/projects/models.py</td>
+            <td class="td-line">98–111</td>
+            <td class="td-change">Remove <code>tenant</code> FK, add M2M, update <code>__str__</code>, update properties, fix <code>Meta.ordering</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/projects/api/views.py</td>
+            <td class="td-line">37–39</td>
+            <td class="td-change"><code>get_or_create(tenant=...)</code> &rarr; <code>TenantWorkspace.get_or_create_for_tenant(tenant)</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/recipes/models.py</td>
+            <td class="td-line">104</td>
+            <td class="td-change"><code>self.workspace.tenant.canonical_name</code> &rarr; <code>self.workspace.name</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/recipes/api/views.py</td>
+            <td class="td-line">46</td>
+            <td class="td-change"><code>get_or_create(tenant=...)</code> &rarr; <code>get_or_create_for_tenant(tenant)</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/recipes/services/runner.py</td>
+            <td class="td-line">106</td>
+            <td class="td-change"><code>workspace.tenant</code> &rarr; <code>workspace.primary_tenant()</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/artifacts/models.py</td>
+            <td class="td-line">331</td>
+            <td class="td-change"><code>workspace.tenant</code> &rarr; <code>workspace.primary_tenant()</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/artifacts/views.py</td>
+            <td class="td-line">642, 698, 765, 777, 855, 914, 998, 1063</td>
+            <td class="td-change"><code>workspace.tenant</code> &rarr; <code>workspace.primary_tenant()</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/knowledge/api/views.py</td>
+            <td class="td-line">57</td>
+            <td class="td-change">Check context of <code>tenant=membership.tenant</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">tests/conftest.py</td>
+            <td class="td-line">62</td>
+            <td class="td-change"><code>TenantWorkspace.objects.create(tenant=...)</code> &rarr; <code>create_for_tenant(tenant)</code></td>
+          </tr>
+          <tr>
+            <td class="td-file">tests/test_models.py</td>
+            <td class="td-line">135, 147, 149</td>
+            <td class="td-change">Same as above</td>
+          </tr>
+          <tr>
+            <td class="td-file">tests/test_artifacts.py</td>
+            <td class="td-line">401</td>
+            <td class="td-change">Same as above</td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/artifacts/tests/test_artifact_query_data.py</td>
+            <td class="td-line">25</td>
+            <td class="td-change">Same as above</td>
+          </tr>
+          <tr>
+            <td class="td-file">apps/artifacts/tests/test_share_api.py</td>
+            <td class="td-line">51</td>
+            <td class="td-change">Same as above</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- PHASES -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.2s both;">
+    <span class="section-num">04</span>
+    <h2 class="section-title">Implementation Phases (13 Tasks)</h2>
+  </div>
+
+  <div class="phases-grid">
+    <!-- Phase 1 -->
+    <div class="phase-card phase-1">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 1 &bull; Backend Core</div>
+        <div class="phase-card__title">Evolve TenantWorkspace</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T1</span>
+          <div>
+            <div class="task-name">Write model evolution tests</div>
+            <span class="task-step">tests/test_workspace_evolution.py</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T2</span>
+          <div>
+            <div class="task-name">Implement M2M migration &amp; factory methods</div>
+            <span class="task-step">apps/projects/models.py + migration</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T3</span>
+          <div>
+            <div class="task-name">Update all callsites &amp; commit</div>
+            <span class="task-step">13 files across apps/ and tests/</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Unblocks all subsequent phases</div>
+    </div>
+
+    <!-- Phase 2 -->
+    <div class="phase-card phase-2">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 2 &bull; Access Control</div>
+        <div class="phase-card__title">WorkspaceMembership + Signal Sync</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T4</span>
+          <div>
+            <div class="task-name">Write WorkspaceMembership tests</div>
+            <span class="task-step">tests/test_workspace_membership.py</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T5</span>
+          <div>
+            <div class="task-name">Implement model, signal, data migration</div>
+            <span class="task-step">models.py + signals.py + apps.py + migration</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Depends on T3 &bull; Signal syncs TenantMembership &rarr; WorkspaceMembership</div>
+    </div>
+
+    <!-- Phase 3 -->
+    <div class="phase-card phase-3">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 3 &bull; DRF Permission</div>
+        <div class="phase-card__title">WorkspacePermission Class</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T6</span>
+          <div>
+            <div class="task-name">Write WorkspacePermission tests</div>
+            <span class="task-step">tests/test_workspace_permission.py</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T7</span>
+          <div>
+            <div class="task-name">Implement WorkspacePermission</div>
+            <span class="task-step">apps/projects/permissions.py</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Depends on T5 &bull; Requires URL refactor (workspace_id in path)</div>
+    </div>
+
+    <!-- Phase 4 -->
+    <div class="phase-card phase-4">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 4 &bull; REST API</div>
+        <div class="phase-card__title">Custom Workspace CRUD API</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T8</span>
+          <div>
+            <div class="task-name">Write API tests</div>
+            <span class="task-step">tests/test_custom_workspace_api.py</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T9</span>
+          <div>
+            <div class="task-name">Implement serializers, views, URLs</div>
+            <span class="task-step">custom_workspace_serializers.py + views.py + custom_workspace_urls.py + config/urls.py</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Depends on T5 &bull; Parallelizable with T6&ndash;T11</div>
+    </div>
+
+    <!-- Phase 5 -->
+    <div class="phase-card phase-5">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 5 &bull; Agent</div>
+        <div class="phase-card__title">Agent Context Assembly</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T10</span>
+          <div>
+            <div class="task-name">Write context builder tests</div>
+            <span class="task-step">tests/test_custom_workspace_context.py</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T11</span>
+          <div>
+            <div class="task-name">Implement _build_custom_workspace_context</div>
+            <span class="task-step">apps/agents/graph/base.py</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Depends on T3 &bull; Parallelizable with T4&ndash;T9</div>
+    </div>
+
+    <!-- Phase 6 -->
+    <div class="phase-card phase-6">
+      <div class="phase-card__top">
+        <div class="phase-card__num">Phase 6 &bull; Frontend</div>
+        <div class="phase-card__title">Zustand Store + WorkspaceSelector UI</div>
+      </div>
+      <div class="phase-card__tasks">
+        <div class="task-row">
+          <span class="task-num">T12</span>
+          <div>
+            <div class="task-name">Add workspaceSlice to Zustand store</div>
+            <span class="task-step">frontend/src/store/workspaceSlice.ts + store.ts</span>
+          </div>
+        </div>
+        <div class="task-row">
+          <span class="task-num">T13</span>
+          <div>
+            <div class="task-name">Create WorkspaceSelector UI</div>
+            <span class="task-step">WorkspaceSelector.tsx + Sidebar.tsx</span>
+          </div>
+        </div>
+      </div>
+      <div class="phase-card__footer">Depends on T9 (API) &bull; tenant_ids payload (not tenant_workspace_ids)</div>
+    </div>
+  </div>
+
+  <!-- TASK DEPENDENCY GRAPH -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.25s both;">
+    <span class="section-num">05</span>
+    <h2 class="section-title">Task Dependency Graph</h2>
+  </div>
+
+  <div class="mermaid-wrap">
+    <div class="zoom-controls">
+      <button class="zoom-btn" id="zoom-in">+</button>
+      <button class="zoom-btn" id="zoom-out">&minus;</button>
+      <button class="zoom-btn" id="zoom-reset" style="font-size:10px;width:auto;padding:0 8px;">reset</button>
+    </div>
+    <div class="mermaid-viewport" id="mermaid-viewport">
+      <div class="mermaid-inner" id="mermaid-inner">
+        <div class="mermaid">
+%%{init: {
+  "theme": "base",
+  "look": "classic",
+  "themeVariables": {
+    "primaryColor": "#192538",
+    "primaryBorderColor": "#38bdf8",
+    "primaryTextColor": "#d4e3f5",
+    "secondaryColor": "#192538",
+    "secondaryBorderColor": "#4ade80",
+    "secondaryTextColor": "#d4e3f5",
+    "tertiaryColor": "#1e2035",
+    "tertiaryBorderColor": "#a78bfa",
+    "tertiaryTextColor": "#d4e3f5",
+    "lineColor": "#3a5a7a",
+    "fontSize": "15px",
+    "fontFamily": "Fira Code, monospace",
+    "edgeLabelBackground": "#131e2e"
+  }
+}}%%
+flowchart TD
+    T1["T1\nWrite model evolution tests"]:::phase1
+    T2["T2\nModel migration + factory methods"]:::phase1
+    T3["T3\nUpdate all callsites"]:::phase1
+
+    T4["T4\nWrite WorkspaceMembership tests"]:::phase2
+    T5["T5\nWorkspaceMembership + signal"]:::phase2
+
+    T6["T6\nWrite WorkspacePermission tests"]:::phase3
+    T7["T7\nWorkspacePermission"]:::phase3
+
+    T8["T8\nWrite API tests"]:::phase4
+    T9["T9\nAPI views + serializers + URLs"]:::phase4
+
+    T10["T10\nWrite context tests"]:::phase5
+    T11["T11\n_build_custom_workspace_context"]:::phase5
+
+    T12["T12\nworkspaceSlice"]:::phase6
+    T13["T13\nWorkspaceSelector UI"]:::phase6
+
+    T1 --> T2 --> T3
+    T3 --> T4 --> T5
+    T5 --> T6 --> T7
+    T5 --> T8
+    T7 --> T9
+    T8 --> T9
+    T3 --> T10 --> T11
+    T9 --> T12 --> T13
+
+    classDef phase1 fill:#192538,stroke:#38bdf8,color:#d4e3f5
+    classDef phase2 fill:#192538,stroke:#4ade80,color:#d4e3f5
+    classDef phase3 fill:#1e2035,stroke:#a78bfa,color:#d4e3f5
+    classDef phase4 fill:#1e2538,stroke:#f59e0b,color:#d4e3f5
+    classDef phase5 fill:#201a28,stroke:#fb7185,color:#d4e3f5
+    classDef phase6 fill:#192538,stroke:#34d399,color:#d4e3f5
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase1)"></div>Phase 1: Evolve TenantWorkspace</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase2)"></div>Phase 2: WorkspaceMembership</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase3)"></div>Phase 3: WorkspacePermission</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase4)"></div>Phase 4: CRUD API</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase5)"></div>Phase 5: Agent Context</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--phase6)"></div>Phase 6: Frontend</div>
+  </div>
+
+  <div class="parallel-note">
+    <strong>Parallelization opportunities:</strong> After T5 lands, Tasks T6&ndash;T7 (WorkspacePermission), T8&ndash;T9 (API), and T10&ndash;T11 (agent context) can all proceed concurrently. Phase 3 is most useful post URL refactor (<code>tenant_id &rarr; workspace_id</code> in URL paths). Tasks T10&ndash;T11 can proceed independently of the URL refactor.
+  </div>
+
+  <!-- API ENDPOINTS -->
+  <div class="section-header" style="animation: fadeUp 0.5s ease 0.3s both;">
+    <span class="section-num">06</span>
+    <h2 class="section-title">API Endpoints (Phase 4)</h2>
+  </div>
+
+  <div class="callsite-table-wrap" style="animation: fadeUp 0.5s ease 0.35s both;">
+    <table>
+      <thead>
+        <tr>
+          <th>Method</th>
+          <th>URL</th>
+          <th>View</th>
+          <th>Description</th>
+          <th>Permission</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>GET</code></td>
+          <td class="td-file">/api/custom-workspaces/</td>
+          <td class="td-line">CustomWorkspaceListCreateView</td>
+          <td class="td-change">List workspaces where user is a member (custom type only)</td>
+          <td><code>IsAuthenticated</code></td>
+        </tr>
+        <tr>
+          <td><code>POST</code></td>
+          <td class="td-file">/api/custom-workspaces/</td>
+          <td class="td-line">CustomWorkspaceListCreateView</td>
+          <td class="td-change">Create workspace; validates tenant access; auto-creates owner membership</td>
+          <td><code>IsAuthenticated</code></td>
+        </tr>
+        <tr>
+          <td><code>GET</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/</td>
+          <td class="td-line">CustomWorkspaceDetailView</td>
+          <td class="td-change">Get workspace detail with tenants + members</td>
+          <td>Member (view)</td>
+        </tr>
+        <tr>
+          <td><code>PATCH</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/</td>
+          <td class="td-line">CustomWorkspaceDetailView</td>
+          <td class="td-change">Update name, description, system_prompt</td>
+          <td>Owner</td>
+        </tr>
+        <tr>
+          <td><code>DELETE</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/</td>
+          <td class="td-line">CustomWorkspaceDetailView</td>
+          <td class="td-change">Delete workspace</td>
+          <td>Owner</td>
+        </tr>
+        <tr>
+          <td><code>POST</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/enter/</td>
+          <td class="td-line">CustomWorkspaceEnterView</td>
+          <td class="td-change">Validate tenant access + return detail; 403 if missing TenantMembership</td>
+          <td>Member (view)</td>
+        </tr>
+        <tr>
+          <td><code>GET</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/members/</td>
+          <td class="td-line">WorkspaceMemberListCreateView</td>
+          <td class="td-change">List all members</td>
+          <td>Member (view)</td>
+        </tr>
+        <tr>
+          <td><code>POST</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/members/</td>
+          <td class="td-line">WorkspaceMemberListCreateView</td>
+          <td class="td-change">Invite member (editor|viewer only, not owner)</td>
+          <td>Owner</td>
+        </tr>
+        <tr>
+          <td><code>PATCH</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/members/&lt;uuid&gt;/</td>
+          <td class="td-line">WorkspaceMemberDetailView</td>
+          <td class="td-change">Change role (editor|viewer only)</td>
+          <td>Owner</td>
+        </tr>
+        <tr>
+          <td><code>DELETE</code></td>
+          <td class="td-file">/api/custom-workspaces/&lt;uuid&gt;/members/&lt;uuid&gt;/</td>
+          <td class="td-line">WorkspaceMemberDetailView</td>
+          <td class="td-change">Remove member</td>
+          <td>Owner</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+
+  const isDark = !window.matchMedia('(prefers-color-scheme: light)').matches;
+
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    look: 'classic',
+    themeVariables: {
+      primaryColor: isDark ? '#192538' : '#e8f4fd',
+      primaryBorderColor: isDark ? '#38bdf8' : '#0369a1',
+      primaryTextColor: isDark ? '#d4e3f5' : '#0f1f33',
+      secondaryColor: isDark ? '#192538' : '#edfaf4',
+      secondaryBorderColor: isDark ? '#4ade80' : '#15803d',
+      secondaryTextColor: isDark ? '#d4e3f5' : '#0f1f33',
+      tertiaryColor: isDark ? '#1e2035' : '#f3eeff',
+      tertiaryBorderColor: isDark ? '#a78bfa' : '#6d28d9',
+      tertiaryTextColor: isDark ? '#d4e3f5' : '#0f1f33',
+      lineColor: isDark ? '#3a5a7a' : '#94a3b8',
+      fontSize: '15px',
+      fontFamily: 'Fira Code, monospace',
+      edgeLabelBackground: isDark ? '#131e2e' : '#f0f4f9',
+    }
+  });
+
+  // Zoom controls
+  let scale = 1;
+  const inner = document.getElementById('mermaid-inner');
+  const STEP = 0.15;
+  const MIN = 0.5, MAX = 2.5;
+
+  function setScale(s) {
+    scale = Math.min(MAX, Math.max(MIN, s));
+    inner.style.transform = `scale(${scale})`;
+  }
+
+  document.getElementById('zoom-in').addEventListener('click', () => setScale(scale + STEP));
+  document.getElementById('zoom-out').addEventListener('click', () => setScale(scale - STEP));
+  document.getElementById('zoom-reset').addEventListener('click', () => setScale(1));
+
+  const vp = document.getElementById('mermaid-viewport');
+  vp.addEventListener('wheel', e => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      setScale(scale - e.deltaY * 0.001);
+    }
+  }, { passive: false });
+</script>
+</body>
+</html>
