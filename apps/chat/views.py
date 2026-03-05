@@ -652,7 +652,7 @@ async def chat_view(request):
     )
 
     async def _traced_stream():
-        async with trace_ctx:
+        with trace_ctx:
             async for chunk in langgraph_to_ui_stream(agent, input_state, config, progress_queue=progress_queue):
                 yield chunk
 
