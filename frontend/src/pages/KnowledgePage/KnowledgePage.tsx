@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react"
 import { useNavigate, useParams, useLocation } from "react-router-dom"
 import { Download, Loader2, Plus, Upload } from "lucide-react"
 import { useAppStore } from "@/store/store"
+import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { Button } from "@/components/ui/button"
 import {
   AlertDialog,
@@ -37,6 +38,7 @@ export function KnowledgePage() {
     setSearch,
   } = useAppStore((s) => s.knowledgeActions)
 
+  const { status: networkStatus } = useNetworkStatus()
   const [formOpen, setFormOpen] = useState(false)
   const [editItem, setEditItem] = useState<KnowledgeItem | null>(null)
   const [deleteItem, setDeleteItem] = useState<KnowledgeItem | null>(null)
@@ -175,7 +177,7 @@ export function KnowledgePage() {
       )}
 
       {/* Error state */}
-      {knowledgeStatus === "error" && (
+      {knowledgeStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load knowledge items. Please try again.
         </div>

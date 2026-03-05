@@ -12,7 +12,11 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
+from apps.users.services.tenant_verification import (
+    CommCareVerificationError,
+    verify_commcare_credential,
+)
 
 # Only refresh tenant lists from external APIs once per hour
 _REFRESH_INTERVAL = timedelta(hours=1)
@@ -93,13 +97,13 @@ async def tenant_list_view(request):
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
 
     memberships = []
-    async for tm in TenantMembership.objects.filter(user=user):
+    async for tm in TenantMembership.objects.filter(user=user).select_related("tenant"):
         memberships.append(
             {
                 "id": str(tm.id),
-                "provider": tm.provider,
-                "tenant_id": tm.tenant_id,
-                "tenant_name": tm.tenant_name,
+                "provider": tm.tenant.provider,
+                "tenant_id": tm.tenant.external_id,
+                "tenant_name": tm.tenant.canonical_name,
                 "last_selected_at": (
                     tm.last_selected_at.isoformat() if tm.last_selected_at else None
                 ),
@@ -123,14 +127,16 @@ async def tenant_select_view(request):
     tenant_membership_id = body.get("tenant_id")
 
     try:
-        tm = await TenantMembership.objects.aget(id=tenant_membership_id, user=user)
+        tm = await TenantMembership.objects.select_related("tenant").aget(
+            id=tenant_membership_id, user=user
+        )
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Tenant not found"}, status=404)
 
     tm.last_selected_at = timezone.now()
     await tm.asave(update_fields=["last_selected_at"])
 
-    return JsonResponse({"status": "ok", "tenant_id": tm.tenant_id})
+    return JsonResponse({"status": "ok", "tenant_id": tm.tenant.external_id})
 
 
 @require_http_methods(["GET", "POST"])
@@ -146,19 +152,19 @@ async def tenant_credential_list_view(request):
         async for tm in TenantMembership.objects.filter(
             user=user,
             credential__isnull=False,
-        ).select_related("credential"):
+        ).select_related("credential", "tenant"):
             results.append(
                 {
                     "membership_id": str(tm.id),
-                    "provider": tm.provider,
-                    "tenant_id": tm.tenant_id,
-                    "tenant_name": tm.tenant_name,
+                    "provider": tm.tenant.provider,
+                    "tenant_id": tm.tenant.external_id,
+                    "tenant_name": tm.tenant.canonical_name,
                     "credential_type": tm.credential.credential_type,
                 }
             )
         return JsonResponse(results, safe=False)
 
-    # POST — create API-key-backed membership
+    # POST — create API-key-backed membership with provider verification
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -175,6 +181,27 @@ async def tenant_credential_list_view(request):
             status=400,
         )
 
+    if provider != "commcare":
+        return JsonResponse(
+            {"error": f"API-key credentials are not supported for provider '{provider}'"},
+            status=400,
+        )
+
+    # credential must be "username:apikey"
+    if ":" not in credential:
+        return JsonResponse(
+            {"error": "credential must be in the format 'username:apikey'"},
+            status=400,
+        )
+    cc_username, cc_api_key = credential.split(":", 1)
+
+    try:
+        await sync_to_async(verify_commcare_credential)(
+            domain=tenant_id, username=cc_username, api_key=cc_api_key
+        )
+    except CommCareVerificationError as e:
+        return JsonResponse({"error": str(e)}, status=400)
+
     from django.db import transaction
 
     from apps.users.adapters import encrypt_credential
@@ -187,12 +214,14 @@ async def tenant_credential_list_view(request):
 
     def _create():
         with transaction.atomic():
-            tm, _ = TenantMembership.objects.update_or_create(
-                user=user,
+            # Use get_or_create so that an existing Tenant's canonical_name is never
+            # overwritten by a user-supplied string (which feeds into the LLM system prompt).
+            tenant, _ = Tenant.objects.get_or_create(
                 provider=provider,
-                tenant_id=tenant_id,
-                defaults={"tenant_name": tenant_name},
+                external_id=tenant_id,
+                defaults={"canonical_name": tenant_name},
             )
+            tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
             TenantCredential.objects.update_or_create(
                 tenant_membership=tm,
                 defaults={
@@ -235,46 +264,50 @@ async def tenant_credential_detail_view(request, membership_id):
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    tenant_name = body.get("tenant_name", "").strip()
     credential = body.get("credential", "").strip()
 
-    if not tenant_name and not credential:
+    if not credential:
+        return JsonResponse({"error": "credential is required"}, status=400)
+
+    if ":" not in credential:
         return JsonResponse(
-            {"error": "At least one of tenant_name or credential is required"}, status=400
+            {"error": "credential must be in the format 'username:apikey'"},
+            status=400,
         )
+    cc_username, cc_api_key = credential.split(":", 1)
+
+    # Fetch membership to get tenant domain for verification
+    try:
+        tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
+            id=membership_id, user=user
+        )
+    except TenantMembership.DoesNotExist:
+        return JsonResponse({"error": "Not found"}, status=404)
+
+    if not hasattr(tm, "credential"):
+        return JsonResponse({"error": "Not found"}, status=404)
+
+    try:
+        await sync_to_async(verify_commcare_credential)(
+            domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
+        )
+    except CommCareVerificationError as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
     from apps.users.adapters import encrypt_credential
 
-    encrypted = None
-    if credential:
-        try:
-            encrypted = await sync_to_async(encrypt_credential)(credential)
-        except ValueError as e:
-            return JsonResponse({"error": str(e)}, status=500)
+    try:
+        encrypted = await sync_to_async(encrypt_credential)(credential)
+    except ValueError as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
-    def _update():
-        try:
-            tm = TenantMembership.objects.select_related("credential").get(
-                id=membership_id, user=user
-            )
-        except TenantMembership.DoesNotExist:
-            return None
-
-        if tenant_name:
-            tm.tenant_name = tenant_name
-            tm.save(update_fields=["tenant_name"])
-
-        if encrypted and hasattr(tm, "credential"):
-            tm.credential.encrypted_credential = encrypted
-            tm.credential.save(update_fields=["encrypted_credential"])
-
+    def _save_credential(tm):
+        tm.credential.encrypted_credential = encrypted
+        tm.credential.save(update_fields=["encrypted_credential"])
         return tm
 
-    tm = await sync_to_async(_update)()
-    if tm is None:
-        return JsonResponse({"error": "Not found"}, status=404)
-
-    return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant_name})
+    tm = await sync_to_async(_save_credential)(tm)
+    return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant.canonical_name})
 
 
 @require_http_methods(["POST"])
@@ -302,7 +335,9 @@ async def tenant_ensure_view(request):
 
     # Try to find existing membership
     try:
-        tm = await TenantMembership.objects.aget(user=user, provider=provider, tenant_id=tenant_id)
+        tm = await TenantMembership.objects.select_related("tenant").aget(
+            user=user, tenant__provider=provider, tenant__external_id=tenant_id
+        )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
             connect_token = await sync_to_async(_get_connect_token)(user)
@@ -319,7 +354,7 @@ async def tenant_ensure_view(request):
             )
 
             memberships = await sync_to_async(resolve_connect_opportunities)(user, connect_token)
-            tm = next((m for m in memberships if m.tenant_id == tenant_id), None)
+            tm = next((m for m in memberships if m.tenant.external_id == tenant_id), None)
             if tm is None:
                 return JsonResponse(
                     {"error": "Opportunity not found for this user"},
@@ -334,8 +369,8 @@ async def tenant_ensure_view(request):
     return JsonResponse(
         {
             "id": str(tm.id),
-            "provider": tm.provider,
-            "tenant_id": tm.tenant_id,
-            "tenant_name": tm.tenant_name,
+            "provider": tm.tenant.provider,
+            "tenant_id": tm.tenant.external_id,
+            "tenant_name": tm.tenant.canonical_name,
         }
     )

@@ -12,7 +12,7 @@ import logging
 
 import requests
 
-from apps.users.models import TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantCredential, TenantMembership
 
 logger = logging.getLogger(__name__)
 
@@ -25,12 +25,12 @@ def resolve_commcare_domains(user, access_token: str) -> list[TenantMembership]:
     memberships = []
 
     for domain in domains:
-        tm, _created = TenantMembership.objects.update_or_create(
-            user=user,
+        tenant, _ = Tenant.objects.update_or_create(
             provider="commcare",
-            tenant_id=domain["domain_name"],
-            defaults={"tenant_name": domain["project_name"]},
+            external_id=domain["domain_name"],
+            defaults={"canonical_name": domain["project_name"]},
         )
+        tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
         # Ensure a TenantCredential(oauth) exists for this membership
         TenantCredential.objects.get_or_create(
             tenant_membership=tm,
@@ -79,12 +79,12 @@ def resolve_connect_opportunities(user, access_token: str) -> list[TenantMembers
     memberships = []
 
     for opp in opportunities:
-        tm, _created = TenantMembership.objects.update_or_create(
-            user=user,
+        tenant, _ = Tenant.objects.update_or_create(
             provider="commcare_connect",
-            tenant_id=str(opp["id"]),
-            defaults={"tenant_name": opp["name"]},
+            external_id=str(opp["id"]),
+            defaults={"canonical_name": opp["name"]},
         )
+        tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
         TenantCredential.objects.get_or_create(
             tenant_membership=tm,
             defaults={"credential_type": TenantCredential.OAUTH},

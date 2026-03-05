@@ -1,0 +1,305 @@
+name: Deploy to Connect-Labs
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_target:
+        description: 'What to deploy (auto detects changes from last deploy)'
+        type: choice
+        options:
+          - auto
+          - all
+          - frontend-only
+          - backend-only
+        default: auto
+      run_migrations:
+        description: 'Run database migrations before deployment'
+        type: boolean
+        required: true
+        default: false
+
+env:
+  AWS_REGION: us-east-1
+  ECS_CLUSTER: labs-jj-cluster
+  ECS_WEB_SERVICE: labs-jj-scout-web
+  ECS_MCP_SERVICE: labs-jj-scout-mcp
+  ECR_REGISTRY: 858923557655.dkr.ecr.us-east-1.amazonaws.com
+  ECR_BACKEND: labs-jj-scout
+  ECR_FRONTEND: labs-jj-scout-frontend
+
+jobs:
+  # ── Detect what changed since the last deploy ──
+  detect:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      mcp: ${{ steps.changes.outputs.mcp }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        if: inputs.deploy_target == 'auto'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Determine changed components
+        id: changes
+        run: |
+          TARGET="${{ inputs.deploy_target }}"
+
+          if [ "$TARGET" = "all" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "mcp=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy target: all (forced)"
+            exit 0
+          fi
+
+          if [ "$TARGET" = "frontend-only" ]; then
+            echo "backend=false" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "mcp=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy target: frontend-only (forced)"
+            exit 0
+          fi
+
+          if [ "$TARGET" = "backend-only" ]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+            echo "mcp=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Deploy target: backend-only (forced)"
+            exit 0
+          fi
+
+          # Auto-detect: get last deployed SHA from ECR backend image tag
+          LAST_SHA=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_BACKEND }}" \
+            --query 'sort_by(imageDetails,& imagePushedAt)[-1].imageTags' \
+            --output json 2>/dev/null \
+            | jq -r '.[] | select(. != "latest")' 2>/dev/null || echo "")
+
+          if [ -z "$LAST_SHA" ] || ! git cat-file -e "$LAST_SHA" 2>/dev/null; then
+            echo "::warning::Could not find last deployed SHA, deploying all"
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "mcp=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice::Comparing $LAST_SHA..HEAD"
+          CHANGED=$(git diff --name-only "$LAST_SHA" HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          # Categorize changes
+          BACKEND=false
+          FRONTEND=false
+          MCP=false
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              frontend/*) FRONTEND=true ;;
+              mcp_server/*) MCP=true; BACKEND=true ;;
+              Dockerfile) BACKEND=true ;;
+              Dockerfile.frontend) FRONTEND=true ;;
+              *) BACKEND=true ;;
+            esac
+          done <<< "$CHANGED"
+
+          # If migrations requested, backend must be built
+          if [ "${{ inputs.run_migrations }}" = "true" ]; then
+            BACKEND=true
+          fi
+
+          echo "backend=$BACKEND" >> "$GITHUB_OUTPUT"
+          echo "frontend=$FRONTEND" >> "$GITHUB_OUTPUT"
+          echo "mcp=$MCP" >> "$GITHUB_OUTPUT"
+          echo "::notice::Auto-detected — backend=$BACKEND frontend=$FRONTEND mcp=$MCP"
+
+  # ── Build backend image (parallel) ──
+  build-backend:
+    name: Build backend
+    needs: detect
+    if: needs.detect.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_BACKEND }}:latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_BACKEND }}:${{ github.sha }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+  # ── Build frontend image (parallel) ──
+  build-frontend:
+    name: Build frontend
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          push: true
+          build-args: |
+            VITE_BASE_PATH=/scout/
+            NGINX_CONF=frontend/nginx.prod.conf
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_FRONTEND }}:latest
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_FRONTEND }}:${{ github.sha }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+  # ── Deploy ──
+  deploy:
+    name: Deploy services
+    needs: [detect, build-backend, build-frontend]
+    if: always() && !failure() && !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations
+        if: inputs.run_migrations == true
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_WEB_SERVICE }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition $TASK_DEF_ARN \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.LABS_SUBNET }}],securityGroups=[${{ secrets.LABS_SECURITY_GROUP }}],assignPublicIp=ENABLED}" \
+            --overrides '{"containerOverrides":[{"name":"api","command":["python","manage.py","migrate","--noinput"]}]}' \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "Migration task: $TASK_ARN"
+
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks $TASK_ARN
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+
+          if [ "$EXIT_CODE" == "0" ]; then
+            echo "Migrations completed successfully"
+          else
+            echo "Migrations failed with exit code: $EXIT_CODE"
+            exit 1
+          fi
+
+      - name: Deploy web service
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        run: |
+          echo "::notice::Deploying web service (backend=${{ needs.detect.outputs.backend }}, frontend=${{ needs.detect.outputs.frontend }})"
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_WEB_SERVICE }} \
+            --force-new-deployment \
+            --output text
+
+      - name: Deploy MCP service
+        if: needs.detect.outputs.mcp == 'true'
+        run: |
+          echo "::notice::Deploying MCP service"
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_MCP_SERVICE }} \
+            --force-new-deployment \
+            --output text
+
+      - name: Wait for web service to stabilize
+        if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_WEB_SERVICE }}
+
+      - name: Wait for MCP service to stabilize
+        if: needs.detect.outputs.mcp == 'true'
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_MCP_SERVICE }}
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Component | Deployed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Backend   | ${{ needs.detect.outputs.backend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Frontend  | ${{ needs.detect.outputs.frontend }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| MCP       | ${{ needs.detect.outputs.mcp }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Migrations| ${{ inputs.run_migrations }} |" >> "$GITHUB_STEP_SUMMARY"

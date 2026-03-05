@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { RouterProvider } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { NetworkStatusProvider } from "@/contexts/NetworkStatusContext"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { OnboardingWizard } from "@/components/OnboardingWizard/OnboardingWizard"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -58,5 +59,9 @@ export default function App() {
     return <OnboardingWizard />
   }
 
-  return <RouterProvider router={router} />
+  return (
+    <NetworkStatusProvider>
+      <RouterProvider router={router} />
+    </NetworkStatusProvider>
+  )
 }

@@ -14,12 +14,12 @@ def user(db):
 
 @pytest.fixture
 def membership(user):
-    return TenantMembership.objects.create(
-        user=user,
-        provider="commcare",
-        tenant_id="test-domain",
-        tenant_name="Test Domain",
+    from apps.users.models import Tenant
+
+    tenant = Tenant.objects.create(
+        provider="commcare", external_id="test-domain", canonical_name="Test Domain"
     )
+    return TenantMembership.objects.create(user=user, tenant=tenant)
 
 
 @pytest.fixture
@@ -49,10 +49,9 @@ def tenant_metadata(membership):
 
 
 @pytest.fixture
-def workspace():
+def workspace(membership):
     return TenantWorkspace.objects.create(
-        tenant_id="test-domain",
-        tenant_name="Test Domain",
+        tenant=membership.tenant,
         data_dictionary={"tables": []},
     )
 

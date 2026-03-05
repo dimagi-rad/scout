@@ -47,7 +47,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
     from apps.projects.models import SchemaState, TenantSchema
 
     ts = await TenantSchema.objects.filter(
-        tenant_membership__tenant_id=tenant_id,
+        tenant_membership__tenant__external_id=tenant_id,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 

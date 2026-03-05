@@ -25,19 +25,20 @@ class TestResolveCommcareDomains:
             memberships = resolve_commcare_domains(user, "fake-token")
 
         assert len(memberships) == 2
-        assert memberships[0].tenant_id == "dimagi"
-        assert memberships[1].tenant_id == "test-project"
+        assert memberships[0].tenant.external_id == "dimagi"
+        assert memberships[1].tenant.external_id == "test-project"
 
         from apps.users.models import TenantMembership
 
         assert TenantMembership.objects.filter(user=user).count() == 2
 
     def test_updates_existing_memberships(self, user):
-        from apps.users.models import TenantMembership
+        from apps.users.models import Tenant, TenantMembership
 
-        TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Old Name"
+        tenant = Tenant.objects.create(
+            provider="commcare", external_id="dimagi", canonical_name="Old Name"
         )
+        TenantMembership.objects.create(user=user, tenant=tenant)
 
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -52,8 +53,8 @@ class TestResolveCommcareDomains:
         ):
             resolve_commcare_domains(user, "fake-token")
 
-        tm = TenantMembership.objects.get(user=user, tenant_id="dimagi")
-        assert tm.tenant_name == "New Name"
+        tenant.refresh_from_db()
+        assert tenant.canonical_name == "New Name"
 
     def test_api_error_raises(self, user):
         mock_response = MagicMock()

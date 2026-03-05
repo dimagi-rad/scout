@@ -26,6 +26,9 @@ export default defineConfig(({ mode }) => {
         "/accounts": {
           target: `http://localhost:${env.API_PORT || 8000}`,
         },
+        "/health": {
+          target: `http://localhost:${env.API_PORT || 8000}`,
+        },
       },
     }
   }

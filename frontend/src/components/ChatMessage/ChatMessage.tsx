@@ -5,6 +5,67 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight } from "lucide-react"
+import {
+  QueryToolOutput,
+  DescribeTableOutput as DescribeTableOutputComponent,
+  ListTablesOutput as ListTablesOutputComponent,
+  GetMetadataOutput as GetMetadataOutputComponent,
+} from "./ToolOutput"
+import type {
+  QueryOutput,
+  DescribeTableOutput,
+  ListTablesOutput,
+  GetMetadataOutput,
+} from "./ToolOutput"
+
+function parseOutput(output: unknown): unknown {
+  if (typeof output === "string") {
+    // MCP wraps results as [{'type':'text','text':'...json...'}] with single quotes
+    try {
+      const jsonLike = output.replace(/'/g, '"')
+      const arr = JSON.parse(jsonLike)
+      if (Array.isArray(arr) && arr[0]?.text) return JSON.parse(arr[0].text)
+    } catch {
+      /* ignore */
+    }
+    try {
+      return JSON.parse(output)
+    } catch {
+      return output
+    }
+  }
+  // Handle the MCP envelope array directly (already parsed objects)
+  if (
+    Array.isArray(output) &&
+    output[0]?.type === "text" &&
+    typeof output[0]?.text === "string"
+  ) {
+    try {
+      return JSON.parse(output[0].text)
+    } catch {
+      return output
+    }
+  }
+  return output
+}
+
+function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode | null {
+  const output = parseOutput(rawOutput)
+  if (output == null || typeof output !== "object") return null
+
+  switch (toolName) {
+    case "query":
+      return <QueryToolOutput output={output as QueryOutput} />
+    case "describe_table":
+      return <DescribeTableOutputComponent output={output as DescribeTableOutput} />
+    case "list_tables":
+      return <ListTablesOutputComponent output={output as ListTablesOutput} />
+    case "get_metadata":
+      return <GetMetadataOutputComponent output={output as GetMetadataOutput} />
+    default:
+      return null
+  }
+}
 
 interface ChatMessageProps {
   message: UIMessage
@@ -54,19 +115,27 @@ function formatToolOutput(output: unknown): string {
   return JSON.stringify(output, null, 2)
 }
 
-// Tools that emit MCP progress notifications and should auto-expand.
-// Mirrors _PROGRESS_TOOLS in apps/chat/stream.py — keep in sync when adding new tools.
-const PROGRESS_TOOLS = new Set(["run_materialization"])
+// Tools that auto-expand to show their output.
+// run_materialization is here because it emits MCP progress notifications.
+// The data tools auto-expand because their rich output is the main value.
+const AUTO_EXPAND_TOOLS = new Set([
+  "run_materialization",
+  "query",
+  "describe_table",
+  "list_tables",
+  "get_metadata",
+])
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ToolCallPart({ part, index }: { part: any; index: number }) {
   const toolName = getToolName(part)
-  const [expanded, setExpanded] = useState(() => PROGRESS_TOOLS.has(toolName))
+  const [expanded, setExpanded] = useState(() => AUTO_EXPAND_TOOLS.has(toolName))
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
-  const outputText = hasOutput && part.output != null
-    ? formatToolOutput(part.output)
-    : null
+
+  const richOutput = hasOutput && part.output != null ? renderToolOutput(toolName, part.output) : null
+  const fallbackText =
+    hasOutput && part.output != null && !richOutput ? formatToolOutput(part.output) : null
 
   return (
     <div key={index} className="rounded border bg-muted/30 my-1 text-xs">
@@ -87,11 +156,13 @@ function ToolCallPart({ part, index }: { part: any; index: number }) {
           {isLoading && "..."}
         </span>
       </button>
-      {expanded && outputText && (
-        <div className="border-t px-3 py-2 max-h-60 overflow-auto">
-          <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono">
-            {outputText.slice(0, 2000)}
-          </pre>
+      {expanded && (richOutput ?? fallbackText) && (
+        <div className="border-t px-3 py-2.5">
+          {richOutput ?? (
+            <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
+              {fallbackText!.slice(0, 2000)}
+            </pre>
+          )}
         </div>
       )}
     </div>

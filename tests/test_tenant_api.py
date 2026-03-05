@@ -1,7 +1,19 @@
+from unittest.mock import patch
+
 import pytest
 from django.test import Client
 
 from apps.users.models import TenantMembership
+from apps.users.services.tenant_verification import CommCareVerificationError
+
+
+def _make_membership(user, external_id="dimagi", canonical_name="Dimagi", provider="commcare"):
+    from apps.users.models import Tenant
+
+    tenant = Tenant.objects.create(
+        provider=provider, external_id=external_id, canonical_name=canonical_name
+    )
+    return TenantMembership.objects.create(user=user, tenant=tenant)
 
 
 @pytest.mark.django_db
@@ -11,9 +23,7 @@ class TestTenantCredentialDeleteAPI:
         from apps.users.adapters import encrypt_credential
         from apps.users.models import TenantCredential
 
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="sk-test", tenant_name="sk-test"
-        )
+        tm = _make_membership(user, external_id="sk-test", canonical_name="sk-test")
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.API_KEY,
@@ -43,9 +53,7 @@ class TestTenantCredentialDeleteAPI:
 @pytest.mark.django_db
 class TestTenantListAPI:
     def test_list_tenants(self, user):
-        TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        _make_membership(user)
         client = Client()
         client.force_login(user)
         response = client.get("/api/auth/tenants/")
@@ -63,9 +71,7 @@ class TestTenantListAPI:
 @pytest.mark.django_db
 class TestTenantSelectAPI:
     def test_select_tenant(self, user):
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(user)
         client = Client()
         client.force_login(user)
         response = client.post(
@@ -84,49 +90,160 @@ class TestTenantCredentialUpdateAPI:
         from apps.users.adapters import encrypt_credential
         from apps.users.models import TenantCredential
 
-        tm = TenantMembership.objects.create(
-            user=user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(user)
+        old_encrypted = encrypt_credential("old@example.com:oldkey")
         TenantCredential.objects.create(
             tenant_membership=tm,
             credential_type=TenantCredential.API_KEY,
-            encrypted_credential=encrypt_credential("old@example.com:oldkey"),
+            encrypted_credential=old_encrypted,
         )
 
         client = Client()
         client.force_login(user)
-        response = client.patch(
-            f"/api/auth/tenant-credentials/{tm.id}/",
-            data={
-                "tenant_name": "Dimagi Updated",
-                "credential": "new@example.com:newkey",
-            },
-            content_type="application/json",
-        )
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            return_value={},
+        ):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "new@example.com:newkey"},
+                content_type="application/json",
+            )
         assert response.status_code == 200
-        tm.refresh_from_db()
-        assert tm.tenant_name == "Dimagi Updated"
+        # canonical_name on the shared Tenant is NOT changed by PATCH
+        tm.tenant.refresh_from_db()
+        assert tm.tenant.canonical_name == "Dimagi"
         tm.credential.refresh_from_db()
-        assert tm.credential.encrypted_credential != encrypt_credential("old@example.com:oldkey")
+        assert tm.credential.encrypted_credential != old_encrypted
+
+    def test_patch_rejects_unverified_credential(self, user):
+        """PATCH must call verify_commcare_credential; invalid key is rejected."""
+        from apps.users.models import TenantCredential
+
+        tm = _make_membership(user)
+        TenantCredential.objects.create(
+            tenant_membership=tm,
+            credential_type=TenantCredential.API_KEY,
+            encrypted_credential="x",
+        )
+
+        client = Client()
+        client.force_login(user)
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            side_effect=CommCareVerificationError("Bad key"),
+        ):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "bad@evil.com:badkey"},
+                content_type="application/json",
+            )
+        assert response.status_code == 400
 
     def test_patch_requires_auth(self):
         client = Client()
         response = client.patch(
             "/api/auth/tenant-credentials/00000000-0000-0000-0000-000000000000/",
-            data={"tenant_name": "x"},
+            data={"credential": "x:y"},
             content_type="application/json",
         )
         assert response.status_code == 401
 
     def test_patch_returns_404_for_wrong_user(self, user, other_user):
-        tm = TenantMembership.objects.create(
-            user=other_user, provider="commcare", tenant_id="dimagi", tenant_name="Dimagi"
-        )
+        tm = _make_membership(other_user)
         client = Client()
         client.force_login(user)
-        response = client.patch(
-            f"/api/auth/tenant-credentials/{tm.id}/",
-            data={"tenant_name": "hijacked"},
-            content_type="application/json",
-        )
+        with patch("apps.users.views.verify_commcare_credential", return_value={}):
+            response = client.patch(
+                f"/api/auth/tenant-credentials/{tm.id}/",
+                data={"credential": "a:b"},
+                content_type="application/json",
+            )
         assert response.status_code == 404
+
+
+@pytest.mark.django_db
+class TestTenantCredentialCreateAPI:
+    def test_create_with_valid_credential(self, user):
+        """Valid credential creates Tenant + TenantMembership."""
+        from apps.users.models import Tenant, TenantMembership
+
+        client = Client()
+        client.force_login(user)
+
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            return_value={"domain": "dimagi", "username": "user@dimagi.org"},
+        ):
+            response = client.post(
+                "/api/auth/tenant-credentials/",
+                data={
+                    "provider": "commcare",
+                    "tenant_id": "dimagi",
+                    "tenant_name": "Dimagi",
+                    "credential": "user@dimagi.org:apikey123",
+                },
+                content_type="application/json",
+            )
+
+        assert response.status_code == 201
+        assert Tenant.objects.filter(provider="commcare", external_id="dimagi").exists()
+        assert TenantMembership.objects.filter(user=user, tenant__external_id="dimagi").exists()
+
+    def test_create_with_invalid_credential_is_rejected(self, user):
+        """Invalid credential must not create any records."""
+        from apps.users.models import Tenant, TenantMembership
+
+        client = Client()
+        client.force_login(user)
+
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            side_effect=CommCareVerificationError("Invalid"),
+        ):
+            response = client.post(
+                "/api/auth/tenant-credentials/",
+                data={
+                    "provider": "commcare",
+                    "tenant_id": "victim-domain",
+                    "tenant_name": "Victim",
+                    "credential": "attacker@evil.com:badkey",
+                },
+                content_type="application/json",
+            )
+
+        assert response.status_code == 400
+        assert not Tenant.objects.filter(external_id="victim-domain").exists()
+        assert not TenantMembership.objects.filter(user=user).exists()
+
+    def test_cross_tenant_access_blocked_by_structure(self, user, other_user):
+        """A user who guesses another tenant's external_id cannot gain access
+        because they cannot create a TenantMembership without a verified Tenant."""
+        from apps.users.models import Tenant, TenantMembership
+
+        # Simulate victim tenant exists (created by other_user via OAuth)
+        victim_tenant = Tenant.objects.create(
+            provider="commcare", external_id="victim-domain", canonical_name="Victim"
+        )
+        TenantMembership.objects.create(user=other_user, tenant=victim_tenant)
+
+        client = Client()
+        client.force_login(user)
+
+        with patch(
+            "apps.users.views.verify_commcare_credential",
+            side_effect=CommCareVerificationError("Invalid"),
+        ):
+            response = client.post(
+                "/api/auth/tenant-credentials/",
+                data={
+                    "provider": "commcare",
+                    "tenant_id": "victim-domain",
+                    "tenant_name": "Victim",
+                    "credential": "attacker@evil.com:wrongkey",
+                },
+                content_type="application/json",
+            )
+
+        assert response.status_code == 400
+        assert not TenantMembership.objects.filter(user=user).exists()

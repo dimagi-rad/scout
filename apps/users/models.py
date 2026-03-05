@@ -74,13 +74,35 @@ class User(AbstractUser):
         return full_name or self.email
 
 
-class TenantMembership(models.Model):
-    """Links users to tenants discovered from OAuth providers."""
+PROVIDER_CHOICES = [
+    ("commcare", "CommCare HQ"),
+    ("commcare_connect", "CommCare Connect"),
+]
 
-    PROVIDER_CHOICES = [
-        ("commcare", "CommCare HQ"),
-        ("commcare_connect", "CommCare Connect"),
-    ]
+
+class Tenant(models.Model):
+    """Canonical tenant identity record, created only after provider verification."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    external_id = models.CharField(
+        max_length=255,
+        help_text="Provider-assigned identifier (CommCare domain name or Connect org ID).",
+    )
+    canonical_name = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [["provider", "external_id"]]
+        ordering = ["canonical_name"]
+
+    def __str__(self):
+        return f"{self.provider}:{self.external_id} ({self.canonical_name})"
+
+
+class TenantMembership(models.Model):
+    """Links a user to a verified Tenant."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -88,24 +110,20 @@ class TenantMembership(models.Model):
         on_delete=models.CASCADE,
         related_name="tenant_memberships",
     )
-    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
-    tenant_id = models.CharField(
-        max_length=255,
-        help_text="Domain name (CommCare) or organization ID (Connect)",
-    )
-    tenant_name = models.CharField(
-        max_length=255,
-        help_text="Human-readable tenant name",
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="memberships",
     )
     last_selected_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ["user", "provider", "tenant_id"]
-        ordering = ["-last_selected_at", "tenant_name"]
+        unique_together = [["user", "tenant"]]
+        ordering = ["-last_selected_at", "tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.user.email} - {self.provider}:{self.tenant_id}"
+        return f"{self.user.email} - {self.tenant}"
 
 
 class TenantCredential(models.Model):

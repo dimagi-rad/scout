@@ -545,7 +545,9 @@ async def chat_view(request):
     from apps.users.models import TenantMembership
 
     try:
-        tenant_membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
+        tenant_membership = await TenantMembership.objects.select_related("tenant").aget(
+            id=tenant_id, user=user
+        )
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
 
@@ -617,8 +619,8 @@ async def chat_view(request):
 
     input_state = {
         "messages": [HumanMessage(content=user_content)],
-        "tenant_id": tenant_membership.tenant_id,
-        "tenant_name": tenant_membership.tenant_name,
+        "tenant_id": tenant_membership.tenant.external_id,
+        "tenant_name": tenant_membership.tenant.canonical_name,
         "tenant_membership_id": str(tenant_membership.id),
         "user_id": str(user.id),
         "user_role": "analyst",
@@ -696,9 +698,9 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 if tr:
-                    tool_part["output"] = (
-                        tr.content if isinstance(tr.content, str) else str(tr.content)
-                    )
+                    from apps.chat.stream import _tool_content_to_str
+
+                    tool_part["output"] = _tool_content_to_str(tr)
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
 

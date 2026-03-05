@@ -43,10 +43,12 @@ class ArtifactShareAPITestCase(TestCase):
         )
 
         # Create a tenant workspace
-        cls.workspace = TenantWorkspace.objects.create(
-            tenant_id="test-domain",
-            tenant_name="Test Domain",
+        from apps.users.models import Tenant
+
+        cls.tenant = Tenant.objects.create(
+            provider="commcare", external_id="test-domain", canonical_name="Test Domain"
         )
+        cls.workspace = TenantWorkspace.objects.create(tenant=cls.tenant)
 
         # Create an artifact (only creator can manage its shares)
         cls.artifact = Artifact.objects.create(

@@ -101,7 +101,7 @@ class Recipe(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.workspace.tenant_name})"
+        return f"{self.name} ({self.workspace.tenant.canonical_name})"
 
     def get_variable_names(self) -> list[str]:
         """Return a list of variable names defined in this recipe."""

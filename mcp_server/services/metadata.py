@@ -139,7 +139,14 @@ def _build_jsonb_annotations(
     elif table_name == "forms":
         form_definitions = metadata.get("form_definitions", {})
         if form_definitions:
-            form_names = ", ".join(fd.get("name", xmlns) for xmlns, fd in form_definitions.items())
+            names = []
+            for xmlns, fd in form_definitions.items():
+                name = fd.get("name", xmlns)
+                if isinstance(name, dict):
+                    # name is a translations dict e.g. {"en": "My Form"} — take first value
+                    name = next(iter(name.values()), xmlns)
+                names.append(str(name))
+            form_names = ", ".join(names)
             return {"form_data": f"Contains form submission data. Available forms: {form_names}"}
 
     return {}

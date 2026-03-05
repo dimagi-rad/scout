@@ -54,8 +54,7 @@ def _resolve_workspace(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     workspace, _ = TenantWorkspace.objects.get_or_create(
-        tenant_id=membership.tenant_id,
-        defaults={"tenant_name": membership.tenant_name},
+        tenant=membership.tenant,
     )
     return workspace, None
 
@@ -267,7 +266,7 @@ class KnowledgeExportView(APIView):
                 zf.writestr(filename, content)
 
         buf.seek(0)
-        safe_name = workspace.tenant_id.replace("/", "_")
+        safe_name = workspace.tenant.external_id.replace("/", "_")
         response = HttpResponse(buf.read(), content_type="application/zip")
         response["Content-Disposition"] = f'attachment; filename="knowledge-{safe_name}.zip"'
         return response

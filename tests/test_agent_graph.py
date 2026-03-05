@@ -33,9 +33,10 @@ class TestSystemPrompt:
         prompt = await _build_system_prompt(workspace, tenant_membership)
 
         assert "Data Availability" in prompt
-        assert "get_schema_status" in prompt
+        # Schema context is now pre-fetched; no instruction to call get_schema_status
+        assert "get_schema_status" not in prompt
+        # When no schema exists, agent is told to call run_materialization
         assert "run_materialization" in prompt
-        assert "teardown_schema" in prompt
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
@@ -45,4 +46,4 @@ class TestSystemPrompt:
         prompt = await _build_system_prompt(workspace, tenant_membership)
 
         # Agent must know to run materialization when no data exists
-        assert "not_provisioned" in prompt or "loading" in prompt.lower()
+        assert "No data has been loaded yet" in prompt or "loading" in prompt.lower()

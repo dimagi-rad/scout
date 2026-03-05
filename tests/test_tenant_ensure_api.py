@@ -57,7 +57,9 @@ class TestTenantEnsureAPI:
         assert data["tenant_name"] == "Opportunity 532"
         assert "id" in data
 
-        tm = TenantMembership.objects.get(user=user, provider="commcare_connect", tenant_id="532")
+        tm = TenantMembership.objects.get(
+            user=user, tenant__provider="commcare_connect", tenant__external_id="532"
+        )
         assert tm.last_selected_at is not None
 
     def test_ensure_returns_404_for_unauthorized_opportunity(self, user):
@@ -89,12 +91,12 @@ class TestTenantEnsureAPI:
     def test_ensure_returns_existing_membership(self, user):
         self._create_connect_social_token(user)
 
-        TenantMembership.objects.create(
-            user=user,
-            provider="commcare_connect",
-            tenant_id="532",
-            tenant_name="Existing Opp",
+        from apps.users.models import Tenant
+
+        existing_tenant = Tenant.objects.create(
+            provider="commcare_connect", external_id="532", canonical_name="Existing Opp"
         )
+        TenantMembership.objects.create(user=user, tenant=existing_tenant)
 
         client = Client()
         client.force_login(user)
@@ -112,7 +114,7 @@ class TestTenantEnsureAPI:
 
         assert (
             TenantMembership.objects.filter(
-                user=user, provider="commcare_connect", tenant_id="532"
+                user=user, tenant__provider="commcare_connect", tenant__external_id="532"
             ).count()
             == 1
         )
