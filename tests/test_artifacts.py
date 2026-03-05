@@ -317,7 +317,9 @@ class TestArtifactSandboxView:
 
     def test_sandbox_returns_html(self, authenticated_client, artifact, tenant_membership):
         """Test that sandbox view returns HTML content."""
-        response = authenticated_client.get(f"/api/artifacts/{artifact.id}/sandbox/")
+        response = authenticated_client.get(
+            f"/api/artifacts/{tenant_membership.id}/{artifact.id}/sandbox/"
+        )
 
         assert response.status_code == 200
         assert "text/html" in response["Content-Type"]
@@ -331,7 +333,9 @@ class TestArtifactSandboxView:
 
     def test_sandbox_csp_headers(self, authenticated_client, artifact, tenant_membership):
         """Test that CSP headers are set correctly for security."""
-        response = authenticated_client.get(f"/api/artifacts/{artifact.id}/sandbox/")
+        response = authenticated_client.get(
+            f"/api/artifacts/{tenant_membership.id}/{artifact.id}/sandbox/"
+        )
 
         assert response.status_code == 200
         assert "Content-Security-Policy" in response
@@ -361,7 +365,9 @@ class TestArtifactDataView:
         self, authenticated_client, artifact, tenant_membership
     ):
         """Test authenticated user with workspace access can get artifact data."""
-        response = authenticated_client.get(f"/api/artifacts/{artifact.id}/data/")
+        response = authenticated_client.get(
+            f"/api/artifacts/{tenant_membership.id}/{artifact.id}/data/"
+        )
 
         assert response.status_code == 200
         data = response.json()
@@ -373,35 +379,38 @@ class TestArtifactDataView:
         assert data["data"] == artifact.data
         assert data["version"] == artifact.version
 
-    def test_get_artifact_data_unauthenticated(self, client, artifact):
+    def test_get_artifact_data_unauthenticated(self, client, artifact, tenant_membership):
         """Test unauthenticated user cannot access artifact data."""
-        response = client.get(f"/api/artifacts/{artifact.id}/data/")
+        response = client.get(f"/api/artifacts/{tenant_membership.id}/{artifact.id}/data/")
 
         assert response.status_code == 401
         data = response.json()
         assert "error" in data
 
-    def test_get_artifact_data_not_found(self, authenticated_client):
+    def test_get_artifact_data_not_found(self, authenticated_client, tenant_membership):
         """Test accessing non-existent artifact returns 404."""
         fake_id = uuid.uuid4()
-        response = authenticated_client.get(f"/api/artifacts/{fake_id}/data/")
+        response = authenticated_client.get(
+            f"/api/artifacts/{tenant_membership.id}/{fake_id}/data/"
+        )
 
         assert response.status_code == 404
 
     def test_artifact_data_requires_workspace_membership(self, db, user, client):
-        """Test that artifact access requires workspace membership."""
+        """Test that artifact access requires workspace membership (foreign tenant_id -> 403)."""
         from apps.projects.models import TenantWorkspace
+        from apps.users.models import Tenant, TenantMembership
 
-        # Create artifact in a workspace that user is NOT a member of
-        from apps.users.models import Tenant
-
+        # Create a workspace and membership owned by a different user
+        other_user = User.objects.create_user(email="other2@example.com", password="pass")
         other_tenant = Tenant.objects.create(
             provider="commcare", external_id="other-domain", canonical_name="Other Domain"
         )
         other_workspace = TenantWorkspace.objects.create(tenant=other_tenant)
+        other_membership = TenantMembership.objects.create(user=other_user, tenant=other_tenant)
         other_artifact = Artifact.objects.create(
             workspace=other_workspace,
-            created_by=user,
+            created_by=other_user,
             title="Other Artifact",
             artifact_type=ArtifactType.HTML,
             code="<div>Other</div>",
@@ -409,9 +418,9 @@ class TestArtifactDataView:
             conversation_id="conv_other",
         )
 
-        # User tries to access artifact from other workspace (no TenantMembership)
+        # User tries to access artifact using a tenant_id they don't own -> 403
         client.force_login(user)
-        response = client.get(f"/api/artifacts/{other_artifact.id}/data/")
+        response = client.get(f"/api/artifacts/{other_membership.id}/{other_artifact.id}/data/")
 
         assert response.status_code == 403
         data = response.json()

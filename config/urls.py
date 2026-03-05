@@ -63,7 +63,9 @@ urlpatterns = [
     path("api/knowledge/", include("apps.knowledge.urls")),
     path("api/recipes/", include("apps.recipes.urls")),
     path("api/data-dictionary/", include("apps.projects.api.urls")),
-    path("api/refresh-schema/", RefreshSchemaView.as_view(), name="refresh_schema"),
+    path(
+        "api/refresh-schema/<uuid:tenant_id>/", RefreshSchemaView.as_view(), name="refresh_schema"
+    ),
     # Public share links (no auth required)
     path(
         "api/recipes/runs/shared/<str:share_token>/",

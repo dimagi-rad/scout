@@ -26,12 +26,24 @@ class ArtifactSharePermissionMixin:
     Only artifact creators or project admins can create/revoke share links.
     """
 
-    def get_artifact(self, artifact_id):
-        """Retrieve the artifact and check it exists."""
+    def get_artifact(self, tenant_id, artifact_id, user):
+        """Retrieve the artifact scoped to the tenant, or raise 404."""
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
+
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=user)
+        except TenantMembership.DoesNotExist:
+            return None, Response(
+                {"error": "Tenant not found or access denied."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
         return get_object_or_404(
             Artifact.objects.select_related("created_by"),
             pk=artifact_id,
-        )
+            workspace=workspace,
+        ), None
 
     def check_share_permission(self, request, artifact):
         """
@@ -72,9 +84,11 @@ class CreateShareView(ArtifactSharePermissionMixin, APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, artifact_id):
+    def post(self, request, tenant_id, artifact_id):
         """Create a new share link for the artifact."""
-        artifact = self.get_artifact(artifact_id)
+        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        if err:
+            return err
 
         has_permission, error_response = self.check_share_permission(request, artifact)
         if not has_permission:
@@ -107,9 +121,11 @@ class ListSharesView(ArtifactSharePermissionMixin, APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, artifact_id):
+    def get(self, request, tenant_id, artifact_id):
         """List all share links for the artifact."""
-        artifact = self.get_artifact(artifact_id)
+        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        if err:
+            return err
 
         has_permission, error_response = self.check_share_permission(request, artifact)
         if not has_permission:
@@ -138,9 +154,11 @@ class RevokeShareView(ArtifactSharePermissionMixin, APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def delete(self, request, artifact_id, share_token):
+    def delete(self, request, tenant_id, artifact_id, share_token):
         """Revoke a share link by deleting the SharedArtifact record."""
-        artifact = self.get_artifact(artifact_id)
+        artifact, err = self.get_artifact(tenant_id, artifact_id, request.user)
+        if err:
+            return err
 
         has_permission, error_response = self.check_share_permission(request, artifact)
         if not has_permission:

@@ -221,7 +221,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 if (artifact.has_live_queries) {
                     this.showLoading('Querying database...');
                     try {
-                        const resp = await fetch('/api/artifacts/' + artifact.id + '/query-data/', {
+                        const resp = await fetch('/api/artifacts/' + artifact.tenant_id + '/' + artifact.id + '/query-data/', {
                             credentials: 'include',
                         });
                         if (!resp.ok) {
@@ -626,23 +626,22 @@ class ArtifactSandboxView(View):
     from CDN and listens for postMessage events to render artifacts securely.
     """
 
-    def get(self, request: HttpRequest, artifact_id: str) -> HttpResponse:
+    def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> HttpResponse:
         """Return the sandbox HTML with strict CSP headers."""
-        artifact = get_object_or_404(Artifact, pk=artifact_id)
-
         # Require authentication
         if not request.user.is_authenticated:
             return HttpResponse("Authentication required", status=401)
 
-        # Check workspace membership (unless superuser)
-        if not request.user.is_superuser and artifact.workspace_id:
-            from apps.users.models import TenantMembership
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
 
-            has_access = TenantMembership.objects.filter(
-                user=request.user, tenant=artifact.workspace.tenant
-            ).exists()
-            if not has_access:
-                return HttpResponse("Access denied", status=403)
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+        except TenantMembership.DoesNotExist:
+            return HttpResponse("Access denied", status=403)
+
+        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
@@ -653,6 +652,7 @@ class ArtifactSandboxView(View):
         artifact_json = json.dumps(
             {
                 "id": str(artifact.id),
+                "tenant_id": str(tenant_id),
                 "title": artifact.title,
                 "type": artifact.artifact_type,
                 "code": artifact.code,
@@ -683,26 +683,21 @@ class ArtifactDataView(View):
     Requires project membership for access.
     """
 
-    def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+    def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
         """Fetch artifact data for rendering."""
-        artifact = get_object_or_404(Artifact, pk=artifact_id)
-
-        # Check access via workspace membership
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        if not request.user.is_superuser and artifact.workspace_id:
-            from apps.users.models import TenantMembership
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
 
-            has_access = TenantMembership.objects.filter(
-                user=request.user, tenant=artifact.workspace.tenant
-            ).exists()
-            if not has_access:
-                return JsonResponse(
-                    {"error": "Access denied. You are not a member of this workspace."},
-                    status=403,
-                )
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+        except TenantMembership.DoesNotExist:
+            return JsonResponse({"error": "Tenant not found or access denied."}, status=403)
 
+        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:
@@ -742,30 +737,29 @@ class ArtifactQueryDataView(View):
     format the artifact sandbox can consume directly via mergeQueryResults().
     """
 
-    async def get(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
+    async def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
         from django.http import Http404
-
-        try:
-            artifact = await Artifact.objects.select_related("workspace__tenant").aget(
-                pk=artifact_id
-            )
-        except Artifact.DoesNotExist:
-            raise Http404 from None
 
         user = await request.auser()
         if not user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        if not user.is_superuser:
-            if not artifact.workspace_id:
-                return JsonResponse({"error": "Access denied"}, status=403)
-            from apps.users.models import TenantMembership
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
 
-            has_access = await TenantMembership.objects.filter(
-                user=user, tenant=artifact.workspace.tenant
-            ).aexists()
-            if not has_access:
-                return JsonResponse({"error": "Access denied"}, status=403)
+        try:
+            membership = await TenantMembership.objects.aget(id=tenant_id, user=user)
+        except TenantMembership.DoesNotExist:
+            return JsonResponse({"error": "Tenant not found or access denied."}, status=403)
+
+        workspace, _ = await TenantWorkspace.objects.aget_or_create(tenant=membership.tenant)
+
+        try:
+            artifact = await Artifact.objects.select_related("workspace__tenant").aget(
+                pk=artifact_id, workspace=workspace
+            )
+        except Artifact.DoesNotExist:
+            raise Http404 from None
 
         if not artifact.source_queries:
             return JsonResponse({"queries": [], "static_data": artifact.data or {}})
@@ -936,21 +930,20 @@ class SharedArtifactView(View):
 
 class ArtifactListView(View):
     """
-    GET /api/artifacts/ - List artifacts for the active workspace.
+    GET /api/artifacts/<tenant_id>/ - List artifacts for the specified workspace.
     """
 
-    def get(self, request: HttpRequest) -> JsonResponse:
+    def get(self, request: HttpRequest, tenant_id) -> JsonResponse:
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
         from apps.projects.models import TenantWorkspace
         from apps.users.models import TenantMembership
 
-        membership = (
-            TenantMembership.objects.filter(user=request.user).order_by("-last_selected_at").first()
-        )
-        if not membership:
-            return JsonResponse({"results": []})
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+        except TenantMembership.DoesNotExist:
+            return JsonResponse({"error": "Tenant not found or access denied."}, status=403)
 
         workspace, _ = TenantWorkspace.objects.get_or_create(
             tenant=membership.tenant,
@@ -983,26 +976,27 @@ class ArtifactListView(View):
 
 class ArtifactDetailView(View):
     """
-    PATCH /api/artifacts/<artifact_id>/ - Update title/description.
-    DELETE /api/artifacts/<artifact_id>/ - Delete artifact.
+    PATCH /api/artifacts/<tenant_id>/<artifact_id>/ - Update title/description.
+    DELETE /api/artifacts/<tenant_id>/<artifact_id>/ - Delete artifact.
     """
 
-    def _get_artifact_with_access(self, request: HttpRequest, artifact_id: str):
-        artifact = get_object_or_404(Artifact, pk=artifact_id)
+    def _get_artifact_with_access(self, request: HttpRequest, tenant_id, artifact_id: str):
         if not request.user.is_authenticated:
             return None, JsonResponse({"error": "Authentication required"}, status=401)
-        if not request.user.is_superuser and artifact.workspace_id:
-            from apps.users.models import TenantMembership
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
 
-            has_access = TenantMembership.objects.filter(
-                user=request.user, tenant=artifact.workspace.tenant
-            ).exists()
-            if not has_access:
-                return None, JsonResponse({"error": "Access denied"}, status=403)
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+        except TenantMembership.DoesNotExist:
+            return None, JsonResponse({"error": "Tenant not found or access denied."}, status=403)
+
+        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
         return artifact, None
 
-    def patch(self, request: HttpRequest, artifact_id: str) -> JsonResponse:
-        artifact, err = self._get_artifact_with_access(request, artifact_id)
+    def patch(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+        artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
         if err:
             return err
         try:
@@ -1023,8 +1017,8 @@ class ArtifactDetailView(View):
             {"id": str(artifact.id), "title": artifact.title, "description": artifact.description}
         )
 
-    def delete(self, request: HttpRequest, artifact_id: str) -> HttpResponse:
-        artifact, err = self._get_artifact_with_access(request, artifact_id)
+    def delete(self, request: HttpRequest, tenant_id, artifact_id: str) -> HttpResponse:
+        artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
         if err:
             return err
         artifact.delete()
@@ -1038,35 +1032,32 @@ class ArtifactExportView(View):
     Requires project membership for access.
     """
 
-    def get(self, request: HttpRequest, artifact_id: str, format: str) -> HttpResponse:
+    def get(self, request: HttpRequest, tenant_id, artifact_id: str, format: str) -> HttpResponse:
         """
         Export artifact to the specified format.
 
         Args:
             request: HTTP request
+            tenant_id: UUID of the TenantMembership
             artifact_id: UUID of the artifact
             format: Export format (html, png, pdf)
 
         Returns:
             HttpResponse with the exported content
         """
-        artifact = get_object_or_404(Artifact, pk=artifact_id)
-
-        # Check access via workspace membership
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        if not request.user.is_superuser and artifact.workspace_id:
-            from apps.users.models import TenantMembership
+        from apps.projects.models import TenantWorkspace
+        from apps.users.models import TenantMembership
 
-            has_access = TenantMembership.objects.filter(
-                user=request.user, tenant=artifact.workspace.tenant
-            ).exists()
-            if not has_access:
-                return JsonResponse(
-                    {"error": "Access denied. You are not a member of this workspace."},
-                    status=403,
-                )
+        try:
+            membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+        except TenantMembership.DoesNotExist:
+            return JsonResponse({"error": "Tenant not found or access denied."}, status=403)
+
+        workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
         # Validate format
         if format not in ("html", "png", "pdf"):

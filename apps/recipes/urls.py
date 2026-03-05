@@ -15,9 +15,13 @@ from .api.views import (
 app_name = "recipes"
 
 urlpatterns = [
-    path("", RecipeListView.as_view(), name="list"),
-    path("<uuid:recipe_id>/", RecipeDetailView.as_view(), name="detail"),
-    path("<uuid:recipe_id>/run/", RecipeRunView.as_view(), name="run"),
-    path("<uuid:recipe_id>/runs/", RecipeRunListView.as_view(), name="runs"),
-    path("<uuid:recipe_id>/runs/<uuid:run_id>/", RecipeRunDetailView.as_view(), name="run_detail"),
+    path("<uuid:tenant_id>/", RecipeListView.as_view(), name="list"),
+    path("<uuid:tenant_id>/<uuid:recipe_id>/", RecipeDetailView.as_view(), name="detail"),
+    path("<uuid:tenant_id>/<uuid:recipe_id>/run/", RecipeRunView.as_view(), name="run"),
+    path("<uuid:tenant_id>/<uuid:recipe_id>/runs/", RecipeRunListView.as_view(), name="runs"),
+    path(
+        "<uuid:tenant_id>/<uuid:recipe_id>/runs/<uuid:run_id>/",
+        RecipeRunDetailView.as_view(),
+        name="run_detail",
+    ),
 ]

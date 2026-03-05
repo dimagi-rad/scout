@@ -36,26 +36,25 @@ KNOWLEDGE_TYPES = {
 }
 
 
-def _resolve_workspace(request):
-    """Resolve the active TenantWorkspace for the authenticated user."""
-    from django.db.models import F
+def _resolve_workspace(request, tenant_id):
+    """Resolve TenantWorkspace from the tenant_id URL path parameter.
 
+    tenant_id is the TenantMembership.id (UUID). It must belong to the
+    requesting user. Returns (workspace, None) on success or (None, Response)
+    on error.
+    """
     from apps.projects.models import TenantWorkspace
     from apps.users.models import TenantMembership
 
-    membership = (
-        TenantMembership.objects.filter(user=request.user)
-        .order_by(F("last_selected_at").desc(nulls_last=True))
-        .first()
-    )
-    if not membership:
+    try:
+        membership = TenantMembership.objects.get(id=tenant_id, user=request.user)
+    except TenantMembership.DoesNotExist:
         return None, Response(
-            {"error": "No tenant selected. Please select a domain first."},
-            status=status.HTTP_400_BAD_REQUEST,
+            {"error": "Tenant not found or access denied."},
+            status=status.HTTP_403_FORBIDDEN,
         )
-    workspace, _ = TenantWorkspace.objects.get_or_create(
-        tenant=membership.tenant,
-    )
+
+    workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
     return workspace, None
 
 
@@ -67,8 +66,8 @@ class KnowledgeListCreateView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        workspace, err = _resolve_workspace(request)
+    def get(self, request, tenant_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -134,8 +133,8 @@ class KnowledgeListCreateView(APIView):
             }
         )
 
-    def post(self, request):
-        workspace, err = _resolve_workspace(request)
+    def post(self, request, tenant_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -187,8 +186,8 @@ class KnowledgeDetailView(APIView):
                 continue
         return None, None, None
 
-    def get(self, request, item_id):
-        workspace, err = _resolve_workspace(request)
+    def get(self, request, tenant_id, item_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -201,8 +200,8 @@ class KnowledgeDetailView(APIView):
         serializer = serializer_class(item)
         return Response(serializer.data)
 
-    def put(self, request, item_id):
-        workspace, err = _resolve_workspace(request)
+    def put(self, request, tenant_id, item_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -224,8 +223,8 @@ class KnowledgeDetailView(APIView):
         serializer.save()
         return Response(serializer.data)
 
-    def delete(self, request, item_id):
-        workspace, err = _resolve_workspace(request)
+    def delete(self, request, tenant_id, item_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -248,8 +247,8 @@ class KnowledgeExportView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request):
-        workspace, err = _resolve_workspace(request)
+    def get(self, request, tenant_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 
@@ -282,8 +281,8 @@ class KnowledgeImportView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser]
 
-    def post(self, request):
-        workspace, err = _resolve_workspace(request)
+    def post(self, request, tenant_id):
+        workspace, err = _resolve_workspace(request, tenant_id)
         if err:
             return err
 

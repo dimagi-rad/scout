@@ -40,7 +40,9 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_covers_not_provisioned_case(self, workspace, tenant_membership):
+    async def test_data_availability_covers_not_provisioned_case(
+        self, workspace, tenant_membership
+    ):
         from apps.agents.graph.base import _build_system_prompt
 
         prompt = await _build_system_prompt(workspace, tenant_membership)
