@@ -68,12 +68,9 @@ async def tenant_list_view(request):
     recently_resolved = await sync_to_async(cache.get)(cache_key)
 
     if not recently_resolved or force_refresh:
-        resolved_any = False
-
         # Resolve domains from CommCare if the user has an OAuth token
         access_token = await sync_to_async(_get_commcare_token)(user)
         if access_token:
-            resolved_any = True
             try:
                 from apps.users.services.tenant_resolution import resolve_commcare_domains
 
@@ -84,7 +81,6 @@ async def tenant_list_view(request):
         # Resolve opportunities from Connect if the user has a Connect OAuth token
         connect_token = await sync_to_async(_get_connect_token)(user)
         if connect_token:
-            resolved_any = True
             try:
                 from apps.users.services.tenant_resolution import resolve_connect_opportunities
 
@@ -92,8 +88,7 @@ async def tenant_list_view(request):
             except Exception:
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
 
-        if resolved_any:
-            await sync_to_async(cache.set)(cache_key, True, TENANT_RESOLUTION_TTL)
+        await sync_to_async(cache.set)(cache_key, True, TENANT_RESOLUTION_TTL)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(user=user):

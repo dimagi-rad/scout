@@ -465,14 +465,16 @@ export function ConnectionsPage() {
                       const next = encodeURIComponent(`${BASE_PATH}${prefix}/settings/connections?popup_close=1`)
                       const url = `${provider.login_url}?process=connect&next=${next}`
                       const popup = window.open(url, "scout-oauth", "width=600,height=700")
-                      const check = setInterval(() => {
-                        if (popup && popup.closed) {
-                          clearInterval(check)
-                          fetchProviders()
-                          fetchDomains()
-                          void fetchStoreDomains()
-                        }
-                      }, 500)
+                      if (popup) {
+                        const check = setInterval(() => {
+                          if (popup.closed) {
+                            clearInterval(check)
+                            fetchProviders()
+                            fetchDomains()
+                            void fetchStoreDomains()
+                          }
+                        }, 500)
+                      }
                     }}
                   >
                     {provider.status === "expired" ? "Reconnect" : "Connect"}
