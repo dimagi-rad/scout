@@ -28,7 +28,7 @@ from django.views.decorators.http import require_GET, require_POST
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.agents.memory.checkpointer import get_database_url
-from apps.chat.models import Thread
+from apps.chat.models import Thread, ThreadUIState
 from apps.chat.stream import langgraph_to_ui_stream
 
 logger = logging.getLogger(__name__)
@@ -840,6 +840,54 @@ async def thread_share_view(request, thread_id):
             is_public=body.get("is_public"),
         )
         return JsonResponse(result)
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@sync_to_async
+def _get_or_create_ui_state(thread, user):
+    obj, _ = ThreadUIState.objects.get_or_create(thread=thread, user=user)
+    return obj
+
+
+@sync_to_async
+def _save_ui_state(thread, user, tool_states_patch):
+    obj, _ = ThreadUIState.objects.get_or_create(thread=thread, user=user)
+    obj.tool_states.update(tool_states_patch)
+    obj.save(update_fields=["tool_states"])
+    return obj.tool_states
+
+
+async def thread_ui_state_view(request, thread_id):
+    """
+    GET  /api/chat/threads/<thread_id>/ui-state/  — fetch per-user UI state
+    PATCH /api/chat/threads/<thread_id>/ui-state/ — merge-update tool_states
+    """
+    user = await _get_user_if_authenticated(request)
+    if user is None:
+        return JsonResponse({"error": "Authentication required"}, status=401)
+
+    thread = await _get_thread(thread_id, user)
+    if thread is None:
+        # Thread doesn't exist or isn't owned by user — return empty state
+        return JsonResponse({"tool_states": {}})
+
+    if request.method == "GET":
+        obj = await _get_or_create_ui_state(thread, user)
+        return JsonResponse({"tool_states": obj.tool_states})
+
+    if request.method == "PATCH":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+        patch = body.get("tool_states")
+        if not isinstance(patch, dict):
+            return JsonResponse({"error": "tool_states must be an object"}, status=400)
+
+        tool_states = await _save_ui_state(thread, user, patch)
+        return JsonResponse({"tool_states": tool_states})
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
 

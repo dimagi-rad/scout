@@ -7,6 +7,7 @@ from apps.chat.views import (
     thread_list_view,
     thread_messages_view,
     thread_share_view,
+    thread_ui_state_view,
 )
 
 app_name = "chat"
@@ -16,4 +17,5 @@ urlpatterns = [
     path("threads/", thread_list_view, name="thread_list"),
     path("threads/<uuid:thread_id>/messages/", thread_messages_view, name="thread_messages"),
     path("threads/<uuid:thread_id>/share/", thread_share_view, name="thread_share"),
+    path("threads/<uuid:thread_id>/ui-state/", thread_ui_state_view, name="thread_ui_state"),
 ]
