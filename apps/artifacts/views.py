@@ -781,6 +781,15 @@ class ArtifactQueryDataView(View):
             ]
             return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
+        # Touch the schema to reset the inactivity TTL on user-initiated queries
+        from asgiref.sync import sync_to_async
+
+        from apps.projects.models import TenantSchema
+
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+        if ts is not None:
+            await sync_to_async(ts.touch)()
+
         results = []
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")

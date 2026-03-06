@@ -562,6 +562,16 @@ async def chat_view(request):
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
+    # Touch the schema to reset inactivity TTL on user-initiated chat
+    from apps.projects.models import SchemaState, TenantSchema
+
+    ts = await TenantSchema.objects.filter(
+        tenant=tenant_membership.tenant,
+        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+    ).afirst()
+    if ts is not None:
+        await sync_to_async(ts.touch)()
+
     # Load MCP tools; attach progress callback for run_materialization updates.
     progress_queue: asyncio.Queue = asyncio.Queue()
 
@@ -653,7 +663,9 @@ async def chat_view(request):
 
     async def _traced_stream():
         with trace_ctx:
-            async for chunk in langgraph_to_ui_stream(agent, input_state, config, progress_queue=progress_queue):
+            async for chunk in langgraph_to_ui_stream(
+                agent, input_state, config, progress_queue=progress_queue
+            ):
                 yield chunk
 
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)

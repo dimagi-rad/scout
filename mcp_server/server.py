@@ -253,6 +253,11 @@ async def query(tenant_id: str, sql: str) -> dict:
             tc["result"] = result
             return tc["result"]
 
+        # Touch schema to reset inactivity TTL on user-initiated queries
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+        if ts is not None:
+            await sync_to_async(ts.touch)()
+
         warnings = []
         if result.get("truncated"):
             warnings.append(f"Results truncated to {ctx.max_rows_per_query} rows")
