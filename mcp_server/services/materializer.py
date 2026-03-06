@@ -77,7 +77,7 @@ def run_pipeline(
 
     # ── 1. PROVISION ──────────────────────────────────────────────────────────
     report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
-    tenant_schema = SchemaManager().provision(tenant_membership)
+    tenant_schema = SchemaManager().provision(tenant_membership.tenant)
     schema_name = tenant_schema.schema_name
 
     run = MaterializationRun.objects.create(

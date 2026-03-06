@@ -22,8 +22,8 @@ class TenantSchema(models.Model):
     """Tracks a tenant's provisioned schema in the managed database."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant_membership = models.ForeignKey(
-        "users.TenantMembership",
+    tenant = models.ForeignKey(
+        "users.Tenant",
         on_delete=models.CASCADE,
         related_name="schemas",
     )
@@ -34,13 +34,20 @@ class TenantSchema(models.Model):
         default=SchemaState.PROVISIONING,
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    last_accessed_at = models.DateTimeField(auto_now=True)
+    last_accessed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-last_accessed_at"]
 
     def __str__(self):
         return f"{self.schema_name} ({self.state})"
+
+    def touch(self):
+        """Call this on user-initiated actions to reset the inactivity TTL."""
+        from django.utils import timezone
+
+        self.last_accessed_at = timezone.now()
+        self.save(update_fields=["last_accessed_at"])
 
 
 class MaterializationRun(models.Model):

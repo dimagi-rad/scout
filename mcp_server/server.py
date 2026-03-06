@@ -142,7 +142,7 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
                 .afirst()
             )
             tenant_metadata = await TenantMetadata.objects.filter(
-                tenant_membership_id=ts.tenant_membership_id
+                tenant_membership__tenant=ts.tenant
             ).afirst()
 
         pipeline_name = last_run.pipeline if last_run else "commcare_sync"
@@ -315,14 +315,14 @@ async def get_materialization_status(run_id: str) -> dict:
     """
     async with tool_context("get_materialization_status", run_id) as tc:
         try:
-            run = await MaterializationRun.objects.select_related(
-                "tenant_schema__tenant_membership"
-            ).aget(id=run_id)
+            run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
+                id=run_id
+            )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
-        tenant_id = run.tenant_schema.tenant_membership.tenant.external_id
+        tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
 
         tc["result"] = success_response(
@@ -355,9 +355,9 @@ async def cancel_materialization(run_id: str) -> dict:
     """
     async with tool_context("cancel_materialization", run_id) as tc:
         try:
-            run = await MaterializationRun.objects.select_related(
-                "tenant_schema__tenant_membership"
-            ).aget(id=run_id)
+            run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
+                id=run_id
+            )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
@@ -381,7 +381,7 @@ async def cancel_materialization(run_id: str) -> dict:
         run.result = {**(run.result or {}), "cancelled": True}
         await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
 
-        tenant_id = run.tenant_schema.tenant_membership.tenant.external_id
+        tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
         logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
 
@@ -555,7 +555,7 @@ async def get_schema_status(tenant_id: str) -> dict:
 
     async with tool_context("get_schema_status", tenant_id) as tc:
         ts = await TenantSchema.objects.filter(
-            tenant_membership__tenant_id=tenant_id,
+            tenant__external_id=tenant_id,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
         ).afirst()
 
@@ -639,7 +639,7 @@ async def teardown_schema(tenant_id: str, confirm: bool = False) -> dict:
 
         ts = (
             await TenantSchema.objects.filter(
-                tenant_membership__tenant_id=tenant_id,
+                tenant__external_id=tenant_id,
             )
             .exclude(state=SchemaState.TEARDOWN)
             .afirst()
