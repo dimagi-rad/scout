@@ -634,9 +634,31 @@ async def chat_view(request):
         "oauth_tokens": oauth_tokens,
     }
 
+    # Attach Langfuse tracing callback if configured
+    from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
+
+    langfuse_handler = get_langfuse_callback(
+        session_id=str(thread_id),
+        user_id=str(user.id),
+        metadata={"tenant_id": tenant_membership.tenant.external_id},
+    )
+    if langfuse_handler is not None:
+        config["callbacks"] = [langfuse_handler]
+
+    trace_ctx = langfuse_trace_context(
+        session_id=str(thread_id),
+        user_id=str(user.id),
+        metadata={"tenant_id": tenant_membership.tenant.external_id},
+    )
+
+    async def _traced_stream():
+        with trace_ctx:
+            async for chunk in langgraph_to_ui_stream(agent, input_state, config, progress_queue=progress_queue):
+                yield chunk
+
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)
     response = StreamingHttpResponse(
-        langgraph_to_ui_stream(agent, input_state, config, progress_queue=progress_queue),
+        _traced_stream(),
         content_type="text/event-stream; charset=utf-8",
     )
     response["Cache-Control"] = "no-cache"
