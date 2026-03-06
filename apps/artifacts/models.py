@@ -65,8 +65,10 @@ class Artifact(models.Model):
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="artifacts",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_artifacts",
         help_text="User who created this artifact.",
     )
     title = models.CharField(
