@@ -46,29 +46,3 @@ class Thread(models.Model):
 
     def __str__(self):
         return f"{self.title} ({self.id})"
-
-
-class ThreadUIState(models.Model):
-    """Stores per-user UI preferences for a thread (e.g. which tool calls are expanded).
-
-    Kept separate from Thread so shared threads can have per-viewer state.
-    """
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="thread_ui_states",
-    )
-    thread = models.ForeignKey(
-        Thread,
-        on_delete=models.CASCADE,
-        related_name="ui_states",
-    )
-    # Keyed by "{message_id}:{part_index}" → bool (True = expanded)
-    tool_states = models.JSONField(default=dict)
-
-    class Meta:
-        unique_together = [("user", "thread")]
-
-    def __str__(self):
-        return f"UIState({self.user_id}, {self.thread_id})"

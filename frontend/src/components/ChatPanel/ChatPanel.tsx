@@ -112,7 +112,6 @@ function ShareMenu({
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
-  const [toolStates, setToolStates] = useState<Record<string, boolean>>({})
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -173,22 +172,26 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDomainId])
 
-  // Load messages and UI state from backend when threadId changes
+  // Load messages from backend when threadId changes
   useEffect(() => {
     if (!threadId) return
     let cancelled = false
 
-    async function loadThread() {
-      const [msgs, uiStateRes] = await Promise.allSettled([
-        api.get<UIMessage[]>(`/api/chat/threads/${threadId}/messages/`),
-        api.get<{ tool_states: Record<string, boolean> }>(`/api/chat/threads/${threadId}/ui-state/`),
-      ])
-      if (cancelled) return
-      setMessages(msgs.status === "fulfilled" ? msgs.value : [])
-      setToolStates(uiStateRes.status === "fulfilled" ? (uiStateRes.value.tool_states ?? {}) : {})
+    async function loadMessages() {
+      try {
+        const msgs = await api.get<UIMessage[]>(`/api/chat/threads/${threadId}/messages/`)
+        if (!cancelled) {
+          setMessages(msgs)
+        }
+      } catch {
+        // New thread or fetch failed — start with empty
+        if (!cancelled) {
+          setMessages([])
+        }
+      }
     }
 
-    loadThread()
+    loadMessages()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId])
@@ -289,11 +292,6 @@ export function ChatPanel() {
             key={msg.id}
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
-            toolStates={toolStates}
-            onToggleTool={(key, value) => {
-              setToolStates((prev) => ({ ...prev, [key]: value }))
-              api.patch(`/api/chat/threads/${threadId}/ui-state/`, { tool_states: { [key]: value } }).catch(() => {})
-            }}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}

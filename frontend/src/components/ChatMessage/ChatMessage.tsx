@@ -70,8 +70,6 @@ function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode
 interface ChatMessageProps {
   message: UIMessage
   isActiveMessage: boolean
-  toolStates: Record<string, boolean>
-  onToggleTool: (key: string, value: boolean) => void
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -135,37 +133,20 @@ interface ToolCallPartProps {
   index: number
   isLatest: boolean
   isActiveMessage: boolean
-  messageId: string
-  toolStates: Record<string, boolean>
-  onToggleTool: (key: string, value: boolean) => void
 }
 
-function ToolCallPart({ part, index, isLatest, isActiveMessage, messageId, toolStates, onToggleTool }: ToolCallPartProps) {
+function ToolCallPart({ part, index, isLatest, isActiveMessage }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
 
-  const fieldKey = `${messageId}:${index}`
-
-  // Streaming messages: auto-expand while active, auto-collapse when superseded.
-  // User overrides are tied to the current isLatest so they reset on transition.
-  const autoExpanded = (isLatest || isLoading) && AUTO_EXPAND_TOOLS.has(toolName)
+  // Auto-expand while actively streaming; collapsed by default for historical messages.
+  // User overrides tied to isLatest reset automatically when a part is superseded.
+  const autoExpanded = (isLatest || isLoading) && isActiveMessage && AUTO_EXPAND_TOOLS.has(toolName)
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
-  const streamingExpanded = effectiveOverride ?? autoExpanded
-
-  // Historical messages: server-persisted state, default to collapsed.
-  const persistedExpanded = toolStates[fieldKey] ?? false
-
-  const expanded = isActiveMessage ? streamingExpanded : persistedExpanded
-
-  const toggleExpanded = () => {
-    if (isActiveMessage) {
-      setOverride({ whenLatest: isLatest, value: !expanded })
-    } else {
-      onToggleTool(fieldKey, !expanded)
-    }
-  }
+  const expanded = effectiveOverride ?? autoExpanded
+  const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
 
   const richOutput = hasOutput && part.output != null ? renderToolOutput(toolName, part.output) : null
   const fallbackText =
@@ -243,7 +224,7 @@ function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; 
   )
 }
 
-export function ChatMessage({ message, isActiveMessage, toolStates, onToggleTool }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -303,7 +284,7 @@ export function ChatMessage({ message, isActiveMessage, toolStates, onToggleTool
               }
             }
 
-            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} messageId={message.id} toolStates={toolStates} onToggleTool={onToggleTool} />
+            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
           }
 
           return null
