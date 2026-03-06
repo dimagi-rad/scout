@@ -69,6 +69,7 @@ function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode
 
 interface ChatMessageProps {
   message: UIMessage
+  isActiveMessage: boolean
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,12 +127,26 @@ const AUTO_EXPAND_TOOLS = new Set([
   "get_metadata",
 ])
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function ToolCallPart({ part, index }: { part: any; index: number }) {
+interface ToolCallPartProps {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  part: any
+  index: number
+  isLatest: boolean
+  isActiveMessage: boolean
+}
+
+function ToolCallPart({ part, index, isLatest, isActiveMessage }: ToolCallPartProps) {
   const toolName = getToolName(part)
-  const [expanded, setExpanded] = useState(() => AUTO_EXPAND_TOOLS.has(toolName))
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
+
+  // Auto-expand while actively streaming; collapsed by default for historical messages.
+  // User overrides tied to isLatest reset automatically when a part is superseded.
+  const autoExpanded = (isLatest || isLoading) && isActiveMessage && AUTO_EXPAND_TOOLS.has(toolName)
+  const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
+  const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
+  const expanded = effectiveOverride ?? autoExpanded
+  const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
 
   const richOutput = hasOutput && part.output != null ? renderToolOutput(toolName, part.output) : null
   const fallbackText =
@@ -141,7 +156,7 @@ function ToolCallPart({ part, index }: { part: any; index: number }) {
     <div key={index} className="rounded border bg-muted/30 my-1 text-xs">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
         data-testid={`tool-call-${toolName}`}
       >
@@ -170,9 +185,15 @@ function ToolCallPart({ part, index }: { part: any; index: number }) {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function ReasoningPart({ part, index }: { part: any; index: number }) {
-  const [expanded, setExpanded] = useState(false)
+function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; index: number; isLatest: boolean; isActiveMessage: boolean }) {
   const text = part.reasoning || part.text || ""
+
+  // Only auto-expand while actively streaming. On historical loads or once superseded: collapsed.
+  const autoExpanded = isActiveMessage && isLatest
+  const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
+  const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
+  const expanded = effectiveOverride ?? autoExpanded
+  const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
 
   if (!text) return null
 
@@ -180,7 +201,7 @@ function ReasoningPart({ part, index }: { part: any; index: number }) {
     <div key={index} className="rounded border border-dashed bg-muted/20 my-1 text-xs">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggleExpanded}
         className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
         data-testid="thinking-toggle"
       >
@@ -203,7 +224,7 @@ function ReasoningPart({ part, index }: { part: any; index: number }) {
   )
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -238,7 +259,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
           }
 
           if (part.type === "reasoning") {
-            return <ReasoningPart key={i} part={part} index={i} />
+            return <ReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
           }
 
           if (isToolUIPart(part)) {
@@ -263,7 +284,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               }
             }
 
-            return <ToolCallPart key={i} part={part} index={i} />
+            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
           }
 
           return null

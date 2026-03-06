@@ -287,8 +287,12 @@ export function ChatPanel() {
             Ask a question about your data to get started.
           </div>
         )}
-        {messages.map((msg: UIMessage) => (
-          <ChatMessage key={msg.id} message={msg} />
+        {messages.map((msg: UIMessage, msgIdx: number) => (
+          <ChatMessage
+            key={msg.id}
+            message={msg}
+            isActiveMessage={isStreaming && msgIdx === messages.length - 1}
+          />
         ))}
         {isStreaming && <ThinkingIndicator />}
         {error && (
