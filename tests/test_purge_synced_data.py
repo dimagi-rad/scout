@@ -25,7 +25,7 @@ def membership(user):
 @pytest.fixture
 def tenant_schema(membership):
     return TenantSchema.objects.create(
-        tenant_membership=membership,
+        tenant=membership.tenant,
         schema_name="test_domain",
         state="active",
     )

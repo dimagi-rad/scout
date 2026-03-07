@@ -2,7 +2,7 @@
 Artifact views for Scout data agent platform.
 
 Provides views for rendering artifacts in a sandboxed iframe,
-fetching artifact data via API, executing live queries, and serving shared artifacts.
+fetching artifact data via API, and executing live queries.
 """
 
 import json
@@ -22,7 +22,7 @@ from apps.users.models import TenantMembership
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
 
-from .models import AccessLevel, Artifact, SharedArtifact
+from .models import Artifact
 from .services.export import ArtifactExporter
 
 logger = logging.getLogger(__name__)
@@ -781,6 +781,15 @@ class ArtifactQueryDataView(View):
             ]
             return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
+        # Touch the schema to reset the inactivity TTL on user-initiated queries
+        from asgiref.sync import sync_to_async
+
+        from apps.projects.models import TenantSchema
+
+        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
+        if ts is not None:
+            await sync_to_async(ts.touch)()
+
         results = []
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")
@@ -813,125 +822,6 @@ class ArtifactQueryDataView(View):
         return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
 
-class SharedArtifactView(View):
-    """
-    Public view for accessing shared artifacts via token.
-
-    Checks access level, expiration, and allowed users before
-    returning artifact data.
-
-    Note: View count is incremented via POST to avoid state changes on GET
-    requests and to properly support CSRF protection.
-    """
-
-    def get(self, request: HttpRequest, share_token: str) -> JsonResponse:
-        """Fetch shared artifact data (read-only, no state changes)."""
-        share = get_object_or_404(
-            SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
-            share_token=share_token,
-        )
-
-        # Check if share is expired
-        if share.is_expired:
-            return JsonResponse({"error": "This share link has expired."}, status=403)
-
-        # Check access based on access level
-        if share.access_level == AccessLevel.PUBLIC:
-            # Public links are accessible to anyone
-            pass
-        elif share.access_level == AccessLevel.TENANT:
-            # Workspace-level access requires authentication and tenant membership
-            if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required to access this artifact."}, status=401
-                )
-            workspace = share.artifact.workspace
-            if workspace:
-                from apps.users.models import TenantMembership
-
-                if not TenantMembership.objects.filter(
-                    user=request.user, tenant=workspace.tenant
-                ).exists():
-                    return JsonResponse(
-                        {"error": "You must be a workspace member to access this artifact."},
-                        status=403,
-                    )
-        elif share.access_level == AccessLevel.SPECIFIC:
-            # Specific user access requires authentication and being in allowed_users
-            if not request.user.is_authenticated:
-                return JsonResponse(
-                    {"error": "Authentication required to access this artifact."}, status=401
-                )
-            if not share.allowed_users.filter(pk=request.user.pk).exists():
-                return JsonResponse(
-                    {"error": "You do not have permission to access this artifact."}, status=403
-                )
-
-        # Return artifact data (no state changes on GET)
-        artifact = share.artifact
-        return JsonResponse(
-            {
-                "id": str(artifact.id),
-                "title": artifact.title,
-                "type": artifact.artifact_type,
-                "code": artifact.code,
-                "data": artifact.data,
-                "version": artifact.version,
-                "access_level": share.access_level,
-                "view_count": share.view_count,
-            }
-        )
-
-    def post(self, request: HttpRequest, share_token: str) -> JsonResponse:
-        """
-        Record a view of the shared artifact.
-
-        This endpoint should be called by the client after successfully
-        loading and displaying the artifact to the user.
-        """
-        share = get_object_or_404(
-            SharedArtifact.objects.select_related("artifact", "artifact__workspace"),
-            share_token=share_token,
-        )
-
-        # Check if share is expired
-        if share.is_expired:
-            return JsonResponse({"error": "This share link has expired."}, status=403)
-
-        # Check access based on access level (same checks as GET)
-        if share.access_level == AccessLevel.PUBLIC:
-            pass
-        elif share.access_level == AccessLevel.TENANT:
-            if not request.user.is_authenticated:
-                return JsonResponse({"error": "Authentication required."}, status=401)
-            workspace = share.artifact.workspace
-            if workspace:
-                from apps.users.models import TenantMembership
-
-                if not TenantMembership.objects.filter(
-                    user=request.user, tenant=workspace.tenant
-                ).exists():
-                    return JsonResponse(
-                        {"error": "You must be a workspace member."},
-                        status=403,
-                    )
-        elif share.access_level == AccessLevel.SPECIFIC:
-            if not request.user.is_authenticated:
-                return JsonResponse({"error": "Authentication required."}, status=401)
-            if not share.allowed_users.filter(pk=request.user.pk).exists():
-                return JsonResponse({"error": "You do not have permission."}, status=403)
-
-        # Record the view
-        share.increment_view_count()
-
-        return JsonResponse(
-            {
-                "status": "ok",
-                "view_count": share.view_count,
-            }
-        )
-
-
 class ArtifactListView(View):
     """
     GET /api/artifacts/<tenant_id>/ - List artifacts for the specified workspace.
@@ -954,6 +844,8 @@ class ArtifactListView(View):
                 Q(title__icontains=search) | Q(description__icontains=search)
             )
 
+        from apps.common.utils import creator_display_name
+
         results = [
             {
                 "id": str(a.id),
@@ -962,10 +854,11 @@ class ArtifactListView(View):
                 "artifact_type": a.artifact_type,
                 "version": a.version,
                 "has_live_queries": bool(a.source_queries),
+                "created_by_name": creator_display_name(a.created_by),
                 "created_at": a.created_at.isoformat(),
                 "updated_at": a.updated_at.isoformat(),
             }
-            for a in queryset
+            for a in queryset.select_related("created_by")
         ]
         return JsonResponse({"results": results})
 
@@ -1011,8 +904,22 @@ class ArtifactDetailView(View):
         artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
         if err:
             return err
-        artifact.delete()
+        artifact.soft_delete(deleted_by=request.user)
         return HttpResponse(status=204)
+
+
+class ArtifactUndeleteView(View):
+    """POST /api/artifacts/<tenant_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
+
+    def post(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+        workspace, err = _resolve_workspace(request, tenant_id)
+        if err:
+            return err
+        artifact = get_object_or_404(Artifact.all_objects, pk=artifact_id, workspace=workspace)
+        artifact.undelete()
+        return JsonResponse({"id": str(artifact.id), "is_deleted": False})
 
 
 class ArtifactExportView(View):

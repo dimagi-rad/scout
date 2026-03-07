@@ -19,7 +19,7 @@ def _resolve_tenant_schema(tenant):
     from apps.projects.models import SchemaState, TenantSchema
 
     return TenantSchema.objects.filter(
-        tenant_membership__tenant=tenant,
+        tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).first()
 
@@ -235,7 +235,7 @@ class DataDictionaryView(APIView):
 
         schema_name = tenant_schema.schema_name
         all_columns = _get_all_columns(schema_name)
-        tenant = tenant_schema.tenant_membership.tenant
+        tenant = tenant_schema.tenant
         tenant_metadata = _get_tenant_metadata(tenant)
 
         enriched_tables = {}
@@ -352,7 +352,7 @@ class TableDetailView(APIView):
         if table_name not in known:
             return None
 
-        tenant = tenant_schema.tenant_membership.tenant
+        tenant = tenant_schema.tenant
         tenant_metadata = _get_tenant_metadata(tenant)
         source_metadata = _build_source_metadata(table_name, tenant_metadata)
 

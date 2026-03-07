@@ -18,7 +18,7 @@ class TestSchemaManager:
             return_value=mock_conn,
         ):
             mgr = SchemaManager()
-            ts = mgr.provision(tenant_membership)
+            ts = mgr.provision(tenant_membership.tenant)
 
         assert ts.schema_name == mgr._sanitize_schema_name(tenant_membership.tenant.external_id)
         assert ts.state == "active"
@@ -31,13 +31,13 @@ class TestSchemaManager:
         mgr = SchemaManager()
         schema_name = mgr._sanitize_schema_name(tenant_membership.tenant.external_id)
         TenantSchema.objects.create(
-            tenant_membership=tenant_membership,
+            tenant=tenant_membership.tenant,
             schema_name=schema_name,
             state="active",
         )
 
         # No DB connection should be needed when an active schema is found
-        ts = mgr.provision(tenant_membership)
+        ts = mgr.provision(tenant_membership.tenant)
 
         assert TenantSchema.objects.count() == 1  # no duplicate
         assert ts.schema_name == schema_name

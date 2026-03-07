@@ -77,7 +77,7 @@ class RecipeDetailView(APIView):
         recipe, err = self._get_recipe(request, tenant_id, recipe_id)
         if err:
             return err
-        recipe.delete()
+        recipe.soft_delete(deleted_by=request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -109,6 +109,15 @@ class RecipeRunView(APIView):
         except Exception as e:
             logger.exception("Error running recipe %s", recipe_id)
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Touch the schema to reset the inactivity TTL on user-initiated recipe runs
+        from apps.projects.models import SchemaState, TenantSchema
+
+        ts = TenantSchema.objects.filter(
+            tenant=workspace.tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
+        ).first()
+        if ts is not None:
+            ts.touch()
 
         return Response(RecipeRunSerializer(run).data, status=status.HTTP_201_CREATED)
 

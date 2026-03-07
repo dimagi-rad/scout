@@ -28,16 +28,16 @@ def get_managed_db_connection():
 class SchemaManager:
     """Creates and manages tenant schemas in the managed database."""
 
-    def provision(self, tenant_membership) -> TenantSchema:
+    def provision(self, tenant) -> TenantSchema:
         """Get or create a schema for the tenant.
 
-        Checks for an existing active schema by schema_name (not just by
-        tenant_membership) so that multiple users in the same CommCare domain
-        share one schema rather than colliding on the unique constraint.
+        Checks for an existing active schema by schema_name so that multiple
+        users in the same tenant share one schema rather than colliding on the
+        unique constraint.
         """
         from django.db import IntegrityError
 
-        schema_name = self._sanitize_schema_name(tenant_membership.tenant.external_id)
+        schema_name = self._sanitize_schema_name(tenant.external_id)
 
         existing = TenantSchema.objects.filter(
             schema_name=schema_name,
@@ -45,12 +45,12 @@ class SchemaManager:
         ).first()
 
         if existing:
-            existing.save(update_fields=["last_accessed_at"])  # touch
+            existing.touch()
             return existing
 
         try:
             ts = TenantSchema.objects.create(
-                tenant_membership=tenant_membership,
+                tenant=tenant,
                 schema_name=schema_name,
                 state=SchemaState.PROVISIONING,
             )
@@ -87,7 +87,7 @@ class SchemaManager:
         logger.info(
             "Provisioned schema '%s' for tenant '%s'",
             schema_name,
-            tenant_membership.tenant.external_id,
+            tenant.external_id,
         )
         return ts
 

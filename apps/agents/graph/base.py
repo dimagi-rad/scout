@@ -134,7 +134,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
     block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
     """
     ts = await TenantSchema.objects.filter(
-        tenant_membership__tenant=tenant_membership.tenant,
+        tenant=tenant_membership.tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 

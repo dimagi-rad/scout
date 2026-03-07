@@ -497,7 +497,7 @@ class TestLoadTenantContext:
         from mcp_server.context import load_tenant_context
 
         await TenantSchema.objects.acreate(
-            tenant_membership=tenant_membership,
+            tenant=tenant_membership.tenant,
             schema_name="dimagi",
             state=SchemaState.ACTIVE,
         )
@@ -522,7 +522,7 @@ class TestLoadTenantContext:
         from mcp_server.context import load_tenant_context
 
         await TenantSchema.objects.acreate(
-            tenant_membership=tenant_membership,
+            tenant=tenant_membership.tenant,
             schema_name="dimagi",
             state=SchemaState.ACTIVE,
         )

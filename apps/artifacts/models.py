@@ -6,13 +6,16 @@ React components, HTML pages, Plotly charts, Markdown documents, and SVG graphic
 """
 
 import hashlib
-import secrets
 import uuid
 
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.utils import timezone
+
+
+class SoftDeleteManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
 
 
 class ArtifactType(models.TextChoices):
@@ -30,8 +33,7 @@ class Artifact(models.Model):
     Represents a generated artifact from agent conversations.
 
     Artifacts are code or visualization outputs created by the AI agent during
-    conversations. They support versioning through parent_artifact linking and
-    can be shared via SharedArtifact records.
+    conversations. They support versioning through parent_artifact linking.
 
     Attributes:
         id: Unique identifier for the artifact.
@@ -65,8 +67,10 @@ class Artifact(models.Model):
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="artifacts",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_artifacts",
         help_text="User who created this artifact.",
     )
     title = models.CharField(
@@ -115,6 +119,18 @@ class Artifact(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    objects = SoftDeleteManager()
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ["-created_at"]
@@ -127,6 +143,20 @@ class Artifact(models.Model):
 
     def __str__(self):
         return f"{self.title} (v{self.version})"
+
+    def soft_delete(self, deleted_by) -> None:
+        from django.utils import timezone
+
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.deleted_by = deleted_by
+        self.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
+
+    def undelete(self) -> None:
+        self.is_deleted = False
+        self.deleted_at = None
+        self.deleted_by = None
+        self.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
 
     @property
     def content_hash(self) -> str:
@@ -190,158 +220,3 @@ class Artifact(models.Model):
             current = current.parent_artifact
             depth += 1
         return list(reversed(history))
-
-
-class AccessLevel(models.TextChoices):
-    """Access level choices for shared artifacts."""
-
-    PUBLIC = "public", "Public (anyone with link)"
-    TENANT = "tenant", "Tenant Members Only"
-    SPECIFIC = "specific", "Specific Users Only"
-
-
-class SharedArtifact(models.Model):
-    """
-    Represents a shareable link to an artifact.
-
-    SharedArtifact enables sharing artifacts with different access levels:
-    - Public: Anyone with the link can view
-    - Project: Only project members can view
-    - Specific: Only explicitly allowed users can view
-
-    Attributes:
-        id: Unique identifier for the share record.
-        artifact: The artifact being shared.
-        created_by: User who created the share link.
-        share_token: Unique token for the share URL.
-        access_level: Who can access the shared artifact.
-        allowed_users: Specific users allowed when access_level is 'specific'.
-        expires_at: Optional expiration datetime for the share link.
-        view_count: Number of times the shared artifact has been viewed.
-        created_at: When the share was created.
-    """
-
-    id = models.UUIDField(
-        primary_key=True,
-        default=uuid.uuid4,
-        editable=False,
-    )
-    artifact = models.ForeignKey(
-        Artifact,
-        on_delete=models.CASCADE,
-        related_name="shares",
-        help_text="The artifact being shared.",
-    )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="shared_artifacts",
-        help_text="User who created this share link.",
-    )
-    share_token = models.CharField(
-        max_length=64,
-        unique=True,
-        db_index=True,
-        help_text="Unique token for the share URL.",
-    )
-    access_level = models.CharField(
-        max_length=20,
-        choices=AccessLevel.choices,
-        default=AccessLevel.TENANT,
-        help_text="Who can access this shared artifact.",
-    )
-    allowed_users = models.ManyToManyField(
-        settings.AUTH_USER_MODEL,
-        blank=True,
-        related_name="accessible_shared_artifacts",
-        help_text="Users allowed to access when access_level is 'specific'.",
-    )
-    expires_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="When this share link expires. Null means no expiration.",
-    )
-    view_count = models.IntegerField(
-        default=0,
-        help_text="Number of times this shared artifact has been viewed.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-        verbose_name = "Shared Artifact"
-        verbose_name_plural = "Shared Artifacts"
-        indexes = [
-            models.Index(fields=["artifact", "-created_at"]),
-        ]
-
-    def __str__(self):
-        return f"Share: {self.artifact.title} ({self.access_level})"
-
-    @property
-    def share_url(self) -> str:
-        """
-        Generate the full share URL for this artifact.
-
-        Returns:
-            The complete URL path for accessing the shared artifact.
-        """
-        return f"/artifacts/shared/{self.share_token}/"
-
-    @property
-    def is_expired(self) -> bool:
-        """
-        Check if this share link has expired.
-
-        Returns:
-            True if the share has expired, False otherwise.
-        """
-        if self.expires_at is None:
-            return False
-        return timezone.now() > self.expires_at
-
-    def increment_view_count(self) -> None:
-        """Increment the view count atomically."""
-        SharedArtifact.objects.filter(pk=self.pk).update(view_count=models.F("view_count") + 1)
-        self.refresh_from_db(fields=["view_count"])
-
-    def can_access(self, user) -> bool:
-        """
-        Check if a user can access this shared artifact.
-
-        Args:
-            user: The user attempting to access the artifact.
-
-        Returns:
-            True if the user can access the artifact, False otherwise.
-        """
-        if self.is_expired:
-            return False
-
-        if self.access_level == AccessLevel.PUBLIC:
-            return True
-
-        if user is None or not user.is_authenticated:
-            return False
-
-        if self.access_level == AccessLevel.TENANT:
-            from apps.users.models import TenantMembership
-
-            return TenantMembership.objects.filter(
-                user=user, tenant=self.artifact.workspace.tenant
-            ).exists()
-
-        if self.access_level == AccessLevel.SPECIFIC:
-            return self.allowed_users.filter(pk=user.pk).exists()
-
-        return False
-
-    @classmethod
-    def generate_token(cls) -> str:
-        """
-        Generate a unique share token.
-
-        Returns:
-            A URL-safe base64-encoded token (43 characters).
-        """
-        return secrets.token_urlsafe(32)

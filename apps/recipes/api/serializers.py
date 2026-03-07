@@ -12,6 +12,7 @@ class RecipeListSerializer(serializers.ModelSerializer):
 
     variable_count = serializers.SerializerMethodField()
     last_run_at = serializers.SerializerMethodField()
+    created_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Recipe
@@ -22,6 +23,7 @@ class RecipeListSerializer(serializers.ModelSerializer):
             "is_shared",
             "variable_count",
             "last_run_at",
+            "created_by_name",
             "created_at",
             "updated_at",
         ]
@@ -34,9 +36,16 @@ class RecipeListSerializer(serializers.ModelSerializer):
         last_run = obj.runs.order_by("-created_at").first()
         return last_run.created_at if last_run else None
 
+    def get_created_by_name(self, obj):
+        from apps.common.utils import creator_display_name
+
+        return creator_display_name(obj.created_by)
+
 
 class RecipeDetailSerializer(serializers.ModelSerializer):
     """Serializer for recipe detail/update."""
+
+    created_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Recipe
@@ -47,10 +56,16 @@ class RecipeDetailSerializer(serializers.ModelSerializer):
             "prompt",
             "variables",
             "is_shared",
+            "created_by_name",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_by_name", "created_at", "updated_at"]
+
+    def get_created_by_name(self, obj):
+        from apps.common.utils import creator_display_name
+
+        return creator_display_name(obj.created_by)
 
 
 class RecipeUpdateSerializer(serializers.ModelSerializer):

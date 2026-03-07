@@ -98,3 +98,17 @@ def createsuperuser(c: Context) -> None:
 def purge_data(c: Context) -> None:
     """Purge all materialized tenant data (schemas, metadata, data dictionaries). Dev only."""
     c.run("uv run python manage.py purge_synced_data --confirm", pty=True)
+
+
+@task
+def docs_serve(c: Context) -> None:
+    """Serve the docs site locally (zensical serve in docs/)."""
+    with c.cd("docs"):
+        c.run("uv run --with zensical zensical serve", pty=True)
+
+
+@task
+def docs_build(c: Context) -> None:
+    """Build the docs site (zensical build in docs/)."""
+    with c.cd("docs"):
+        c.run("uv run --with zensical zensical build", pty=True)

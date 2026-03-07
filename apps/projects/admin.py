@@ -16,7 +16,7 @@ class TenantWorkspaceAdmin(admin.ModelAdmin):
 
 @admin.register(TenantSchema)
 class TenantSchemaAdmin(admin.ModelAdmin):
-    list_display = ["schema_name", "state", "tenant_membership", "created_at"]
+    list_display = ["schema_name", "state", "tenant", "created_at"]
     list_filter = ["state"]
     readonly_fields = ["id", "created_at"]
 

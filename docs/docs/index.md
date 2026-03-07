@@ -25,3 +25,7 @@ Scout is an AI-powered data agent platform that lets teams query databases using
 - **[Admin guide](admin/)** — Project configuration, user management, table access, and knowledge base
 - **[Deployment](deployment/)** — Docker, manual setup, and environment variable reference
 - **[Reference](reference/)** — API endpoints, security model, and artifact types
+
+## Design
+
+**[Core design specification](reference/design.md)** — The authoritative reference for Scout's data model and behaviour: tenants, workspaces, user roles & permissions, invitations, threads, artifacts, recipes, multi-tenancy, account deletion, and the audit log.
