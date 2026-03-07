@@ -2,7 +2,7 @@
 Tests for ArtifactQueryDataView — live query execution via MCP service.
 """
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.contrib.auth.models import update_last_login
@@ -108,7 +108,8 @@ def static_artifact(db, workspace, member_user):
     )
 
 
-FAKE_CTX = object()
+FAKE_CTX = MagicMock()
+FAKE_CTX.schema_name = "test_domain"
 
 MOCK_SUBMISSIONS_RESULT = {
     "columns": ["total"],
