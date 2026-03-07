@@ -845,10 +845,7 @@ class SharedArtifactView(View):
             return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level
-        if share.access_level == AccessLevel.PUBLIC:
-            # Public links are accessible to anyone
-            pass
-        elif share.access_level == AccessLevel.TENANT:
+        if share.access_level == AccessLevel.TENANT:
             # Workspace-level access requires authentication and tenant membership
             if not request.user.is_authenticated:
                 return JsonResponse(
@@ -908,9 +905,7 @@ class SharedArtifactView(View):
             return JsonResponse({"error": "This share link has expired."}, status=403)
 
         # Check access based on access level (same checks as GET)
-        if share.access_level == AccessLevel.PUBLIC:
-            pass
-        elif share.access_level == AccessLevel.TENANT:
+        if share.access_level == AccessLevel.TENANT:
             if not request.user.is_authenticated:
                 return JsonResponse({"error": "Authentication required."}, status=401)
             workspace = share.artifact.workspace

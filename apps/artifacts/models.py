@@ -228,7 +228,6 @@ class Artifact(models.Model):
 class AccessLevel(models.TextChoices):
     """Access level choices for shared artifacts."""
 
-    PUBLIC = "public", "Public (anyone with link)"
     TENANT = "tenant", "Tenant Members Only"
     SPECIFIC = "specific", "Specific Users Only"
 
@@ -350,9 +349,6 @@ class SharedArtifact(models.Model):
         """
         if self.is_expired:
             return False
-
-        if self.access_level == AccessLevel.PUBLIC:
-            return True
 
         if user is None or not user.is_authenticated:
             return False

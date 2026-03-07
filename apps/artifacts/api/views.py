@@ -81,6 +81,12 @@ class CreateShareView(ArtifactSharePermissionMixin, APIView):
         if not has_permission:
             return error_response
 
+        if request.data.get("access_level") == "public":
+            return Response(
+                {"error": "Public sharing is not permitted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = CreateShareSerializer(
             data=request.data,
             context={"request": request, "artifact": artifact},

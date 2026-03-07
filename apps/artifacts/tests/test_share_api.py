@@ -86,12 +86,12 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         self.assertIn("share_token", response.data)
         self.assertIn("share_url", response.data)
-        self.assertEqual(response.data["access_level"], "public")
+        self.assertEqual(response.data["access_level"], "tenant")
 
     def test_create_share_as_non_creator_forbidden(self):
         """Non-creator users cannot create share links."""
@@ -101,7 +101,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.other_membership.id, "artifact_id": self.artifact.id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -113,7 +113,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.regular_membership.id, "artifact_id": self.artifact.id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -123,7 +123,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -139,7 +139,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         response = self.client.post(
             url,
             {
-                "access_level": "public",
+                "access_level": "tenant",
                 "expires_at": expires_at.isoformat(),
             },
         )
@@ -159,7 +159,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
         response = self.client.post(
             url,
             {
-                "access_level": "public",
+                "access_level": "tenant",
                 "expires_at": expires_at.isoformat(),
             },
         )
@@ -221,7 +221,7 @@ class CreateShareViewTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.creator_membership.id, "artifact_id": fake_id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
@@ -236,7 +236,7 @@ class ListSharesViewTests(ArtifactShareAPITestCase):
             artifact=self.artifact,
             created_by=self.creator,
             share_token="token1234567890",
-            access_level=AccessLevel.PUBLIC,
+            access_level=AccessLevel.TENANT,
         )
         self.share2 = SharedArtifact.objects.create(
             artifact=self.artifact,
@@ -322,7 +322,7 @@ class RevokeShareViewTests(ArtifactShareAPITestCase):
             artifact=self.artifact,
             created_by=self.creator,
             share_token="tokentorevoke123",
-            access_level=AccessLevel.PUBLIC,
+            access_level=AccessLevel.TENANT,
         )
 
     def test_revoke_share_as_creator(self):
@@ -421,7 +421,7 @@ class ShareTokenGenerationTests(ArtifactShareAPITestCase):
 
         tokens = set()
         for _ in range(5):
-            response = self.client.post(url, {"access_level": "public"})
+            response = self.client.post(url, {"access_level": "tenant"})
             self.assertEqual(response.status_code, status.HTTP_201_CREATED)
             tokens.add(response.data["share_token"])
 
@@ -436,7 +436,21 @@ class ShareTokenGenerationTests(ArtifactShareAPITestCase):
             "artifacts:create_share",
             kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
         )
-        response = self.client.post(url, {"access_level": "public"})
+        response = self.client.post(url, {"access_level": "tenant"})
 
         # secrets.token_urlsafe(32) produces ~43 character tokens
         self.assertGreaterEqual(len(response.data["share_token"]), 40)
+
+
+class PublicSharingBlockedTests(ArtifactShareAPITestCase):
+    """Public sharing is prohibited due to sensitive data risk."""
+
+    def test_cannot_create_public_share(self):
+        """Creating a share with access_level='public' is rejected."""
+        self.client.force_authenticate(user=self.creator)
+        url = reverse(
+            "artifacts:create_share",
+            kwargs={"tenant_id": self.creator_membership.id, "artifact_id": self.artifact.id},
+        )
+        resp = self.client.post(url, {"access_level": "public"})
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

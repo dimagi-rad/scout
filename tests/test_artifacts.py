@@ -713,8 +713,8 @@ class TestSharedArtifactAccessControl:
         assert shared.expires_at == future_expiry
         assert not shared.is_expired
 
-    def test_public_access_allows_unauthenticated_users(self, user, artifact):
-        """Test that public share links can be accessed by unauthenticated users."""
+    def test_public_access_denied_unauthenticated_users(self, user, artifact):
+        """Public sharing is removed; legacy public records deny unauthenticated access."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
@@ -722,11 +722,10 @@ class TestSharedArtifactAccessControl:
             access_level="public",
         )
 
-        # Unauthenticated user (None)
-        assert shared.can_access(None) is True
+        assert shared.can_access(None) is False
 
-    def test_public_access_allows_any_authenticated_user(self, user, other_user, artifact):
-        """Test that public share links work for any authenticated user."""
+    def test_public_access_denied_any_authenticated_user(self, user, other_user, artifact):
+        """Public sharing is removed; legacy public records deny authenticated access."""
         shared = SharedArtifact.objects.create(
             artifact=artifact,
             created_by=user,
@@ -734,8 +733,8 @@ class TestSharedArtifactAccessControl:
             access_level="public",
         )
 
-        assert shared.can_access(user) is True
-        assert shared.can_access(other_user) is True
+        assert shared.can_access(user) is False
+        assert shared.can_access(other_user) is False
 
     def test_tenant_access_requires_membership(self, user, other_user, artifact, tenant_membership):
         """Test that tenant-level access requires tenant membership."""

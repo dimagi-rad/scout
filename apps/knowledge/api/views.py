@@ -118,6 +118,13 @@ class KnowledgeListCreateView(APIView):
             return err
 
         item_type = request.data.get("type")
+        if item_type == "learning":
+            return Response(
+                {
+                    "error": "AgentLearning entries are created automatically by the agent and cannot be manually created."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not item_type or item_type not in KNOWLEDGE_TYPES:
             return Response(
                 {
