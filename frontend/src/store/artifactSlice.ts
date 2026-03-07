@@ -48,7 +48,7 @@ export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], 
         const params = new URLSearchParams()
         if (options?.search) params.set("search", options.search)
         const qs = params.toString()
-        const url = `/api/artifacts/${activeDomainId}/${qs ? `?${qs}` : ""}`
+        const url = `/api/workspaces/${activeDomainId}/artifacts/${qs ? `?${qs}` : ""}`
         const response = await api.get<ArtifactListResponse>(url)
         set({
           artifacts: response.results,
@@ -66,7 +66,7 @@ export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], 
       const activeDomainId = get().activeDomainId
       if (!activeDomainId) throw new Error("No active domain selected.")
       const updated = await api.patch<{ id: string; title: string; description: string }>(
-        `/api/artifacts/${activeDomainId}/${artifactId}/`,
+        `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`,
         data,
       )
       set((state) => ({
@@ -78,7 +78,7 @@ export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], 
     deleteArtifact: async (artifactId) => {
       const activeDomainId = get().activeDomainId
       if (!activeDomainId) throw new Error("No active domain selected.")
-      await api.delete(`/api/artifacts/${activeDomainId}/${artifactId}/`)
+      await api.delete(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`)
       set((state) => ({
         artifacts: state.artifacts.filter((a) => a.id !== artifactId),
       }))

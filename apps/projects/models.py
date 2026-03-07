@@ -107,7 +107,7 @@ class TenantWorkspace(models.Model):
         ordering = ["tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.tenant.canonical_name} ({self.tenant.external_id})"
+        return f"TenantWorkspace({self.tenant_id})"
 
     @property
     def external_tenant_id(self):

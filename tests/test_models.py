@@ -135,7 +135,7 @@ class TestTenantWorkspace:
         ws = TenantWorkspace.objects.create(tenant=tenant)
         assert ws.tenant.external_id == "dimagi"
         assert ws.tenant_name == "Dimagi"  # via property
-        assert str(ws) == "Dimagi (dimagi)"
+        assert str(ws) == f"TenantWorkspace({ws.tenant_id})"
 
     def test_one_workspace_per_tenant(self):
         from apps.projects.models import TenantWorkspace

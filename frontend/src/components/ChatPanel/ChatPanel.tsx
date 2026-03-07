@@ -20,9 +20,11 @@ function getPublicUrl(token: string): string {
 
 function ShareMenu({
   threadId,
+  workspaceId,
   onClose,
 }: {
   threadId: string
+  workspaceId: string
   onClose: () => void
 }) {
   const threads = useAppStore((s) => s.threads)
@@ -51,7 +53,7 @@ function ShareMenu({
           <input
             type="checkbox"
             checked={isShared}
-            onChange={(e) => updateThreadSharing(threadId, { is_shared: e.target.checked })}
+            onChange={(e) => updateThreadSharing(threadId, { is_shared: e.target.checked }, workspaceId)}
             className="h-4 w-4 rounded border-gray-300"
           />
           <Users className="h-4 w-4 text-muted-foreground" />
@@ -64,7 +66,7 @@ function ShareMenu({
           <input
             type="checkbox"
             checked={isPublic}
-            onChange={(e) => updateThreadSharing(threadId, { is_public: e.target.checked })}
+            onChange={(e) => updateThreadSharing(threadId, { is_public: e.target.checked }, workspaceId)}
             className="h-4 w-4 rounded border-gray-300"
           />
           <Globe className="h-4 w-4 text-muted-foreground" />
@@ -122,8 +124,8 @@ export function ChatPanel() {
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
-  const contextRef = useRef({ tenantId: activeDomainId, threadId })
-  contextRef.current = { tenantId: activeDomainId, threadId }
+  const contextRef = useRef({ workspaceId: activeDomainId, threadId })
+  contextRef.current = { workspaceId: activeDomainId, threadId }
 
   const [transport] = useState(
     () =>
@@ -174,12 +176,12 @@ export function ChatPanel() {
 
   // Load messages from backend when threadId changes
   useEffect(() => {
-    if (!threadId) return
+    if (!threadId || !activeDomainId) return
     let cancelled = false
 
     async function loadMessages() {
       try {
-        const msgs = await api.get<UIMessage[]>(`/api/chat/threads/${threadId}/messages/`)
+        const msgs = await api.get<UIMessage[]>(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/`)
         if (!cancelled) {
           setMessages(msgs)
         }
@@ -194,7 +196,7 @@ export function ChatPanel() {
     loadMessages()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId])
+  }, [threadId, activeDomainId])
 
   // Refresh thread list when streaming finishes (so new threads appear)
   useEffect(() => {
@@ -270,9 +272,10 @@ export function ChatPanel() {
               <Share2 className="mr-1 h-4 w-4" />
               Share
             </Button>
-            {showShareMenu && (
+            {showShareMenu && activeDomainId && (
               <ShareMenu
                 threadId={threadId}
+                workspaceId={activeDomainId}
                 onClose={() => setShowShareMenu(false)}
               />
             )}
