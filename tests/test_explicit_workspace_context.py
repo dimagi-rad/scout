@@ -1,7 +1,7 @@
-"""Tests for path-scoped tenant workspace resolution.
+"""Tests for workspace-scoped URL resolution.
 
-These tests verify the NEW URL structure where tenant_id is explicit in the URL path.
-They FAIL against the current code (old unscoped URLs) and PASS after the fix.
+These tests verify the URL structure where workspace_id is explicit in the URL path.
+All content APIs are nested under /api/workspaces/<workspace_id>/.
 """
 
 import pytest
@@ -47,6 +47,7 @@ def tenant_b(db):
 
 @pytest.fixture
 def membership_a(db, user_a, tenant_a):
+    """Creates TenantMembership and auto-creates Workspace via signal."""
     from apps.users.models import TenantMembership
 
     return TenantMembership.objects.create(user=user_a, tenant=tenant_a)
@@ -54,216 +55,165 @@ def membership_a(db, user_a, tenant_a):
 
 @pytest.fixture
 def membership_b(db, user_a, tenant_b):
+    """Creates TenantMembership and auto-creates Workspace via signal."""
     from apps.users.models import TenantMembership
 
     return TenantMembership.objects.create(user=user_a, tenant=tenant_b)
 
 
 @pytest.fixture
-def workspace_a(db, tenant_a):
-    from apps.projects.models import TenantWorkspace
+def workspace_a(membership_a):
+    """The auto-created workspace for user_a in tenant_a."""
+    from apps.projects.models import Workspace
 
-    ws, _ = TenantWorkspace.objects.get_or_create(tenant=tenant_a)
-    return ws
+    return Workspace.objects.get(
+        is_auto_created=True,
+        workspace_tenants__tenant=membership_a.tenant,
+        memberships__user=membership_a.user,
+    )
 
 
 @pytest.fixture
-def workspace_b(db, tenant_b):
-    from apps.projects.models import TenantWorkspace
+def workspace_b(membership_b):
+    """The auto-created workspace for user_a in tenant_b."""
+    from apps.projects.models import Workspace
 
-    ws, _ = TenantWorkspace.objects.get_or_create(tenant=tenant_b)
-    return ws
+    return Workspace.objects.get(
+        is_auto_created=True,
+        workspace_tenants__tenant=membership_b.tenant,
+        memberships__user=membership_b.user,
+    )
 
 
-class TestKnowledgeExplicitTenantId:
-    def test_scoped_url_returns_200(self, client, user_a, membership_a, workspace_a):
-        """GET /api/knowledge/<tenant_id>/ returns 200 for a valid tenant."""
+class TestKnowledgeWorkspaceScoped:
+    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
+        """GET /api/workspaces/<id>/knowledge/ returns 200 for a member."""
         client.force_login(user_a)
-        response = client.get(f"/api/knowledge/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/knowledge/")
         assert response.status_code == 200
 
-    def test_unscoped_url_returns_404(self, client, user_a, membership_a, workspace_a):
+    def test_unscoped_url_returns_404(self, client, user_a):
         """GET /api/knowledge/ (old URL) is no longer valid."""
         client.force_login(user_a)
         response = client.get("/api/knowledge/")
         assert response.status_code == 404
 
-    def test_correct_workspace_is_used(
-        self, client, user_a, membership_a, membership_b, workspace_a, workspace_b
-    ):
-        """The tenant_id in the URL determines which workspace's data is returned."""
+    def test_correct_workspace_is_used(self, client, user_a, workspace_a, workspace_b):
+        """The workspace_id in the URL determines which workspace's data is returned."""
         from apps.knowledge.models import KnowledgeEntry
 
         KnowledgeEntry.objects.create(workspace=workspace_a, title="Entry A", content="content")
         KnowledgeEntry.objects.create(workspace=workspace_b, title="Entry B", content="content")
 
-        # Mark membership_b as most recently selected — must have no effect
-        from django.utils import timezone
-
-        membership_b.last_selected_at = timezone.now()
-        membership_b.save(update_fields=["last_selected_at"])
-
         client.force_login(user_a)
-
-        response = client.get(f"/api/knowledge/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/knowledge/")
         assert response.status_code == 200
-        items = response.json().get("results", [])
-        titles = [item["title"] for item in items]
+        titles = [item["title"] for item in response.json().get("results", [])]
         assert "Entry A" in titles
         assert "Entry B" not in titles
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        """A tenant_id belonging to another user returns 403."""
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other", canonical_name="Other"
-        )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.get(f"/api/knowledge/{other_membership.id}/")
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        """A workspace_id for a workspace the user doesn't belong to returns 403."""
+        client.force_login(user_b)
+        response = client.get(f"/api/workspaces/{workspace_a.id}/knowledge/")
         assert response.status_code == 403
 
 
-class TestRecipesExplicitTenantId:
-    def test_scoped_url_returns_200(self, client, user_a, membership_a, workspace_a):
+class TestRecipesWorkspaceScoped:
+    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
         client.force_login(user_a)
-        response = client.get(f"/api/recipes/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/recipes/")
         assert response.status_code == 200
 
-    def test_unscoped_url_returns_404(self, client, user_a, membership_a, workspace_a):
+    def test_unscoped_url_returns_404(self, client, user_a):
         client.force_login(user_a)
         response = client.get("/api/recipes/")
         assert response.status_code == 404
 
-    def test_correct_workspace_is_used(
-        self, client, user_a, membership_a, membership_b, workspace_a, workspace_b
-    ):
+    def test_correct_workspace_is_used(self, client, user_a, workspace_a, workspace_b):
         from apps.recipes.models import Recipe
 
         Recipe.objects.create(workspace=workspace_a, name="Recipe A")
         Recipe.objects.create(workspace=workspace_b, name="Recipe B")
 
-        from django.utils import timezone
-
-        membership_b.last_selected_at = timezone.now()
-        membership_b.save(update_fields=["last_selected_at"])
-
         client.force_login(user_a)
-        response = client.get(f"/api/recipes/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/recipes/")
         assert response.status_code == 200
         names = [r["name"] for r in response.json()]
         assert "Recipe A" in names
         assert "Recipe B" not in names
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other2", canonical_name="Other2"
-        )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.get(f"/api/recipes/{other_membership.id}/")
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        client.force_login(user_b)
+        response = client.get(f"/api/workspaces/{workspace_a.id}/recipes/")
         assert response.status_code == 403
 
 
-class TestArtifactsExplicitTenantId:
-    def test_scoped_url_returns_200(self, client, user_a, membership_a, workspace_a):
+class TestArtifactsWorkspaceScoped:
+    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
         client.force_login(user_a)
-        response = client.get(f"/api/artifacts/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/artifacts/")
         assert response.status_code == 200
 
-    def test_unscoped_url_returns_404(self, client, user_a, membership_a, workspace_a):
+    def test_unscoped_url_returns_404(self, client, user_a):
         client.force_login(user_a)
         response = client.get("/api/artifacts/")
         assert response.status_code == 404
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other3", canonical_name="Other3"
-        )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.get(f"/api/artifacts/{other_membership.id}/")
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        client.force_login(user_b)
+        response = client.get(f"/api/workspaces/{workspace_a.id}/artifacts/")
         assert response.status_code == 403
 
 
-class TestDataDictionaryExplicitTenantId:
-    def test_scoped_url_returns_200(self, client, user_a, membership_a, workspace_a):
+class TestDataDictionaryWorkspaceScoped:
+    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
         client.force_login(user_a)
-        response = client.get(f"/api/data-dictionary/{membership_a.id}/")
+        response = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
         assert response.status_code == 200
 
-    def test_unscoped_url_returns_404(self, client, user_a, membership_a, workspace_a):
+    def test_unscoped_url_returns_404(self, client, user_a):
         client.force_login(user_a)
         response = client.get("/api/data-dictionary/")
         assert response.status_code == 404
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other4", canonical_name="Other4"
-        )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.get(f"/api/data-dictionary/{other_membership.id}/")
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        client.force_login(user_b)
+        response = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
         assert response.status_code == 403
 
-    def test_correct_workspace_is_used(
-        self, client, user_a, membership_a, membership_b, workspace_a, workspace_b
-    ):
-        """tenant_id in URL determines which workspace's data is returned."""
-        from django.utils import timezone
-
-        membership_b.last_selected_at = timezone.now()
-        membership_b.save(update_fields=["last_selected_at"])
-
+    def test_each_workspace_returns_own_data(self, client, user_a, workspace_a, workspace_b):
         client.force_login(user_a)
-        # Both return 200 for different memberships — key thing is no cross-tenant bleed
-        response_a = client.get(f"/api/data-dictionary/{membership_a.id}/")
-        response_b = client.get(f"/api/data-dictionary/{membership_b.id}/")
+        response_a = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
+        response_b = client.get(f"/api/workspaces/{workspace_b.id}/data-dictionary/")
         assert response_a.status_code == 200
         assert response_b.status_code == 200
 
 
-class TestRefreshSchemaExplicitTenantId:
-    def test_scoped_url_returns_200(self, client, user_a, membership_a, workspace_a):
+class TestRefreshSchemaWorkspaceScoped:
+    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
         client.force_login(user_a)
-        response = client.post(f"/api/refresh-schema/{membership_a.id}/")
+        response = client.post(f"/api/workspaces/{workspace_a.id}/refresh/")
         assert response.status_code == 200
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other5", canonical_name="Other5"
-        )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.post(f"/api/refresh-schema/{other_membership.id}/")
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        client.force_login(user_b)
+        response = client.post(f"/api/workspaces/{workspace_a.id}/refresh/")
         assert response.status_code == 403
 
 
-class TestTableDetailExplicitTenantId:
-    def test_scoped_url_returns_404_for_unknown_table(
-        self, client, user_a, membership_a, workspace_a
-    ):
-        """Table endpoint with valid tenant but unknown table returns 404."""
+class TestTableDetailWorkspaceScoped:
+    def test_scoped_url_returns_404_for_unknown_table(self, client, user_a, workspace_a):
+        """Table endpoint with valid workspace but unknown table returns 404."""
         client.force_login(user_a)
-        response = client.get(f"/api/data-dictionary/{membership_a.id}/tables/public.nonexistent/")
+        response = client.get(
+            f"/api/workspaces/{workspace_a.id}/data-dictionary/tables/public.nonexistent/"
+        )
         assert response.status_code == 404
 
-    def test_foreign_tenant_id_returns_403(self, client, user_a, user_b, db):
-        from apps.users.models import Tenant, TenantMembership
-
-        other_tenant = Tenant.objects.create(
-            provider="commcare", external_id="domain-other6", canonical_name="Other6"
+    def test_non_member_returns_403(self, client, user_b, workspace_a):
+        client.force_login(user_b)
+        response = client.get(
+            f"/api/workspaces/{workspace_a.id}/data-dictionary/tables/public.cases/"
         )
-        other_membership = TenantMembership.objects.create(user=user_b, tenant=other_tenant)
-        client.force_login(user_a)
-        response = client.get(f"/api/data-dictionary/{other_membership.id}/tables/public.cases/")
         assert response.status_code == 403

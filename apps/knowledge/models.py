@@ -28,7 +28,7 @@ class TableKnowledge(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "projects.Workspace",
         on_delete=models.CASCADE,
         related_name="table_knowledge",
         null=True,
@@ -78,7 +78,7 @@ class TableKnowledge(models.Model):
         verbose_name_plural = "Table knowledge"
 
     def __str__(self):
-        return f"{self.table_name} ({self.workspace.tenant.canonical_name})"
+        return f"{self.table_name} ({self.workspace})"
 
 
 class KnowledgeEntry(models.Model):
@@ -92,7 +92,7 @@ class KnowledgeEntry(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "projects.Workspace",
         on_delete=models.CASCADE,
         related_name="knowledge_entries",
         null=True,
@@ -112,7 +112,7 @@ class KnowledgeEntry(models.Model):
         verbose_name_plural = "Knowledge entries"
 
     def __str__(self):
-        return f"{self.title} ({self.workspace.tenant.canonical_name})"
+        return f"{self.title} ({self.workspace})"
 
 
 class AgentLearning(models.Model):
@@ -137,7 +137,7 @@ class AgentLearning(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "projects.Workspace",
         on_delete=models.CASCADE,
         related_name="learnings",
         null=True,

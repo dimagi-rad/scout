@@ -45,8 +45,8 @@ class KnowledgeListCreateView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -112,8 +112,8 @@ class KnowledgeListCreateView(APIView):
             }
         )
 
-    def post(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def post(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -172,8 +172,8 @@ class KnowledgeDetailView(APIView):
                 continue
         return None, None, None
 
-    def get(self, request, tenant_id, item_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id, item_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -186,8 +186,8 @@ class KnowledgeDetailView(APIView):
         serializer = serializer_class(item)
         return Response(serializer.data)
 
-    def put(self, request, tenant_id, item_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def put(self, request, workspace_id, item_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -209,8 +209,8 @@ class KnowledgeDetailView(APIView):
         serializer.save()
         return Response(serializer.data)
 
-    def delete(self, request, tenant_id, item_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def delete(self, request, workspace_id, item_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -233,8 +233,8 @@ class KnowledgeExportView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -251,7 +251,8 @@ class KnowledgeExportView(APIView):
                 zf.writestr(filename, content)
 
         buf.seek(0)
-        safe_name = workspace.tenant.external_id.replace("/", "_")
+        tenant = workspace.tenant
+        safe_name = (tenant.external_id if tenant else str(workspace.id)).replace("/", "_")
         response = HttpResponse(buf.read(), content_type="application/zip")
         response["Content-Disposition"] = f'attachment; filename="knowledge-{safe_name}.zip"'
         return response
@@ -267,8 +268,8 @@ class KnowledgeImportView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser]
 
-    def post(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def post(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 

@@ -58,10 +58,10 @@ class Artifact(models.Model):
         editable=False,
     )
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "projects.Workspace",
         on_delete=models.CASCADE,
         related_name="artifacts",
-        help_text="The tenant workspace this artifact belongs to.",
+        help_text="The workspace this artifact belongs to.",
         null=True,
         blank=True,
     )

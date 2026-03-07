@@ -17,8 +17,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
-from apps.projects.models import TenantWorkspace
-from apps.users.models import TenantMembership
+from apps.projects.models import WorkspaceMembership
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
 
@@ -27,37 +26,35 @@ from .services.export import ArtifactExporter
 
 logger = logging.getLogger(__name__)
 
-_ACCESS_DENIED = {"error": "Tenant not found or access denied."}
+_ACCESS_DENIED = {"error": "Workspace not found or access denied."}
 
 
-def _resolve_workspace(request: HttpRequest, tenant_id):
-    """Resolve TenantWorkspace for Django (non-DRF) views.
+def _resolve_workspace(request: HttpRequest, workspace_id):
+    """Resolve Workspace for Django (non-DRF) views.
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
     try:
-        membership = TenantMembership.objects.select_related("tenant").get(
-            id=tenant_id, user=request.user
+        membership = WorkspaceMembership.objects.select_related("workspace").get(
+            workspace_id=workspace_id, user=request.user
         )
-    except TenantMembership.DoesNotExist:
+    except WorkspaceMembership.DoesNotExist:
         return None, JsonResponse(_ACCESS_DENIED, status=403)
-    workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
-    return workspace, None
+    return membership.workspace, None
 
 
-async def _aresolve_workspace(user, tenant_id):
+async def _aresolve_workspace(user, workspace_id):
     """Async workspace resolution for ArtifactQueryDataView.
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
     try:
-        membership = await TenantMembership.objects.select_related("tenant").aget(
-            id=tenant_id, user=user
+        membership = await WorkspaceMembership.objects.select_related("workspace").aget(
+            workspace_id=workspace_id, user=user
         )
-    except TenantMembership.DoesNotExist:
+    except WorkspaceMembership.DoesNotExist:
         return None, JsonResponse(_ACCESS_DENIED, status=403)
-    workspace, _ = await TenantWorkspace.objects.aget_or_create(tenant=membership.tenant)
-    return workspace, None
+    return membership.workspace, None
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
@@ -244,7 +241,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 if (artifact.has_live_queries) {
                     this.showLoading('Querying database...');
                     try {
-                        const resp = await fetch('/api/artifacts/' + artifact.tenant_id + '/' + artifact.id + '/query-data/', {
+                        const resp = await fetch('/api/workspaces/' + artifact.workspace_id + '/artifacts/' + artifact.id + '/query-data/', {
                             credentials: 'include',
                         });
                         if (!resp.ok) {
@@ -649,12 +646,12 @@ class ArtifactSandboxView(View):
     from CDN and listens for postMessage events to render artifacts securely.
     """
 
-    def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> HttpResponse:
+    def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> HttpResponse:
         """Return the sandbox HTML with strict CSP headers."""
         if not request.user.is_authenticated:
             return HttpResponse("Authentication required", status=401)
 
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return HttpResponse("Access denied", status=403)
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
@@ -668,7 +665,7 @@ class ArtifactSandboxView(View):
         artifact_json = json.dumps(
             {
                 "id": str(artifact.id),
-                "tenant_id": str(tenant_id),
+                "workspace_id": str(workspace_id),
                 "title": artifact.title,
                 "type": artifact.artifact_type,
                 "code": artifact.code,
@@ -699,12 +696,12 @@ class ArtifactDataView(View):
     Requires project membership for access.
     """
 
-    def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+    def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         """Fetch artifact data for rendering."""
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
@@ -747,19 +744,20 @@ class ArtifactQueryDataView(View):
     format the artifact sandbox can consume directly via mergeQueryResults().
     """
 
-    async def get(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+    async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        from asgiref.sync import sync_to_async
         from django.http import Http404
 
         user = await request.auser()
         if not user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        workspace, err = await _aresolve_workspace(user, tenant_id)
+        workspace, err = await _aresolve_workspace(user, workspace_id)
         if err:
             return err
 
         try:
-            artifact = await Artifact.objects.select_related("workspace__tenant").aget(
+            artifact = await Artifact.objects.select_related("workspace").aget(
                 pk=artifact_id, workspace=workspace
             )
         except Artifact.DoesNotExist:
@@ -771,8 +769,12 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
+        tenant = await sync_to_async(lambda: artifact.workspace.tenant)()
+        if tenant is None:
+            return JsonResponse({"error": "Workspace has no associated tenant"}, status=400)
+
         try:
-            ctx = await load_tenant_context(artifact.workspace.tenant.external_id)
+            ctx = await load_tenant_context(tenant.external_id)
         except Exception as e:
             error_msg = str(e)
             results = [
@@ -782,8 +784,6 @@ class ArtifactQueryDataView(View):
             return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
         # Touch the schema to reset the inactivity TTL on user-initiated queries
-        from asgiref.sync import sync_to_async
-
         from apps.projects.models import TenantSchema
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
@@ -824,14 +824,14 @@ class ArtifactQueryDataView(View):
 
 class ArtifactListView(View):
     """
-    GET /api/artifacts/<tenant_id>/ - List artifacts for the specified workspace.
+    GET /api/artifacts/<workspace_id>/ - List artifacts for the specified workspace.
     """
 
-    def get(self, request: HttpRequest, tenant_id) -> JsonResponse:
+    def get(self, request: HttpRequest, workspace_id) -> JsonResponse:
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -865,21 +865,21 @@ class ArtifactListView(View):
 
 class ArtifactDetailView(View):
     """
-    PATCH /api/artifacts/<tenant_id>/<artifact_id>/ - Update title/description.
-    DELETE /api/artifacts/<tenant_id>/<artifact_id>/ - Delete artifact.
+    PATCH /api/artifacts/<workspace_id>/<artifact_id>/ - Update title/description.
+    DELETE /api/artifacts/<workspace_id>/<artifact_id>/ - Delete artifact.
     """
 
-    def _get_artifact_with_access(self, request: HttpRequest, tenant_id, artifact_id: str):
+    def _get_artifact_with_access(self, request: HttpRequest, workspace_id, artifact_id: str):
         if not request.user.is_authenticated:
             return None, JsonResponse({"error": "Authentication required"}, status=401)
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return None, err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
         return artifact, None
 
-    def patch(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
-        artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
+    def patch(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        artifact, err = self._get_artifact_with_access(request, workspace_id, artifact_id)
         if err:
             return err
         try:
@@ -900,8 +900,8 @@ class ArtifactDetailView(View):
             {"id": str(artifact.id), "title": artifact.title, "description": artifact.description}
         )
 
-    def delete(self, request: HttpRequest, tenant_id, artifact_id: str) -> HttpResponse:
-        artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
+    def delete(self, request: HttpRequest, workspace_id, artifact_id: str) -> HttpResponse:
+        artifact, err = self._get_artifact_with_access(request, workspace_id, artifact_id)
         if err:
             return err
         artifact.soft_delete(deleted_by=request.user)
@@ -909,12 +909,12 @@ class ArtifactDetailView(View):
 
 
 class ArtifactUndeleteView(View):
-    """POST /api/artifacts/<tenant_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
+    """POST /api/artifacts/<workspace_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
 
-    def post(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+    def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact.all_objects, pk=artifact_id, workspace=workspace)
@@ -929,13 +929,15 @@ class ArtifactExportView(View):
     Requires project membership for access.
     """
 
-    def get(self, request: HttpRequest, tenant_id, artifact_id: str, format: str) -> HttpResponse:
+    def get(
+        self, request: HttpRequest, workspace_id, artifact_id: str, format: str
+    ) -> HttpResponse:
         """
         Export artifact to the specified format.
 
         Args:
             request: HTTP request
-            tenant_id: UUID of the TenantMembership
+            workspace_id: UUID of the TenantMembership
             artifact_id: UUID of the artifact
             format: Export format (html, png, pdf)
 
@@ -945,7 +947,7 @@ class ArtifactExportView(View):
         if not request.user.is_authenticated:
             return JsonResponse({"error": "Authentication required"}, status=401)
 
-        workspace, err = _resolve_workspace(request, tenant_id)
+        workspace, err = _resolve_workspace(request, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)

@@ -201,7 +201,7 @@ def create_artifact_tools(
             logger.info(
                 "Created artifact %s for workspace %s: %s",
                 artifact.id,
-                workspace.external_tenant_id,
+                workspace.id,
                 title,
             )
 
@@ -220,7 +220,7 @@ def create_artifact_tools(
         except Exception as e:
             logger.exception(
                 "Failed to create artifact for workspace %s: %s",
-                workspace.external_tenant_id,
+                workspace.id,
                 str(e),
             )
             return {
@@ -319,7 +319,7 @@ def create_artifact_tools(
                 new_artifact.id,
                 new_artifact.version,
                 original.id,
-                workspace.external_tenant_id,
+                workspace.id,
             )
 
             # Build render URL
@@ -339,7 +339,7 @@ def create_artifact_tools(
             logger.exception(
                 "Failed to update artifact %s for workspace %s: %s",
                 artifact_id,
-                workspace.external_tenant_id,
+                workspace.id,
                 str(e),
             )
             return {

@@ -31,8 +31,8 @@ class RecipeListView(APIView):
     GET /api/recipes/ - List recipes for the active workspace.
     """
 
-    def get(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         recipes = Recipe.objects.filter(workspace=workspace)
@@ -47,8 +47,8 @@ class RecipeDetailView(APIView):
     DELETE /api/recipes/<recipe_id>/ - Delete a recipe.
     """
 
-    def _get_recipe(self, request, tenant_id, recipe_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def _get_recipe(self, request, workspace_id, recipe_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return None, err
         try:
@@ -57,14 +57,14 @@ class RecipeDetailView(APIView):
             return None, Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
         return recipe, None
 
-    def get(self, request, tenant_id, recipe_id):
-        recipe, err = self._get_recipe(request, tenant_id, recipe_id)
+    def get(self, request, workspace_id, recipe_id):
+        recipe, err = self._get_recipe(request, workspace_id, recipe_id)
         if err:
             return err
         return Response(RecipeDetailSerializer(recipe).data)
 
-    def put(self, request, tenant_id, recipe_id):
-        recipe, err = self._get_recipe(request, tenant_id, recipe_id)
+    def put(self, request, workspace_id, recipe_id):
+        recipe, err = self._get_recipe(request, workspace_id, recipe_id)
         if err:
             return err
         serializer = RecipeUpdateSerializer(recipe, data=request.data, partial=True)
@@ -73,8 +73,8 @@ class RecipeDetailView(APIView):
         serializer.save()
         return Response(RecipeDetailSerializer(recipe).data)
 
-    def delete(self, request, tenant_id, recipe_id):
-        recipe, err = self._get_recipe(request, tenant_id, recipe_id)
+    def delete(self, request, workspace_id, recipe_id):
+        recipe, err = self._get_recipe(request, workspace_id, recipe_id)
         if err:
             return err
         recipe.soft_delete(deleted_by=request.user)
@@ -86,8 +86,8 @@ class RecipeRunView(APIView):
     POST /api/recipes/<recipe_id>/run/ - Execute a recipe with variable values.
     """
 
-    def post(self, request, tenant_id, recipe_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def post(self, request, workspace_id, recipe_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:
@@ -113,11 +113,13 @@ class RecipeRunView(APIView):
         # Touch the schema to reset the inactivity TTL on user-initiated recipe runs
         from apps.projects.models import SchemaState, TenantSchema
 
-        ts = TenantSchema.objects.filter(
-            tenant=workspace.tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
-        ).first()
-        if ts is not None:
-            ts.touch()
+        tenant = workspace.tenant
+        if tenant:
+            ts = TenantSchema.objects.filter(
+                tenant=tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
+            ).first()
+            if ts is not None:
+                ts.touch()
 
         return Response(RecipeRunSerializer(run).data, status=status.HTTP_201_CREATED)
 
@@ -127,8 +129,8 @@ class RecipeRunListView(APIView):
     GET /api/recipes/<recipe_id>/runs/ - List runs for a recipe.
     """
 
-    def get(self, request, tenant_id, recipe_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id, recipe_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:
@@ -144,8 +146,8 @@ class RecipeRunDetailView(APIView):
     PATCH /api/recipes/<recipe_id>/runs/<run_id>/ - Update run sharing settings.
     """
 
-    def patch(self, request, tenant_id, recipe_id, run_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def patch(self, request, workspace_id, recipe_id, run_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:

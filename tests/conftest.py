@@ -41,6 +41,7 @@ def tenant(db):
 
 @pytest.fixture
 def tenant_membership(db, user, tenant):
+    """Create a TenantMembership (signal auto-creates a Workspace)."""
     from apps.users.models import TenantMembership
 
     return TenantMembership.objects.create(user=user, tenant=tenant)
@@ -56,7 +57,31 @@ def other_user(db):
 
 
 @pytest.fixture
-def workspace(db, tenant):
-    from apps.projects.models import TenantWorkspace
+def workspace(db, user, tenant):
+    """Create a test Workspace with WorkspaceTenant and WorkspaceMembership."""
+    from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
-    return TenantWorkspace.objects.create(tenant=tenant)
+    ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    return ws
+
+
+@pytest.fixture
+def read_user(db, workspace):
+    User = get_user_model()
+    from apps.projects.models import WorkspaceMembership, WorkspaceRole
+
+    u = User.objects.create_user(email="reader@example.com", password="pass")
+    WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ)
+    return u
+
+
+@pytest.fixture
+def write_user(db, workspace):
+    User = get_user_model()
+    from apps.projects.models import WorkspaceMembership, WorkspaceRole
+
+    u = User.objects.create_user(email="writer@example.com", password="pass")
+    WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)
+    return u

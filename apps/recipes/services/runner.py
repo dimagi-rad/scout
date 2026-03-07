@@ -99,11 +99,18 @@ class RecipeRunner:
             return self._provided_graph
 
         if self._graph is None:
+            from apps.projects.models import WorkspaceTenant
             from apps.users.models import TenantMembership
 
+            workspace_tenant = (
+                await WorkspaceTenant.objects.select_related("tenant")
+                .filter(workspace=self.recipe.workspace)
+                .afirst()
+            )
+            tenant = workspace_tenant.tenant if workspace_tenant else None
             self._tenant_membership = await TenantMembership.objects.filter(
                 user=self.user,
-                tenant=self.recipe.workspace.tenant,
+                tenant=tenant,
             ).afirst()
             self._graph = await build_agent_graph(
                 tenant_membership=self._tenant_membership,
@@ -297,10 +304,15 @@ class RecipeRunner:
 
         try:
             workspace = self.recipe.workspace
+            # Fetch tenant info asynchronously to avoid sync query in async context
+            from apps.projects.models import WorkspaceTenant as _WT
+
+            _wt = await _WT.objects.select_related("tenant").filter(workspace=workspace).afirst()
+            _tenant = _wt.tenant if _wt else None
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "tenant_id": workspace.external_tenant_id if workspace else "",
-                "tenant_name": workspace.tenant_name if workspace else "",
+                "tenant_id": _tenant.external_id if _tenant else "",
+                "tenant_name": _tenant.canonical_name if _tenant else "",
                 "tenant_membership_id": str(self._tenant_membership.id)
                 if self._tenant_membership
                 else "",
