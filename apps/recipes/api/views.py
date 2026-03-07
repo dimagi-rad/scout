@@ -77,7 +77,7 @@ class RecipeDetailView(APIView):
         recipe, err = self._get_recipe(request, tenant_id, recipe_id)
         if err:
             return err
-        recipe.delete()
+        recipe.soft_delete(deleted_by=request.user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

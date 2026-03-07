@@ -12,6 +12,11 @@ from django.conf import settings
 from django.db import models
 
 
+class RecipeSoftDeleteManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(is_deleted=False)
+
+
 class Recipe(models.Model):
     """
     A reusable workflow template that defines a sequence of prompts with variables.
@@ -85,6 +90,18 @@ class Recipe(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    objects = RecipeSoftDeleteManager()
+    all_objects = models.Manager()
 
     class Meta:
         ordering = ["-updated_at"]
@@ -102,6 +119,20 @@ class Recipe(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.workspace.tenant.canonical_name})"
+
+    def soft_delete(self, deleted_by) -> None:
+        from django.utils import timezone
+
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.deleted_by = deleted_by
+        self.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
+
+    def undelete(self) -> None:
+        self.is_deleted = False
+        self.deleted_at = None
+        self.deleted_by = None
+        self.save(update_fields=["is_deleted", "deleted_at", "deleted_by"])
 
     def get_variable_names(self) -> list[str]:
         """Return a list of variable names defined in this recipe."""
