@@ -1023,8 +1023,22 @@ class ArtifactDetailView(View):
         artifact, err = self._get_artifact_with_access(request, tenant_id, artifact_id)
         if err:
             return err
-        artifact.delete()
+        artifact.soft_delete(deleted_by=request.user)
         return HttpResponse(status=204)
+
+
+class ArtifactUndeleteView(View):
+    """POST /api/artifacts/<tenant_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
+
+    def post(self, request: HttpRequest, tenant_id, artifact_id: str) -> JsonResponse:
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "Authentication required"}, status=401)
+        workspace, err = _resolve_workspace(request, tenant_id)
+        if err:
+            return err
+        artifact = get_object_or_404(Artifact.all_objects, pk=artifact_id, workspace=workspace)
+        artifact.undelete()
+        return JsonResponse({"id": str(artifact.id), "is_deleted": False})
 
 
 class ArtifactExportView(View):

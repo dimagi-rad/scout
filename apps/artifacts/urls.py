@@ -14,6 +14,7 @@ from .views import (
     ArtifactListView,
     ArtifactQueryDataView,
     ArtifactSandboxView,
+    ArtifactUndeleteView,
     SharedArtifactView,
 )
 
@@ -25,6 +26,11 @@ urlpatterns = [
     # Tenant-scoped routes
     path("<uuid:tenant_id>/", ArtifactListView.as_view(), name="list"),
     path("<uuid:tenant_id>/<uuid:artifact_id>/", ArtifactDetailView.as_view(), name="detail"),
+    path(
+        "<uuid:tenant_id>/<uuid:artifact_id>/undelete/",
+        ArtifactUndeleteView.as_view(),
+        name="undelete",
+    ),
     path(
         "<uuid:tenant_id>/<uuid:artifact_id>/sandbox/",
         ArtifactSandboxView.as_view(),
