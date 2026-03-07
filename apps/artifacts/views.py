@@ -963,6 +963,8 @@ class ArtifactListView(View):
                 Q(title__icontains=search) | Q(description__icontains=search)
             )
 
+        from apps.common.utils import creator_display_name
+
         results = [
             {
                 "id": str(a.id),
@@ -971,10 +973,11 @@ class ArtifactListView(View):
                 "artifact_type": a.artifact_type,
                 "version": a.version,
                 "has_live_queries": bool(a.source_queries),
+                "created_by_name": creator_display_name(a.created_by),
                 "created_at": a.created_at.isoformat(),
                 "updated_at": a.updated_at.isoformat(),
             }
-            for a in queryset
+            for a in queryset.select_related("created_by")
         ]
         return JsonResponse({"results": results})
 
