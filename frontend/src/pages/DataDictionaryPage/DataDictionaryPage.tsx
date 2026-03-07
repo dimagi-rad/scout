@@ -10,19 +10,21 @@ export function DataDictionaryPage() {
   const dataDictionary = useAppStore((s) => s.dataDictionary)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
   const selectedTable = useAppStore((s) => s.selectedTable)
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const { fetchDictionary, refreshSchema, fetchTable, clearDictionary } =
     useAppStore((s) => s.dictionaryActions)
 
   const { status: networkStatus } = useNetworkStatus()
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  // Fetch dictionary on mount
+  // Fetch dictionary when domain is available
   useEffect(() => {
+    if (!activeDomainId) return
     fetchDictionary()
     return () => {
       clearDictionary()
     }
-  }, [fetchDictionary, clearDictionary])
+  }, [fetchDictionary, clearDictionary, activeDomainId])
 
   const handleSelectTable = async (schema: string, table: string) => {
     await fetchTable(schema, table)
