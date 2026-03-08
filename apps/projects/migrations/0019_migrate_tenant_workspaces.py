@@ -9,8 +9,10 @@ from django.db import migrations
 
 def create_workspaces_from_tenant_workspaces(apps, schema_editor):
     TenantWorkspace = apps.get_model("projects", "TenantWorkspace")
+    TenantMembership = apps.get_model("users", "TenantMembership")
     Workspace = apps.get_model("projects", "Workspace")
     WorkspaceTenant = apps.get_model("projects", "WorkspaceTenant")
+    WorkspaceMembership = apps.get_model("projects", "WorkspaceMembership")
 
     for tw in TenantWorkspace.objects.select_related("tenant").all():
         ws, created = Workspace.objects.get_or_create(
@@ -25,6 +27,13 @@ def create_workspaces_from_tenant_workspaces(apps, schema_editor):
         )
         if created:
             WorkspaceTenant.objects.create(workspace=ws, tenant=tw.tenant)
+
+        for tm in TenantMembership.objects.filter(tenant=tw.tenant):
+            WorkspaceMembership.objects.get_or_create(
+                workspace=ws,
+                user=tm.user,
+                defaults={"role": "manage"},
+            )
 
 
 def reverse_migration(apps, schema_editor):

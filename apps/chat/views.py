@@ -447,9 +447,20 @@ def _resolve_workspace_and_membership(user, workspace_id):
 
 
 @sync_to_async
-def _get_thread(thread_id, user):
-    """Load a thread ensuring ownership."""
+def _get_thread(thread_id, user, *, workspace_id=None):
+    """Load a thread ensuring ownership, optionally scoped to a workspace."""
     try:
+        if workspace_id is not None:
+            from apps.projects.models import WorkspaceTenant
+
+            tenant_ids = list(
+                WorkspaceTenant.objects.filter(workspace_id=workspace_id).values_list(
+                    "tenant_id", flat=True
+                )
+            )
+            return Thread.objects.get(
+                id=thread_id, user=user, tenant_membership__tenant_id__in=tenant_ids
+            )
         return Thread.objects.get(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
@@ -825,7 +836,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
-    thread = await _get_thread(thread_id, user)
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         return JsonResponse([], safe=False)
 
@@ -864,7 +875,7 @@ async def thread_share_view(request, workspace_id, thread_id):
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
-    thread = await _get_thread(thread_id, user)
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         return JsonResponse({"error": "Thread not found"}, status=404)
 
