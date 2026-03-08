@@ -177,7 +177,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
         from apps.projects.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership_id=ts.tenant_membership_id
+            tenant_membership_id=tenant_membership.id
         ).afirst()
 
         column_map: dict[str, list[dict]] = {}

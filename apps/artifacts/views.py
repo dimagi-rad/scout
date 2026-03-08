@@ -256,7 +256,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             type: 'artifact-query-data',
                             artifactId: artifact.id,
                             queryData: queryData,
-                        }, '*');
+                        }, window.location.origin);
                     } catch (error) {
                         this.showError('Data Fetch Error', error.message);
                         return;
@@ -616,7 +616,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     window.parent.postMessage({
                         type: 'artifact-error',
                         error: { title, message, details }
-                    }, '*');
+                    }, window.location.origin);
                 } catch (e) { /* ignore if not in iframe */ }
             },
 
