@@ -224,7 +224,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
             logger.info(
                 "Created new learning %s for workspace %s: %s",
                 learning.id,
-                workspace.external_tenant_id,
+                workspace.id,
                 description[:50] + "..." if len(description) > 50 else description,
             )
 
@@ -240,7 +240,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
         except Exception as e:
             logger.exception(
                 "Failed to save learning for workspace %s: %s",
-                workspace.external_tenant_id,
+                workspace.id,
                 str(e),
             )
             return {

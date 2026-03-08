@@ -28,10 +28,11 @@ export interface UiSlice {
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => void
-    fetchThreads: (tenantId: string) => Promise<void>
+    fetchThreads: (workspaceId: string) => Promise<void>
     updateThreadSharing: (
       threadId: string,
       data: { is_shared?: boolean; is_public?: boolean },
+      workspaceId: string,
     ) => Promise<ThreadShareState>
     openArtifact: (id: string) => void
     closeArtifact: () => void
@@ -50,10 +51,10 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
     selectThread: (id: string) => {
       set({ threadId: id, activeArtifactId: null })
     },
-    fetchThreads: async (tenantId: string) => {
+    fetchThreads: async (workspaceId: string) => {
       set({ threadsStatus: "loading" })
       try {
-        const threads = await api.get<Thread[]>(`/api/chat/threads/?tenant_id=${tenantId}`)
+        const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
         set({ threads, threadsStatus: "loaded" })
       } catch {
         set({ threads: [], threadsStatus: "loaded" })
@@ -62,9 +63,10 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
     updateThreadSharing: async (
       threadId: string,
       data: { is_shared?: boolean; is_public?: boolean },
+      workspaceId: string,
     ) => {
       const result = await api.patch<ThreadShareState>(
-        `/api/chat/threads/${threadId}/share/`,
+        `/api/workspaces/${workspaceId}/threads/${threadId}/share/`,
         data,
       )
       set((state) => ({

@@ -418,9 +418,49 @@ def _upsert_thread(thread_id, user, title, *, tenant_membership):
 
 
 @sync_to_async
-def _get_thread(thread_id, user):
-    """Load a thread ensuring ownership."""
+def _resolve_workspace_and_membership(user, workspace_id):
+    """Resolve Workspace and TenantMembership from workspace_id.
+
+    Returns (workspace, tenant_membership) or (None, None) if access denied.
+    """
+    from apps.projects.models import WorkspaceMembership
+
     try:
+        wm = WorkspaceMembership.objects.select_related("workspace").get(
+            workspace_id=workspace_id, user=user
+        )
+    except WorkspaceMembership.DoesNotExist:
+        return None, None
+
+    workspace = wm.workspace
+    # For the agent, resolve a TenantMembership via the workspace's tenants
+    from apps.users.models import TenantMembership
+
+    tenant = workspace.tenant  # single-tenant compat
+    if tenant is None:
+        return workspace, None
+    try:
+        tm = TenantMembership.objects.select_related("tenant").get(user=user, tenant=tenant)
+    except TenantMembership.DoesNotExist:
+        return workspace, None
+    return workspace, tm
+
+
+@sync_to_async
+def _get_thread(thread_id, user, *, workspace_id=None):
+    """Load a thread ensuring ownership, optionally scoped to a workspace."""
+    try:
+        if workspace_id is not None:
+            from apps.projects.models import WorkspaceTenant
+
+            tenant_ids = list(
+                WorkspaceTenant.objects.filter(workspace_id=workspace_id).values_list(
+                    "tenant_id", flat=True
+                )
+            )
+            return Thread.objects.get(
+                id=thread_id, user=user, tenant_membership__tenant_id__in=tenant_ids
+            )
         return Thread.objects.get(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
@@ -471,10 +511,23 @@ def _get_thread_artifacts(thread_id):
 
 
 @sync_to_async
-def _list_threads(user, *, tenant_membership_id):
-    """Return recent threads for a tenant/user."""
-    qs = Thread.objects.filter(user=user, tenant_membership_id=tenant_membership_id)
-    qs = qs.order_by("-updated_at")[:50]
+def _list_threads(user, *, workspace_id):
+    """Return recent threads for a workspace/user."""
+    from apps.projects.models import WorkspaceMembership
+
+    try:
+        wm = WorkspaceMembership.objects.select_related("workspace").get(
+            workspace_id=workspace_id, user=user
+        )
+    except WorkspaceMembership.DoesNotExist:
+        return None
+
+    workspace = wm.workspace
+    tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+
+    qs = Thread.objects.filter(user=user, tenant_membership__tenant_id__in=tenant_ids).order_by(
+        "-updated_at"
+    )[:50]
     return [
         {
             "id": str(t.id),
@@ -519,13 +572,13 @@ async def chat_view(request):
 
     messages = body.get("messages", [])
     data = body.get("data", {})
-    tenant_id = data.get("tenantId") or body.get("tenantId")
+    workspace_id = data.get("workspaceId") or body.get("workspaceId")
     thread_id = data.get("threadId") or body.get("threadId") or str(uuid.uuid4())
 
     if not messages:
         return JsonResponse({"error": "messages is required"}, status=400)
-    if not tenant_id:
-        return JsonResponse({"error": "tenantId is required"}, status=400)
+    if not workspace_id:
+        return JsonResponse({"error": "workspaceId is required"}, status=400)
 
     # Get the last user message.
     # AI SDK v6 sends {parts: [{type:"text", text:"..."}]} instead of {content: "..."}.
@@ -541,15 +594,12 @@ async def chat_view(request):
             {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
         )
 
-    # Validate tenant membership
-    from apps.users.models import TenantMembership
-
-    try:
-        tenant_membership = await TenantMembership.objects.select_related("tenant").aget(
-            id=tenant_id, user=user
-        )
-    except TenantMembership.DoesNotExist:
-        return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
+    # Resolve workspace and tenant membership
+    workspace, tenant_membership = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    if tenant_membership is None:
+        return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
     try:
@@ -750,11 +800,11 @@ def _langchain_messages_to_ui(lc_messages) -> list[dict]:
     return ui_messages
 
 
-async def thread_list_view(request):
+async def thread_list_view(request, workspace_id):
     """
-    GET /api/chat/threads/?tenant_id=X
+    GET /api/workspaces/<workspace_id>/threads/
 
-    Returns recent threads for the authenticated user in a tenant.
+    Returns recent threads for the authenticated user in a workspace.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -763,22 +813,13 @@ async def thread_list_view(request):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    tenant_id = request.GET.get("tenant_id")
-    if not tenant_id:
-        return JsonResponse({"error": "tenant_id is required"}, status=400)
-
-    from apps.users.models import TenantMembership
-
-    try:
-        await TenantMembership.objects.aget(id=tenant_id, user=user)
-    except TenantMembership.DoesNotExist:
-        return JsonResponse({"error": "Tenant not found or access denied"}, status=403)
-
-    threads = await _list_threads(user, tenant_membership_id=tenant_id)
+    threads = await _list_threads(user, workspace_id=workspace_id)
+    if threads is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
     return JsonResponse(threads, safe=False)
 
 
-async def thread_messages_view(request, thread_id):
+async def thread_messages_view(request, workspace_id, thread_id):
     """
     GET /api/chat/threads/<thread_id>/messages/
 
@@ -791,7 +832,11 @@ async def thread_messages_view(request, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    thread = await _get_thread(thread_id, user)
+    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         return JsonResponse([], safe=False)
 
@@ -817,7 +862,7 @@ async def thread_messages_view(request, thread_id):
 # ---------------------------------------------------------------------------
 
 
-async def thread_share_view(request, thread_id):
+async def thread_share_view(request, workspace_id, thread_id):
     """
     GET  /api/chat/threads/<thread_id>/share/  — get sharing settings
     PATCH /api/chat/threads/<thread_id>/share/ — update sharing settings
@@ -826,7 +871,11 @@ async def thread_share_view(request, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    thread = await _get_thread(thread_id, user)
+    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
         return JsonResponse({"error": "Thread not found"}, status=404)
 

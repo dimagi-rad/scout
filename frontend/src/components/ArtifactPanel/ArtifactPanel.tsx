@@ -43,7 +43,7 @@ export function ArtifactPanel() {
     setDataLoading(true)
     setDataError(null)
     try {
-      const data = await api.get<QueryDataResponse>(`/api/artifacts/${activeDomainId}/${id}/query-data/`)
+      const data = await api.get<QueryDataResponse>(`/api/workspaces/${activeDomainId}/artifacts/${id}/query-data/`)
       setQueryData(data)
     } catch (e) {
       setDataError(e instanceof Error ? e.message : "Failed to load query data")
@@ -164,7 +164,7 @@ export function ArtifactPanel() {
           {activeTab === "view" && (
             <iframe
               key={artifactId}
-              src={activeDomainId ? `/api/artifacts/${activeDomainId}/${artifactId}/sandbox/` : ""}
+              src={activeDomainId ? `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/` : ""}
               className="flex-1 w-full"
               sandbox="allow-scripts allow-same-origin"
               title="Artifact"

@@ -8,8 +8,14 @@ from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
 
-from apps.chat.views import public_thread_view
-from apps.projects.api.views import RefreshSchemaView
+from apps.chat.urls import workspace_thread_urlpatterns
+from apps.chat.views import chat_view, public_thread_view
+from apps.projects.api.workspace_views import (
+    WorkspaceDetailView,
+    WorkspaceListView,
+    WorkspaceMemberDetailView,
+    WorkspaceMemberListView,
+)
 from apps.projects.views import health_check
 from apps.recipes.api.views import PublicRecipeRunView
 from config.views import widget_js_view
@@ -51,21 +57,42 @@ def api_root(request):
     return HttpResponse(html)
 
 
+# All workspace-scoped content URLs, nested under /api/workspaces/<workspace_id>/
+workspace_urlpatterns = [
+    path("artifacts/", include("apps.artifacts.urls")),
+    path("recipes/", include("apps.recipes.urls")),
+    path("knowledge/", include("apps.knowledge.urls")),
+    path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
+    path("", include("apps.projects.api.urls")),
+    # Workspace management
+    path("members/", WorkspaceMemberListView.as_view(), name="workspace_members"),
+    path(
+        "members/<uuid:membership_id>/",
+        WorkspaceMemberDetailView.as_view(),
+        name="workspace_member_detail",
+    ),
+]
+
 urlpatterns = [
     path("", api_root, name="api_root"),
     path("widget.js", widget_js_view, name="widget-js"),
     path("health/", health_check, name="health_check"),
     path("admin/", admin.site.urls),
     path("accounts/", include("allauth.urls")),
-    path("api/chat/", include("apps.chat.urls")),
-    path("api/auth/", include("apps.chat.auth_urls")),
-    path("api/artifacts/", include("apps.artifacts.urls")),
-    path("api/knowledge/", include("apps.knowledge.urls")),
-    path("api/recipes/", include("apps.recipes.urls")),
-    path("api/data-dictionary/", include("apps.projects.api.urls")),
+    # Workspace-scoped content APIs
+    path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(
-        "api/refresh-schema/<uuid:tenant_id>/", RefreshSchemaView.as_view(), name="refresh_schema"
+        "api/workspaces/<uuid:workspace_id>/",
+        WorkspaceDetailView.as_view(),
+        name="workspace_detail",
     ),
+    path(
+        "api/workspaces/<uuid:workspace_id>/",
+        include(workspace_urlpatterns),
+    ),
+    # Chat streaming (workspace_id in body)
+    path("api/chat/", chat_view, name="chat"),
+    path("api/auth/", include("apps.chat.auth_urls")),
     # Public share links (no auth required)
     path(
         "api/recipes/runs/shared/<str:share_token>/",

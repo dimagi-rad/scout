@@ -222,7 +222,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
             logger.info(
                 "Created recipe %s for workspace %s",
                 recipe.id,
-                workspace.external_tenant_id,
+                workspace.id,
             )
 
             return {
@@ -236,7 +236,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
         except Exception as e:
             logger.exception(
                 "Failed to create recipe for workspace %s: %s",
-                workspace.external_tenant_id,
+                workspace.id,
                 str(e),
             )
             return {

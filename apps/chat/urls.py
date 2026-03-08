@@ -1,4 +1,8 @@
-"""URL configuration for chat app (streaming endpoint + thread history)."""
+"""URL configuration for chat app (streaming endpoint + thread history).
+
+Thread-related endpoints are nested under /api/workspaces/<workspace_id>/threads/.
+The chat streaming endpoint lives at /api/chat/ (workspace_id in request body).
+"""
 
 from django.urls import path
 
@@ -11,9 +15,13 @@ from apps.chat.views import (
 
 app_name = "chat"
 
+# Thread endpoints nested under workspace (included via config/urls.py workspace router)
+workspace_thread_urlpatterns = [
+    path("", thread_list_view, name="thread_list"),
+    path("<uuid:thread_id>/messages/", thread_messages_view, name="thread_messages"),
+    path("<uuid:thread_id>/share/", thread_share_view, name="thread_share"),
+]
+
 urlpatterns = [
     path("", chat_view, name="chat"),
-    path("threads/", thread_list_view, name="thread_list"),
-    path("threads/<uuid:thread_id>/messages/", thread_messages_view, name="thread_messages"),
-    path("threads/<uuid:thread_id>/share/", thread_share_view, name="thread_share"),
 ]

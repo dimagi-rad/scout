@@ -1,27 +1,29 @@
-"""Shared workspace resolution for tenant-scoped API views."""
+"""Shared workspace resolution for workspace-scoped API views."""
 
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.projects.models import TenantWorkspace
-from apps.users.models import TenantMembership
+from apps.projects.models import WorkspaceMembership
 
 
-def resolve_workspace(request, tenant_id):
-    """Resolve TenantWorkspace from the tenant_id URL path parameter.
+def resolve_workspace(request, workspace_id):
+    """Resolve Workspace from workspace_id URL path parameter.
 
-    tenant_id is the TenantMembership.id (UUID) and must belong to
-    request.user. Returns (workspace, None) on success or (None, Response(403))
-    on error.
+    workspace_id is the Workspace.id (UUID) and the requesting user must be a member.
+    Returns (workspace, membership, None) on success or (None, None, Response(403)) on error.
     """
     try:
-        membership = TenantMembership.objects.select_related("tenant").get(
-            id=tenant_id, user=request.user
+        membership = WorkspaceMembership.objects.select_related("workspace").get(
+            workspace_id=workspace_id,
+            user=request.user,
         )
-    except TenantMembership.DoesNotExist:
-        return None, Response(
-            {"error": "Tenant not found or access denied."},
-            status=status.HTTP_403_FORBIDDEN,
+    except WorkspaceMembership.DoesNotExist:
+        return (
+            None,
+            None,
+            Response(
+                {"error": "Workspace not found or access denied."},
+                status=status.HTTP_403_FORBIDDEN,
+            ),
         )
-    workspace, _ = TenantWorkspace.objects.get_or_create(tenant=membership.tenant)
-    return workspace, None
+    return membership.workspace, membership, None

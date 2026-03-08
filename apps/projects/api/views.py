@@ -195,8 +195,8 @@ class DataDictionaryView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -295,8 +295,8 @@ class RefreshSchemaView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, tenant_id):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def post(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -367,8 +367,8 @@ class TableDetailView(APIView):
             entry["source_metadata"] = source_metadata
         return entry
 
-    def get(self, request, tenant_id, qualified_name):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def get(self, request, workspace_id, qualified_name):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -384,8 +384,8 @@ class TableDetailView(APIView):
 
         return Response(response_data)
 
-    def put(self, request, tenant_id, qualified_name):
-        workspace, err = resolve_workspace(request, tenant_id)
+    def put(self, request, workspace_id, qualified_name):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 

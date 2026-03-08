@@ -3,10 +3,16 @@ import { api } from "@/api/client"
 
 export interface TenantMembership {
   id: string
-  provider: string
-  tenant_id: string
-  tenant_name: string
-  last_selected_at: string | null
+  name: string
+  is_auto_created: boolean
+  role: string
+  tenant_count: number
+  member_count: number
+  created_at: string
+  // Legacy compat fields — kept so code referencing these doesn't break at compile time
+  provider?: string
+  tenant_id?: string
+  tenant_name?: string
 }
 
 export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
@@ -33,7 +39,7 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     fetchDomains: async () => {
       set({ domainsStatus: "loading", domainsError: null })
       try {
-        const domains = await api.get<TenantMembership[]>("/api/auth/tenants/")
+        const domains = await api.get<TenantMembership[]>("/api/workspaces/")
         const activeDomainId = get().activeDomainId
         set({
           domains,
@@ -41,11 +47,6 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
           domainsError: null,
           activeDomainId: activeDomainId ?? (domains[0]?.id ?? null),
         })
-        // Mark as selected on backend
-        const selected = activeDomainId ?? domains[0]?.id
-        if (selected) {
-          api.post("/api/auth/tenants/select/", { tenant_id: selected }).catch(() => {})
-        }
       } catch (error) {
         set({
           domainsStatus: "error",
@@ -56,16 +57,11 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
 
     setActiveDomain: (id: string) => {
       set({ activeDomainId: id })
-      api.post("/api/auth/tenants/select/", { tenant_id: id }).catch(() => {})
     },
 
-    setActiveDomainByTenantId: (provider: string, tenantId: string) => {
-      const match = get().domains.find(
-        (d) => d.provider === provider && d.tenant_id === tenantId
-      )
-      if (match) {
-        get().domainActions.setActiveDomain(match.id)
-      }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    setActiveDomainByTenantId: (_provider: string, _tenantId: string) => {
+      // No-op: workspace-based API doesn't need tenant selection
     },
 
     ensureTenant: async (provider: string, tenantId: string) => {
@@ -75,7 +71,6 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
           tenant_id: tenantId,
         })
         await get().domainActions.fetchDomains()
-        get().domainActions.setActiveDomainByTenantId(provider, tenantId)
       } catch (error) {
         console.error("[Scout] Failed to ensure tenant:", error)
       }

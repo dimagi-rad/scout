@@ -177,7 +177,7 @@ async def _fetch_schema_context(tenant_membership) -> str:
         from apps.projects.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership_id=ts.tenant_membership_id
+            tenant_membership_id=tenant_membership.id
         ).afirst()
 
         column_map: dict[str, list[dict]] = {}
@@ -293,11 +293,14 @@ async def build_agent_graph(
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
     """
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import TenantWorkspace, Workspace
 
     workspace, _ = await TenantWorkspace.objects.aget_or_create(
         tenant=tenant_membership.tenant,
     )
+    knowledge_workspace = await Workspace.objects.filter(
+        workspace_tenants__tenant=tenant_membership.tenant
+    ).afirst()
 
     logger.info("Building agent graph for tenant:%s", tenant_membership.tenant.external_id)
 
@@ -322,7 +325,7 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, tenant_membership)
+    system_prompt = await _build_system_prompt(workspace, tenant_membership, knowledge_workspace)
     logger.debug(
         "System prompt assembled: %d characters for tenant:%s",
         len(system_prompt),
@@ -462,7 +465,7 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
 
 
 async def _build_system_prompt(
-    workspace: TenantWorkspace, tenant_membership: TenantMembership
+    workspace: TenantWorkspace, tenant_membership: TenantMembership, knowledge_workspace=None
 ) -> str:
     """
     Assemble the complete system prompt for a tenant workspace.
@@ -487,10 +490,11 @@ async def _build_system_prompt(
     if workspace.system_prompt:
         sections.append(f"\n## Tenant-Specific Instructions\n\n{workspace.system_prompt}\n")
 
-    retriever = KnowledgeRetriever(workspace)
-    knowledge_context = await retriever.retrieve()
-    if knowledge_context:
-        sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
+    if knowledge_workspace is not None:
+        retriever = KnowledgeRetriever(knowledge_workspace)
+        knowledge_context = await retriever.retrieve()
+        if knowledge_context:
+            sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
     provider = tenant_membership.tenant.provider
     if provider == "commcare_connect":

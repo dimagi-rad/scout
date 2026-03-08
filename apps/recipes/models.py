@@ -40,7 +40,7 @@ class Recipe(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.ForeignKey(
-        "projects.TenantWorkspace",
+        "projects.Workspace",
         on_delete=models.CASCADE,
         related_name="recipes",
         null=True,
@@ -118,7 +118,7 @@ class Recipe(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.name} ({self.workspace.tenant.canonical_name})"
+        return f"{self.name} ({self.workspace})"
 
     def soft_delete(self, deleted_by) -> None:
         from django.utils import timezone

@@ -1,11 +1,12 @@
 """
 Core models for Scout data agent platform.
 
-Defines TenantWorkspace, TenantSchema, and MaterializationRun models.
+Defines Workspace, TenantSchema, and MaterializationRun models.
 """
 
 import uuid
 
+from django.conf import settings
 from django.db import models
 from django_pydantic_field import SchemaField
 
@@ -106,7 +107,7 @@ class TenantWorkspace(models.Model):
         ordering = ["tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.tenant.canonical_name} ({self.tenant.external_id})"
+        return f"TenantWorkspace({self.tenant_id})"
 
     @property
     def external_tenant_id(self):
@@ -115,6 +116,105 @@ class TenantWorkspace(models.Model):
     @property
     def tenant_name(self):
         return self.tenant.canonical_name
+
+
+class WorkspaceRole(models.TextChoices):
+    READ = "read", "Read"
+    READ_WRITE = "read_write", "Read/Write"
+    MANAGE = "manage", "Manage"
+
+
+class Workspace(models.Model):
+    """User-facing workspace, layered on top of one or more tenants."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    tenants = models.ManyToManyField(
+        "users.Tenant",
+        through="WorkspaceTenant",
+        related_name="workspaces",
+    )
+    is_auto_created = models.BooleanField(
+        default=False,
+        help_text="True if this workspace was automatically created during OAuth login.",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    system_prompt = models.TextField(blank=True)
+    # Legacy fields carried over from TenantWorkspace for backward compat
+    data_dictionary = models.JSONField(null=True, blank=True)
+    data_dictionary_generated_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+    @property
+    def tenant(self):
+        """Single-tenant compatibility: returns the first associated tenant."""
+        return self.tenants.first()
+
+    @property
+    def external_tenant_id(self):
+        """Compatibility shim: returns the external_id of the first tenant."""
+        t = self.tenant
+        return t.external_id if t else None
+
+    @property
+    def tenant_name(self):
+        """Compatibility shim: returns the canonical_name of the first tenant."""
+        t = self.tenant
+        return t.canonical_name if t else ""
+
+
+class WorkspaceTenant(models.Model):
+    """Junction table linking a Workspace to a Tenant."""
+
+    workspace = models.ForeignKey(
+        Workspace, on_delete=models.CASCADE, related_name="workspace_tenants"
+    )
+    tenant = models.ForeignKey(
+        "users.Tenant", on_delete=models.CASCADE, related_name="workspace_tenants"
+    )
+
+    class Meta:
+        unique_together = [["workspace", "tenant"]]
+
+
+class WorkspaceMembership(models.Model):
+    """A user's membership of a workspace with an assigned role."""
+
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="memberships")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="workspace_memberships",
+    )
+    role = models.CharField(max_length=20, choices=WorkspaceRole.choices)
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [["workspace", "user"]]
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.user.email} in {self.workspace.name} ({self.role})"
 
 
 class TenantMetadata(models.Model):

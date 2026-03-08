@@ -123,7 +123,7 @@ class TenantMembership(models.Model):
         ordering = ["-last_selected_at", "tenant__canonical_name"]
 
     def __str__(self):
-        return f"{self.user.email} - {self.tenant}"
+        return f"TenantMembership({self.user_id} - {self.tenant_id})"
 
 
 class TenantCredential(models.Model):

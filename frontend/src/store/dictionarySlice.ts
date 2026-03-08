@@ -175,7 +175,7 @@ export const createDictionarySlice: StateCreator<
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/data-dictionary/${activeDomainId}/`
+          `/api/workspaces/${activeDomainId}/data-dictionary/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -192,10 +192,10 @@ export const createDictionarySlice: StateCreator<
       try {
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        await api.post(`/api/refresh-schema/${activeDomainId}/`)
+        await api.post(`/api/workspaces/${activeDomainId}/refresh/`)
         // Re-fetch the full dictionary after refresh
         const raw = await api.get<BackendDictionaryResponse>(
-          `/api/data-dictionary/${activeDomainId}/`
+          `/api/workspaces/${activeDomainId}/data-dictionary/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
@@ -211,7 +211,7 @@ export const createDictionarySlice: StateCreator<
       const activeDomainId = get().activeDomainId
       if (!activeDomainId) throw new Error("No active domain selected.")
       const raw = await api.get<BackendTableDetailResponse>(
-        `/api/data-dictionary/${activeDomainId}/tables/${schema}.${table}/`
+        `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`
       )
       const data: TableDetail = {
         schema: raw.schema,
@@ -246,7 +246,7 @@ export const createDictionarySlice: StateCreator<
       const activeDomainId = get().activeDomainId
       if (!activeDomainId) throw new Error("No active domain selected.")
       const updated = await api.put<TableAnnotations>(
-        `/api/data-dictionary/${activeDomainId}/tables/${schema}.${table}/`,
+        `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`,
         annotations
       )
       // Update selected table

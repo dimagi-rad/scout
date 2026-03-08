@@ -39,7 +39,7 @@ class TestTenantMembership:
         assert tm.tenant.external_id == "dimagi"
         assert tm.tenant.provider == "commcare"
         assert tm.tenant.canonical_name == "Dimagi"
-        assert str(tm) == f"{user.email} - commcare:dimagi (Dimagi)"
+        assert str(tm) == f"TenantMembership({tm.user_id} - {tm.tenant_id})"
 
     def test_unique_constraint(self, db, user):
         from apps.users.models import Tenant

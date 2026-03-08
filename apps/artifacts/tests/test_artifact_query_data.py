@@ -8,10 +8,9 @@ import pytest
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
-from django.urls import reverse
 
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.projects.models import TenantWorkspace
+from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.users.models import TenantMembership, User
 
 
@@ -22,19 +21,23 @@ def workspace(db):
     tenant = Tenant.objects.create(
         provider="commcare", external_id="test-domain", canonical_name="Test Domain"
     )
-    return TenantWorkspace.objects.create(tenant=tenant)
+    ws = Workspace.objects.create(name="Test Domain")
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    return ws
 
 
 @pytest.fixture
 def member_user(db, workspace):
     user = User.objects.create_user(email="member@example.com", password="pass")
     TenantMembership.objects.create(user=user, tenant=workspace.tenant)
+    WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
     return user
 
 
 @pytest.fixture
 def membership(db, workspace, member_user):
-    return TenantMembership.objects.get(user=member_user, tenant=workspace.tenant)
+    """Returns the workspace (used as the URL parameter)."""
+    return workspace
 
 
 @pytest.fixture
@@ -49,12 +52,19 @@ def other_workspace(db):
     tenant = Tenant.objects.create(
         provider="commcare", external_id="other-domain", canonical_name="Other Domain"
     )
-    return TenantWorkspace.objects.create(tenant=tenant)
+    ws = Workspace.objects.create(name="Other Domain")
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
+    return ws
 
 
 @pytest.fixture
 def other_membership(db, other_workspace, other_user):
-    return TenantMembership.objects.create(user=other_user, tenant=other_workspace.tenant)
+    """Returns the other workspace (used as the URL parameter)."""
+    TenantMembership.objects.create(user=other_user, tenant=other_workspace.tenant)
+    WorkspaceMembership.objects.create(
+        workspace=other_workspace, user=other_user, role=WorkspaceRole.MANAGE
+    )
+    return other_workspace
 
 
 def _make_auth_client(user):
@@ -134,10 +144,7 @@ MOCK_DAILY_RESULT = {
 @pytest.mark.asyncio
 async def test_returns_query_results_for_live_artifact(live_artifact, member_client, membership):
     """Happy path: queries are executed and results returned with correct shape."""
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": live_artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     with (
         patch(
@@ -168,10 +175,7 @@ async def test_returns_empty_queries_for_static_artifact(
     static_artifact, member_client, membership
 ):
     """Artifacts with no source_queries return empty queries list."""
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": static_artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{static_artifact.id}/query-data/"
     response = await member_client.get(url)
 
     assert response.status_code == 200
@@ -185,10 +189,7 @@ async def test_returns_empty_queries_for_static_artifact(
 async def test_unauthenticated_returns_401(live_artifact, membership):
     """Unauthenticated request returns 401."""
     client = AsyncClient()
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": live_artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
     response = await client.get(url)
     assert response.status_code == 401
 
@@ -197,10 +198,7 @@ async def test_unauthenticated_returns_401(live_artifact, membership):
 @pytest.mark.asyncio
 async def test_non_member_returns_404(live_artifact, other_client, other_membership):
     """User from a different workspace cannot access artifacts scoped to this workspace."""
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": other_membership.id, "artifact_id": live_artifact.id},
-    )
+    url = f"/api/workspaces/{other_membership.id}/artifacts/{live_artifact.id}/query-data/"
     response = await other_client.get(url)
     assert response.status_code == 404
 
@@ -218,10 +216,7 @@ async def test_no_workspace_returns_404(member_user, member_client, membership):
         conversation_id="t",
         source_queries=[{"name": "q", "sql": "SELECT 1"}],
     )
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{artifact.id}/query-data/"
     response = await member_client.get(url)
     assert response.status_code == 404
 
@@ -230,10 +225,7 @@ async def test_no_workspace_returns_404(member_user, member_client, membership):
 @pytest.mark.asyncio
 async def test_tenant_context_error_returns_error_query(live_artifact, member_client, membership):
     """If load_tenant_context fails (no schema), return error response."""
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": live_artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     with patch(
         "apps.artifacts.views.load_tenant_context",
@@ -251,10 +243,7 @@ async def test_tenant_context_error_returns_error_query(live_artifact, member_cl
 @pytest.mark.asyncio
 async def test_individual_query_failure_continues(live_artifact, member_client, membership):
     """A failed query includes an error entry; other queries still execute."""
-    url = reverse(
-        "artifacts:query_data",
-        kwargs={"tenant_id": membership.id, "artifact_id": live_artifact.id},
-    )
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     error_result = {"success": False, "error": {"code": "QUERY_TIMEOUT", "message": "Timed out"}}
 
