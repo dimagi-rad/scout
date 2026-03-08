@@ -35,6 +35,8 @@ class Thread(models.Model):
         ordering = ["-updated_at"]
 
     def save(self, *args, **kwargs):
+        # Maintain the is_shared ↔ share_token invariant.
+        # Always call save() (not update()) to toggle is_shared so this runs.
         if self.is_shared and not self.share_token:
             self.share_token = secrets.token_urlsafe(32)
         elif not self.is_shared:

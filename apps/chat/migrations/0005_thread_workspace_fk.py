@@ -58,7 +58,10 @@ class Migration(migrations.Migration):
                 to="projects.workspace",
             ),
         ),
-        # Step 2: Data migration — assign workspace from tenant_membership
+        # Step 2: Data migration — assign workspace from tenant_membership.
+        # WARNING: reverse_code is noop because deleted threads cannot be recovered.
+        # Rolling back this migration will leave the Thread table without the old
+        # tenant_membership column — only roll back if starting from an empty Thread table.
         migrations.RunPython(
             migrate_threads_to_workspace,
             reverse_code=migrations.RunPython.noop,

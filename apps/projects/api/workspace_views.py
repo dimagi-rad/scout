@@ -1,12 +1,28 @@
 """Workspace management API views."""
 
+from django.db.models import Count
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.projects.models import (
+    SchemaState,
+    TenantSchema,
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from apps.projects.workspace_resolver import resolve_workspace
+from apps.users.models import Tenant, TenantMembership
+
+
+def _is_last_manager(workspace, membership):
+    """Return True if membership is the sole manager of workspace."""
+    if membership.role != WorkspaceRole.MANAGE:
+        return False
+    return workspace.memberships.filter(role=WorkspaceRole.MANAGE).count() <= 1
 
 
 class WorkspaceListView(APIView):
@@ -18,23 +34,26 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        memberships = WorkspaceMembership.objects.filter(user=request.user).select_related(
-            "workspace"
-        )
-        results = []
-        for m in memberships:
-            ws = m.workspace
-            results.append(
-                {
-                    "id": str(ws.id),
-                    "name": ws.name,
-                    "is_auto_created": ws.is_auto_created,
-                    "role": m.role,
-                    "tenant_count": ws.workspace_tenants.count(),
-                    "member_count": ws.memberships.count(),
-                    "created_at": ws.created_at.isoformat(),
-                }
+        memberships = (
+            WorkspaceMembership.objects.filter(user=request.user)
+            .select_related("workspace")
+            .annotate(
+                tenant_count=Count("workspace__workspace_tenants", distinct=True),
+                member_count=Count("workspace__memberships", distinct=True),
             )
+        )
+        results = [
+            {
+                "id": str(m.workspace.id),
+                "name": m.workspace.name,
+                "is_auto_created": m.workspace.is_auto_created,
+                "role": m.role,
+                "tenant_count": m.tenant_count,
+                "member_count": m.member_count,
+                "created_at": m.workspace.created_at.isoformat(),
+            }
+            for m in memberships
+        ]
         return Response(results)
 
     def post(self, request):
@@ -48,8 +67,6 @@ class WorkspaceListView(APIView):
                 {"error": "At least one tenant_id is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        from apps.users.models import TenantMembership
 
         # Validate user has access to all requested tenants
         accessible_tenant_ids = set(
@@ -65,15 +82,20 @@ class WorkspaceListView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        from apps.users.models import Tenant
-
         workspace = Workspace.objects.create(
             name=name,
             is_auto_created=False,
             created_by=request.user,
         )
         for tid in tenant_ids:
-            tenant = Tenant.objects.get(id=tid)
+            try:
+                tenant = Tenant.objects.get(id=tid)
+            except Tenant.DoesNotExist:
+                workspace.delete()
+                return Response(
+                    {"error": "One or more tenants are not accessible."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
 
         WorkspaceMembership.objects.create(
@@ -109,8 +131,6 @@ class WorkspaceDetailView(APIView):
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
-
-        from apps.projects.models import SchemaState, TenantSchema
 
         tenants = list(workspace.tenants.all())
         active_schemas = TenantSchema.objects.filter(
@@ -239,23 +259,24 @@ class WorkspaceMemberDetailView(APIView):
         if err:
             return err
         if membership.role != WorkspaceRole.MANAGE:
-            return Response({"error": "Only managers can change roles."}, status=403)
+            return Response(
+                {"error": "Only managers can change roles."}, status=status.HTTP_403_FORBIDDEN
+            )
 
         target = self._get_target_membership(workspace, membership_id)
         if target is None:
-            return Response({"error": "Member not found."}, status=404)
+            return Response({"error": "Member not found."}, status=status.HTTP_404_NOT_FOUND)
 
         new_role = request.data.get("role")
         if new_role not in WorkspaceRole.values:
-            return Response({"error": "Invalid role."}, status=400)
+            return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Prevent demoting the last manager
         if target.role == WorkspaceRole.MANAGE and new_role != WorkspaceRole.MANAGE:
-            manage_count = workspace.memberships.filter(role=WorkspaceRole.MANAGE).count()
-            if manage_count <= 1:
+            if _is_last_manager(workspace, target):
                 return Response(
                     {"error": "Cannot demote the last manager of the workspace."},
-                    status=400,
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
         target.role = new_role
@@ -269,24 +290,27 @@ class WorkspaceMemberDetailView(APIView):
 
         target = self._get_target_membership(workspace, membership_id)
         if target is None:
-            return Response({"error": "Member not found."}, status=404)
+            return Response({"error": "Member not found."}, status=status.HTTP_404_NOT_FOUND)
 
         # Allow self-removal; managers can remove others
         is_self = target.user_id == request.user.id
         if not is_self and membership.role != WorkspaceRole.MANAGE:
-            return Response({"error": "Only managers can remove other members."}, status=403)
+            return Response(
+                {"error": "Only managers can remove other members."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         # Prevent removing the last manager
-        if target.role == WorkspaceRole.MANAGE:
-            manage_count = workspace.memberships.filter(role=WorkspaceRole.MANAGE).count()
-            if manage_count <= 1:
-                return Response(
-                    {"error": "Cannot remove the last manager of the workspace."},
-                    status=400,
-                )
+        if _is_last_manager(workspace, target):
+            return Response(
+                {"error": "Cannot remove the last manager of the workspace."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Delete the member's threads in this workspace
-        from apps.chat.models import Thread
+        from apps.chat.models import (
+            Thread,  # noqa: PLC0415 — avoids circular import at module level
+        )
 
         Thread.objects.filter(workspace=workspace, user=target.user).delete()
 

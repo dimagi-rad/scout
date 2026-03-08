@@ -403,17 +403,15 @@ def _get_user_if_authenticated(request):
 def _upsert_thread(thread_id, user, title, *, workspace):
     """Create or update a Thread record.
 
-    auto_now on updated_at handles the timestamp on every save, so we only
-    need to pass workspace/user in defaults and title in create_defaults.
+    The lookup key includes both id AND user+workspace so an attacker-supplied
+    thread_id cannot silently relocate a thread from another workspace.
+    auto_now on updated_at handles the timestamp on every save.
     """
     Thread.objects.update_or_create(
         id=thread_id,
-        defaults={"user": user, "workspace": workspace},
-        create_defaults={
-            "user": user,
-            "title": title[:200],
-            "workspace": workspace,
-        },
+        user=user,
+        workspace=workspace,
+        create_defaults={"title": title[:200]},
     )
 
 
@@ -520,7 +518,7 @@ def _list_threads(user, *, workspace_id):
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
             "is_shared": t.is_shared,
-            "share_token": t.share_token,
+            # share_token is intentionally omitted here; use the /share/ endpoint to retrieve it
         }
         for t in qs
     ]
