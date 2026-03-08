@@ -400,19 +400,19 @@ def _get_user_if_authenticated(request):
 
 
 @sync_to_async
-def _upsert_thread(thread_id, user, title, *, tenant_membership):
+def _upsert_thread(thread_id, user, title, *, workspace):
     """Create or update a Thread record.
 
     auto_now on updated_at handles the timestamp on every save, so we only
-    need to pass tenant_membership/user in defaults and title in create_defaults.
+    need to pass workspace/user in defaults and title in create_defaults.
     """
     Thread.objects.update_or_create(
         id=thread_id,
-        defaults={"user": user, "tenant_membership": tenant_membership},
+        defaults={"user": user, "workspace": workspace},
         create_defaults={
             "user": user,
             "title": title[:200],
-            "tenant_membership": tenant_membership,
+            "workspace": workspace,
         },
     )
 
@@ -451,16 +451,7 @@ def _get_thread(thread_id, user, *, workspace_id=None):
     """Load a thread ensuring ownership, optionally scoped to a workspace."""
     try:
         if workspace_id is not None:
-            from apps.projects.models import WorkspaceTenant
-
-            tenant_ids = list(
-                WorkspaceTenant.objects.filter(workspace_id=workspace_id).values_list(
-                    "tenant_id", flat=True
-                )
-            )
-            return Thread.objects.get(
-                id=thread_id, user=user, tenant_membership__tenant_id__in=tenant_ids
-            )
+            return Thread.objects.get(id=thread_id, user=user, workspace_id=workspace_id)
         return Thread.objects.get(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
@@ -468,25 +459,22 @@ def _get_thread(thread_id, user, *, workspace_id=None):
 
 @sync_to_async
 def _get_public_thread(share_token):
-    """Load a public thread by share token."""
+    """Load a shared thread by share token."""
     try:
-        return Thread.objects.select_related("user").get(share_token=share_token, is_public=True)
+        return Thread.objects.select_related("user").get(share_token=share_token, is_shared=True)
     except Thread.DoesNotExist:
         return None
 
 
 @sync_to_async
-def _update_thread_sharing(thread, is_shared=None, is_public=None):
+def _update_thread_sharing(thread, is_shared=None):
     """Update sharing settings on a thread."""
     if is_shared is not None:
         thread.is_shared = is_shared
-    if is_public is not None:
-        thread.is_public = is_public
     thread.save()
     return {
         "id": str(thread.id),
         "is_shared": thread.is_shared,
-        "is_public": thread.is_public,
         "share_token": thread.share_token,
     }
 
@@ -523,11 +511,8 @@ def _list_threads(user, *, workspace_id):
         return None
 
     workspace = wm.workspace
-    tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
 
-    qs = Thread.objects.filter(user=user, tenant_membership__tenant_id__in=tenant_ids).order_by(
-        "-updated_at"
-    )[:50]
+    qs = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     return [
         {
             "id": str(t.id),
@@ -535,7 +520,6 @@ def _list_threads(user, *, workspace_id):
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
             "is_shared": t.is_shared,
-            "is_public": t.is_public,
             "share_token": t.share_token,
         }
         for t in qs
@@ -607,7 +591,7 @@ async def chat_view(request):
             thread_id,
             user,
             user_content,
-            tenant_membership=tenant_membership,
+            workspace=workspace,
         )
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
@@ -884,7 +868,6 @@ async def thread_share_view(request, workspace_id, thread_id):
             {
                 "id": str(thread.id),
                 "is_shared": thread.is_shared,
-                "is_public": thread.is_public,
                 "share_token": thread.share_token,
             }
         )
@@ -898,7 +881,6 @@ async def thread_share_view(request, workspace_id, thread_id):
         result = await _update_thread_sharing(
             thread,
             is_shared=body.get("is_shared"),
-            is_public=body.get("is_public"),
         )
         return JsonResponse(result)
 

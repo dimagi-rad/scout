@@ -1032,10 +1032,10 @@ class TestEndToEndStreaming:
             # Consume the stream to ensure the view fully executes
             await _collect_sse_events(response)
 
-            # Verify thread was created
+            # Verify thread was created and scoped to the workspace
             thread = await Thread.objects.filter(id=thread_id).afirst()
             assert thread is not None
-            assert str(thread.tenant_membership_id) == str(tenant_membership.id)
+            assert str(thread.workspace_id) == str(workspace_from_membership.id)
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)

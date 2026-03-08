@@ -285,15 +285,10 @@ class WorkspaceMemberDetailView(APIView):
                     status=400,
                 )
 
-        # Delete the member's threads in this workspace (Thread.workspace FK added in Task 3.4)
+        # Delete the member's threads in this workspace
         from apps.chat.models import Thread
 
-        if hasattr(Thread, "workspace_id"):
-            Thread.objects.filter(workspace=workspace, user=target.user).delete()
-        else:
-            Thread.objects.filter(
-                tenant_membership__tenant__in=workspace.tenants.all(), user=target.user
-            ).delete()
+        Thread.objects.filter(workspace=workspace, user=target.user).delete()
 
         target.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
