@@ -54,11 +54,18 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP("scout")
 
 
+async def _resolve_mcp_context(workspace_id: str | None, tenant_id: str):
+    """Route to workspace or tenant context based on whether workspace_id is provided."""
+    if workspace_id:
+        return await load_workspace_context(workspace_id)
+    return await load_tenant_context(tenant_id)
+
+
 # --- Tools ---
 
 
 @mcp.tool()
-async def list_tables(tenant_id: str, workspace_id: str = "") -> dict:
+async def list_tables(tenant_id: str, workspace_id: str | None = None) -> dict:
     """List all tables in the tenant's database schema.
 
     Returns table names, types, descriptions, row counts, and materialization timestamps.
@@ -70,11 +77,7 @@ async def list_tables(tenant_id: str, workspace_id: str = "") -> dict:
     """
     async with tool_context("list_tables", tenant_id) as tc:
         try:
-            ctx = (
-                await load_workspace_context(workspace_id)
-                if workspace_id
-                else await load_tenant_context(tenant_id)
-            )
+            ctx = await _resolve_mcp_context(workspace_id, tenant_id)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -117,7 +120,7 @@ async def list_tables(tenant_id: str, workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def describe_table(tenant_id: str, table_name: str, workspace_id: str = "") -> dict:
+async def describe_table(tenant_id: str, table_name: str, workspace_id: str | None = None) -> dict:
     """Get detailed metadata for a specific table.
 
     Returns columns (name, type, nullable, default, description) and a table description.
@@ -130,11 +133,7 @@ async def describe_table(tenant_id: str, table_name: str, workspace_id: str = ""
     """
     async with tool_context("describe_table", tenant_id, table_name=table_name) as tc:
         try:
-            ctx = (
-                await load_workspace_context(workspace_id)
-                if workspace_id
-                else await load_tenant_context(tenant_id)
-            )
+            ctx = await _resolve_mcp_context(workspace_id, tenant_id)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -178,7 +177,7 @@ async def describe_table(tenant_id: str, table_name: str, workspace_id: str = ""
 
 
 @mcp.tool()
-async def get_metadata(tenant_id: str, workspace_id: str = "") -> dict:
+async def get_metadata(tenant_id: str, workspace_id: str | None = None) -> dict:
     """Get a complete metadata snapshot for the tenant's database.
 
     Returns all tables with their columns, descriptions, and table relationships
@@ -190,11 +189,7 @@ async def get_metadata(tenant_id: str, workspace_id: str = "") -> dict:
     """
     async with tool_context("get_metadata", tenant_id) as tc:
         try:
-            ctx = (
-                await load_workspace_context(workspace_id)
-                if workspace_id
-                else await load_tenant_context(tenant_id)
-            )
+            ctx = await _resolve_mcp_context(workspace_id, tenant_id)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -243,7 +238,7 @@ async def get_metadata(tenant_id: str, workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def query(tenant_id: str, sql: str, workspace_id: str = "") -> dict:
+async def query(tenant_id: str, sql: str, workspace_id: str | None = None) -> dict:
     """Execute a read-only SQL query against the tenant's database.
 
     The query is validated for safety (SELECT only, no dangerous functions),
@@ -257,11 +252,7 @@ async def query(tenant_id: str, sql: str, workspace_id: str = "") -> dict:
     """
     async with tool_context("query", tenant_id, sql=sql) as tc:
         try:
-            ctx = (
-                await load_workspace_context(workspace_id)
-                if workspace_id
-                else await load_tenant_context(tenant_id)
-            )
+            ctx = await _resolve_mcp_context(workspace_id, tenant_id)
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
