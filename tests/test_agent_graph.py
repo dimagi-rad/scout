@@ -4,7 +4,7 @@ import pytest
 
 
 class TestMcpToolNames:
-    """Verify MCP_TOOL_NAMES contains all tools that need tenant_id injection."""
+    """Verify MCP_TOOL_NAMES contains all tools that need workspace_id injection."""
 
     def test_new_tools_in_mcp_tool_names(self):
         from apps.agents.graph.base import MCP_TOOL_NAMES
@@ -27,10 +27,10 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_section_present(self, workspace, tenant_membership):
+    async def test_data_availability_section_present(self, workspace):
         from apps.agents.graph.base import _build_system_prompt
 
-        prompt = await _build_system_prompt(workspace, tenant_membership)
+        prompt = await _build_system_prompt(workspace)
 
         assert "Data Availability" in prompt
         # Schema context is now pre-fetched; no instruction to call get_schema_status
@@ -40,12 +40,10 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_covers_not_provisioned_case(
-        self, workspace, tenant_membership
-    ):
+    async def test_data_availability_covers_not_provisioned_case(self, workspace):
         from apps.agents.graph.base import _build_system_prompt
 
-        prompt = await _build_system_prompt(workspace, tenant_membership)
+        prompt = await _build_system_prompt(workspace)
 
         # Agent must know to run materialization when no data exists
         assert "No data has been loaded yet" in prompt or "loading" in prompt.lower()

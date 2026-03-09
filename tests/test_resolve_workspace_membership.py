@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
@@ -10,7 +12,8 @@ User = get_user_model()
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_single_tenant_workspace_returns_membership():
+async def test_single_tenant_workspace_with_membership_is_accessible():
+    """Single-tenant workspace is accessible when user holds TenantMembership."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
@@ -24,17 +27,37 @@ async def test_single_tenant_workspace_returns_membership():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     await TenantMembership.objects.acreate(user=user, tenant=t)
 
-    workspace, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    assert tm is not None
-    assert tm.tenant.external_id == "single-domain"
-    assert is_multi is False
+    assert is_accessible is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_multi_tenant_workspace_returns_none_membership():
-    """Multi-tenant workspaces must return None for tenant_membership so routing uses workspace_id."""
+async def test_single_tenant_workspace_without_membership_is_inaccessible():
+    """Single-tenant workspace is inaccessible when user lacks TenantMembership."""
+    from apps.chat.views import _resolve_workspace_and_membership
+
+    user = await sync_to_async(User.objects.create_user)(
+        email="resolve-nomem@example.com", password="pass"
+    )
+    t = await Tenant.objects.acreate(
+        provider="commcare", external_id="nomem-domain", canonical_name="NoMem"
+    )
+    ws = await Workspace.objects.acreate(name="NoMem WS", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+    # no TenantMembership created
+
+    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
+    assert workspace is not None
+    assert is_accessible is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db
+async def test_multi_tenant_workspace_is_accessible():
+    """Multi-tenant workspaces are accessible via workspace_id routing."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
@@ -50,34 +73,22 @@ async def test_multi_tenant_workspace_returns_none_membership():
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
-    await TenantMembership.objects.acreate(user=user, tenant=t1)
-    await TenantMembership.objects.acreate(user=user, tenant=t2)
 
-    workspace, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    assert tm is None  # critical: must be None even though user has TenantMembership for both
-    assert is_multi is True
+    assert is_accessible is True
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_resolve_workspace_and_membership_returns_is_multi_tenant_flag():
-    """_resolve_workspace_and_membership third return value is True for multi-tenant."""
+async def test_workspace_not_found_returns_none():
+    """Returns (None, False) when the workspace doesn't exist or user lacks WorkspaceMembership."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
-        email="resolve-flag@example.com", password="pass"
+        email="resolve-missing@example.com", password="pass"
     )
-    t1 = await Tenant.objects.acreate(
-        provider="commcare", external_id="flag-domain-1", canonical_name="Flag1"
-    )
-    t2 = await Tenant.objects.acreate(
-        provider="commcare", external_id="flag-domain-2", canonical_name="Flag2"
-    )
-    ws = await Workspace.objects.acreate(name="Flag WS", created_by=user)
-    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
-    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
 
-    ws_result, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
-    assert is_multi is True
+    workspace, is_accessible = await _resolve_workspace_and_membership(user, uuid.uuid4())
+    assert workspace is None
+    assert is_accessible is False

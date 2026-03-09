@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
     from apps.projects.models import Workspace
-    from apps.users.models import TenantMembership, User
+    from apps.users.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -127,23 +127,20 @@ def _render_full_schema(
     return "\n".join(lines)
 
 
-async def _fetch_schema_context(tenant_membership) -> str:
+async def _fetch_schema_context(tenant) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
     Tries to build a full schema block (tables + columns). Falls back to a compact
     block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
     """
     ts = await TenantSchema.objects.filter(
-        tenant=tenant_membership.tenant,
+        tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 
+    pipeline_name = "connect_sync" if tenant.provider == "commcare_connect" else "commcare_sync"
+
     if ts is None:
-        provider = tenant_membership.tenant.provider
-        if provider == "commcare_connect":
-            pipeline_name = "connect_sync"
-        else:
-            pipeline_name = "commcare_sync"
         return (
             "No data has been loaded yet. "
             f'Call `run_materialization` with `pipeline="{pipeline_name}"` to load data.'
@@ -156,12 +153,6 @@ async def _fetch_schema_context(tenant_membership) -> str:
         )
 
     # Schema is active: fetch table list
-    provider = tenant_membership.tenant.provider
-    if provider == "commcare_connect":
-        pipeline_name = "connect_sync"
-    else:
-        pipeline_name = "commcare_sync"
-
     registry = get_registry()
     pipeline_config = registry.get(pipeline_name) or registry.get("commcare_sync")
 
@@ -173,11 +164,11 @@ async def _fetch_schema_context(tenant_membership) -> str:
 
     # Try full schema with columns
     try:
-        ctx = await load_tenant_context(tenant_membership.tenant.external_id)
+        ctx = await load_tenant_context(tenant.external_id)
         from apps.projects.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership_id=tenant_membership.id
+            tenant_membership__tenant=tenant
         ).afirst()
 
         column_map: dict[str, list[dict]] = {}
@@ -278,7 +269,6 @@ def _make_injecting_tool_node(
 
 async def build_agent_graph(
     workspace: Workspace,
-    tenant_membership: TenantMembership | None = None,
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
@@ -289,28 +279,19 @@ async def build_agent_graph(
 
     Args:
         workspace: The Workspace model instance.
-        tenant_membership: The TenantMembership for the current user (None for multi-tenant).
         user: Optional User model instance.
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
     """
-    tenant_label = (
-        tenant_membership.tenant.external_id if tenant_membership else f"workspace:{workspace.id}"
-    )
-
-    logger.info("Building agent graph for %s", tenant_label)
+    logger.info("Building agent graph for workspace %s", workspace.id)
 
     # --- Build tools ---
     tools = _build_tools(workspace, user, mcp_tools or [])
-    logger.debug("Created %d tools for %s", len(tools), tenant_label)
+    logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
-    # --- Inject tenant_id, tenant_membership_id, and workspace_id into MCP tool calls ---
-    injections = {
-        "tenant_id": "tenant_id",
-        "tenant_membership_id": "tenant_membership_id",
-        "workspace_id": "workspace_id",
-    }
+    # --- Inject workspace_id into MCP tool calls from agent state ---
+    injections = {"workspace_id": "workspace_id"}
     hidden_params = list(injections.keys())
 
     # --- Build LLM with tools ---
@@ -323,11 +304,11 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, tenant_membership)
+    system_prompt = await _build_system_prompt(workspace)
     logger.debug(
-        "System prompt assembled: %d characters for %s",
+        "System prompt assembled: %d characters for workspace %s",
         len(system_prompt),
-        tenant_label,
+        workspace.id,
     )
 
     # --- Create tool node with context ID injection ---
@@ -423,8 +404,8 @@ async def build_agent_graph(
     compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "Agent graph compiled for %s (checkpointer: %s)",
-        tenant_label,
+        "Agent graph compiled for workspace %s (checkpointer: %s)",
+        workspace.id,
         type(checkpointer).__name__ if checkpointer else "None",
     )
 
@@ -462,10 +443,7 @@ def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> li
     return tools
 
 
-async def _build_system_prompt(
-    workspace: Workspace,
-    tenant_membership: TenantMembership | None,
-) -> str:
+async def _build_system_prompt(workspace: Workspace) -> str:
     """
     Assemble the complete system prompt for a workspace.
 
@@ -478,7 +456,6 @@ async def _build_system_prompt(
 
     Args:
         workspace: The Workspace model instance.
-        tenant_membership: The TenantMembership for context metadata (None for multi-tenant).
 
     Returns:
         Complete system prompt string.
@@ -494,18 +471,17 @@ async def _build_system_prompt(
     if knowledge_context:
         sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
-    if tenant_membership is not None:
-        provider = tenant_membership.tenant.provider
-        if provider == "commcare_connect":
-            pipeline_name = "connect_sync"
-        else:
-            pipeline_name = "commcare_sync"
+    tenant_count = await workspace.tenants.acount()
+
+    if tenant_count == 1:
+        tenant = await workspace.tenants.afirst()
+        pipeline_name = "connect_sync" if tenant.provider == "commcare_connect" else "commcare_sync"
 
         sections.append(f"""
 ## Tenant Context
 
-- Tenant: {tenant_membership.tenant.canonical_name} ({tenant_membership.tenant.external_id})
-- Provider: {provider}
+- Tenant: {tenant.canonical_name} ({tenant.external_id})
+- Provider: {tenant.provider}
 - Pipeline: {pipeline_name}
 
 ## Query Configuration
@@ -517,7 +493,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
 
         # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant_membership)
+        schema_context = await _fetch_schema_context(tenant)
         sections.append(f"\n## Data Availability\n\n{schema_context}\n")
     else:
         sections.append("""

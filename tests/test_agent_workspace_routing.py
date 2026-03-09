@@ -25,20 +25,17 @@ async def test_injecting_node_includes_workspace_id():
                     {
                         "id": "call_1",
                         "name": "query",
-                        "args": {"tenant_id": "old-tenant", "sql": "SELECT 1"},
+                        "args": {"sql": "SELECT 1"},
                     }
                 ],
             )
         ],
-        "tenant_id": "old-tenant",
-        "tenant_membership_id": "membership-123",
         "workspace_id": "ws-uuid-456",
         "user_id": "user-1",
         "user_role": "analyst",
         "needs_correction": False,
         "retry_count": 0,
         "correction_context": {},
-        "tenant_name": "Old Tenant",
     }
 
     mock_base_node = AsyncMock()
@@ -46,11 +43,7 @@ async def test_injecting_node_includes_workspace_id():
 
     node = _make_injecting_tool_node(
         mock_base_node,
-        injections={
-            "tenant_id": "tenant_id",
-            "tenant_membership_id": "tenant_membership_id",
-            "workspace_id": "workspace_id",
-        },
+        injections={"workspace_id": "workspace_id"},
     )
 
     await node(state)

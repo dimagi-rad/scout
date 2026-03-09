@@ -97,12 +97,9 @@ class AgentState(TypedDict):
         - ToolMessage: Results from tool execution (SQL results, errors)
         - SystemMessage: Dynamic context injection
 
-    tenant_id : str
-        Identifier for the current tenant (e.g. CommCare domain name).
-        Used to scope all database queries and knowledge lookups.
-
-    tenant_name : str
-        Human-readable tenant name for use in responses.
+    workspace_id : str
+        UUID of the current workspace. Injected into every MCP tool call so tools
+        can route to the correct schema (single-tenant or view schema for multi-tenant).
 
     user_id : str
         UUID of the current user (as string for serialization).
@@ -141,8 +138,7 @@ class AgentState(TypedDict):
 
         state = AgentState(
             messages=[],
-            tenant_id="dimagi",
-            tenant_name="Dimagi",
+            workspace_id="ws-uuid-123",
             user_id="user-123",
             user_role="analyst",
             needs_correction=False,
@@ -163,12 +159,7 @@ class AgentState(TypedDict):
     # Conversation history with automatic deduplication
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Tenant context - scopes all data access (single-tenant workspaces)
-    tenant_id: str
-    tenant_name: str
-    tenant_membership_id: str
-
-    # Workspace context - for multi-tenant workspace routing via MCP
+    # Workspace context - primary routing key for all MCP tool calls
     workspace_id: str
 
     # User context - for permissions and audit
