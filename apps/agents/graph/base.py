@@ -49,7 +49,7 @@ from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import Workspace
     from apps.users.models import TenantMembership, User
 
 logger = logging.getLogger(__name__)
@@ -277,41 +277,41 @@ def _make_injecting_tool_node(
 
 
 async def build_agent_graph(
-    tenant_membership: TenantMembership,
+    workspace: Workspace,
+    tenant_membership: TenantMembership | None = None,
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
+    workspace_id: str = "",
 ):
     """
-    Build a LangGraph agent graph for a tenant workspace.
+    Build a LangGraph agent graph for a workspace.
 
     Args:
-        tenant_membership: The TenantMembership for the current user.
+        workspace: The Workspace model instance.
+        tenant_membership: The TenantMembership for the current user (None for multi-tenant).
         user: Optional User model instance.
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
+        workspace_id: Workspace UUID string for multi-tenant MCP routing.
     """
-    from apps.projects.models import TenantWorkspace, Workspace
-
-    workspace, _ = await TenantWorkspace.objects.aget_or_create(
-        tenant=tenant_membership.tenant,
+    tenant_label = (
+        tenant_membership.tenant.external_id if tenant_membership else f"workspace:{workspace.id}"
     )
-    knowledge_workspace = await Workspace.objects.filter(
-        workspace_tenants__tenant=tenant_membership.tenant
-    ).afirst()
 
-    logger.info("Building agent graph for tenant:%s", tenant_membership.tenant.external_id)
+    logger.info("Building agent graph for %s", tenant_label)
 
     # --- Build tools ---
     tools = _build_tools(workspace, user, mcp_tools or [])
-    logger.debug("Created %d tools for tenant:%s", len(tools), tenant_membership.tenant.external_id)
+    logger.debug("Created %d tools for %s", len(tools), tenant_label)
 
-    # --- Inject tenant_id and tenant_membership_id into MCP tool calls ---
+    # --- Inject tenant_id, tenant_membership_id, and workspace_id into MCP tool calls ---
     injections = {
         "tenant_id": "tenant_id",
         "tenant_membership_id": "tenant_membership_id",
+        "workspace_id": "workspace_id",
     }
     hidden_params = list(injections.keys())
 
@@ -325,11 +325,11 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, tenant_membership, knowledge_workspace)
+    system_prompt = await _build_system_prompt(workspace, tenant_membership)
     logger.debug(
-        "System prompt assembled: %d characters for tenant:%s",
+        "System prompt assembled: %d characters for %s",
         len(system_prompt),
-        tenant_membership.tenant.external_id,
+        tenant_label,
     )
 
     # --- Create tool node with context ID injection ---
@@ -425,15 +425,15 @@ async def build_agent_graph(
     compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
-        "Agent graph compiled for tenant:%s (checkpointer: %s)",
-        tenant_membership.tenant.external_id,
+        "Agent graph compiled for %s (checkpointer: %s)",
+        tenant_label,
         type(checkpointer).__name__ if checkpointer else "None",
     )
 
     return compiled
 
 
-def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list) -> list:
+def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> list:
     """
     Build the tool list for the agent.
 
@@ -465,21 +465,22 @@ def _build_tools(workspace: TenantWorkspace, user: User | None, mcp_tools: list)
 
 
 async def _build_system_prompt(
-    workspace: TenantWorkspace, tenant_membership: TenantMembership, knowledge_workspace=None
+    workspace: Workspace,
+    tenant_membership: TenantMembership | None,
 ) -> str:
     """
-    Assemble the complete system prompt for a tenant workspace.
+    Assemble the complete system prompt for a workspace.
 
     The prompt is built from:
     1. BASE_SYSTEM_PROMPT: Core agent behavior and formatting
     2. ARTIFACT_PROMPT_ADDITION: Instructions for creating artifacts
-    3. Workspace system prompt: Tenant-specific instructions
+    3. Workspace system prompt: Workspace-specific instructions
     4. Knowledge retriever output: Metrics, rules, learnings
-    5. Tenant context: Tenant name, provider, query config
+    5. Tenant context: Tenant name, provider, query config (single-tenant only)
 
     Args:
-        workspace: The TenantWorkspace model instance.
-        tenant_membership: The TenantMembership for context metadata.
+        workspace: The Workspace model instance.
+        tenant_membership: The TenantMembership for context metadata (None for multi-tenant).
 
     Returns:
         Complete system prompt string.
@@ -488,21 +489,21 @@ async def _build_system_prompt(
     sections.append(ARTIFACT_PROMPT_ADDITION)
 
     if workspace.system_prompt:
-        sections.append(f"\n## Tenant-Specific Instructions\n\n{workspace.system_prompt}\n")
+        sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
 
-    if knowledge_workspace is not None:
-        retriever = KnowledgeRetriever(knowledge_workspace)
-        knowledge_context = await retriever.retrieve()
-        if knowledge_context:
-            sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
+    retriever = KnowledgeRetriever(workspace)
+    knowledge_context = await retriever.retrieve()
+    if knowledge_context:
+        sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
 
-    provider = tenant_membership.tenant.provider
-    if provider == "commcare_connect":
-        pipeline_name = "connect_sync"
-    else:
-        pipeline_name = "commcare_sync"
+    if tenant_membership is not None:
+        provider = tenant_membership.tenant.provider
+        if provider == "commcare_connect":
+            pipeline_name = "connect_sync"
+        else:
+            pipeline_name = "commcare_sync"
 
-    sections.append(f"""
+        sections.append(f"""
 ## Tenant Context
 
 - Tenant: {tenant_membership.tenant.canonical_name} ({tenant_membership.tenant.external_id})
@@ -517,10 +518,23 @@ async def _build_system_prompt(
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-    # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
-    # If data is not yet loaded, the context will say so and instruct the agent to run_materialization.
-    schema_context = await _fetch_schema_context(tenant_membership)
-    sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+        # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
+        schema_context = await _fetch_schema_context(tenant_membership)
+        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+    else:
+        sections.append("""
+## Query Configuration
+
+- Maximum rows per query: 500
+- Query timeout: 30 seconds
+
+When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+""")
+        sections.append(
+            "\n## Data Availability\n\n"
+            "This is a multi-tenant workspace. Use workspace_id when calling MCP tools. "
+            "Call `list_tables` to see available tables.\n"
+        )
 
     return "\n".join(sections)
 

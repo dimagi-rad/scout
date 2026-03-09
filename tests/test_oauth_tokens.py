@@ -229,7 +229,9 @@ class TestGraphOAuthConfig:
 
     @patch("apps.agents.graph.base.ChatAnthropic")
     @patch("apps.agents.graph.base.KnowledgeRetriever")
-    def test_build_graph_accepts_oauth_tokens(self, mock_kr, mock_llm, tenant_membership):
+    def test_build_graph_accepts_oauth_tokens(
+        self, mock_kr, mock_llm, workspace, tenant_membership
+    ):
         """build_agent_graph should accept oauth_tokens without error."""
         from apps.agents.graph.base import build_agent_graph
 
@@ -241,8 +243,9 @@ class TestGraphOAuthConfig:
         mock_llm_instance.bind_tools.return_value = mock_llm_instance
         mock_llm.return_value = mock_llm_instance
 
-        # Should not raise
+        # Should not raise (returns a coroutine — check it's not None)
         graph = build_agent_graph(
+            workspace=workspace,
             tenant_membership=tenant_membership,
             oauth_tokens={"commcare": "test_token"},
         )

@@ -430,6 +430,7 @@ def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve Workspace and TenantMembership from workspace_id.
 
     Returns (workspace, tenant_membership) or (None, None) if access denied.
+    Multi-tenant workspaces return (workspace, None) — routing uses workspace_id.
     """
     from apps.projects.models import WorkspaceMembership
 
@@ -441,12 +442,16 @@ def _resolve_workspace_and_membership(user, workspace_id):
         return None, None
 
     workspace = wm.workspace
-    # For the agent, resolve a TenantMembership via the workspace's tenants
-    from apps.users.models import TenantMembership
+    # Multi-tenant workspaces route via workspace_id — no single TenantMembership applies
+    if workspace.workspace_tenants.count() > 1:
+        return workspace, None
 
     tenant = workspace.tenant  # single-tenant compat
     if tenant is None:
         return workspace, None
+
+    from apps.users.models import TenantMembership
+
     try:
         tm = TenantMembership.objects.select_related("tenant").get(user=user, tenant=tenant)
     except TenantMembership.DoesNotExist:
@@ -590,7 +595,10 @@ async def chat_view(request):
     workspace, tenant_membership = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
-    if tenant_membership is None:
+
+    # For multi-tenant workspaces, tenant_membership may be None (routing uses workspace_id)
+    tenant_count = await workspace.tenants.acount()
+    if tenant_membership is None and tenant_count <= 1:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
@@ -605,14 +613,15 @@ async def chat_view(request):
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
     # Touch the schema to reset inactivity TTL on user-initiated chat
-    from apps.projects.models import SchemaState, TenantSchema
+    if tenant_membership is not None:
+        from apps.projects.models import SchemaState, TenantSchema
 
-    ts = await TenantSchema.objects.filter(
-        tenant=tenant_membership.tenant,
-        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-    ).afirst()
-    if ts is not None:
-        await sync_to_async(ts.touch)()
+        ts = await TenantSchema.objects.filter(
+            tenant=tenant_membership.tenant,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+        if ts is not None:
+            await sync_to_async(ts.touch)()
 
     # Load MCP tools; attach progress callback for run_materialization updates.
     progress_queue: asyncio.Queue = asyncio.Queue()
@@ -641,11 +650,13 @@ async def chat_view(request):
     try:
         checkpointer = await _ensure_checkpointer()
         agent = await build_agent_graph(
+            workspace=workspace,
             tenant_membership=tenant_membership,
             user=user,
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
             oauth_tokens=oauth_tokens,
+            workspace_id=str(workspace.id),
         )
     except Exception:
         # Connection may have gone stale -- force a new checkpointer and retry
@@ -653,11 +664,13 @@ async def chat_view(request):
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await _ensure_checkpointer(force_new=True)
             agent = await build_agent_graph(
+                workspace=workspace,
                 tenant_membership=tenant_membership,
                 user=user,
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
                 oauth_tokens=oauth_tokens,
+                workspace_id=str(workspace.id),
             )
         except Exception as e:
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
@@ -671,9 +684,10 @@ async def chat_view(request):
 
     input_state = {
         "messages": [HumanMessage(content=user_content)],
-        "tenant_id": tenant_membership.tenant.external_id,
-        "tenant_name": tenant_membership.tenant.canonical_name,
-        "tenant_membership_id": str(tenant_membership.id),
+        "tenant_id": tenant_membership.tenant.external_id if tenant_membership else "",
+        "tenant_name": tenant_membership.tenant.canonical_name if tenant_membership else "",
+        "tenant_membership_id": str(tenant_membership.id) if tenant_membership else "",
+        "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "user_role": "analyst",
         "needs_correction": False,
@@ -689,10 +703,14 @@ async def chat_view(request):
     # Attach Langfuse tracing callback if configured
     from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 
+    trace_metadata = {
+        "tenant_id": tenant_membership.tenant.external_id if tenant_membership else "",
+        "workspace_id": str(workspace.id),
+    }
     langfuse_handler = get_langfuse_callback(
         session_id=str(thread_id),
         user_id=str(user.id),
-        metadata={"tenant_id": tenant_membership.tenant.external_id},
+        metadata=trace_metadata,
     )
     if langfuse_handler is not None:
         config["callbacks"] = [langfuse_handler]
@@ -700,7 +718,7 @@ async def chat_view(request):
     trace_ctx = langfuse_trace_context(
         session_id=str(thread_id),
         user_id=str(user.id),
-        metadata={"tenant_id": tenant_membership.tenant.external_id},
+        metadata=trace_metadata,
     )
 
     async def _traced_stream():

@@ -163,10 +163,13 @@ class AgentState(TypedDict):
     # Conversation history with automatic deduplication
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Tenant context - scopes all data access
+    # Tenant context - scopes all data access (single-tenant workspaces)
     tenant_id: str
     tenant_name: str
     tenant_membership_id: str
+
+    # Workspace context - for multi-tenant workspace routing via MCP
+    workspace_id: str
 
     # User context - for permissions and audit
     user_id: str
