@@ -21,7 +21,6 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": {
           target: `http://localhost:${env.API_PORT || 8000}`,
-          changeOrigin: true,
         },
         "/accounts": {
           target: `http://localhost:${env.API_PORT || 8000}`,

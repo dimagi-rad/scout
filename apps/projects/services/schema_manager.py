@@ -7,6 +7,7 @@ Creates and tears down tenant-scoped PostgreSQL schemas.
 from __future__ import annotations
 
 import logging
+import uuid
 
 import psycopg
 import psycopg.sql
@@ -90,6 +91,20 @@ class SchemaManager:
             tenant.external_id,
         )
         return ts
+
+    def create_refresh_schema(self, tenant) -> TenantSchema:
+        """Create a new TenantSchema record for a background refresh.
+
+        Returns a PROVISIONING record with a unique schema name. The caller
+        is responsible for creating the physical schema and dispatching the
+        Celery task (refresh_tenant_schema) to run the materialization.
+        """
+        schema_name = f"{self._sanitize_schema_name(tenant.external_id)}_r{uuid.uuid4().hex[:8]}"
+        return TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name=schema_name,
+            state=SchemaState.PROVISIONING,
+        )
 
     def teardown(self, tenant_schema: TenantSchema) -> None:
         """Drop a tenant's schema and mark it as torn down."""

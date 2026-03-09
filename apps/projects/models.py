@@ -17,6 +17,7 @@ class SchemaState(models.TextChoices):
     MATERIALIZING = "materializing"
     EXPIRED = "expired"
     TEARDOWN = "teardown"
+    FAILED = "failed"
 
 
 class TenantSchema(models.Model):

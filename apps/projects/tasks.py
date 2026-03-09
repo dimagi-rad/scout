@@ -4,11 +4,10 @@ import logging
 from datetime import timedelta
 
 from celery import shared_task
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
-
-SCHEMA_TTL_HOURS = 24
 
 
 @shared_task
@@ -160,7 +159,7 @@ def expire_inactive_schemas() -> None:
     """
     from apps.projects.models import SchemaState, TenantSchema
 
-    cutoff = timezone.now() - timedelta(hours=SCHEMA_TTL_HOURS)
+    cutoff = timezone.now() - timedelta(hours=settings.SCHEMA_TTL_HOURS)
     stale = TenantSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,

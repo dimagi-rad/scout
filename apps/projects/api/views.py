@@ -3,22 +3,24 @@ API views for data dictionary and workspace schema management.
 """
 
 import logging
-import uuid
 
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.projects.models import SchemaState, TenantSchema, WorkspaceRole
+from apps.projects.services.schema_manager import SchemaManager
+from apps.projects.tasks import refresh_tenant_schema
 from apps.projects.workspace_resolver import resolve_workspace
+from apps.users.models import TenantMembership
 
 logger = logging.getLogger(__name__)
 
 
 def _resolve_tenant_schema(tenant):
     """Return the active TenantSchema for the given tenant, or None."""
-    from apps.projects.models import SchemaState, TenantSchema
-
     return TenantSchema.objects.filter(
         tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
@@ -30,8 +32,6 @@ def _schema_unavailable_response(tenant) -> Response | None:
 
     Returns None when an ACTIVE or MATERIALIZING schema exists (data is readable).
     """
-    from apps.projects.models import SchemaState, TenantSchema
-
     if tenant is None:
         return Response(
             {
@@ -300,26 +300,6 @@ class DataDictionaryView(APIView):
             }
         )
 
-    def _get_from_legacy(self, workspace):
-        raw_dict = workspace.data_dictionary or {}
-        tables = raw_dict.get("tables", {})
-        generated_at = workspace.data_dictionary_generated_at
-
-        enriched_tables = {}
-        for qualified_name, table_data in tables.items():
-            annotation = _get_annotation(workspace, qualified_name)
-            enriched = dict(table_data)
-            if annotation:
-                enriched["annotation"] = annotation
-            enriched_tables[qualified_name] = enriched
-
-        return Response(
-            {
-                "tables": enriched_tables,
-                "generated_at": generated_at.isoformat() if generated_at else None,
-            }
-        )
-
 
 class RefreshSchemaView(APIView):
     """
@@ -333,11 +313,6 @@ class RefreshSchemaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, workspace_id):
-        from apps.projects.models import SchemaState, TenantSchema, WorkspaceRole
-        from apps.projects.services.schema_manager import SchemaManager
-        from apps.projects.tasks import refresh_tenant_schema
-        from apps.users.models import TenantMembership
-
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
@@ -355,6 +330,12 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists():
+            return Response(
+                {"error": "A refresh is already in progress."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         try:
             tenant_membership = TenantMembership.objects.get(user=request.user, tenant=tenant)
         except TenantMembership.DoesNotExist:
@@ -363,19 +344,14 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        base_name = SchemaManager()._sanitize_schema_name(tenant.external_id)
-        refresh_schema_name = f"{base_name}_r{uuid.uuid4().hex[:8]}"
+        new_schema = SchemaManager().create_refresh_schema(tenant)
+        schema_id = str(new_schema.id)
+        membership_id = str(tenant_membership.id)
 
-        new_schema = TenantSchema.objects.create(
-            tenant=tenant,
-            schema_name=refresh_schema_name,
-            state=SchemaState.PROVISIONING,
-        )
-
-        refresh_tenant_schema.delay(str(new_schema.id), str(tenant_membership.id))
+        transaction.on_commit(lambda: refresh_tenant_schema.delay(schema_id, membership_id))
 
         return Response(
-            {"schema_id": str(new_schema.id), "status": "provisioning"},
+            {"schema_id": schema_id, "status": "provisioning"},
             status=status.HTTP_202_ACCEPTED,
         )
 
@@ -390,8 +366,6 @@ class RefreshStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        from apps.projects.models import TenantSchema
-
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
@@ -404,7 +378,7 @@ class RefreshStatusView(APIView):
         if latest is None:
             return Response({"state": "unavailable", "started_at": None, "error": None})
 
-        error = "Schema provisioning failed." if latest.state == "failed" else None
+        error = "Schema provisioning failed." if latest.state == SchemaState.FAILED else None
         return Response(
             {
                 "state": latest.state,
@@ -501,6 +475,12 @@ class TableDetailView(APIView):
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
+
+        if membership.role == WorkspaceRole.READ:
+            return Response(
+                {"error": "Read-write or manage role required to annotate tables."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
         if table_data is None:
