@@ -39,6 +39,17 @@ def _mock_conn():
     return conn
 
 
+def _mock_registry(provider="commcare"):
+    """Return a mock registry whose list() yields one pipeline for the given provider."""
+    pipeline = MagicMock()
+    pipeline.provider = provider
+    pipeline.name = f"{provider}_sync"
+    registry = MagicMock()
+    registry.list.return_value = [pipeline]
+    registry.get.return_value = MagicMock()
+    return registry
+
+
 @pytest.mark.django_db
 def test_refresh_task_marks_schema_active_on_success(provisioning_schema, tenant_membership_obj):
     with (
@@ -47,13 +58,15 @@ def test_refresh_task_marks_schema_active_on_success(provisioning_schema, tenant
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.projects.tasks._resolve_credential",
+            "apps.projects.tasks.resolve_credential",
             return_value={"type": "api_key", "value": "tok"},
         ),
-        patch("mcp_server.pipeline_registry.get_registry") as mock_registry,
+        patch(
+            "mcp_server.pipeline_registry.get_registry",
+            return_value=_mock_registry(),
+        ),
         patch("mcp_server.services.materializer.run_pipeline"),
     ):
-        mock_registry.return_value.get.return_value = MagicMock()
         from apps.projects.tasks import refresh_tenant_schema
 
         result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
@@ -64,29 +77,33 @@ def test_refresh_task_marks_schema_active_on_success(provisioning_schema, tenant
 
 
 @pytest.mark.django_db
-def test_refresh_task_drops_old_active_schema_on_success(
+def test_refresh_task_schedules_old_schema_teardown(
     provisioning_schema, old_active_schema, tenant_membership_obj
 ):
+    """Old ACTIVE schemas are moved to TEARDOWN and a delayed task is scheduled."""
     with (
         patch(
             "apps.projects.services.schema_manager.get_managed_db_connection",
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.projects.tasks._resolve_credential",
+            "apps.projects.tasks.resolve_credential",
             return_value={"type": "api_key", "value": "tok"},
         ),
-        patch("mcp_server.pipeline_registry.get_registry") as mock_registry,
+        patch(
+            "mcp_server.pipeline_registry.get_registry",
+            return_value=_mock_registry(),
+        ),
         patch("mcp_server.services.materializer.run_pipeline"),
-        patch("apps.projects.services.schema_manager.SchemaManager.teardown"),
+        patch("apps.projects.tasks.teardown_schema.apply_async") as mock_apply_async,
     ):
-        mock_registry.return_value.get.return_value = MagicMock()
         from apps.projects.tasks import refresh_tenant_schema
 
         refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
 
     old_active_schema.refresh_from_db()
-    assert old_active_schema.state == SchemaState.EXPIRED
+    assert old_active_schema.state == SchemaState.TEARDOWN
+    mock_apply_async.assert_called_once_with((str(old_active_schema.id),), countdown=30 * 60)
 
 
 @pytest.mark.django_db
@@ -113,7 +130,7 @@ def test_refresh_task_marks_failed_on_no_credential(provisioning_schema, tenant_
             "apps.projects.services.schema_manager.get_managed_db_connection",
             return_value=_mock_conn(),
         ),
-        patch("apps.projects.tasks._resolve_credential", return_value=None),
+        patch("apps.projects.tasks.resolve_credential", return_value=None),
         patch("apps.projects.services.schema_manager.SchemaManager.teardown"),
     ):
         from apps.projects.tasks import refresh_tenant_schema
@@ -135,17 +152,19 @@ def test_refresh_task_marks_failed_on_materialization_error(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.projects.tasks._resolve_credential",
+            "apps.projects.tasks.resolve_credential",
             return_value={"type": "api_key", "value": "tok"},
         ),
-        patch("mcp_server.pipeline_registry.get_registry") as mock_registry,
+        patch(
+            "mcp_server.pipeline_registry.get_registry",
+            return_value=_mock_registry(),
+        ),
         patch(
             "mcp_server.services.materializer.run_pipeline",
             side_effect=RuntimeError("Pipeline exploded"),
         ),
         patch("apps.projects.services.schema_manager.SchemaManager.teardown"),
     ):
-        mock_registry.return_value.get.return_value = MagicMock()
         from apps.projects.tasks import refresh_tenant_schema
 
         result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))

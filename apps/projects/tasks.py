@@ -5,7 +5,10 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
+
+from apps.users.services.credential_resolver import resolve_credential
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +17,11 @@ logger = logging.getLogger(__name__)
 def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
 
-    On success: marks state=ACTIVE, drops old active schemas for the tenant.
+    On success: marks state=ACTIVE, schedules teardown of old active schemas.
     On failure: drops the new schema, marks state=FAILED.
     """
-    import psycopg
-    import psycopg.sql
-
     from apps.projects.models import SchemaState, TenantSchema
-    from apps.projects.services.schema_manager import SchemaManager, get_managed_db_connection
+    from apps.projects.services.schema_manager import SchemaManager
     from apps.users.models import TenantMembership
 
     try:
@@ -39,17 +39,7 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
 
     # Step 1: Create the physical schema in the managed database
     try:
-        conn = get_managed_db_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                    psycopg.sql.Identifier(new_schema.schema_name)
-                )
-            )
-            cursor.close()
-        finally:
-            conn.close()
+        SchemaManager().create_physical_schema(new_schema)
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
         new_schema.state = SchemaState.FAILED
@@ -57,7 +47,7 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         return {"error": "Failed to create schema"}
 
     # Step 2: Resolve credential and run materialization pipeline
-    credential = _resolve_credential(membership)
+    credential = resolve_credential(membership)
     if credential is None:
         _drop_schema_and_fail(new_schema)
         return {"error": "No credential available"}
@@ -66,75 +56,36 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         from mcp_server.pipeline_registry import get_registry
         from mcp_server.services.materializer import run_pipeline
 
-        pipeline_config = get_registry().get("commcare_sync")
+        registry = get_registry()
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
+        if pipeline_name is None:
+            _drop_schema_and_fail(new_schema)
+            return {"error": f"No pipeline configured for provider '{membership.tenant.provider}'"}
+        pipeline_config = registry.get(pipeline_name)
         run_pipeline(membership, credential, pipeline_config)
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
         _drop_schema_and_fail(new_schema)
         return {"error": "Materialization failed"}
 
-    # Step 3: Drop old active schemas for this tenant
+    # Step 3: Mark new schema as active
+    new_schema.state = SchemaState.ACTIVE
+    new_schema.save(update_fields=["state"])
+
+    # Step 4: Schedule teardown of previously active schemas with a delay to allow
+    # in-flight queries against the old schema to complete before it is dropped.
     old_schemas = TenantSchema.objects.filter(
         tenant=new_schema.tenant,
         state=SchemaState.ACTIVE,
     ).exclude(id=new_schema.id)
     for old_schema in old_schemas:
-        try:
-            SchemaManager().teardown(old_schema)
-            old_schema.state = SchemaState.EXPIRED
-            old_schema.save(update_fields=["state"])
-        except Exception:
-            logger.exception("Failed to tear down old schema '%s'", old_schema.schema_name)
-
-    # Step 4: Mark new schema as active
-    new_schema.state = SchemaState.ACTIVE
-    new_schema.save(update_fields=["state"])
+        old_schema.state = SchemaState.TEARDOWN
+        old_schema.save(update_fields=["state"])
+        teardown_schema.apply_async((str(old_schema.id),), countdown=30 * 60)
 
     logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
     return {"status": "active", "schema_id": schema_id}
-
-
-def _resolve_credential(membership) -> dict | None:
-    """Resolve a credential dict for a TenantMembership, or return None."""
-    from apps.users.models import TenantCredential
-
-    try:
-        cred_obj = TenantCredential.objects.get(tenant_membership=membership)
-    except TenantCredential.DoesNotExist:
-        return None
-
-    if cred_obj.credential_type == TenantCredential.API_KEY:
-        from apps.users.adapters import decrypt_credential
-
-        try:
-            decrypted = decrypt_credential(cred_obj.encrypted_credential)
-            return {"type": "api_key", "value": decrypted}
-        except Exception:
-            logger.exception("Failed to decrypt API key for membership %s", membership.id)
-            return None
-
-    # OAuth credential
-    from allauth.socialaccount.models import SocialToken
-
-    provider = membership.tenant.provider
-    if provider == "commcare_connect":
-        token_obj = SocialToken.objects.filter(
-            account__user=membership.user,
-            account__provider__startswith="commcare_connect",
-        ).first()
-    else:
-        token_obj = (
-            SocialToken.objects.filter(
-                account__user=membership.user,
-                account__provider__startswith="commcare",
-            )
-            .exclude(account__provider__startswith="commcare_connect")
-            .first()
-        )
-
-    if not token_obj:
-        return None
-    return {"type": "oauth", "value": token_obj.token}
 
 
 def _drop_schema_and_fail(schema) -> None:
@@ -167,7 +118,8 @@ def expire_inactive_schemas() -> None:
     for schema in stale:
         schema.state = SchemaState.TEARDOWN
         schema.save(update_fields=["state"])
-        teardown_schema.delay(str(schema.id))
+        schema_id = str(schema.id)
+        transaction.on_commit(lambda sid=schema_id: teardown_schema.delay(sid))
 
 
 @shared_task

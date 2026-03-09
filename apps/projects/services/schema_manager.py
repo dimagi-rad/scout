@@ -92,6 +92,24 @@ class SchemaManager:
         )
         return ts
 
+    def create_physical_schema(self, tenant_schema: TenantSchema) -> None:
+        """Create the physical PostgreSQL schema for an existing TenantSchema record.
+
+        Idempotent — uses ``CREATE SCHEMA IF NOT EXISTS``. The caller is
+        responsible for updating ``tenant_schema.state`` on success or failure.
+        """
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    psycopg.sql.Identifier(tenant_schema.schema_name)
+                )
+            )
+            cursor.close()
+        finally:
+            conn.close()
+
     def create_refresh_schema(self, tenant) -> TenantSchema:
         """Create a new TenantSchema record for a background refresh.
 

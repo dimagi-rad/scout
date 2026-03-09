@@ -24,7 +24,11 @@ def test_expire_inactive_schemas_marks_stale_schema_for_teardown(active_schema):
     active_schema.last_accessed_at = timezone.now() - timedelta(hours=25)
     active_schema.save(update_fields=["last_accessed_at"])
 
-    with patch("apps.projects.tasks.teardown_schema.delay") as mock_delay:
+    # transaction.on_commit doesn't fire inside test transactions; invoke immediately
+    with (
+        patch("apps.projects.tasks.transaction.on_commit", side_effect=lambda cb: cb()),
+        patch("apps.projects.tasks.teardown_schema.delay") as mock_delay,
+    ):
         from apps.projects.tasks import expire_inactive_schemas
 
         expire_inactive_schemas()
