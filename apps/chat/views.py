@@ -403,15 +403,25 @@ def _get_user_if_authenticated(request):
 def _upsert_thread(thread_id, user, title, *, workspace):
     """Create or update a Thread record.
 
-    The lookup key includes both id AND user+workspace so an attacker-supplied
-    thread_id cannot silently relocate a thread from another workspace.
+    Explicitly validates ownership before upserting: if the thread_id already
+    exists and belongs to a different user or workspace, the upsert is skipped
+    with a warning rather than relying on a PK IntegrityError as a side-effect.
     auto_now on updated_at handles the timestamp on every save.
     """
+    existing = Thread.objects.filter(id=thread_id).first()
+    if existing is not None and (
+        existing.user_id != user.pk or existing.workspace_id != workspace.pk
+    ):
+        logger.warning(
+            "Thread %s belongs to a different user/workspace, skipping upsert",
+            thread_id,
+        )
+        return
+    # On create: set user, workspace, and title.
+    # On update: no field changes needed — auto_now on updated_at handles the timestamp.
     Thread.objects.update_or_create(
         id=thread_id,
-        user=user,
-        workspace=workspace,
-        create_defaults={"title": title[:200]},
+        create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
     )
 
 

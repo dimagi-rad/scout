@@ -25,8 +25,13 @@ def migrate_threads_to_workspace(apps, schema_editor):
             continue
 
         tenant = thread.tenant_membership.tenant
-        # Find the workspace linked to this tenant (auto-created or otherwise)
-        workspace = Workspace.objects.filter(workspace_tenants__tenant=tenant).first()
+        # Find the workspace linked to this tenant where the thread's owner is a member.
+        # Anchoring on the user avoids picking a random workspace when the same tenant
+        # appears in multiple workspaces (e.g. a manually created second workspace).
+        workspace = Workspace.objects.filter(
+            workspace_tenants__tenant=tenant,
+            memberships__user=thread.user,
+        ).first()
         if workspace is None:
             to_delete.append(thread.pk)
         else:
