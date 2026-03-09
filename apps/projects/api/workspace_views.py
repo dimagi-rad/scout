@@ -1,6 +1,5 @@
 """Workspace management API views."""
 
-from django.db import transaction
 from django.db.models import Count
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -337,7 +336,7 @@ class WorkspaceTenantView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, workspace_id):
-        from apps.projects.tasks import rebuild_workspace_view_schema
+        from apps.projects.services.workspace_service import add_workspace_tenant
 
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
@@ -379,23 +378,14 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
-
-        # Amendment H: mark view schema PROVISIONING synchronously before dispatch
-        WorkspaceViewSchema.objects.filter(workspace=workspace).update(
-            state=SchemaState.PROVISIONING
-        )
-
-        workspace_id_str = str(workspace.id)
-        transaction.on_commit(lambda: rebuild_workspace_view_schema.delay(workspace_id_str))
-
+        wt = add_workspace_tenant(workspace, tenant)
         return Response(
             {"id": str(wt.id), "tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name},
             status=status.HTTP_202_ACCEPTED,
         )
 
     def delete(self, request, workspace_id, wt_id):
-        from apps.projects.tasks import rebuild_workspace_view_schema
+        from apps.projects.services.workspace_service import remove_workspace_tenant
 
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
@@ -413,21 +403,11 @@ class WorkspaceTenantView(APIView):
                 {"error": "Tenant not found in workspace."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        # Block removal of last tenant
         if workspace.workspace_tenants.count() <= 1:
             return Response(
                 {"error": "Cannot remove the last tenant from a workspace."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        wt.delete()
-
-        # Amendment H: mark view schema PROVISIONING synchronously before dispatch
-        WorkspaceViewSchema.objects.filter(workspace=workspace).update(
-            state=SchemaState.PROVISIONING
-        )
-
-        workspace_id_str = str(workspace.id)
-        transaction.on_commit(lambda: rebuild_workspace_view_schema.delay(workspace_id_str))
-
+        remove_workspace_tenant(workspace, wt)
         return Response(status=status.HTTP_204_NO_CONTENT)
