@@ -8,6 +8,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from apps.projects.services.schema_manager import SchemaManager
 from apps.users.services.credential_resolver import resolve_credential
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,6 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
 def _drop_schema_and_fail(schema) -> None:
     """Drop the physical schema and mark the record as FAILED."""
     from apps.projects.models import SchemaState
-    from apps.projects.services.schema_manager import SchemaManager
 
     try:
         SchemaManager().teardown(schema)
@@ -120,6 +120,65 @@ def expire_inactive_schemas() -> None:
         schema.save(update_fields=["state"])
         schema_id = str(schema.id)
         transaction.on_commit(lambda sid=schema_id: teardown_schema.delay(sid))
+
+
+@shared_task
+def rebuild_workspace_view_schema(workspace_id: str) -> dict:
+    """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
+
+    On success: marks WorkspaceViewSchema.state = ACTIVE.
+    On failure: marks state = FAILED and returns an error dict.
+    """
+    from apps.projects.models import SchemaState, Workspace, WorkspaceViewSchema
+
+    try:
+        workspace = Workspace.objects.prefetch_related("tenants").get(id=workspace_id)
+    except Workspace.DoesNotExist:
+        logger.error("rebuild_workspace_view_schema: workspace %s not found", workspace_id)
+        return {"error": "Workspace not found"}
+
+    try:
+        vs = SchemaManager().build_view_schema(workspace)
+    except Exception:
+        logger.exception("Failed to build view schema for workspace %s", workspace_id)
+        try:
+            vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+            vs.state = SchemaState.FAILED
+            vs.save(update_fields=["state"])
+        except WorkspaceViewSchema.DoesNotExist:
+            pass
+        return {"error": "Failed to build view schema"}
+
+    vs.state = SchemaState.ACTIVE
+    vs.save(update_fields=["state"])
+
+    logger.info(
+        "View schema '%s' is now active for workspace %s",
+        vs.schema_name,
+        workspace_id,
+    )
+    return {"status": "active", "schema_name": vs.schema_name}
+
+
+@shared_task
+def teardown_view_schema_task(view_schema_id: str) -> None:
+    """Drop the physical PostgreSQL schema for a WorkspaceViewSchema and mark EXPIRED."""
+    from apps.projects.models import SchemaState, WorkspaceViewSchema
+
+    try:
+        vs = WorkspaceViewSchema.objects.get(id=view_schema_id)
+    except WorkspaceViewSchema.DoesNotExist:
+        logger.error("teardown_view_schema_task: view schema %s not found", view_schema_id)
+        return
+
+    try:
+        SchemaManager().teardown_view_schema(vs)
+    except Exception:
+        logger.exception("Failed to drop view schema '%s'", vs.schema_name)
+        raise
+
+    vs.state = SchemaState.EXPIRED
+    vs.save(update_fields=["state"])
 
 
 @shared_task
