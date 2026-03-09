@@ -283,7 +283,6 @@ async def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
-    workspace_id: str = "",
 ):
     """
     Build a LangGraph agent graph for a workspace.
@@ -295,7 +294,6 @@ async def build_agent_graph(
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
-        workspace_id: Workspace UUID string for multi-tenant MCP routing.
     """
     tenant_label = (
         tenant_membership.tenant.external_id if tenant_membership else f"workspace:{workspace.id}"
