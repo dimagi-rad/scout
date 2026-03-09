@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from apps.projects.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
@@ -33,10 +34,17 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
 
     Deletes the WorkspaceTenant record and marks any existing WorkspaceViewSchema
     as PROVISIONING, then dispatches a rebuild task after the transaction commits.
+
+    Raises ValidationError if wt is the last tenant in the workspace.
     """
     from apps.projects.tasks import rebuild_workspace_view_schema
 
     with transaction.atomic():
+        # Lock all tenant rows for this workspace before counting to prevent
+        # concurrent removals from both passing the last-tenant guard.
+        count = workspace.workspace_tenants.select_for_update().count()
+        if count <= 1:
+            raise ValidationError("Cannot remove the last tenant from a workspace.")
         wt.delete()
         WorkspaceViewSchema.objects.filter(workspace=workspace).update(
             state=SchemaState.PROVISIONING

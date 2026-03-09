@@ -13,7 +13,7 @@ User = get_user_model()
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_single_tenant_workspace_with_membership_is_accessible():
-    """Single-tenant workspace is accessible when user holds TenantMembership."""
+    """Single-tenant workspace returns TenantMembership when user holds one."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
@@ -27,15 +27,15 @@ async def test_single_tenant_workspace_with_membership_is_accessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     await TenantMembership.objects.acreate(user=user, tenant=t)
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    assert is_accessible is True
+    assert tm is not None
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_single_tenant_workspace_without_membership_is_inaccessible():
-    """Single-tenant workspace is inaccessible when user lacks TenantMembership."""
+    """Single-tenant workspace returns None tm when user lacks TenantMembership."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
@@ -49,15 +49,15 @@ async def test_single_tenant_workspace_without_membership_is_inaccessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     # no TenantMembership created
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    assert is_accessible is False
+    assert tm is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_multi_tenant_workspace_is_accessible():
-    """Multi-tenant workspaces are accessible via workspace_id routing."""
+    """Multi-tenant workspaces return None tm (caller re-checks count for access)."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
@@ -74,21 +74,23 @@ async def test_multi_tenant_workspace_is_accessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    assert is_accessible is True
+    # tm is None for multi-tenant (no single tenant to check); count > 1 grants access
+    assert tm is None
+    assert await workspace.workspace_tenants.acount() > 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_workspace_not_found_returns_none():
-    """Returns (None, False) when the workspace doesn't exist or user lacks WorkspaceMembership."""
+    """Returns (None, None) when the workspace doesn't exist or user lacks WorkspaceMembership."""
     from apps.chat.views import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-missing@example.com", password="pass"
     )
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, uuid.uuid4())
+    workspace, tm = await _resolve_workspace_and_membership(user, uuid.uuid4())
     assert workspace is None
-    assert is_accessible is False
+    assert tm is None

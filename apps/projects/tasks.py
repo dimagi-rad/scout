@@ -142,7 +142,7 @@ def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     On success: marks WorkspaceViewSchema.state = ACTIVE.
     On failure: marks state = FAILED and returns an error dict.
     """
-    from apps.projects.models import SchemaState, Workspace, WorkspaceViewSchema
+    from apps.projects.models import Workspace
 
     try:
         workspace = Workspace.objects.prefetch_related("tenants").get(id=workspace_id)
@@ -153,13 +153,10 @@ def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         vs = SchemaManager().build_view_schema(workspace)
     except Exception:
+        # build_view_schema already saves state=FAILED before re-raising;
+        # no need to write it again here (doing so risks overwriting a
+        # concurrent state transition, e.g. TEARDOWN set by expire_inactive_schemas).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
-        try:
-            vs = WorkspaceViewSchema.objects.get(workspace=workspace)
-            vs.state = SchemaState.FAILED
-            vs.save(update_fields=["state"])
-        except WorkspaceViewSchema.DoesNotExist:
-            pass
         return {"error": "Failed to build view schema"}
 
     logger.info(

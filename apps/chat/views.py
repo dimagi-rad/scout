@@ -429,10 +429,11 @@ def _upsert_thread(thread_id, user, title, *, workspace):
 def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve workspace access for a user.
 
-    Returns (workspace, is_accessible):
-    - (None, False): workspace not found or user lacks WorkspaceMembership
-    - (workspace, False): workspace found but user lacks TenantMembership for single-tenant
-    - (workspace, True): workspace found and user has appropriate access
+    Returns (workspace, tenant_membership):
+    - (None, None): workspace not found or user lacks WorkspaceMembership
+    - (workspace, None): workspace found but no single-tenant TenantMembership
+      (caller should re-read workspace_tenants.count() to decide if multi-tenant access applies)
+    - (workspace, tm): workspace found with a valid TenantMembership
     """
     from apps.projects.models import WorkspaceMembership
 
@@ -441,24 +442,21 @@ def _resolve_workspace_and_membership(user, workspace_id):
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
-        return None, False
+        return None, None
 
     workspace = wm.workspace
-    is_multi_tenant = workspace.workspace_tenants.count() > 1
-    if is_multi_tenant:
-        return workspace, True
-
     tenant = workspace.tenant
     if tenant is None:
-        return workspace, False
+        # Either multi-tenant or no tenants; caller checks count to determine access.
+        return workspace, None
 
     from apps.users.models import TenantMembership
 
     try:
-        TenantMembership.objects.get(user=user, tenant=tenant)
+        tm = TenantMembership.objects.get(user=user, tenant=tenant)
     except TenantMembership.DoesNotExist:
-        return workspace, False
-    return workspace, True
+        return workspace, None
+    return workspace, tm
 
 
 @sync_to_async
@@ -593,12 +591,13 @@ async def chat_view(request):
             {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
         )
 
-    # Resolve workspace and verify access
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, workspace_id)
+    # Resolve workspace and verify access. Re-read tenant count fresh here to
+    # avoid a TOCTOU where is_multi_tenant was stale at resolution time.
+    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
-    if not is_accessible:
+    if tm is None and await workspace.workspace_tenants.acount() <= 1:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
@@ -835,8 +834,8 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None or not is_accessible:
+    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
@@ -874,8 +873,8 @@ async def thread_share_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, is_accessible = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None or not is_accessible:
+    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)

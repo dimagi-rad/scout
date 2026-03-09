@@ -410,6 +410,7 @@ async def run_materialization(
     tenant_id: str,
     tenant_membership_id: str = "",
     pipeline: str = "commcare_sync",
+    workspace_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
     """Materialize data from a provider into the tenant's schema.
@@ -646,7 +647,7 @@ async def get_schema_status(tenant_id: str, workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def teardown_schema(tenant_id: str, confirm: bool = False) -> dict:
+async def teardown_schema(tenant_id: str, confirm: bool = False, workspace_id: str = "") -> dict:
     """Drop the tenant's schema and all its materialized data.
 
     Destructive — the schema and all tables are permanently dropped. The
