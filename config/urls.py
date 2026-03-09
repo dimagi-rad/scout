@@ -15,6 +15,7 @@ from apps.projects.api.workspace_views import (
     WorkspaceListView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListView,
+    WorkspaceTenantView,
 )
 from apps.projects.views import health_check
 from apps.recipes.api.views import PublicRecipeRunView
@@ -71,6 +72,8 @@ workspace_urlpatterns = [
         WorkspaceMemberDetailView.as_view(),
         name="workspace_member_detail",
     ),
+    path("tenants/", WorkspaceTenantView.as_view(), name="workspace_tenants"),
+    path("tenants/<uuid:wt_id>/", WorkspaceTenantView.as_view(), name="workspace_tenant_detail"),
 ]
 
 urlpatterns = [
