@@ -429,8 +429,8 @@ def _upsert_thread(thread_id, user, title, *, workspace):
 def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve Workspace and TenantMembership from workspace_id.
 
-    Returns (workspace, tenant_membership) or (None, None) if access denied.
-    Multi-tenant workspaces return (workspace, None) — routing uses workspace_id.
+    Returns (workspace, tenant_membership, is_multi_tenant) or (None, None, False) if denied.
+    Multi-tenant workspaces return (workspace, None, True) — routing uses workspace_id.
     """
     from apps.projects.models import WorkspaceMembership
 
@@ -439,24 +439,24 @@ def _resolve_workspace_and_membership(user, workspace_id):
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
-        return None, None
+        return None, None, False
 
     workspace = wm.workspace
-    # Multi-tenant workspaces route via workspace_id — no single TenantMembership applies
-    if workspace.workspace_tenants.count() > 1:
-        return workspace, None
+    is_multi_tenant = workspace.workspace_tenants.count() > 1
+    if is_multi_tenant:
+        return workspace, None, True
 
     tenant = workspace.tenant  # single-tenant compat
     if tenant is None:
-        return workspace, None
+        return workspace, None, False
 
     from apps.users.models import TenantMembership
 
     try:
         tm = TenantMembership.objects.select_related("tenant").get(user=user, tenant=tenant)
     except TenantMembership.DoesNotExist:
-        return workspace, None
-    return workspace, tm
+        return workspace, None, False
+    return workspace, tm, False
 
 
 @sync_to_async
@@ -592,13 +592,13 @@ async def chat_view(request):
         )
 
     # Resolve workspace and tenant membership
-    workspace, tenant_membership = await _resolve_workspace_and_membership(user, workspace_id)
+    workspace, tenant_membership, is_multi_tenant = await _resolve_workspace_and_membership(
+        user, workspace_id
+    )
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
-    # For multi-tenant workspaces, tenant_membership may be None (routing uses workspace_id)
-    tenant_count = await workspace.tenants.acount()
-    if tenant_membership is None and tenant_count <= 1:
+    if tenant_membership is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
@@ -840,7 +840,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
@@ -879,7 +879,7 @@ async def thread_share_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 

@@ -24,10 +24,11 @@ async def test_single_tenant_workspace_returns_membership():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     await TenantMembership.objects.acreate(user=user, tenant=t)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
     assert tm is not None
     assert tm.tenant.external_id == "single-domain"
+    assert is_multi is False
 
 
 @pytest.mark.asyncio
@@ -52,6 +53,31 @@ async def test_multi_tenant_workspace_returns_none_membership():
     await TenantMembership.objects.acreate(user=user, tenant=t1)
     await TenantMembership.objects.acreate(user=user, tenant=t2)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
     assert tm is None  # critical: must be None even though user has TenantMembership for both
+    assert is_multi is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db
+async def test_resolve_workspace_and_membership_returns_is_multi_tenant_flag():
+    """_resolve_workspace_and_membership third return value is True for multi-tenant."""
+    from apps.chat.views import _resolve_workspace_and_membership
+
+    user = await sync_to_async(User.objects.create_user)(
+        email="resolve-flag@example.com", password="pass"
+    )
+    t1 = await Tenant.objects.acreate(
+        provider="commcare", external_id="flag-domain-1", canonical_name="Flag1"
+    )
+    t2 = await Tenant.objects.acreate(
+        provider="commcare", external_id="flag-domain-2", canonical_name="Flag2"
+    )
+    ws = await Workspace.objects.acreate(name="Flag WS", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
+
+    ws_result, tm, is_multi = await _resolve_workspace_and_membership(user, ws.id)
+    assert is_multi is True
