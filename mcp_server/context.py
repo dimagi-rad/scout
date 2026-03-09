@@ -38,6 +38,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
 
     Uses the tenant_id (domain name) to find the TenantSchema and builds
     a QueryContext pointing at the managed DB with the tenant's schema.
+    Resets the schema's inactivity TTL via touch().
 
     Raises ValueError if the tenant schema is not found or not active.
     """
@@ -55,6 +56,8 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
         raise ValueError(
             f"No active schema for tenant '{tenant_id}'. Run materialization first to load data."
         )
+
+    await sync_to_async(ts.touch)()
 
     url = settings.MANAGED_DATABASE_URL
     if not url:
