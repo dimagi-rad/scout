@@ -30,7 +30,7 @@ from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
 from apps.projects.models import MaterializationRun, TenantMetadata, TenantSchema
-from mcp_server.context import load_tenant_context
+from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
     INTERNAL_ERROR,
@@ -47,6 +47,7 @@ from mcp_server.services.metadata import (
     pipeline_get_metadata,
     pipeline_list_tables,
 )
+from mcp_server.services.query import execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ mcp = FastMCP("scout")
 
 
 @mcp.tool()
-async def list_tables(tenant_id: str) -> dict:
+async def list_tables(tenant_id: str, workspace_id: str = "") -> dict:
     """List all tables in the tenant's database schema.
 
     Returns table names, types, descriptions, row counts, and materialization timestamps.
@@ -65,10 +66,15 @@ async def list_tables(tenant_id: str) -> dict:
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
+        workspace_id: Optional workspace UUID. When provided, routes to the workspace's schema.
     """
     async with tool_context("list_tables", tenant_id) as tc:
         try:
-            ctx = await load_tenant_context(tenant_id)
+            ctx = (
+                await load_workspace_context(workspace_id)
+                if workspace_id
+                else await load_tenant_context(tenant_id)
+            )
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -111,7 +117,7 @@ async def list_tables(tenant_id: str) -> dict:
 
 
 @mcp.tool()
-async def describe_table(tenant_id: str, table_name: str) -> dict:
+async def describe_table(tenant_id: str, table_name: str, workspace_id: str = "") -> dict:
     """Get detailed metadata for a specific table.
 
     Returns columns (name, type, nullable, default, description) and a table description.
@@ -120,10 +126,15 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
         table_name: Name of the table to describe.
+        workspace_id: Optional workspace UUID. When provided, routes to the workspace's schema.
     """
     async with tool_context("describe_table", tenant_id, table_name=table_name) as tc:
         try:
-            ctx = await load_tenant_context(tenant_id)
+            ctx = (
+                await load_workspace_context(workspace_id)
+                if workspace_id
+                else await load_tenant_context(tenant_id)
+            )
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -167,7 +178,7 @@ async def describe_table(tenant_id: str, table_name: str) -> dict:
 
 
 @mcp.tool()
-async def get_metadata(tenant_id: str) -> dict:
+async def get_metadata(tenant_id: str, workspace_id: str = "") -> dict:
     """Get a complete metadata snapshot for the tenant's database.
 
     Returns all tables with their columns, descriptions, and table relationships
@@ -175,10 +186,15 @@ async def get_metadata(tenant_id: str) -> dict:
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
+        workspace_id: Optional workspace UUID. When provided, routes to the workspace's schema.
     """
     async with tool_context("get_metadata", tenant_id) as tc:
         try:
-            ctx = await load_tenant_context(tenant_id)
+            ctx = (
+                await load_workspace_context(workspace_id)
+                if workspace_id
+                else await load_tenant_context(tenant_id)
+            )
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
@@ -227,7 +243,7 @@ async def get_metadata(tenant_id: str) -> dict:
 
 
 @mcp.tool()
-async def query(tenant_id: str, sql: str) -> dict:
+async def query(tenant_id: str, sql: str, workspace_id: str = "") -> dict:
     """Execute a read-only SQL query against the tenant's database.
 
     The query is validated for safety (SELECT only, no dangerous functions),
@@ -236,15 +252,19 @@ async def query(tenant_id: str, sql: str) -> dict:
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
         sql: A SQL SELECT query to execute.
+        workspace_id: Optional workspace UUID. When provided, routes to the workspace's
+            view schema (multi-tenant) or the single tenant's schema.
     """
     async with tool_context("query", tenant_id, sql=sql) as tc:
         try:
-            ctx = await load_tenant_context(tenant_id)
+            ctx = (
+                await load_workspace_context(workspace_id)
+                if workspace_id
+                else await load_tenant_context(tenant_id)
+            )
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
-
-        from mcp_server.services.query import execute_query
 
         result = await execute_query(ctx, sql)
 
@@ -252,11 +272,6 @@ async def query(tenant_id: str, sql: str) -> dict:
         if not result.get("success", True):
             tc["result"] = result
             return tc["result"]
-
-        # Touch schema to reset inactivity TTL on user-initiated queries
-        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
-        if ts is not None:
-            await sync_to_async(ts.touch)()
 
         warnings = []
         if result.get("truncated"):
@@ -546,8 +561,8 @@ async def run_materialization(
 
 
 @mcp.tool()
-async def get_schema_status(tenant_id: str) -> dict:
-    """Check whether data has been loaded for this tenant.
+async def get_schema_status(tenant_id: str, workspace_id: str = "") -> dict:
+    """Check whether data has been loaded for this tenant or workspace.
 
     Returns schema existence, state, last materialization timestamp, and table
     list. Always succeeds — returns exists=False if no schema has been
@@ -555,10 +570,37 @@ async def get_schema_status(tenant_id: str) -> dict:
 
     Args:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
+        workspace_id: Optional workspace UUID. When provided, checks WorkspaceViewSchema state.
     """
     from apps.projects.models import MaterializationRun, SchemaState, TenantSchema
 
     async with tool_context("get_schema_status", tenant_id) as tc:
+        if workspace_id:
+            from apps.projects.models import WorkspaceViewSchema
+
+            vs = await WorkspaceViewSchema.objects.filter(
+                workspace_id=workspace_id,
+                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            ).afirst()
+            if vs is None:
+                tc["result"] = success_response(
+                    {
+                        "exists": False,
+                        "state": "not_provisioned",
+                        "last_materialized_at": None,
+                        "tables": [],
+                    },
+                    tenant_id=workspace_id,
+                    schema="",
+                )
+            else:
+                tc["result"] = success_response(
+                    {"exists": True, "state": vs.state, "last_materialized_at": None, "tables": []},
+                    tenant_id=workspace_id,
+                    schema=vs.schema_name,
+                )
+            return tc["result"]
+
         ts = await TenantSchema.objects.filter(
             tenant__external_id=tenant_id,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
