@@ -81,3 +81,11 @@ def test_workspace_tenant_has_uuid_pk(workspace, tenant):
 
     wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
     assert isinstance(wt.id, uuid.UUID)
+
+
+def test_workspace_view_schema_has_uuid_pk(workspace):
+    """WorkspaceViewSchema must have a UUID primary key matching other models."""
+    import uuid as uuid_module
+
+    vs = WorkspaceViewSchema.objects.create(workspace=workspace, schema_name="ws_aabbccdd11223344")
+    assert isinstance(vs.pk, uuid_module.UUID)

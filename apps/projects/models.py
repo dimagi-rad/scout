@@ -226,6 +226,7 @@ class WorkspaceViewSchema(models.Model):
     containing UNION ALL views that merge the per-tenant schemas.
     """
 
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workspace = models.OneToOneField(
         Workspace,
         on_delete=models.CASCADE,
