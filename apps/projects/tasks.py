@@ -105,21 +105,33 @@ def _drop_schema_and_fail(schema) -> None:
 def expire_inactive_schemas() -> None:
     """Mark stale schemas for teardown and dispatch teardown tasks.
 
-    Schemas with last_accessed_at older than SCHEMA_TTL_HOURS are expired.
+    Handles both TenantSchema and WorkspaceViewSchema records.
     Schemas with null last_accessed_at are never auto-expired.
     """
-    from apps.projects.models import SchemaState, TenantSchema
+    from apps.projects.models import SchemaState, TenantSchema, WorkspaceViewSchema
 
     cutoff = timezone.now() - timedelta(hours=settings.SCHEMA_TTL_HOURS)
-    stale = TenantSchema.objects.filter(
+
+    # Expire stale tenant schemas
+    stale_tenant = TenantSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
     )
-    for schema in stale:
+    for schema in stale_tenant:
         schema.state = SchemaState.TEARDOWN
         schema.save(update_fields=["state"])
         schema_id = str(schema.id)
         transaction.on_commit(lambda sid=schema_id: teardown_schema.delay(sid))
+
+    # Expire stale view schemas (Amendment D: call .delay() directly in tasks)
+    stale_views = WorkspaceViewSchema.objects.filter(
+        state=SchemaState.ACTIVE,
+        last_accessed_at__lt=cutoff,
+    )
+    for vs in stale_views:
+        vs.state = SchemaState.TEARDOWN
+        vs.save(update_fields=["state"])
+        teardown_view_schema_task.delay(str(vs.id))
 
 
 @shared_task
