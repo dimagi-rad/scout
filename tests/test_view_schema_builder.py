@@ -1,4 +1,5 @@
 import os
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -106,3 +107,33 @@ def test_build_view_schema_creates_record(two_tenant_workspace, managed_db_conne
             vs.delete()
         ts1.delete()
         ts2.delete()
+
+
+@pytest.mark.django_db
+def test_build_view_schema_returns_active_record(workspace, tenant):
+    """build_view_schema must return a record with state=ACTIVE — it owns the full lifecycle."""
+    from apps.projects.services.schema_manager import SchemaManager
+
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_conn = MagicMock()
+    mock_conn.closed = False
+    mock_conn.cursor.return_value = mock_cursor
+
+    # tenant needs an active TenantSchema for the workspace to have something to build
+    from apps.projects.models import TenantSchema
+
+    ts = TenantSchema.objects.create(
+        tenant=tenant, schema_name="test_domain_schema", state=SchemaState.ACTIVE
+    )
+    try:
+        with patch(
+            "apps.projects.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            vs = SchemaManager().build_view_schema(workspace)
+        assert vs.state == SchemaState.ACTIVE
+    finally:
+        ts.delete()
+        if vs:
+            vs.delete()

@@ -48,8 +48,9 @@ def test_rebuild_view_schema_calls_build_view_schema(workspace):
 
         result = rebuild_workspace_view_schema(str(workspace.id))
 
+    # The service (build_view_schema) now owns the ACTIVE transition; the task does not write state
     assert result["status"] == "active"
-    mock_vs.save.assert_called_once()
+    mock_vs.save.assert_not_called()
 
 
 def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):

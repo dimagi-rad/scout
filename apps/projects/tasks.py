@@ -161,9 +161,6 @@ def rebuild_workspace_view_schema(workspace_id: str) -> dict:
             pass
         return {"error": "Failed to build view schema"}
 
-    vs.state = SchemaState.ACTIVE
-    vs.save(update_fields=["state"])
-
     logger.info(
         "View schema '%s' is now active for workspace %s",
         vs.schema_name,

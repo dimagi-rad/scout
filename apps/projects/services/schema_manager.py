@@ -300,6 +300,9 @@ class SchemaManager:
             if not conn.closed:
                 conn.close()
 
+        vs.state = SchemaState.ACTIVE
+        vs.save(update_fields=["state"])
+
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d tables)",
             view_schema_name,
