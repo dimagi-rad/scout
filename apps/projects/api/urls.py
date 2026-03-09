@@ -6,7 +6,7 @@ Nested under /api/workspaces/<workspace_id>/
 
 from django.urls import path
 
-from .views import DataDictionaryView, RefreshSchemaView, TableDetailView
+from .views import DataDictionaryView, RefreshSchemaView, RefreshStatusView, TableDetailView
 
 app_name = "data_dictionary"
 
@@ -18,4 +18,5 @@ urlpatterns = [
         name="table_detail",
     ),
     path("refresh/", RefreshSchemaView.as_view(), name="refresh_schema"),
+    path("refresh/status/", RefreshStatusView.as_view(), name="refresh_status"),
 ]

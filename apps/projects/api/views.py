@@ -3,6 +3,7 @@ API views for data dictionary and workspace schema management.
 """
 
 import logging
+import uuid
 
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -22,6 +23,41 @@ def _resolve_tenant_schema(tenant):
         tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).first()
+
+
+def _schema_unavailable_response(tenant) -> Response | None:
+    """Return a 503 Response if the workspace schema is not available, else None.
+
+    Returns None when an ACTIVE or MATERIALIZING schema exists (data is readable).
+    """
+    from apps.projects.models import SchemaState, TenantSchema
+
+    if tenant is None:
+        return Response(
+            {
+                "error": "Data unavailable. Please refresh workspace data.",
+                "schema_status": "unavailable",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    if TenantSchema.objects.filter(
+        tenant=tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
+    ).exists():
+        return None
+
+    provisioning = TenantSchema.objects.filter(
+        tenant=tenant,
+        state__in=[SchemaState.PROVISIONING],
+    ).exists()
+    schema_status = "provisioning" if provisioning else "unavailable"
+    return Response(
+        {
+            "error": "Data unavailable. Please refresh workspace data.",
+            "schema_status": schema_status,
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 def _get_all_columns(schema_name: str) -> dict[str, list[dict]]:
@@ -200,13 +236,12 @@ class DataDictionaryView(APIView):
         if err:
             return err
 
+        unavailable = _schema_unavailable_response(workspace.tenant)
+        if unavailable is not None:
+            return unavailable
+
         tenant_schema = _resolve_tenant_schema(workspace.tenant)
-
-        if tenant_schema is not None:
-            return self._get_from_pipeline(workspace, tenant_schema)
-
-        # Fallback: legacy data_dictionary JSONField (may be empty)
-        return self._get_from_legacy(workspace)
+        return self._get_from_pipeline(workspace, tenant_schema)
 
     def _get_from_pipeline(self, workspace, tenant_schema):
         from apps.projects.models import MaterializationRun
@@ -288,21 +323,95 @@ class DataDictionaryView(APIView):
 
 class RefreshSchemaView(APIView):
     """
-    POST /api/refresh-schema/
+    POST /api/workspaces/<workspace_id>/refresh/
 
-    Triggers a schema refresh for the active workspace.
+    Triggers a background schema refresh for the workspace. Requires read-write or manage role.
+    Creates a new TenantSchema in PROVISIONING state and dispatches a Celery task.
+    Returns 202 Accepted immediately.
     """
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, workspace_id):
+        from apps.projects.models import SchemaState, TenantSchema, WorkspaceRole
+        from apps.projects.services.schema_manager import SchemaManager
+        from apps.projects.tasks import refresh_tenant_schema
+        from apps.users.models import TenantMembership
+
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
-        # Schema refresh is handled by the MCP server during agent interactions.
-        # This endpoint acknowledges the request; future work can trigger an explicit refresh.
-        return Response({"status": "ok"})
+        if membership.role not in (WorkspaceRole.READ_WRITE, WorkspaceRole.MANAGE):
+            return Response(
+                {"error": "Read-write or manage role required to trigger a refresh."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        tenant = workspace.tenant
+        if tenant is None:
+            return Response(
+                {"error": "Workspace has no associated tenant."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            tenant_membership = TenantMembership.objects.get(user=request.user, tenant=tenant)
+        except TenantMembership.DoesNotExist:
+            return Response(
+                {"error": "No tenant membership found for this workspace."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        base_name = SchemaManager()._sanitize_schema_name(tenant.external_id)
+        refresh_schema_name = f"{base_name}_r{uuid.uuid4().hex[:8]}"
+
+        new_schema = TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name=refresh_schema_name,
+            state=SchemaState.PROVISIONING,
+        )
+
+        refresh_tenant_schema.delay(str(new_schema.id), str(tenant_membership.id))
+
+        return Response(
+            {"schema_id": str(new_schema.id), "status": "provisioning"},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class RefreshStatusView(APIView):
+    """
+    GET /api/workspaces/<workspace_id>/refresh/status/
+
+    Returns the current schema state for the workspace's tenant.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        from apps.projects.models import TenantSchema
+
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+
+        tenant = workspace.tenant
+        if tenant is None:
+            return Response({"state": "unavailable", "started_at": None, "error": None})
+
+        latest = TenantSchema.objects.filter(tenant=tenant).order_by("-created_at").first()
+        if latest is None:
+            return Response({"state": "unavailable", "started_at": None, "error": None})
+
+        error = "Schema provisioning failed." if latest.state == "failed" else None
+        return Response(
+            {
+                "state": latest.state,
+                "started_at": latest.created_at.isoformat(),
+                "error": error,
+            }
+        )
 
 
 class TableDetailView(APIView):
@@ -371,6 +480,10 @@ class TableDetailView(APIView):
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
+
+        unavailable = _schema_unavailable_response(workspace.tenant)
+        if unavailable is not None:
+            return unavailable
 
         table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
         if table_data is None:

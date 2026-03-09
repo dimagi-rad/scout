@@ -167,10 +167,11 @@ class TestArtifactsWorkspaceScoped:
 
 
 class TestDataDictionaryWorkspaceScoped:
-    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
+    def test_scoped_url_returns_503_when_no_schema(self, client, user_a, workspace_a):
+        """Without an active schema, data-dictionary returns 503 (not 200)."""
         client.force_login(user_a)
         response = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
-        assert response.status_code == 200
+        assert response.status_code == 503
 
     def test_unscoped_url_returns_404(self, client, user_a):
         client.force_login(user_a)
@@ -182,19 +183,26 @@ class TestDataDictionaryWorkspaceScoped:
         response = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
         assert response.status_code == 403
 
-    def test_each_workspace_returns_own_data(self, client, user_a, workspace_a, workspace_b):
+    def test_each_workspace_returns_503_without_schema(
+        self, client, user_a, workspace_a, workspace_b
+    ):
+        """Without active schemas, each workspace endpoint returns 503."""
         client.force_login(user_a)
         response_a = client.get(f"/api/workspaces/{workspace_a.id}/data-dictionary/")
         response_b = client.get(f"/api/workspaces/{workspace_b.id}/data-dictionary/")
-        assert response_a.status_code == 200
-        assert response_b.status_code == 200
+        assert response_a.status_code == 503
+        assert response_b.status_code == 503
 
 
 class TestRefreshSchemaWorkspaceScoped:
-    def test_scoped_url_returns_200(self, client, user_a, workspace_a):
+    def test_scoped_url_returns_202(self, client, user_a, workspace_a, membership_a):
+        """Refresh endpoint returns 202 Accepted and queues a background task."""
+        from unittest.mock import patch
+
         client.force_login(user_a)
-        response = client.post(f"/api/workspaces/{workspace_a.id}/refresh/")
-        assert response.status_code == 200
+        with patch("apps.projects.tasks.refresh_tenant_schema.delay"):
+            response = client.post(f"/api/workspaces/{workspace_a.id}/refresh/")
+        assert response.status_code == 202
 
     def test_non_member_returns_403(self, client, user_b, workspace_a):
         client.force_login(user_b)
@@ -203,13 +211,13 @@ class TestRefreshSchemaWorkspaceScoped:
 
 
 class TestTableDetailWorkspaceScoped:
-    def test_scoped_url_returns_404_for_unknown_table(self, client, user_a, workspace_a):
-        """Table endpoint with valid workspace but unknown table returns 404."""
+    def test_scoped_url_returns_503_without_schema(self, client, user_a, workspace_a):
+        """Without an active schema, table detail returns 503."""
         client.force_login(user_a)
         response = client.get(
             f"/api/workspaces/{workspace_a.id}/data-dictionary/tables/public.nonexistent/"
         )
-        assert response.status_code == 404
+        assert response.status_code == 503
 
     def test_non_member_returns_403(self, client, user_b, workspace_a):
         client.force_login(user_b)
