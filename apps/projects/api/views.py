@@ -241,6 +241,10 @@ class DataDictionaryView(APIView):
             return unavailable
 
         tenant_schema = _resolve_tenant_schema(workspace.tenant)
+        if tenant_schema is None:
+            return Response(
+                {"schema_status": "unavailable"}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
         return self._get_from_pipeline(workspace, tenant_schema)
 
     def _get_from_pipeline(self, workspace, tenant_schema):

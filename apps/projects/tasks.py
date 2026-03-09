@@ -184,9 +184,16 @@ def teardown_schema(schema_id: str) -> None:
 
     try:
         SchemaManager().teardown(schema)
+    except Exception:
+        schema.state = SchemaState.ACTIVE  # rollback: physical schema still exists
+        schema.save(update_fields=["state"])
+        raise
+    try:
         schema.state = SchemaState.EXPIRED
         schema.save(update_fields=["state"])
     except Exception:
-        schema.state = SchemaState.ACTIVE  # rollback to safe state
-        schema.save(update_fields=["state"])
+        # Physical schema is already dropped; don't pretend it's ACTIVE.
+        logger.exception(
+            "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
+        )
         raise
