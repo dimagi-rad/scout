@@ -107,7 +107,11 @@ class SchemaManager:
         )
 
     def teardown(self, tenant_schema: TenantSchema) -> None:
-        """Drop a tenant's schema and mark it as torn down."""
+        """Drop a tenant's schema from the managed database.
+
+        Only performs the physical DROP SCHEMA — callers are responsible for
+        updating the model state (EXPIRED or FAILED) after this returns.
+        """
         conn = get_managed_db_connection()
         try:
             cursor = conn.cursor()
@@ -119,9 +123,6 @@ class SchemaManager:
             cursor.close()
         finally:
             conn.close()
-
-        tenant_schema.state = SchemaState.TEARDOWN
-        tenant_schema.save(update_fields=["state"])
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
         """Convert a tenant_id to a valid PostgreSQL schema name."""

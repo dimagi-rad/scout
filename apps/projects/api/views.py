@@ -334,12 +334,6 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists():
-            return Response(
-                {"error": "A refresh is already in progress."},
-                status=status.HTTP_409_CONFLICT,
-            )
-
         try:
             tenant_membership = TenantMembership.objects.get(user=request.user, tenant=tenant)
         except TenantMembership.DoesNotExist:
@@ -348,11 +342,20 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        new_schema = SchemaManager().create_refresh_schema(tenant)
-        schema_id = str(new_schema.id)
-        membership_id = str(tenant_membership.id)
-
-        transaction.on_commit(lambda: refresh_tenant_schema.delay(schema_id, membership_id))
+        with transaction.atomic():
+            if (
+                TenantSchema.objects.select_for_update()
+                .filter(tenant=tenant, state=SchemaState.PROVISIONING)
+                .exists()
+            ):
+                return Response(
+                    {"error": "A refresh is already in progress."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            new_schema = SchemaManager().create_refresh_schema(tenant)
+            schema_id = str(new_schema.id)
+            membership_id = str(tenant_membership.id)
+            transaction.on_commit(lambda: refresh_tenant_schema.delay(schema_id, membership_id))
 
         return Response(
             {"schema_id": schema_id, "status": "provisioning"},
