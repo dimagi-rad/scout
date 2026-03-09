@@ -14,7 +14,7 @@ from apps.projects.models import (
 
 
 @pytest.fixture
-def workspace_with_view_schema(db):
+def workspace_with_view_schema(transactional_db):
     from django.contrib.auth import get_user_model
 
     User = get_user_model()

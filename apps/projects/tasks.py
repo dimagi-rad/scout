@@ -123,7 +123,7 @@ def expire_inactive_schemas() -> None:
         schema_id = str(schema.id)
         transaction.on_commit(lambda sid=schema_id: teardown_schema.delay(sid))
 
-    # Expire stale view schemas (Amendment D: call .delay() directly in tasks)
+    # Expire stale view schemas
     stale_views = WorkspaceViewSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
@@ -131,7 +131,8 @@ def expire_inactive_schemas() -> None:
     for vs in stale_views:
         vs.state = SchemaState.TEARDOWN
         vs.save(update_fields=["state"])
-        teardown_view_schema_task.delay(str(vs.id))
+        vs_id = str(vs.id)
+        transaction.on_commit(lambda vid=vs_id: teardown_view_schema_task.delay(vid))
 
 
 @shared_task

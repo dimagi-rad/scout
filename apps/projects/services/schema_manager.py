@@ -7,17 +7,14 @@ Creates and tears down tenant-scoped PostgreSQL schemas.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
-from typing import TYPE_CHECKING
 
 import psycopg
 import psycopg.sql
 from django.conf import settings
 
-if TYPE_CHECKING:
-    from apps.projects.models import WorkspaceViewSchema
-
-from apps.projects.models import SchemaState, TenantSchema
+from apps.projects.models import SchemaState, TenantSchema, WorkspaceViewSchema
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +157,6 @@ class SchemaManager:
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
-        import re
-
-        from apps.projects.models import SchemaState, TenantSchema, WorkspaceViewSchema
-
         tenants = list(workspace.tenants.all())
         if not tenants:
             raise ValueError(f"Workspace {workspace.id} has no tenants")
@@ -281,7 +274,7 @@ class SchemaManager:
 
             cursor.close()
         except Exception:
-            # Amendment E: drop partial schema before marking FAILED
+            # Drop any partially-created schema before marking FAILED to avoid leaving debris
             try:
                 if not conn.closed:
                     c = conn.cursor()

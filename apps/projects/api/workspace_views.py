@@ -149,7 +149,7 @@ class WorkspaceDetailView(APIView):
         else:
             schema_status = "unavailable"
 
-        # Amendment J: for multi-tenant workspaces, also check WorkspaceViewSchema state
+        # Multi-tenant workspaces track readiness via WorkspaceViewSchema
         if len(tenants) > 1:
             try:
                 vs = workspace.view_schema

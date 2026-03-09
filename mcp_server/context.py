@@ -5,8 +5,10 @@ Holds configuration as an immutable snapshot for tenant-based queries.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,6 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
             "Trigger a rebuild via POST /api/workspaces/<id>/tenants/ or a data refresh."
         ) from None
 
-    # Amendment I: touch inside load_workspace_context to reset TTL automatically
     await sync_to_async(vs.touch)()
 
     url = settings.MANAGED_DATABASE_URL
@@ -134,9 +135,6 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
 
 def _parse_db_url(url: str, schema: str) -> dict:
     """Parse a database URL into psycopg connection params."""
-    import re
-    from urllib.parse import urlparse
-
     # Defensive validation: schema_name must only contain safe characters before
     # embedding in the options string. _sanitize_schema_name already guarantees
     # this, but we re-check here as defence-in-depth.
@@ -150,5 +148,6 @@ def _parse_db_url(url: str, schema: str) -> dict:
         "dbname": parsed.path.lstrip("/") or "scout",
         "user": parsed.username or "",
         "password": parsed.password or "",
+        # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
         "options": f"-c search_path={schema},public -c statement_timeout=30000",
     }
