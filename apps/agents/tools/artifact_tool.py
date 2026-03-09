@@ -18,7 +18,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import Workspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ VALID_ARTIFACT_TYPES = frozenset(
 
 
 def create_artifact_tools(
-    workspace: "TenantWorkspace", user: "User | None", conversation_id: str | None = None
+    workspace: "Workspace", user: "User | None", conversation_id: str | None = None
 ) -> list:
     """
     Factory function to create artifact creation tools for a specific workspace.
@@ -64,7 +64,7 @@ def create_artifact_tools(
     2. update_artifact: Create a new version of an existing artifact
 
     Args:
-        workspace: The TenantWorkspace model instance for scoping artifacts.
+        workspace: The Workspace model instance for scoping artifacts.
         user: The User model instance who triggered the conversation.
               Used to track artifact ownership.
         conversation_id: The conversation/thread ID for tracking artifact provenance.

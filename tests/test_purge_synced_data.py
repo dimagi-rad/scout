@@ -3,7 +3,7 @@ from unittest.mock import patch
 import pytest
 from django.core.management import call_command
 
-from apps.projects.models import MaterializationRun, TenantMetadata, TenantSchema, TenantWorkspace
+from apps.projects.models import MaterializationRun, TenantMetadata, TenantSchema, Workspace
 from apps.users.models import TenantMembership, User
 
 
@@ -50,8 +50,8 @@ def tenant_metadata(membership):
 
 @pytest.fixture
 def workspace(membership):
-    return TenantWorkspace.objects.create(
-        tenant=membership.tenant,
+    return Workspace.objects.create(
+        name="Test Workspace",
         data_dictionary={"tables": []},
     )
 
@@ -100,14 +100,14 @@ def test_purge_deletes_tenant_metadata(tenant_metadata):
 
 @pytest.mark.django_db
 def test_purge_clears_data_dictionary(workspace):
-    """--confirm clears data_dictionary on TenantWorkspace without deleting the workspace."""
+    """--confirm clears data_dictionary on Workspace without deleting the workspace."""
     with patch("apps.projects.management.commands.purge_synced_data.SchemaManager.teardown"):
         call_command("purge_synced_data", confirm=True)
 
     workspace.refresh_from_db()
     assert workspace.data_dictionary is None
     assert workspace.data_dictionary_generated_at is None
-    assert TenantWorkspace.objects.count() == 1  # workspace preserved
+    assert Workspace.objects.filter(id=workspace.id).exists()  # workspace preserved
 
 
 @pytest.mark.django_db

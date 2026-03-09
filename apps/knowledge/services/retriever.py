@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import Workspace
 
 
 class KnowledgeRetriever:
@@ -27,7 +27,7 @@ class KnowledgeRetriever:
 
     MAX_AGENT_LEARNINGS = 20
 
-    def __init__(self, workspace: TenantWorkspace) -> None:
+    def __init__(self, workspace: Workspace) -> None:
         self.workspace = workspace
 
     async def retrieve(self, user_question: str = "") -> str:

@@ -4,7 +4,7 @@ import logging
 
 from django.core.management.base import BaseCommand
 
-from apps.projects.models import TenantMetadata, TenantSchema, TenantWorkspace
+from apps.projects.models import TenantMetadata, TenantSchema, Workspace
 from apps.projects.services.schema_manager import SchemaManager
 
 logger = logging.getLogger(__name__)
@@ -28,14 +28,14 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         schema_count = TenantSchema.objects.count()
         metadata_count = TenantMetadata.objects.count()
-        workspace_count = TenantWorkspace.objects.exclude(data_dictionary=None).count()
+        workspace_count = Workspace.objects.exclude(data_dictionary=None).count()
 
         self.stdout.write(
             self.style.WARNING(
                 f"\nPurge synced data summary:\n"
                 f"  TenantSchema records (+ cascaded MaterializationRun): {schema_count}\n"
                 f"  TenantMetadata records: {metadata_count}\n"
-                f"  TenantWorkspace records with data_dictionary to clear: {workspace_count}\n"
+                f"  Workspace records with data_dictionary to clear: {workspace_count}\n"
             )
         )
 
@@ -58,14 +58,14 @@ class Command(BaseCommand):
 
         deleted_schemas, _ = TenantSchema.objects.all().delete()
         deleted_metadata, _ = TenantMetadata.objects.all().delete()
-        TenantWorkspace.objects.update(data_dictionary=None, data_dictionary_generated_at=None)
+        Workspace.objects.update(data_dictionary=None, data_dictionary_generated_at=None)
 
         self.stdout.write(
             self.style.SUCCESS(
                 f"\nDone.\n"
                 f"  Deleted {deleted_schemas} TenantSchema/MaterializationRun rows\n"
                 f"  Deleted {deleted_metadata} TenantMetadata rows\n"
-                f"  Cleared data_dictionary on {workspace_count} TenantWorkspace(s)\n"
+                f"  Cleared data_dictionary on {workspace_count} Workspace(s)\n"
             )
         )
 

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import Workspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ VALID_CATEGORIES = frozenset(
 )
 
 
-def create_save_learning_tool(workspace: TenantWorkspace, user: User):
+def create_save_learning_tool(workspace: Workspace, user: User):
     """
     Create a tool for saving agent learnings.
 
@@ -55,7 +55,7 @@ def create_save_learning_tool(workspace: TenantWorkspace, user: User):
     - Original and corrected SQL (for reference and validation)
 
     Args:
-        workspace: The TenantWorkspace model instance for scoping the learning.
+        workspace: The Workspace model instance for scoping the learning.
         user: The User model instance who triggered the conversation
               where the learning was discovered.
 

@@ -121,29 +121,3 @@ class TestTenantMetadata:
 
         meta = TenantMetadata.objects.create(tenant_membership=tenant_membership)
         assert meta.metadata == {}
-
-
-@pytest.mark.django_db
-class TestTenantWorkspace:
-    def test_create_workspace_with_tenant(self):
-        from apps.projects.models import TenantWorkspace
-        from apps.users.models import Tenant
-
-        tenant = Tenant.objects.create(
-            provider="commcare", external_id="dimagi", canonical_name="Dimagi"
-        )
-        ws = TenantWorkspace.objects.create(tenant=tenant)
-        assert ws.tenant.external_id == "dimagi"
-        assert ws.tenant_name == "Dimagi"  # via property
-        assert str(ws) == f"TenantWorkspace({ws.tenant_id})"
-
-    def test_one_workspace_per_tenant(self):
-        from apps.projects.models import TenantWorkspace
-        from apps.users.models import Tenant
-
-        tenant = Tenant.objects.create(
-            provider="commcare", external_id="dimagi", canonical_name="Dimagi"
-        )
-        TenantWorkspace.objects.create(tenant=tenant)
-        with pytest.raises(Exception):  # noqa: B017
-            TenantWorkspace.objects.create(tenant=tenant)

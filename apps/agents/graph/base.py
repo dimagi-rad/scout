@@ -448,7 +448,7 @@ def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> li
     - save_as_recipe: For creating replayable analysis workflows
 
     Args:
-        workspace: The TenantWorkspace model instance.
+        workspace: The Workspace model instance.
         user: Optional User for tracking learning discovery.
         mcp_tools: LangChain tools loaded from the MCP server.
 

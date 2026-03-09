@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantWorkspace
+    from apps.projects.models import Workspace
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ VALID_VARIABLE_TYPES = frozenset(
 )
 
 
-def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
+def create_recipe_tool(workspace: Workspace, user: User | None):
     """
     Factory function to create a recipe saving tool for a specific workspace.
 
@@ -42,7 +42,7 @@ def create_recipe_tool(workspace: TenantWorkspace, user: User | None):
     recipe with variable substitution support.
 
     Args:
-        workspace: The TenantWorkspace model instance for scoping recipes.
+        workspace: The Workspace model instance for scoping recipes.
         user: The User model instance who triggered the conversation.
               Used to track recipe ownership.
 
