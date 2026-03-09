@@ -168,10 +168,14 @@ class SchemaManager:
         if not tenants:
             raise ValueError(f"Workspace {workspace.id} has no tenants")
 
-        # Resolve active TenantSchema for each tenant
+        # Bulk-fetch active TenantSchema records for all tenants in one query
+        active_schemas = {
+            ts.tenant_id: ts
+            for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
+        }
         tenant_schemas: list[tuple[str, str]] = []  # (schema_name, tenant_external_id)
         for tenant in tenants:
-            ts = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).first()
+            ts = active_schemas.get(tenant.id)
             if ts is None:
                 raise ValueError(
                     f"Tenant '{tenant.external_id}' has no active schema. "

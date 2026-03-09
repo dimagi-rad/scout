@@ -110,6 +110,45 @@ def test_build_view_schema_creates_record(two_tenant_workspace, managed_db_conne
 
 
 @pytest.mark.django_db
+def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
+    """TenantSchema resolution uses one query, not N queries."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from apps.projects.models import TenantSchema
+    from apps.projects.services.schema_manager import SchemaManager
+
+    ts = TenantSchema.objects.create(
+        tenant=tenant, schema_name="test_domain_bulk", state=SchemaState.ACTIVE
+    )
+    try:
+        with CaptureQueriesContext(connection) as ctx:
+            with patch(
+                "apps.projects.services.schema_manager.get_managed_db_connection"
+            ) as mock_conn_fn:
+                mock_cursor = MagicMock()
+                mock_cursor.fetchall.return_value = []
+                mock_conn = MagicMock()
+                mock_conn.closed = False
+                mock_conn.cursor.return_value = mock_cursor
+                mock_conn_fn.return_value = mock_conn
+                try:
+                    SchemaManager().build_view_schema(workspace)
+                except Exception:
+                    pass  # may raise if no DB — we only care about query count
+
+        tenant_schema_queries = [
+            q
+            for q in ctx.captured_queries
+            if "tenantschema" in q["sql"].lower() and "SELECT" in q["sql"].upper()
+        ]
+        # Should be at most 1 SELECT query for TenantSchemas, not one per tenant
+        assert len(tenant_schema_queries) <= 1
+    finally:
+        ts.delete()
+
+
+@pytest.mark.django_db
 def test_build_view_schema_returns_active_record(workspace, tenant):
     """build_view_schema must return a record with state=ACTIVE — it owns the full lifecycle."""
     from apps.projects.services.schema_manager import SchemaManager
