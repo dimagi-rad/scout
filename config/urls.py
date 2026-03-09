@@ -67,7 +67,7 @@ workspace_urlpatterns = [
     # Workspace management
     path("members/", WorkspaceMemberListView.as_view(), name="workspace_members"),
     path(
-        "members/<uuid:membership_id>/",
+        "members/<int:membership_id>/",
         WorkspaceMemberDetailView.as_view(),
         name="workspace_member_detail",
     ),
