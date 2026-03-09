@@ -71,6 +71,64 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
     )
 
 
+async def load_workspace_context(workspace_id: str) -> QueryContext:
+    """Load a QueryContext for a workspace, routing correctly for multi-tenant.
+
+    - Single-tenant workspace (1 tenant): delegates to load_tenant_context(tenant.external_id).
+    - Multi-tenant workspace (2+ tenants): uses the WorkspaceViewSchema.
+
+    Raises ValueError if the workspace has no tenants, or if multi-tenant and
+    no active WorkspaceViewSchema exists.
+    """
+    from asgiref.sync import sync_to_async
+    from django.conf import settings
+
+    from apps.projects.models import SchemaState, Workspace, WorkspaceViewSchema
+
+    try:
+        workspace = await Workspace.objects.aget(id=workspace_id)
+    except Workspace.DoesNotExist:
+        raise ValueError(f"Workspace '{workspace_id}' not found") from None
+
+    tenant_count = await workspace.tenants.acount()
+
+    if tenant_count == 0:
+        raise ValueError(f"Workspace '{workspace_id}' has no tenants")
+
+    if tenant_count == 1:
+        tenant = await workspace.tenants.afirst()
+        return await load_tenant_context(tenant.external_id)
+
+    # Multi-tenant: use the view schema
+    try:
+        vs = await WorkspaceViewSchema.objects.aget(
+            workspace_id=workspace_id,
+            state=SchemaState.ACTIVE,
+        )
+    except WorkspaceViewSchema.DoesNotExist:
+        raise ValueError(
+            f"No active view schema for workspace '{workspace_id}'. "
+            "Trigger a rebuild via POST /api/workspaces/<id>/tenants/ or a data refresh."
+        ) from None
+
+    # Amendment I: touch inside load_workspace_context to reset TTL automatically
+    await sync_to_async(vs.touch)()
+
+    url = settings.MANAGED_DATABASE_URL
+    if not url:
+        raise ValueError("MANAGED_DATABASE_URL is not configured")
+
+    connection_params = await sync_to_async(_parse_db_url)(url, vs.schema_name)
+
+    return QueryContext(
+        tenant_id=workspace_id,
+        schema_name=vs.schema_name,
+        max_rows_per_query=500,
+        max_query_timeout_seconds=30,
+        connection_params=connection_params,
+    )
+
+
 def _parse_db_url(url: str, schema: str) -> dict:
     """Parse a database URL into psycopg connection params."""
     import re
