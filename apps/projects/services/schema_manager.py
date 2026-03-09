@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import TYPE_CHECKING
 
 import psycopg
 import psycopg.sql
 from django.conf import settings
+
+if TYPE_CHECKING:
+    from apps.projects.models import WorkspaceViewSchema
 
 from apps.projects.models import SchemaState, TenantSchema
 
@@ -136,6 +140,183 @@ class SchemaManager:
             cursor.execute(
                 psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
                     psycopg.sql.Identifier(tenant_schema.schema_name)
+                )
+            )
+            cursor.close()
+        finally:
+            conn.close()
+
+    def _view_schema_name(self, workspace_id) -> str:
+        """Generate a PostgreSQL schema name for a workspace's view schema."""
+        hex_id = str(workspace_id).replace("-", "")[:16]
+        return f"ws_{hex_id}"
+
+    def build_view_schema(self, workspace) -> WorkspaceViewSchema:
+        """Create (or replace) the PostgreSQL view schema for a multi-tenant workspace.
+
+        Fetches all active TenantSchema objects for the workspace's tenants,
+        collects their tables and columns, then creates UNION ALL views in a
+        dedicated schema. Raises ValueError if any tenant has no active schema.
+
+        Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
+        """
+        import re
+
+        from apps.projects.models import SchemaState, TenantSchema, WorkspaceViewSchema
+
+        tenants = list(workspace.tenants.all())
+        if not tenants:
+            raise ValueError(f"Workspace {workspace.id} has no tenants")
+
+        # Resolve active TenantSchema for each tenant
+        tenant_schemas: list[tuple[str, str]] = []  # (schema_name, tenant_external_id)
+        for tenant in tenants:
+            ts = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).first()
+            if ts is None:
+                raise ValueError(
+                    f"Tenant '{tenant.external_id}' has no active schema. "
+                    "Run a data refresh for this tenant before building the view schema."
+                )
+            tenant_schemas.append((ts.schema_name, tenant.external_id))
+
+        view_schema_name = self._view_schema_name(workspace.id)
+
+        # Get or create the WorkspaceViewSchema record
+        vs, _ = WorkspaceViewSchema.objects.get_or_create(
+            workspace=workspace,
+            defaults={"schema_name": view_schema_name, "state": SchemaState.PROVISIONING},
+        )
+        if vs.schema_name != view_schema_name:
+            vs.schema_name = view_schema_name
+        vs.state = SchemaState.PROVISIONING
+        vs.save(update_fields=["schema_name", "state"])
+
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+
+            # Validate schema name before embedding
+            if not re.match(r"^ws_[a-f0-9]{16}$", view_schema_name):
+                raise ValueError(f"Invalid view schema name: {view_schema_name!r}")
+
+            # Step 1: Create the physical schema
+            cursor.execute(
+                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    psycopg.sql.Identifier(view_schema_name)
+                )
+            )
+
+            # Step 2: Collect tables and columns per tenant schema
+            all_tables: dict[str, dict[str, list[str]]] = {}
+            # all_tables[table_name][schema_name] = [col1, col2, ...]
+
+            for schema_name, _ in tenant_schemas:
+                cursor.execute(
+                    "SELECT table_name, column_name "
+                    "FROM information_schema.columns "
+                    "WHERE table_schema = %s "
+                    "ORDER BY table_name, ordinal_position",
+                    (schema_name,),
+                )
+                for table_name, col_name in cursor.fetchall():
+                    all_tables.setdefault(table_name, {})
+                    all_tables[table_name].setdefault(schema_name, []).append(col_name)
+
+            # Step 3: Build UNION ALL views
+            for table_name, schema_cols in all_tables.items():
+                # Union of all column names (preserving first-seen order)
+                seen: set[str] = set()
+                union_cols: list[str] = []
+                for schema_name, _ in tenant_schemas:
+                    for col in schema_cols.get(schema_name, []):
+                        if col not in seen:
+                            union_cols.append(col)
+                            seen.add(col)
+
+                # Build one SELECT per tenant schema that has this table
+                select_parts: list[psycopg.sql.Composed] = []
+                for schema_name, tenant_external_id in tenant_schemas:
+                    if schema_name not in schema_cols:
+                        continue  # This tenant doesn't have this table — skip
+                    existing = set(schema_cols[schema_name])
+                    select_list = []
+                    for col in union_cols:
+                        if col in existing:
+                            select_list.append(
+                                psycopg.sql.SQL("{}.{}").format(
+                                    psycopg.sql.Identifier(table_name),
+                                    psycopg.sql.Identifier(col),
+                                )
+                            )
+                        else:
+                            select_list.append(
+                                psycopg.sql.SQL("NULL AS {}").format(psycopg.sql.Identifier(col))
+                            )
+                    select_list.append(
+                        psycopg.sql.SQL("{} AS _tenant").format(
+                            psycopg.sql.Literal(tenant_external_id)
+                        )
+                    )
+                    select_parts.append(
+                        psycopg.sql.SQL("SELECT {} FROM {}.{}").format(
+                            psycopg.sql.SQL(", ").join(select_list),
+                            psycopg.sql.Identifier(schema_name),
+                            psycopg.sql.Identifier(table_name),
+                        )
+                    )
+
+                if not select_parts:
+                    continue
+
+                view_sql = psycopg.sql.SQL("CREATE OR REPLACE VIEW {}.{} AS {}").format(
+                    psycopg.sql.Identifier(view_schema_name),
+                    psycopg.sql.Identifier(table_name),
+                    psycopg.sql.SQL(" UNION ALL ").join(select_parts),
+                )
+                cursor.execute(view_sql)
+
+            cursor.close()
+        except Exception:
+            # Amendment E: drop partial schema before marking FAILED
+            try:
+                if not conn.closed:
+                    c = conn.cursor()
+                    c.execute(
+                        psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                            psycopg.sql.Identifier(view_schema_name)
+                        )
+                    )
+                    c.close()
+            except Exception:
+                logger.exception(
+                    "Failed to drop partial view schema '%s' during cleanup", view_schema_name
+                )
+            if not conn.closed:
+                conn.close()
+            vs.state = SchemaState.FAILED
+            vs.save(update_fields=["state"])
+            raise
+        finally:
+            if not conn.closed:
+                conn.close()
+
+        logger.info(
+            "Built view schema '%s' for workspace '%s' (%d tenants, %d tables)",
+            view_schema_name,
+            workspace.id,
+            len(tenant_schemas),
+            len(all_tables),
+        )
+        return vs
+
+    def teardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
+        """Drop the physical PostgreSQL schema for a WorkspaceViewSchema."""
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(view_schema.schema_name)
                 )
             )
             cursor.close()
