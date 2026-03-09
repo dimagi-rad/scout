@@ -360,7 +360,14 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Idempotent: if already in workspace, return 200 (membership already validated on first add)
+        # Validate the requesting user has access to this tenant (always, before idempotency check)
+        if not TenantMembership.objects.filter(user=request.user, tenant=tenant).exists():
+            return Response(
+                {"error": "You do not have access to this tenant."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Idempotent: if already in workspace, return 200
         existing_wt = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).first()
         if existing_wt:
             return Response(
@@ -370,13 +377,6 @@ class WorkspaceTenantView(APIView):
                     "tenant_name": tenant.canonical_name,
                 },
                 status=status.HTTP_200_OK,
-            )
-
-        # New tenant: validate the requesting user has access to it
-        if not TenantMembership.objects.filter(user=request.user, tenant=tenant).exists():
-            return Response(
-                {"error": "You do not have access to this tenant."},
-                status=status.HTTP_400_BAD_REQUEST,
             )
 
         wt = WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)

@@ -89,7 +89,8 @@ def test_add_tenant_user_lacks_tenant_membership_is_rejected(api_client, user, w
 
 
 def test_add_tenant_already_in_workspace_is_idempotent(api_client, user, workspace, tenant):
-    # tenant is already in workspace
+    # tenant is already in workspace; user must also hold TenantMembership
+    TenantMembership.objects.create(user=user, tenant=tenant)
     api_client.force_login(user)
     resp = api_client.post(
         f"/api/workspaces/{workspace.id}/tenants/",
@@ -113,3 +114,22 @@ def test_cannot_remove_last_tenant_from_workspace(api_client, user, workspace, t
     resp = api_client.delete(f"/api/workspaces/{workspace.id}/tenants/{wt.id}/")
     assert resp.status_code == 400
     assert "last" in resp.data["error"].lower()
+
+
+def test_add_tenant_already_in_workspace_requires_membership(
+    api_client, user, workspace, tenant, tenant2
+):
+    """Idempotent re-add must still verify the user holds TenantMembership for that tenant."""
+    # tenant2 is already in workspace via ORM, but user has NO TenantMembership for tenant2
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant2)
+
+    api_client.force_login(user)
+    resp = api_client.post(
+        f"/api/workspaces/{workspace.id}/tenants/",
+        {"tenant_id": str(tenant2.id)},
+        format="json",
+    )
+
+    # User lacks TenantMembership for tenant2 — must be rejected even though it's already in workspace
+    assert resp.status_code == 400
+    assert "do not have access" in resp.data["error"]
