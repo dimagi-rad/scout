@@ -216,6 +216,23 @@ class TestTenantCredentialCreateAPI:
         assert not Tenant.objects.filter(external_id="victim-domain").exists()
         assert not TenantMembership.objects.filter(user=user).exists()
 
+
+@pytest.mark.django_db
+def test_tenant_list_includes_uuid(user, client):
+    """GET /api/auth/tenants/ response includes internal tenant UUID."""
+    tm = _make_membership(user, external_id="uuid-test", canonical_name="UUID Test")
+    client.force_login(user)
+    response = client.get("/api/auth/tenants/")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) >= 1
+    entry = next(e for e in data if e["tenant_id"] == "uuid-test")
+    assert "tenant_uuid" in entry
+    assert entry["tenant_uuid"] == str(tm.tenant.id)
+
+
+@pytest.mark.django_db
+class TestTenantCrossAccessAPI:
     def test_cross_tenant_access_blocked_by_structure(self, user, other_user):
         """A user who guesses another tenant's external_id cannot gain access
         because they cannot create a TenantMembership without a verified Tenant."""
