@@ -833,9 +833,9 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
-    if deny := await _check_workspace_access(workspace, tm):
-        return deny
+    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -872,9 +872,9 @@ async def thread_share_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
-    if deny := await _check_workspace_access(workspace, tm):
-        return deny
+    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:

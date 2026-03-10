@@ -179,6 +179,8 @@ def teardown_view_schema_task(view_schema_id: str) -> None:
         SchemaManager().teardown_view_schema(vs)
     except Exception:
         logger.exception("Failed to drop view schema '%s'", vs.schema_name)
+        vs.state = SchemaState.ACTIVE
+        vs.save(update_fields=["state"])
         raise
 
     vs.state = SchemaState.EXPIRED

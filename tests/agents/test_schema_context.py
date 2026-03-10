@@ -16,13 +16,18 @@ def mock_tenant():
     return m
 
 
+@pytest.fixture
+def mock_user():
+    return MagicMock()
+
+
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_not_provisioned(mock_tenant):
+async def test_fetch_schema_context_not_provisioned(mock_tenant, mock_user):
     """Returns 'no data' block when TenantSchema does not exist."""
     with patch("apps.agents.graph.base.TenantSchema") as MockTS:
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        result = await _fetch_schema_context(mock_tenant)
+        result = await _fetch_schema_context(mock_tenant, mock_user)
 
     assert "No data has been loaded yet" in result
     assert "run_materialization" in result
@@ -30,7 +35,7 @@ async def test_fetch_schema_context_not_provisioned(mock_tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_materializing(mock_tenant):
+async def test_fetch_schema_context_materializing(mock_tenant, mock_user):
     """Returns 'currently loading' block when schema state is materializing."""
     from apps.projects.models import SchemaState
 
@@ -39,7 +44,7 @@ async def test_fetch_schema_context_materializing(mock_tenant):
 
     with patch("apps.agents.graph.base.TenantSchema") as MockTS:
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        result = await _fetch_schema_context(mock_tenant)
+        result = await _fetch_schema_context(mock_tenant, mock_user)
 
     assert "currently loading" in result.lower()
     assert "run_materialization" not in result
@@ -47,7 +52,7 @@ async def test_fetch_schema_context_materializing(mock_tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_active_compact(mock_tenant):
+async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
     """Returns compact table list (no columns) when full schema exceeds budget."""
     from apps.projects.models import SchemaState
 
@@ -83,7 +88,7 @@ async def test_fetch_schema_context_active_compact(mock_tenant):
         mock_s2a.return_value = AsyncMock(return_value=mock_tables)
         mock_full.return_value = big_column_text  # triggers fallback
 
-        result = await _fetch_schema_context(mock_tenant)
+        result = await _fetch_schema_context(mock_tenant, mock_user)
 
     assert "cases" in result
     assert "forms" in result
@@ -93,7 +98,7 @@ async def test_fetch_schema_context_active_compact(mock_tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_active_full(mock_tenant):
+async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
     """Returns full schema with columns when it fits within the 6000-char budget."""
     from apps.projects.models import SchemaState
 
@@ -133,7 +138,7 @@ async def test_fetch_schema_context_active_full(mock_tenant):
         mock_full.return_value = small_column_text
         MockTM.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
-        result = await _fetch_schema_context(mock_tenant)
+        result = await _fetch_schema_context(mock_tenant, mock_user)
 
     assert "case_id" in result or small_column_text in result
     assert "describe_table" not in result  # no fallback note in full tier
@@ -141,7 +146,7 @@ async def test_fetch_schema_context_active_full(mock_tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant):
+async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant, mock_user):
     """The returned text must NOT instruct the agent to call get_schema_status."""
     from apps.projects.models import SchemaState
 
@@ -159,7 +164,7 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
         mock_s2a.return_value = AsyncMock(return_value=[])
         mock_full.return_value = ""
 
-        result = await _fetch_schema_context(mock_tenant)
+        result = await _fetch_schema_context(mock_tenant, mock_user)
 
     assert "call `get_schema_status`" not in result
     assert "start of every conversation" not in result
@@ -198,7 +203,7 @@ async def test_build_system_prompt_no_schema_status_call():
         mock_s2a.return_value = AsyncMock(return_value=[])
         mock_full.return_value = ""
 
-        prompt = await _build_system_prompt(mock_workspace)
+        prompt = await _build_system_prompt(mock_workspace, MagicMock())
 
     assert "call `get_schema_status`" not in prompt
     assert "start of every conversation" not in prompt

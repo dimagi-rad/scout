@@ -127,7 +127,7 @@ def _render_full_schema(
     return "\n".join(lines)
 
 
-async def _fetch_schema_context(tenant) -> str:
+async def _fetch_schema_context(tenant, user) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
     Tries to build a full schema block (tables + columns). Falls back to a compact
@@ -168,7 +168,7 @@ async def _fetch_schema_context(tenant) -> str:
         from apps.projects.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant=tenant
+            tenant_membership__tenant=tenant, tenant_membership__user=user
         ).afirst()
 
         column_map: dict[str, list[dict]] = {}
@@ -304,7 +304,7 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace)
+    system_prompt = await _build_system_prompt(workspace, user)
     logger.debug(
         "System prompt assembled: %d characters for workspace %s",
         len(system_prompt),
@@ -443,7 +443,7 @@ def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> li
     return tools
 
 
-async def _build_system_prompt(workspace: Workspace) -> str:
+async def _build_system_prompt(workspace: Workspace, user) -> str:
     """
     Assemble the complete system prompt for a workspace.
 
@@ -456,6 +456,7 @@ async def _build_system_prompt(workspace: Workspace) -> str:
 
     Args:
         workspace: The Workspace model instance.
+        user: The User model instance (used to scope tenant metadata lookup).
 
     Returns:
         Complete system prompt string.
@@ -493,7 +494,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
 
         # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant)
+        schema_context = await _fetch_schema_context(tenant, user)
         sections.append(f"\n## Data Availability\n\n{schema_context}\n")
     else:
         sections.append("""
