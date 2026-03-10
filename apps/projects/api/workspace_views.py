@@ -64,11 +64,6 @@ class WorkspaceListView(APIView):
             return Response({"error": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         tenant_ids = request.data.get("tenant_ids", [])
-        if not tenant_ids:
-            return Response(
-                {"error": "At least one tenant_id is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         # Validate user has access to all requested tenants
         accessible_tenant_ids = set(

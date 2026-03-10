@@ -102,6 +102,18 @@ class TestWorkspaceCreate:
         )
         assert resp.status_code == 400
 
+    def test_create_workspace_with_no_tenants(self, client, user):
+        """POST /api/workspaces/ succeeds with tenant_ids=[] (tenants added later)."""
+        client.force_login(user)
+        resp = client.post(
+            "/api/workspaces/",
+            {"name": "Empty WS", "tenant_ids": []},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["name"] == "Empty WS"
+        assert resp.json()["tenant_count"] == 0
+
 
 # ---------------------------------------------------------------------------
 # Workspace rename (PATCH)
