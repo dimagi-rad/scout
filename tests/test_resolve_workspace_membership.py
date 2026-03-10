@@ -27,7 +27,7 @@ async def test_single_tenant_workspace_with_membership_is_accessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     await TenantMembership.objects.acreate(user=user, tenant=t)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
     assert tm is not None
 
@@ -49,7 +49,7 @@ async def test_single_tenant_workspace_without_membership_is_inaccessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
     # no TenantMembership created
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
     assert tm is None
 
@@ -74,11 +74,10 @@ async def test_multi_tenant_workspace_is_accessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
-    # tm is None for multi-tenant (no single tenant to check); count > 1 grants access
     assert tm is None
-    assert await workspace.workspace_tenants.acount() > 1
+    assert is_multi_tenant is True
 
 
 @pytest.mark.asyncio
@@ -103,9 +102,10 @@ async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membershi
     # User has TenantMembership for t1 (first tenant) — must still get tm=None
     await TenantMembership.objects.acreate(user=user, tenant=t1)
 
-    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is not None
     assert tm is None
+    assert is_multi_tenant is True
 
 
 @pytest.mark.asyncio
@@ -118,6 +118,6 @@ async def test_workspace_not_found_returns_none():
         email="resolve-missing@example.com", password="pass"
     )
 
-    workspace, tm = await _resolve_workspace_and_membership(user, uuid.uuid4())
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, uuid.uuid4())
     assert workspace is None
     assert tm is None

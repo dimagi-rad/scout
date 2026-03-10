@@ -430,11 +430,11 @@ def _upsert_thread(thread_id, user, title, *, workspace):
 def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve workspace access for a user.
 
-    Returns (workspace, tenant_membership):
-    - (None, None): workspace not found or user lacks WorkspaceMembership
-    - (workspace, None): workspace found but no single-tenant TenantMembership,
-      or workspace is multi-tenant (TenantMembership is not required for multi-tenant access)
-    - (workspace, tm): workspace found with a valid TenantMembership (single-tenant only)
+    Returns (workspace, tenant_membership, is_multi_tenant):
+    - (None, None, False): workspace not found or user lacks WorkspaceMembership
+    - (workspace, None, True): multi-tenant workspace; WorkspaceMembership is sufficient
+    - (workspace, None, False): single-tenant workspace but user lacks TenantMembership
+    - (workspace, tm, False): single-tenant workspace with a valid TenantMembership
     """
     from apps.projects.models import WorkspaceMembership
 
@@ -443,26 +443,28 @@ def _resolve_workspace_and_membership(user, workspace_id):
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
-        return None, None
+        return None, None, False
 
     workspace = wm.workspace
 
+    # Read tenant count exactly once so callers don't need a second DB query.
     # Multi-tenant workspaces grant access by WorkspaceMembership alone;
     # TenantMembership is irrelevant (and must not be checked) for multi-tenant access.
-    if workspace.workspace_tenants.count() > 1:
-        return workspace, None
+    is_multi_tenant = workspace.workspace_tenants.count() > 1
+    if is_multi_tenant:
+        return workspace, None, True
 
     tenant = workspace.tenant
     if tenant is None:
-        return workspace, None
+        return workspace, None, False
 
     from apps.users.models import TenantMembership
 
     try:
         tm = TenantMembership.objects.get(user=user, tenant=tenant)
     except TenantMembership.DoesNotExist:
-        return workspace, None
-    return workspace, tm
+        return workspace, None, False
+    return workspace, tm, False
 
 
 @sync_to_async
@@ -597,13 +599,13 @@ async def chat_view(request):
             {"error": f"Message exceeds {MAX_MESSAGE_LENGTH} characters"}, status=400
         )
 
-    # Resolve workspace and verify access. Re-read tenant count fresh here to
-    # avoid a TOCTOU where is_multi_tenant was stale at resolution time.
-    workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
+    # Resolve workspace and verify access. The multi-tenant flag is determined
+    # in a single DB read inside _resolve_workspace_and_membership to avoid TOCTOU.
+    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
-    if tm is None and await workspace.workspace_tenants.acount() <= 1:
+    if tm is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
     # Record thread metadata (fire-and-forget on error)
@@ -831,7 +833,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
@@ -870,7 +872,7 @@ async def thread_share_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    workspace, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
