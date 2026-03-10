@@ -367,19 +367,16 @@ class WorkspaceTenantView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Idempotent: if already in workspace, return 200
-        existing_wt = WorkspaceTenant.objects.filter(workspace=workspace, tenant=tenant).first()
-        if existing_wt:
+        wt, created = add_workspace_tenant(workspace, tenant)
+        if not created:
             return Response(
                 {
-                    "id": str(existing_wt.id),
+                    "id": str(wt.id),
                     "tenant_id": str(tenant.id),
                     "tenant_name": tenant.canonical_name,
                 },
                 status=status.HTTP_200_OK,
             )
-
-        wt = add_workspace_tenant(workspace, tenant)
         return Response(
             {"id": str(wt.id), "tenant_id": str(tenant.id), "tenant_name": tenant.canonical_name},
             status=status.HTTP_202_ACCEPTED,
