@@ -355,7 +355,7 @@ class RefreshSchemaView(APIView):
             new_schema = SchemaManager().create_refresh_schema(tenant)
             schema_id = str(new_schema.id)
             membership_id = str(tenant_membership.id)
-            transaction.on_commit(lambda: refresh_tenant_schema.delay(schema_id, membership_id))
+            refresh_tenant_schema.delay_on_commit(schema_id, membership_id)
 
         return Response(
             {"schema_id": schema_id, "status": "provisioning"},

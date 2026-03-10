@@ -30,6 +30,7 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.agents.memory.checkpointer import get_database_url
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
+from apps.projects.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +460,13 @@ def _resolve_workspace_and_membership(user, workspace_id):
     return workspace, tm
 
 
+async def _check_workspace_access(workspace, tm) -> JsonResponse | None:
+    """Return a 403 JsonResponse if workspace access is denied, or None if granted."""
+    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    return None
+
+
 @sync_to_async
 def _get_thread(thread_id, user, *, workspace_id=None):
     """Load a thread ensuring ownership, optionally scoped to a workspace."""
@@ -611,17 +619,8 @@ async def chat_view(request):
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
-    # Touch the schema to reset inactivity TTL on user-initiated chat (single-tenant only)
-    if await workspace.workspace_tenants.acount() == 1:
-        from apps.projects.models import SchemaState, TenantSchema
-
-        tenant = await workspace.tenants.afirst()
-        ts = await TenantSchema.objects.filter(
-            tenant=tenant,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-        ).afirst()
-        if ts is not None:
-            await sync_to_async(ts.touch)()
+    # Touch the schema to reset inactivity TTL on user-initiated chat.
+    await touch_workspace_schemas(workspace)
 
     # Load MCP tools; attach progress callback for run_materialization updates.
     progress_queue: asyncio.Queue = asyncio.Queue()
@@ -835,8 +834,8 @@ async def thread_messages_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    if deny := await _check_workspace_access(workspace, tm):
+        return deny
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
@@ -874,8 +873,8 @@ async def thread_share_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "Authentication required"}, status=401)
 
     workspace, tm = await _resolve_workspace_and_membership(user, workspace_id)
-    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    if deny := await _check_workspace_access(workspace, tm):
+        return deny
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:

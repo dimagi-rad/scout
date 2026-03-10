@@ -24,18 +24,14 @@ def test_expire_inactive_schemas_marks_stale_schema_for_teardown(active_schema):
     active_schema.last_accessed_at = timezone.now() - timedelta(hours=25)
     active_schema.save(update_fields=["last_accessed_at"])
 
-    # transaction.on_commit doesn't fire inside test transactions; invoke immediately
-    with (
-        patch("apps.projects.tasks.transaction.on_commit", side_effect=lambda cb: cb()),
-        patch("apps.projects.tasks.teardown_schema.delay") as mock_delay,
-    ):
+    with patch("apps.projects.tasks.teardown_schema.delay_on_commit") as mock_delay_on_commit:
         from apps.projects.tasks import expire_inactive_schemas
 
         expire_inactive_schemas()
 
     active_schema.refresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
-    mock_delay.assert_called_once_with(str(active_schema.id))
+    mock_delay_on_commit.assert_called_once_with(str(active_schema.id))
 
 
 @pytest.mark.django_db

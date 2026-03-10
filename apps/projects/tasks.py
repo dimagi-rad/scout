@@ -5,7 +5,6 @@ from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
-from django.db import transaction
 from django.utils import timezone
 
 from apps.projects.services.schema_manager import SchemaManager
@@ -120,8 +119,7 @@ def expire_inactive_schemas() -> None:
     for schema in stale_tenant:
         schema.state = SchemaState.TEARDOWN
         schema.save(update_fields=["state"])
-        schema_id = str(schema.id)
-        transaction.on_commit(lambda sid=schema_id: teardown_schema.delay(sid))
+        teardown_schema.delay_on_commit(str(schema.id))
 
     # Expire stale view schemas
     stale_views = WorkspaceViewSchema.objects.filter(
@@ -131,8 +129,7 @@ def expire_inactive_schemas() -> None:
     for vs in stale_views:
         vs.state = SchemaState.TEARDOWN
         vs.save(update_fields=["state"])
-        vs_id = str(vs.id)
-        transaction.on_commit(lambda vid=vs_id: teardown_view_schema_task.delay(vid))
+        teardown_view_schema_task.delay_on_commit(str(vs.id))
 
 
 @shared_task

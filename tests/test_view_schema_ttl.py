@@ -41,7 +41,7 @@ def test_expire_inactive_schemas_also_expires_stale_view_schemas(workspace_with_
 
     vs.refresh_from_db()
     assert vs.state == SchemaState.TEARDOWN
-    mock_teardown.delay.assert_called_once_with(str(vs.id))
+    mock_teardown.delay_on_commit.assert_called_once_with(str(vs.id))
 
 
 def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):

@@ -42,4 +42,4 @@ def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
 
     assert resp.status_code == 202
     assert WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
-    mock_task.delay.assert_called_once_with(str(ws.id))
+    mock_task.delay_on_commit.assert_called_once_with(str(ws.id))

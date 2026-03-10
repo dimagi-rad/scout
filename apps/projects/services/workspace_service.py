@@ -23,8 +23,7 @@ def add_workspace_tenant(workspace, tenant) -> WorkspaceTenant:
         WorkspaceViewSchema.objects.filter(workspace=workspace).update(
             state=SchemaState.PROVISIONING
         )
-        workspace_id_str = str(workspace.id)
-        transaction.on_commit(lambda: rebuild_workspace_view_schema.delay(workspace_id_str))
+        rebuild_workspace_view_schema.delay_on_commit(str(workspace.id))
 
     return wt
 
@@ -49,5 +48,32 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         WorkspaceViewSchema.objects.filter(workspace=workspace).update(
             state=SchemaState.PROVISIONING
         )
-        workspace_id_str = str(workspace.id)
-        transaction.on_commit(lambda: rebuild_workspace_view_schema.delay(workspace_id_str))
+        rebuild_workspace_view_schema.delay_on_commit(str(workspace.id))
+
+
+async def touch_workspace_schemas(workspace) -> None:
+    """Reset the inactivity TTL for active schemas associated with a workspace.
+
+    For single-tenant workspaces, touches the TenantSchema of the sole tenant.
+    For multi-tenant workspaces, touches the WorkspaceViewSchema.
+    """
+    from asgiref.sync import sync_to_async
+
+    from apps.projects.models import TenantSchema
+
+    tenant_count = await workspace.workspace_tenants.acount()
+    if tenant_count == 1:
+        tenant = await workspace.tenants.afirst()
+        ts = await TenantSchema.objects.filter(
+            tenant=tenant,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+        if ts is not None:
+            await sync_to_async(ts.touch)()
+    elif tenant_count > 1:
+        vs = await WorkspaceViewSchema.objects.filter(
+            workspace=workspace,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).afirst()
+        if vs is not None:
+            await sync_to_async(vs.touch)()

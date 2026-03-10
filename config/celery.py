@@ -7,11 +7,12 @@ This module configures Celery for background task processing.
 import os
 
 from celery import Celery
+from celery.contrib.django.task import DjangoTask
 
 # Set the default Django settings module
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
 
-app = Celery("scout")
+app = Celery("scout", task_cls=DjangoTask)
 
 # Load config from Django settings with CELERY_ prefix
 app.config_from_object("django.conf:settings", namespace="CELERY")
