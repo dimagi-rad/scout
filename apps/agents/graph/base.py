@@ -496,7 +496,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
         # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
         schema_context = await _fetch_schema_context(tenant, user)
         sections.append(f"\n## Data Availability\n\n{schema_context}\n")
-    else:
+    elif tenant_count > 1:
         sections.append("""
 ## Query Configuration
 
