@@ -83,6 +83,33 @@ async def test_multi_tenant_workspace_is_accessible():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
+async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membership():
+    """Multi-tenant workspaces always return tm=None even if the user has a TenantMembership."""
+    from apps.chat.views import _resolve_workspace_and_membership
+
+    user = await sync_to_async(User.objects.create_user)(
+        email="resolve-multi-tm@example.com", password="pass"
+    )
+    t1 = await Tenant.objects.acreate(
+        provider="commcare", external_id="mt2-domain-1", canonical_name="MT2-T1"
+    )
+    t2 = await Tenant.objects.acreate(
+        provider="commcare", external_id="mt2-domain-2", canonical_name="MT2-T2"
+    )
+    ws = await Workspace.objects.acreate(name="Multi WS2", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
+    # User has TenantMembership for t1 (first tenant) — must still get tm=None
+    await TenantMembership.objects.acreate(user=user, tenant=t1)
+
+    workspace, tm = await _resolve_workspace_and_membership(user, ws.id)
+    assert workspace is not None
+    assert tm is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db
 async def test_workspace_not_found_returns_none():
     """Returns (None, None) when the workspace doesn't exist or user lacks WorkspaceMembership."""
     from apps.chat.views import _resolve_workspace_and_membership

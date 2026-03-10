@@ -432,9 +432,9 @@ def _resolve_workspace_and_membership(user, workspace_id):
 
     Returns (workspace, tenant_membership):
     - (None, None): workspace not found or user lacks WorkspaceMembership
-    - (workspace, None): workspace found but no single-tenant TenantMembership
-      (caller should re-read workspace_tenants.count() to decide if multi-tenant access applies)
-    - (workspace, tm): workspace found with a valid TenantMembership
+    - (workspace, None): workspace found but no single-tenant TenantMembership,
+      or workspace is multi-tenant (TenantMembership is not required for multi-tenant access)
+    - (workspace, tm): workspace found with a valid TenantMembership (single-tenant only)
     """
     from apps.projects.models import WorkspaceMembership
 
@@ -446,9 +446,14 @@ def _resolve_workspace_and_membership(user, workspace_id):
         return None, None
 
     workspace = wm.workspace
+
+    # Multi-tenant workspaces grant access by WorkspaceMembership alone;
+    # TenantMembership is irrelevant (and must not be checked) for multi-tenant access.
+    if workspace.workspace_tenants.count() > 1:
+        return workspace, None
+
     tenant = workspace.tenant
     if tenant is None:
-        # Either multi-tenant or no tenants; caller checks count to determine access.
         return workspace, None
 
     from apps.users.models import TenantMembership
@@ -458,13 +463,6 @@ def _resolve_workspace_and_membership(user, workspace_id):
     except TenantMembership.DoesNotExist:
         return workspace, None
     return workspace, tm
-
-
-async def _check_workspace_access(workspace, tm) -> JsonResponse | None:
-    """Return a 403 JsonResponse if workspace access is denied, or None if granted."""
-    if workspace is None or (tm is None and await workspace.workspace_tenants.acount() <= 1):
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
-    return None
 
 
 @sync_to_async
