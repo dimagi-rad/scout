@@ -331,6 +331,23 @@ class WorkspaceTenantView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+
+        tenants = []
+        for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant"):
+            tenants.append(
+                {
+                    "id": str(wt.id),
+                    "tenant_id": str(wt.tenant.id),
+                    "tenant_name": wt.tenant.canonical_name,
+                    "provider": wt.tenant.provider,
+                }
+            )
+        return Response(tenants)
+
     def post(self, request, workspace_id):
         from apps.projects.services.workspace_service import add_workspace_tenant
 
