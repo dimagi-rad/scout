@@ -168,6 +168,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const [wsTenants, allTenants] = await Promise.all([
         workspaceApi.getTenants(workspaceId),
