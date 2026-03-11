@@ -99,7 +99,7 @@ class WorkspaceListView(APIView):
                 "name": workspace.name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": WorkspaceRole.MANAGE,
-                "tenant_count": len(tenant_ids),
+                "tenant_count": workspace.workspace_tenants.count(),
                 "member_count": 1,
                 "created_at": workspace.created_at.isoformat(),
             },
@@ -175,6 +175,11 @@ class WorkspaceDetailView(APIView):
             workspace.name = name
         system_prompt = request.data.get("system_prompt")
         if system_prompt is not None:
+            if len(system_prompt) > 10_000:
+                return Response(
+                    {"error": "system_prompt must be 10,000 characters or fewer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             workspace.system_prompt = system_prompt
 
         workspace.save(update_fields=["name", "system_prompt", "updated_at"])

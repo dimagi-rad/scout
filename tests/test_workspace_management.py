@@ -153,6 +153,27 @@ class TestWorkspaceRename:
         )
         assert resp.status_code == 403
 
+    def test_system_prompt_too_long_returns_400(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"system_prompt": "x" * 10_001},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert "system_prompt" in resp.json()["error"]
+
+    def test_system_prompt_at_limit_is_accepted(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/",
+            {"system_prompt": "y" * 10_000},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        workspace.refresh_from_db()
+        assert len(workspace.system_prompt) == 10_000
+
 
 # ---------------------------------------------------------------------------
 # Workspace delete
