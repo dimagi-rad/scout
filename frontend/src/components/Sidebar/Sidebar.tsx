@@ -90,7 +90,7 @@ export function Sidebar() {
             <DropdownMenuItem onSelect={() => navigate("/workspaces")}>
               Manage workspaces…
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setShowCreateModal(true)}>
+            <DropdownMenuItem onSelect={() => setTimeout(() => setShowCreateModal(true), 0)}>
               + New workspace
             </DropdownMenuItem>
           </DropdownMenuContent>
