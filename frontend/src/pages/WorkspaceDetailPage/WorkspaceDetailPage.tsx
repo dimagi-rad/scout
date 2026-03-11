@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from "react"
 import { Link, useParams } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
-import type { WorkspaceDetail, WorkspaceMember } from "@/api/workspaces"
+import { authApi } from "@/api/auth"
+import type { WorkspaceDetail, WorkspaceMember, WorkspaceTenant, UserTenant } from "@/api/workspaces"
 import { ApiError } from "@/api/client"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
@@ -154,6 +155,141 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
+// ── Tenants Tab ─────────────────────────────────────────────────────────────
+
+function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+  const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
+  const [userTenants, setUserTenants] = useState<UserTenant[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [addingId, setAddingId] = useState<string | null>(null)
+  const [removingId, setRemovingId] = useState<string | null>(null)
+  const [showAdd, setShowAdd] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [wsTenants, allTenants] = await Promise.all([
+        workspaceApi.getTenants(workspaceId),
+        authApi.getUserTenants(),
+      ])
+      setTenants(wsTenants)
+      setUserTenants(allTenants)
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to load tenants")
+    } finally {
+      setLoading(false)
+    }
+  }, [workspaceId])
+
+  useEffect(() => { load() }, [load])
+
+  // Tenants the user has access to that are not already in this workspace
+  const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
+  const available = userTenants.filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
+
+  async function handleAdd(tenantUuid: string) {
+    setAddingId(tenantUuid)
+    try {
+      await workspaceApi.addTenant(workspaceId, tenantUuid)
+      await load()
+      setShowAdd(false)
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Failed to add data source")
+    } finally {
+      setAddingId(null)
+    }
+  }
+
+  async function handleRemove(wt: WorkspaceTenant) {
+    if (!confirm(`Remove "${wt.tenant_name}" from this workspace?`)) return
+    setRemovingId(wt.id)
+    try {
+      await workspaceApi.removeTenant(workspaceId, wt.id)
+      setTenants((prev) => prev.filter((t) => t.id !== wt.id))
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Failed to remove data source")
+    } finally {
+      setRemovingId(null)
+    }
+  }
+
+  if (loading) return <div className="py-8 text-center text-muted-foreground">Loading…</div>
+  if (error) return <div className="py-8 text-center text-destructive">{error}</div>
+
+  return (
+    <div data-testid="tenants-tab">
+      <div className="mb-4 flex items-center justify-between">
+        <span className="text-sm text-muted-foreground">
+          {tenants.length} connected {tenants.length === 1 ? "source" : "sources"}
+        </span>
+        {isManager && available.length > 0 && (
+          <Button size="sm" variant="outline" onClick={() => setShowAdd((v) => !v)} data-testid="add-tenant-btn">
+            + Add data source
+          </Button>
+        )}
+      </div>
+
+      {showAdd && available.length > 0 && (
+        <div className="mb-4 rounded-lg border bg-muted/30 p-4">
+          <p className="mb-2 text-sm font-medium">Available data sources</p>
+          <div className="space-y-2">
+            {available.map((t) => (
+              <div key={t.tenant_uuid} className="flex items-center justify-between">
+                <div>
+                  <span className="text-sm">{t.tenant_name}</span>
+                  <span className="ml-2 text-xs text-muted-foreground">{t.provider}</span>
+                </div>
+                <Button
+                  size="sm"
+                  onClick={() => handleAdd(t.tenant_uuid)}
+                  disabled={addingId === t.tenant_uuid}
+                  data-testid={`add-tenant-${t.tenant_uuid}`}
+                >
+                  {addingId === t.tenant_uuid ? "Adding…" : "Add"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tenants.length === 0 ? (
+        <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
+          No data sources connected.
+        </div>
+      ) : (
+        <div className="rounded-lg border">
+          {tenants.map((t, i) => (
+            <div
+              key={t.id}
+              className={`flex items-center justify-between px-4 py-3 ${i < tenants.length - 1 ? "border-b" : ""}`}
+              data-testid={`tenant-row-${t.id}`}
+            >
+              <div>
+                <div className="font-medium">{t.tenant_name}</div>
+                <div className="text-xs text-muted-foreground">{t.provider}</div>
+              </div>
+              {isManager && tenants.length > 1 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => handleRemove(t)}
+                  disabled={removingId === t.id}
+                  data-testid={`remove-tenant-${t.id}`}
+                >
+                  Remove
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export function WorkspaceDetailPage() {
@@ -216,7 +352,7 @@ export function WorkspaceDetailPage() {
         </TabsContent>
 
         <TabsContent value="tenants">
-          <div className="py-8 text-center text-muted-foreground">Tenants (coming soon)</div>
+          <TenantsTab workspaceId={workspace.id} isManager={isManager} />
         </TabsContent>
 
         <TabsContent value="settings">
