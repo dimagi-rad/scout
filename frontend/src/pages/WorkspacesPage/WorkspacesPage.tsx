@@ -3,28 +3,9 @@ import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import type { TenantMembership } from "@/store/domainSlice"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
+import { RoleBadge } from "@/components/RoleBadge"
 import { Button } from "@/components/ui/button"
 import { Users, Database, ChevronRight } from "lucide-react"
-
-function roleBadge(role: string) {
-  const styles: Record<string, string> = {
-    manage: "bg-green-950 text-green-400",
-    read_write: "bg-blue-950 text-blue-400",
-    read: "bg-muted text-muted-foreground",
-  }
-  const labels: Record<string, string> = {
-    manage: "Manager",
-    read_write: "Read-Write",
-    read: "Read",
-  }
-  return (
-    <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${styles[role] ?? styles.read}`}
-    >
-      {labels[role] ?? role}
-    </span>
-  )
-}
 
 function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onClick: () => void }) {
   return (
@@ -47,7 +28,7 @@ function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onC
         </div>
       </div>
       <div className="flex items-center gap-3">
-        {roleBadge(workspace.role)}
+        <RoleBadge role={workspace.role} />
         <ChevronRight className="h-4 w-4 text-muted-foreground" />
       </div>
     </button>
