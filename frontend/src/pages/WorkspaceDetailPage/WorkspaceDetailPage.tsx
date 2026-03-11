@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from "react"
-import { Link, useParams } from "react-router-dom"
+import { Link, useParams, useNavigate } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
 import { authApi } from "@/api/auth"
 import type { WorkspaceDetail, WorkspaceMember, WorkspaceTenant, UserTenant } from "@/api/workspaces"
 import { ApiError } from "@/api/client"
+import { useAppStore } from "@/store/store"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import {
@@ -291,6 +292,148 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
+// ── Settings Tab ─────────────────────────────────────────────────────────────
+
+function SettingsTab({
+  workspace,
+  onRename,
+  onDelete,
+}: {
+  workspace: WorkspaceDetail
+  onRename: (newName: string) => void
+  onDelete: () => void
+}) {
+  const [name, setName] = useState(workspace.name)
+  const [systemPrompt, setSystemPrompt] = useState(workspace.system_prompt ?? "")
+  const [savingName, setSavingName] = useState(false)
+  const [savingPrompt, setSavingPrompt] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [nameError, setNameError] = useState<string | null>(null)
+  const [promptError, setPromptError] = useState<string | null>(null)
+
+  const isManager = workspace.role === "manage"
+
+  async function handleSaveName(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    if (!name.trim() || name.trim() === workspace.name) return
+    setSavingName(true)
+    setNameError(null)
+    try {
+      await workspaceApi.update(workspace.id, { name: name.trim() })
+      onRename(name.trim())
+    } catch (err) {
+      setNameError(err instanceof ApiError ? err.message : "Failed to rename workspace")
+    } finally {
+      setSavingName(false)
+    }
+  }
+
+  async function handleSavePrompt(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault()
+    setSavingPrompt(true)
+    setPromptError(null)
+    try {
+      await workspaceApi.update(workspace.id, { system_prompt: systemPrompt })
+    } catch (err) {
+      setPromptError(err instanceof ApiError ? err.message : "Failed to save system prompt")
+    } finally {
+      setSavingPrompt(false)
+    }
+  }
+
+  async function handleDelete() {
+    if (!confirm(`Delete "${workspace.name}"? This cannot be undone.`)) return
+    setDeleting(true)
+    try {
+      await workspaceApi.delete(workspace.id)
+      onDelete()
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Failed to delete workspace")
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <div className="space-y-8" data-testid="settings-tab">
+      {/* Rename */}
+      <section>
+        <h3 className="mb-3 text-sm font-medium">Workspace name</h3>
+        <form onSubmit={handleSaveName} className="flex items-start gap-3">
+          <div className="flex-1">
+            <input
+              className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={!isManager}
+              data-testid="settings-name-input"
+            />
+            {nameError && <p className="mt-1 text-xs text-destructive">{nameError}</p>}
+          </div>
+          {isManager && (
+            <Button
+              type="submit"
+              size="sm"
+              disabled={savingName || !name.trim() || name.trim() === workspace.name}
+              data-testid="settings-save-name"
+            >
+              {savingName ? "Saving…" : "Save"}
+            </Button>
+          )}
+        </form>
+      </section>
+
+      {/* System Prompt */}
+      <section>
+        <h3 className="mb-1 text-sm font-medium">System prompt</h3>
+        <p className="mb-3 text-xs text-muted-foreground">
+          Custom instructions for the AI agent in this workspace.
+        </p>
+        <form onSubmit={handleSavePrompt} className="space-y-2">
+          <textarea
+            className="w-full rounded-md border bg-background px-3 py-2 text-sm disabled:opacity-50"
+            rows={6}
+            value={systemPrompt}
+            onChange={(e) => setSystemPrompt(e.target.value)}
+            disabled={!isManager}
+            placeholder="Leave blank for default behavior…"
+            data-testid="settings-system-prompt"
+          />
+          {promptError && <p className="text-xs text-destructive">{promptError}</p>}
+          {isManager && (
+            <Button
+              type="submit"
+              size="sm"
+              disabled={savingPrompt}
+              data-testid="settings-save-prompt"
+            >
+              {savingPrompt ? "Saving…" : "Save system prompt"}
+            </Button>
+          )}
+        </form>
+      </section>
+
+      {/* Danger Zone */}
+      {isManager && (
+        <section className="rounded-lg border border-destructive/30 p-4">
+          <h3 className="mb-1 text-sm font-medium text-destructive">Danger zone</h3>
+          <p className="mb-3 text-xs text-muted-foreground">
+            Permanently delete this workspace and all its threads. This cannot be undone.
+          </p>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={handleDelete}
+            disabled={deleting}
+            data-testid="delete-workspace-btn"
+          >
+            {deleting ? "Deleting…" : "Delete workspace"}
+          </Button>
+        </section>
+      )}
+    </div>
+  )
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export function WorkspaceDetailPage() {
@@ -298,6 +441,18 @@ export function WorkspaceDetailPage() {
   const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const navigate = useNavigate()
+  const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+
+  function handleRename(newName: string) {
+    setWorkspace((prev) => prev ? { ...prev, name: newName } : prev)
+    fetchDomains()  // sync sidebar
+  }
+
+  function handleDelete() {
+    fetchDomains()  // removes from sidebar
+    navigate("/workspaces")
+  }
 
   useEffect(() => {
     if (!workspaceId) return
@@ -357,7 +512,7 @@ export function WorkspaceDetailPage() {
         </TabsContent>
 
         <TabsContent value="settings">
-          <div className="py-8 text-center text-muted-foreground">Settings (coming soon)</div>
+          <SettingsTab workspace={workspace} onRename={handleRename} onDelete={handleDelete} />
         </TabsContent>
       </Tabs>
     </div>
