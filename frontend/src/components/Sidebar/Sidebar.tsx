@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
@@ -9,17 +9,19 @@ import {
   LogOut,
   Plus,
   Link2,
+  ChevronDown,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -34,6 +36,7 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
+  const [showCreateModal, setShowCreateModal] = useState(false)
 
   // Fetch domains on mount
   useEffect(() => {
@@ -58,24 +61,43 @@ export function Sidebar() {
 
       {/* Workspace Selector */}
       <div className="border-b p-4">
-        <label className="text-xs font-medium text-muted-foreground">
-          Workspace
-        </label>
-        <Select
-          value={activeDomainId ?? ""}
-          onValueChange={(value) => { setActiveDomain(value); newThread() }}
-        >
-          <SelectTrigger className="mt-1 w-full" data-testid="domain-selector">
-            <SelectValue placeholder="Select workspace" />
-          </SelectTrigger>
-          <SelectContent>
+        <label className="text-xs font-medium text-muted-foreground">Workspace</label>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              className="mt-1 w-full justify-between font-normal"
+              data-testid="domain-selector"
+            >
+              <span className="truncate">
+                {domains.find((d) => d.id === activeDomainId)?.name ?? "Select workspace"}
+              </span>
+              <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-56">
             {domains.map((d) => (
-              <SelectItem key={d.id} value={d.id} data-testid={`domain-item-${d.id}`}>
+              <DropdownMenuItem
+                key={d.id}
+                data-testid={`domain-item-${d.id}`}
+                onSelect={() => { setActiveDomain(d.id); newThread() }}
+                className={d.id === activeDomainId ? "font-medium" : ""}
+              >
                 {d.name}
-              </SelectItem>
+              </DropdownMenuItem>
             ))}
-          </SelectContent>
-        </Select>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => navigate("/workspaces")}>
+              Manage workspaces…
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setShowCreateModal(true)}>
+              + New workspace
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {showCreateModal && (
+          <CreateWorkspaceModal onClose={() => setShowCreateModal(false)} />
+        )}
       </div>
 
       {/* Navigation */}
