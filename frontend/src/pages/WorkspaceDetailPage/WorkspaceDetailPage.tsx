@@ -467,7 +467,7 @@ function SettingsTab({
                   size="sm"
                   onClick={handleDelete}
                   disabled={deleting}
-                  data-testid="delete-workspace-btn"
+                  data-testid="confirm-delete-workspace-btn"
                 >
                   {deleting ? "Deleting…" : "Yes, delete workspace"}
                 </Button>

@@ -65,27 +65,27 @@ async def tenant_list_view(request):
 
     # Refresh domains from CommCare if the user has an OAuth token
     commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
-    if not cache.get(commcare_cache_key):
+    if not await cache.aget(commcare_cache_key):
         access_token = await sync_to_async(_get_commcare_token)(user)
         if access_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_commcare_domains
 
                 await sync_to_async(resolve_commcare_domains)(user, access_token)
-                cache.set(commcare_cache_key, True, TENANT_REFRESH_TTL)
+                await cache.aset(commcare_cache_key, True, TENANT_REFRESH_TTL)
             except Exception:
                 logger.warning("Failed to refresh CommCare domains", exc_info=True)
 
     # Refresh opportunities from Connect if the user has a Connect OAuth token
     connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
-    if not cache.get(connect_cache_key):
+    if not await cache.aget(connect_cache_key):
         connect_token = await sync_to_async(_get_connect_token)(user)
         if connect_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_connect_opportunities
 
                 await sync_to_async(resolve_connect_opportunities)(user, connect_token)
-                cache.set(connect_cache_key, True, TENANT_REFRESH_TTL)
+                await cache.aset(connect_cache_key, True, TENANT_REFRESH_TTL)
             except Exception:
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
 

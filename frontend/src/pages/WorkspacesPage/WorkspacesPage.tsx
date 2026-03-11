@@ -42,7 +42,7 @@ export function WorkspacesPage() {
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const [showCreate, setShowCreate] = useState(false)
 
-  const isLoading = domainsStatus === "loading"
+  const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
 
   return (
     <div className="mx-auto max-w-2xl px-6 py-8">
