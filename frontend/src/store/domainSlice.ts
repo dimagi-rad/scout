@@ -1,14 +1,9 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
 
-export interface TenantMembership {
-  id: string
-  name: string
-  is_auto_created: boolean
-  role: string
-  tenant_count: number
-  member_count: number
-  created_at: string
+// TenantMembership kept as alias so existing imports continue to work
+export type TenantMembership = WorkspaceListItem & {
   // Legacy compat fields — kept so code referencing these doesn't break at compile time
   provider?: string
   tenant_id?: string
@@ -39,7 +34,7 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     fetchDomains: async () => {
       set({ domainsStatus: "loading", domainsError: null })
       try {
-        const domains = await api.get<TenantMembership[]>("/api/workspaces/")
+        const domains = await workspaceApi.list()
         const activeDomainId = get().activeDomainId
         set({
           domains,
