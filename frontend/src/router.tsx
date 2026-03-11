@@ -7,6 +7,8 @@ import { DataSourcesPage } from "@/pages/DataSourcesPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
+import { WorkspacesPage } from "@/pages/WorkspacesPage"
+import { WorkspaceDetailPage } from "@/pages/WorkspaceDetailPage"
 
 export const router = createBrowserRouter([
   {
@@ -25,6 +27,8 @@ export const router = createBrowserRouter([
       { path: "data-dictionary", element: <DataDictionaryPage /> },
       { path: "datasources", element: <DataSourcesPage /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
+      { path: "workspaces", element: <WorkspacesPage /> },
+      { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

@@ -103,6 +103,7 @@ async def tenant_list_view(request):
                 "id": str(tm.id),
                 "provider": tm.tenant.provider,
                 "tenant_id": tm.tenant.external_id,
+                "tenant_uuid": str(tm.tenant.id),
                 "tenant_name": tm.tenant.canonical_name,
                 "last_selected_at": (
                     tm.last_selected_at.isoformat() if tm.last_selected_at else None

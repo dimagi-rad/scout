@@ -133,3 +133,18 @@ def test_add_tenant_already_in_workspace_requires_membership(
     # User lacks TenantMembership for tenant2 — must be rejected even though it's already in workspace
     assert resp.status_code == 400
     assert "do not have access" in resp.data["error"]
+
+
+def test_list_workspace_tenants(api_client, user, workspace):
+    """GET /api/workspaces/<id>/tenants/ returns current tenants."""
+    api_client.force_login(user)
+    response = api_client.get(f"/api/workspaces/{workspace.id}/tenants/")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    # workspace fixture has one tenant (defined in this file's fixtures)
+    assert len(data) == 1
+    assert "id" in data[0]  # WorkspaceTenant UUID
+    assert "tenant_id" in data[0]  # internal Tenant UUID
+    assert "tenant_name" in data[0]
+    assert "provider" in data[0]

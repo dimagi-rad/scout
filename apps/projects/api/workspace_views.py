@@ -64,11 +64,6 @@ class WorkspaceListView(APIView):
             return Response({"error": "name is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         tenant_ids = request.data.get("tenant_ids", [])
-        if not tenant_ids:
-            return Response(
-                {"error": "At least one tenant_id is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         # Validate user has access to all requested tenants
         accessible_tenant_ids = set(
@@ -335,6 +330,23 @@ class WorkspaceTenantView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+
+    def get(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+
+        tenants = []
+        for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant"):
+            tenants.append(
+                {
+                    "id": str(wt.id),
+                    "tenant_id": str(wt.tenant.id),
+                    "tenant_name": wt.tenant.canonical_name,
+                    "provider": wt.tenant.provider,
+                }
+            )
+        return Response(tenants)
 
     def post(self, request, workspace_id):
         from apps.projects.services.workspace_service import add_workspace_tenant

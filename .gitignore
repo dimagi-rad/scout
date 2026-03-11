@@ -78,3 +78,4 @@ bun.lockb
 docs/site/
 node_modules/
 bun.lockb
+.superpowers/
