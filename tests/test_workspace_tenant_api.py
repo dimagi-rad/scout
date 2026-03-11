@@ -2,7 +2,6 @@ import pytest
 from rest_framework.test import APIClient
 
 from apps.projects.models import (
-    Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
@@ -16,20 +15,6 @@ def api_client():
 
 
 @pytest.fixture
-def user(db):
-    from django.contrib.auth import get_user_model
-
-    return get_user_model().objects.create_user(email="api@example.com", password="pass")
-
-
-@pytest.fixture
-def tenant(db):
-    return Tenant.objects.create(
-        provider="commcare", external_id="api-domain", canonical_name="API Domain"
-    )
-
-
-@pytest.fixture
 def tenant2(db):
     return Tenant.objects.create(
         provider="commcare", external_id="api-domain-2", canonical_name="API Domain 2"
@@ -37,15 +22,8 @@ def tenant2(db):
 
 
 @pytest.fixture
-def workspace(db, user, tenant):
-    ws = Workspace.objects.create(name="API WS", created_by=user)
-    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
-    return ws
-
-
-@pytest.fixture
 def tenant_membership(db, user, tenant2):
+    """Grant the test user access to tenant2 (used for add/remove tenant tests)."""
     return TenantMembership.objects.create(user=user, tenant=tenant2)
 
 

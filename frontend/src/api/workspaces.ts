@@ -1,5 +1,7 @@
 import { api } from "./client"
 
+export type { UserTenant } from "./auth"
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface WorkspaceDetail {
@@ -31,24 +33,16 @@ export interface WorkspaceTenant {
   provider: string
 }
 
-export interface UserTenant {
-  id: string          // TenantMembership UUID
-  provider: string
-  tenant_id: string   // external ID
-  tenant_uuid: string // internal Tenant UUID — use this for workspace API calls
-  tenant_name: string
-}
-
 // ── Workspace CRUD ─────────────────────────────────────────────────────────
 
 export const workspaceApi = {
   getDetail: (workspaceId: string) =>
     api.get<WorkspaceDetail>(`/api/workspaces/${workspaceId}/`),
 
-  create: (name: string) =>
+  create: (name: string, tenantIds: string[] = []) =>
     api.post<{ id: string; name: string }>("/api/workspaces/", {
       name,
-      tenant_ids: [],
+      tenant_ids: tenantIds,
     }),
 
   update: (workspaceId: string, body: { name?: string; system_prompt?: string }) =>
@@ -84,8 +78,4 @@ export const workspaceApi = {
 
   removeTenant: (workspaceId: string, workspaceTenantId: string) =>
     api.delete<void>(`/api/workspaces/${workspaceId}/tenants/${workspaceTenantId}/`),
-
-  // ── User's available tenants ──────────────────────────────────────────────
-
-  getUserTenants: () => api.get<UserTenant[]>("/api/auth/tenants/"),
 }

@@ -17,8 +17,6 @@ def client():
 @pytest.fixture
 def manage_user(db, workspace):
     """The workspace fixture already gives `user` MANAGE role; return that user."""
-    from tests.conftest import workspace as ws_fixture  # noqa: F401
-
     return workspace.memberships.get(role=WorkspaceRole.MANAGE).user
 
 

@@ -84,15 +84,7 @@ class WorkspaceListView(APIView):
             is_auto_created=False,
             created_by=request.user,
         )
-        for tid in tenant_ids:
-            try:
-                tenant = Tenant.objects.get(id=tid)
-            except Tenant.DoesNotExist:
-                workspace.delete()
-                return Response(
-                    {"error": "One or more tenants are not accessible."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        for tenant in Tenant.objects.filter(id__in=tenant_ids):
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
 
         WorkspaceMembership.objects.create(
