@@ -25,6 +25,8 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [error, setError] = useState<string | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  const [mutationError, setMutationError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -49,20 +51,20 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
         prev.map((m) => (m.id === membershipId ? { ...m, role: newRole as WorkspaceMember["role"] } : m))
       )
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to update role")
+      setMutationError(err instanceof ApiError ? err.message : "Failed to update role")
     } finally {
       setUpdatingId(null)
     }
   }
 
   async function handleRemove(membershipId: string) {
-    if (!confirm("Remove this member from the workspace?")) return
     setRemovingId(membershipId)
     try {
       await workspaceApi.removeMember(workspaceId, membershipId)
       setMembers((prev) => prev.filter((m) => m.id !== membershipId))
+      setConfirmRemoveId(null)
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to remove member")
+      setMutationError(err instanceof ApiError ? err.message : "Failed to remove member")
     } finally {
       setRemovingId(null)
     }
@@ -78,6 +80,9 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
           {members.length} {members.length === 1 ? "member" : "members"}
         </span>
       </div>
+      {mutationError && (
+        <p className="mb-3 text-sm text-destructive">{mutationError}</p>
+      )}
       <div className="rounded-lg border">
         <table className="w-full text-sm">
           <thead>
@@ -116,16 +121,33 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
                 </td>
                 {isManager && (
                   <td className="px-4 py-3 text-right">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => handleRemove(member.id)}
-                      disabled={removingId === member.id}
-                      data-testid={`remove-member-${member.id}`}
-                    >
-                      Remove
-                    </Button>
+                    {confirmRemoveId === member.id ? (
+                      <div className="flex items-center justify-end gap-2">
+                        <span className="text-xs text-muted-foreground">Remove?</span>
+                        <Button variant="ghost" size="sm" onClick={() => setConfirmRemoveId(null)}>
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          onClick={() => handleRemove(member.id)}
+                          disabled={removingId === member.id}
+                          data-testid={`remove-member-${member.id}`}
+                        >
+                          {removingId === member.id ? "Removing…" : "Confirm"}
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => setConfirmRemoveId(member.id)}
+                        data-testid={`remove-member-${member.id}`}
+                      >
+                        Remove
+                      </Button>
+                    )}
                   </td>
                 )}
               </tr>
@@ -147,6 +169,8 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
+  const [mutationError, setMutationError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -178,20 +202,20 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
       await load()
       setShowAdd(false)
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to add data source")
+      setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
       setAddingId(null)
     }
   }
 
   async function handleRemove(wt: WorkspaceTenant) {
-    if (!confirm(`Remove "${wt.tenant_name}" from this workspace?`)) return
     setRemovingId(wt.id)
     try {
       await workspaceApi.removeTenant(workspaceId, wt.id)
-      setTenants((prev) => prev.filter((t) => t.id !== wt.id))
+      await load()  // consistent with handleAdd
+      setConfirmRemoveId(null)
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to remove data source")
+      setMutationError(err instanceof ApiError ? err.message : "Failed to remove data source")
     } finally {
       setRemovingId(null)
     }
@@ -237,6 +261,10 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
         </div>
       )}
 
+      {mutationError && (
+        <p className="mb-3 text-sm text-destructive">{mutationError}</p>
+      )}
+
       {tenants.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
           No data sources connected.
@@ -254,16 +282,33 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
                 <div className="text-xs text-muted-foreground">{t.provider}</div>
               </div>
               {isManager && tenants.length > 1 && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => handleRemove(t)}
-                  disabled={removingId === t.id}
-                  data-testid={`remove-tenant-${t.id}`}
-                >
-                  Remove
-                </Button>
+                confirmRemoveId === t.id ? (
+                  <div className="flex items-center justify-end gap-2">
+                    <span className="text-xs text-muted-foreground">Remove?</span>
+                    <Button variant="ghost" size="sm" onClick={() => setConfirmRemoveId(null)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => handleRemove(t)}
+                      disabled={removingId === t.id}
+                      data-testid={`remove-tenant-${t.id}`}
+                    >
+                      {removingId === t.id ? "Removing…" : "Confirm"}
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => setConfirmRemoveId(t.id)}
+                    data-testid={`remove-tenant-${t.id}`}
+                  >
+                    Remove
+                  </Button>
+                )
               )}
             </div>
           ))}
@@ -291,6 +336,8 @@ function SettingsTab({
   const [deleting, setDeleting] = useState(false)
   const [nameError, setNameError] = useState<string | null>(null)
   const [promptError, setPromptError] = useState<string | null>(null)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   const isManager = workspace.role === "manage"
 
@@ -323,13 +370,12 @@ function SettingsTab({
   }
 
   async function handleDelete() {
-    if (!confirm(`Delete "${workspace.name}"? This cannot be undone.`)) return
     setDeleting(true)
     try {
       await workspaceApi.delete(workspace.id)
       onDelete()
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to delete workspace")
+      setDeleteError(err instanceof ApiError ? err.message : "Failed to delete workspace")
       setDeleting(false)
     }
   }
@@ -400,15 +446,35 @@ function SettingsTab({
           <p className="mb-3 text-xs text-muted-foreground">
             Permanently delete this workspace and all its threads. This cannot be undone.
           </p>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={handleDelete}
-            disabled={deleting}
-            data-testid="delete-workspace-btn"
-          >
-            {deleting ? "Deleting…" : "Delete workspace"}
-          </Button>
+          {!showDeleteConfirm ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setShowDeleteConfirm(true)}
+              data-testid="delete-workspace-btn"
+            >
+              Delete workspace
+            </Button>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs font-medium">Are you sure? This cannot be undone.</p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => setShowDeleteConfirm(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  data-testid="delete-workspace-btn"
+                >
+                  {deleting ? "Deleting…" : "Yes, delete workspace"}
+                </Button>
+              </div>
+              {deleteError && <p className="text-xs text-destructive">{deleteError}</p>}
+            </div>
+          )}
         </section>
       )}
     </div>
