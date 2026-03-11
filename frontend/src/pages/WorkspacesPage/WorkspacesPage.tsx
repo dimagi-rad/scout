@@ -83,6 +83,16 @@ export function WorkspacesPage() {
             <div key={i} className="h-16 animate-pulse rounded-lg border bg-muted" />
           ))}
         </div>
+      ) : domainsStatus === "error" ? (
+        <div className="rounded-lg border border-destructive/20 p-6 text-center">
+          <p className="text-sm text-destructive">Failed to load workspaces.</p>
+          <button
+            className="mt-2 text-sm text-muted-foreground underline hover:text-foreground"
+            onClick={() => fetchDomains()}
+          >
+            Try again
+          </button>
+        </div>
       ) : domains.length === 0 ? (
         <div className="rounded-lg border border-dashed p-10 text-center">
           <p className="text-muted-foreground">No workspaces yet.</p>
@@ -103,12 +113,7 @@ export function WorkspacesPage() {
       )}
 
       {showCreate && (
-        <CreateWorkspaceModal
-          onClose={() => {
-            setShowCreate(false)
-            fetchDomains()
-          }}
-        />
+        <CreateWorkspaceModal onClose={() => setShowCreate(false)} />
       )}
     </div>
   )
