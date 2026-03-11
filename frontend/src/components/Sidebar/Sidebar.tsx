@@ -90,6 +90,7 @@ export function Sidebar() {
             <DropdownMenuItem onSelect={() => navigate("/workspaces")}>
               Manage workspaces…
             </DropdownMenuItem>
+            {/* Defer modal open so Radix can finish closing the dropdown before the Dialog mounts its own focus trap */}
             <DropdownMenuItem onSelect={() => setTimeout(() => setShowCreateModal(true), 0)}>
               + New workspace
             </DropdownMenuItem>

@@ -60,7 +60,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
   useEffect(() => { load() }, [load])
 
-  async function handleRoleChange(membershipId: string, newRole: string) {
+  async function handleRoleChange(membershipId: string, newRole: WorkspaceMember["role"]) {
     setUpdatingId(membershipId)
     try {
       await workspaceApi.updateMember(workspaceId, membershipId, newRole)
@@ -117,7 +117,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
                   {isManager ? (
                     <Select
                       value={member.role}
-                      onValueChange={(v) => handleRoleChange(member.id, v)}
+                      onValueChange={(v) => handleRoleChange(member.id, v as WorkspaceMember["role"])}
                       disabled={updatingId === member.id}
                     >
                       <SelectTrigger className="h-8 w-32" data-testid={`member-role-${member.id}`}>
