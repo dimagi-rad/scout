@@ -132,7 +132,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
                           size="sm"
                           onClick={() => handleRemove(member.id)}
                           disabled={removingId === member.id}
-                          data-testid={`remove-member-${member.id}`}
+                          data-testid={`confirm-remove-member-${member.id}`}
                         >
                           {removingId === member.id ? "Removing…" : "Confirm"}
                         </Button>
@@ -293,7 +293,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
                       size="sm"
                       onClick={() => handleRemove(t)}
                       disabled={removingId === t.id}
-                      data-testid={`remove-tenant-${t.id}`}
+                      data-testid={`confirm-remove-tenant-${t.id}`}
                     >
                       {removingId === t.id ? "Removing…" : "Confirm"}
                     </Button>
