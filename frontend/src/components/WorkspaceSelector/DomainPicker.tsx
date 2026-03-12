@@ -34,7 +34,10 @@ export function DomainPicker({
     [domains],
   )
   const connectDomains = useMemo(
-    () => domains.filter((d) => d.provider === "commcare_connect"),
+    () =>
+      domains
+        .filter((d) => d.provider === "commcare_connect")
+        .sort((a, b) => Number(a.tenant_id) - Number(b.tenant_id)),
     [domains],
   )
 
