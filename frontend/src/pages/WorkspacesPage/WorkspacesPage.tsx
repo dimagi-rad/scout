@@ -45,7 +45,7 @@ export function WorkspacesPage() {
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-8">
+    <div className="p-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold" data-testid="workspaces-title">Workspaces</h1>
