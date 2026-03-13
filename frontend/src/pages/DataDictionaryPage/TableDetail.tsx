@@ -270,7 +270,7 @@ export function TableDetail({ table }: TableDetailProps) {
                         placeholder="Add description..."
                         value={columnNotes[column.name] ?? column.description ?? ""}
                         onChange={(e) => updateColumnNote(column.name, e.target.value)}
-                        className="h-8 border-0 bg-transparent px-0 focus-visible:ring-0"
+                        className="h-8 rounded-none border-x-0 border-t-0 border-b border-input bg-transparent px-0 shadow-none focus-visible:ring-0 focus-visible:border-foreground transition-colors"
                         data-testid={`column-note-${column.name}`}
                       />
                     </TableCell>
