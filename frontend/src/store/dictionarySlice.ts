@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand"
-import { api } from "@/api/client"
+import { api, ApiError } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
 
 export interface Column {
@@ -101,7 +101,7 @@ interface BackendTableDetailResponse {
   source_metadata?: SourceMetadata
 }
 
-export type DictionaryStatus = "idle" | "loading" | "loaded" | "error"
+export type DictionaryStatus = "idle" | "loading" | "loaded" | "error" | "not_materialized"
 
 export interface DictionarySlice {
   dataDictionary: DataDictionary | null
@@ -180,8 +180,10 @@ export const createDictionarySlice: StateCreator<
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
       } catch (error) {
+        const status =
+          error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
         set({
-          dictionaryStatus: "error",
+          dictionaryStatus: status,
           dictionaryError: error instanceof Error ? error.message : "Failed to load data dictionary",
         })
       }
@@ -193,15 +195,17 @@ export const createDictionarySlice: StateCreator<
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
         await api.post(`/api/workspaces/${activeDomainId}/refresh/`)
-        // Re-fetch the full dictionary after refresh
+        // Materialization runs in the background — re-fetch to pick up any already-available data
         const raw = await api.get<BackendDictionaryResponse>(
           `/api/workspaces/${activeDomainId}/data-dictionary/`
         )
         const data = transformBackendResponse(raw)
         set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
       } catch (error) {
+        const status =
+          error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
         set({
-          dictionaryStatus: "error",
+          dictionaryStatus: status,
           dictionaryError: error instanceof Error ? error.message : "Failed to refresh schema",
         })
       }

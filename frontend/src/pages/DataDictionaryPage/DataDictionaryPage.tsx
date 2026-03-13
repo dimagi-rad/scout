@@ -53,6 +53,21 @@ export function DataDictionaryPage() {
     )
   }
 
+  // No data materialized yet
+  if (dictionaryStatus === "not_materialized") {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <Database className="mx-auto h-12 w-12 text-muted-foreground" />
+          <h2 className="mt-4 text-lg font-medium">No schema data yet</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Start a chat to automatically fetch your schema data.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   // Error state
   if (dictionaryStatus === "error" && networkStatus === "online") {
     return (
