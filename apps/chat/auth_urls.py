@@ -2,7 +2,7 @@
 
 from django.urls import path
 
-from apps.chat.views import (
+from apps.chat.auth_views import (
     csrf_view,
     disconnect_provider_view,
     login_view,
