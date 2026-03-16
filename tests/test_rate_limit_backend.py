@@ -2,7 +2,7 @@
 
 import pytest
 
-from apps.chat.rate_limiting import AUTH_MAX_ATTEMPTS, check_rate_limit, record_attempt
+from apps.users.rate_limiting import AUTH_MAX_ATTEMPTS, check_rate_limit, record_attempt
 
 
 @pytest.mark.django_db
