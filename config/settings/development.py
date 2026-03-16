@@ -6,14 +6,6 @@ from .base import *  # noqa: F401, F403
 
 DEBUG = True
 
-# Allow common development hosts
-ALLOWED_HOSTS = [
-    "localhost",
-    "127.0.0.1",
-    "0.0.0.0",
-    ".ngrok-free.app",
-]
-
 # Use console email backend for development
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 

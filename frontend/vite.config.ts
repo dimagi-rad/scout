@@ -14,7 +14,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      allowedHosts: ['.ngrok-free.app'],
+      allowedHosts: ['.ngrok-free.app', '.ts.net'],
       watch: {
         usePolling: !!process.env.WSL_DISTRO_NAME,
       },
