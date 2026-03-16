@@ -152,7 +152,7 @@ async def describe_table(tenant_id: str, table_name: str, workspace_id: str | No
                 .afirst()
             )
             tenant_metadata = await TenantMetadata.objects.filter(
-                tenant_membership__tenant=ts.tenant
+                tenant_membership__tenant_id=ts.tenant_id
             ).afirst()
 
         pipeline_name = last_run.pipeline if last_run else "commcare_sync"
@@ -216,7 +216,7 @@ async def get_metadata(tenant_id: str, workspace_id: str | None = None) -> dict:
         pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
 
         tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership_id=ts.tenant_membership_id
+            tenant_membership__tenant_id=ts.tenant_id
         ).afirst()
 
         metadata = await sync_to_async(pipeline_get_metadata)(
