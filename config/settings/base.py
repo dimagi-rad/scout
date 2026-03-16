@@ -223,6 +223,14 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/minute",
+        "user": "120/minute",
+    },
 }
 
 
@@ -263,6 +271,10 @@ else:
             "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
         }
     }
+
+
+# NOTE: LocMemCache is per-process — rate limiting won't work across
+# multiple workers. Set REDIS_URL for production deployments.
 
 
 # Rate limiting
