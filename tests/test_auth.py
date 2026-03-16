@@ -134,6 +134,10 @@ class TestDjangoAllauthConfiguration:
         assert settings.SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT is True
         assert settings.SOCIALACCOUNT_EMAIL_VERIFICATION == "none"
 
+    def test_socialaccount_login_on_get_disabled(self, settings):
+        """SOCIALACCOUNT_LOGIN_ON_GET must be False to prevent login CSRF."""
+        assert settings.SOCIALACCOUNT_LOGIN_ON_GET is False
+
     def test_site_id_configured(self, settings):
         """Test that SITE_ID is set for django.contrib.sites."""
         assert hasattr(settings, "SITE_ID")
