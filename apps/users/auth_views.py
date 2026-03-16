@@ -14,9 +14,9 @@ from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
-from apps.chat.helpers import login_required_json
-from apps.chat.rate_limiting import check_rate_limit, record_attempt
+from apps.users.decorators import login_required_json
 from apps.users.models import TenantMembership
+from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,

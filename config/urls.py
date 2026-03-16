@@ -96,7 +96,7 @@ urlpatterns = [
     ),
     # Chat streaming (workspace_id in body)
     path("api/chat/", chat_view, name="chat"),
-    path("api/auth/", include("apps.chat.auth_urls")),
+    path("api/auth/", include("apps.users.auth_urls")),
     # Public share links (no auth required)
     path(
         "api/recipes/runs/shared/<str:share_token>/",

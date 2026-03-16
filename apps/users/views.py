@@ -12,7 +12,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
-from apps.chat.helpers import async_login_required
+from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.tenant_verification import (
     CommCareVerificationError,

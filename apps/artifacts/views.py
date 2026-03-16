@@ -17,8 +17,8 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
-from apps.chat.helpers import LoginRequiredJsonMixin
 from apps.projects.workspace_resolver import aresolve_workspace, resolve_workspace
+from apps.users.decorators import LoginRequiredJsonMixin
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
 
