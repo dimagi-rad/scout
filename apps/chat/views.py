@@ -22,7 +22,7 @@ from django.contrib.sites.models import Site
 from django.core.cache import cache
 from django.http import JsonResponse, StreamingHttpResponse
 from django.middleware.csrf import get_token
-from django.views.decorators.csrf import ensure_csrf_cookie
+from django.views.decorators.csrf import csrf_protect, ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.agents.graph.base import build_agent_graph
@@ -554,6 +554,7 @@ def _list_threads(user, *, workspace_id):
 MAX_MESSAGE_LENGTH = 10_000
 
 
+@csrf_protect
 async def chat_view(request):
     """
     POST /api/chat/
