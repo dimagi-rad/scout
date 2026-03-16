@@ -10,7 +10,7 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.workspace_resolver import resolve_workspace
+from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
 from apps.recipes.models import Recipe, RecipeRun
 
 from .serializers import (

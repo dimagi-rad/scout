@@ -14,7 +14,7 @@ User = get_user_model()
 @pytest.mark.django_db
 async def test_single_tenant_workspace_with_membership_is_accessible():
     """Single-tenant workspace returns TenantMembership when user holds one."""
-    from apps.chat.views import _resolve_workspace_and_membership
+    from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-single@example.com", password="pass"
@@ -36,7 +36,7 @@ async def test_single_tenant_workspace_with_membership_is_accessible():
 @pytest.mark.django_db
 async def test_single_tenant_workspace_without_membership_is_inaccessible():
     """Single-tenant workspace returns None tm when user lacks TenantMembership."""
-    from apps.chat.views import _resolve_workspace_and_membership
+    from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-nomem@example.com", password="pass"
@@ -58,7 +58,7 @@ async def test_single_tenant_workspace_without_membership_is_inaccessible():
 @pytest.mark.django_db
 async def test_multi_tenant_workspace_is_accessible():
     """Multi-tenant workspaces return None tm (caller re-checks count for access)."""
-    from apps.chat.views import _resolve_workspace_and_membership
+    from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-multi@example.com", password="pass"
@@ -84,7 +84,7 @@ async def test_multi_tenant_workspace_is_accessible():
 @pytest.mark.django_db
 async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membership():
     """Multi-tenant workspaces always return tm=None even if the user has a TenantMembership."""
-    from apps.chat.views import _resolve_workspace_and_membership
+    from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-multi-tm@example.com", password="pass"
@@ -112,7 +112,7 @@ async def test_multi_tenant_workspace_returns_none_tm_even_with_tenant_membershi
 @pytest.mark.django_db
 async def test_workspace_not_found_returns_none():
     """Returns (None, None) when the workspace doesn't exist or user lacks WorkspaceMembership."""
-    from apps.chat.views import _resolve_workspace_and_membership
+    from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await sync_to_async(User.objects.create_user)(
         email="resolve-missing@example.com", password="pass"

@@ -6,12 +6,12 @@ The chat streaming endpoint lives at /api/chat/ (workspace_id in request body).
 
 from django.urls import path
 
-from apps.chat.views import (
-    chat_view,
+from apps.chat.thread_views import (
     thread_list_view,
     thread_messages_view,
     thread_share_view,
 )
+from apps.chat.views import chat_view
 
 app_name = "chat"
 

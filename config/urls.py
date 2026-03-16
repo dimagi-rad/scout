@@ -8,8 +8,9 @@ from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
 
+from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
-from apps.chat.views import chat_view, public_thread_view
+from apps.chat.views import chat_view
 from apps.projects.api.workspace_views import (
     WorkspaceDetailView,
     WorkspaceListView,
@@ -95,7 +96,7 @@ urlpatterns = [
     ),
     # Chat streaming (workspace_id in body)
     path("api/chat/", chat_view, name="chat"),
-    path("api/auth/", include("apps.chat.auth_urls")),
+    path("api/auth/", include("apps.users.auth_urls")),
     # Public share links (no auth required)
     path(
         "api/recipes/runs/shared/<str:share_token>/",

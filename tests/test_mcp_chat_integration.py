@@ -252,7 +252,7 @@ class TestChatEndpointValidation:
         """AI SDK v6 parts format should be accepted."""
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
@@ -320,7 +320,7 @@ class TestMCPToolLoading:
 
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = [mock_tool]
@@ -896,7 +896,7 @@ class TestEndToEndStreaming:
         """Full path: chat request → text SSE stream."""
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
@@ -938,7 +938,7 @@ class TestEndToEndStreaming:
         """Full path: chat request → tool call → tool result → text → SSE stream."""
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
@@ -1002,7 +1002,7 @@ class TestEndToEndStreaming:
 
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
@@ -1045,7 +1045,7 @@ class TestEndToEndStreaming:
         """If agent build fails, should return 500."""
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
@@ -1073,7 +1073,7 @@ class TestEndToEndStreaming:
 
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
-            patch("apps.chat.views._ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
+            patch("apps.chat.views.ensure_checkpointer", new_callable=AsyncMock) as mock_cp,
             patch("apps.chat.views.build_agent_graph") as mock_build,
         ):
             mock_mcp.return_value = []
