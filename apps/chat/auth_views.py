@@ -1,16 +1,66 @@
 """Auth endpoints: csrf, me, login, logout, signup, providers, disconnect."""
 
 import json
+import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth import authenticate, get_user_model, login, logout
+from django.contrib.auth.password_validation import validate_password
 from django.contrib.sites.models import Site
+from django.core.exceptions import ValidationError as _ValidationError
+from django.db import IntegrityError
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.chat.rate_limiting import check_rate_limit, record_attempt
+from apps.users.models import TenantMembership
+from apps.users.services.tenant_resolution import (
+    resolve_commcare_domains,
+    resolve_connect_opportunities,
+)
+from apps.users.views import _get_commcare_token, _get_connect_token
+
+logger = logging.getLogger(__name__)
+
+UserModel = get_user_model()
+
+PROVIDER_DISPLAY = {
+    "google": "Google",
+    "github": "GitHub",
+    "commcare": "CommCare",
+    "commcare_connect": "CommCare Connect",
+}
+
+PROVIDER_TOKEN_URLS = {
+    "commcare": "https://www.commcarehq.org/oauth/token/",
+    "commcare_connect": "https://connect.commcarehq.org/oauth/token/",
+}
+
+
+def _user_response(user, *, onboarding_complete=False):
+    """Build standard user JSON response dict."""
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "name": user.get_full_name(),
+        "is_staff": user.is_staff,
+        "onboarding_complete": onboarding_complete,
+    }
+
+
+def _try_resolve_provider(user, get_token_fn, resolve_fn, provider_name):
+    """Attempt lazy OAuth onboarding resolution for a provider."""
+    token = get_token_fn(user)
+    if not token:
+        return False
+    try:
+        resolve_fn(user, token)
+        return True
+    except Exception:
+        logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
+        return False
 
 
 @ensure_csrf_cookie
@@ -27,8 +77,6 @@ def me_view(request):
         return JsonResponse({"error": "Not authenticated"}, status=401)
     user = request.user
 
-    from apps.users.models import TenantMembership
-
     onboarding_complete = TenantMembership.objects.filter(
         user=user,
         credential__isnull=False,
@@ -37,49 +85,17 @@ def me_view(request):
     # If the user just completed CommCare OAuth but tenant resolution hasn't
     # run yet, resolve now so onboarding can complete.
     if not onboarding_complete:
-        from apps.users.views import _get_commcare_token
-
-        access_token = _get_commcare_token(user)
-        if access_token:
-            try:
-                from apps.users.services.tenant_resolution import resolve_commcare_domains
-
-                resolve_commcare_domains(user, access_token)
-                onboarding_complete = True
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "Failed to resolve CommCare domains in me_view", exc_info=True
-                )
+        onboarding_complete = _try_resolve_provider(
+            user, _get_commcare_token, resolve_commcare_domains, "CommCare"
+        )
 
     # Same for Connect OAuth — resolve opportunities if token exists.
     if not onboarding_complete:
-        from apps.users.views import _get_connect_token
+        onboarding_complete = _try_resolve_provider(
+            user, _get_connect_token, resolve_connect_opportunities, "Connect"
+        )
 
-        connect_token = _get_connect_token(user)
-        if connect_token:
-            try:
-                from apps.users.services.tenant_resolution import resolve_connect_opportunities
-
-                resolve_connect_opportunities(user, connect_token)
-                onboarding_complete = True
-            except Exception:
-                import logging
-
-                logging.getLogger(__name__).warning(
-                    "Failed to resolve Connect opportunities in me_view", exc_info=True
-                )
-
-    return JsonResponse(
-        {
-            "id": str(user.id),
-            "email": user.email,
-            "name": user.get_full_name(),
-            "is_staff": user.is_staff,
-            "onboarding_complete": onboarding_complete,
-        }
-    )
+    return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
 
 
 @require_POST
@@ -107,22 +123,12 @@ def login_view(request):
     record_attempt(email, True)
     login(request, user)
 
-    from apps.users.models import TenantMembership
-
     onboarding_complete = TenantMembership.objects.filter(
         user=user,
         credential__isnull=False,
     ).exists()
 
-    return JsonResponse(
-        {
-            "id": str(user.id),
-            "email": user.email,
-            "name": user.get_full_name(),
-            "is_staff": user.is_staff,
-            "onboarding_complete": onboarding_complete,
-        }
-    )
+    return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
 
 
 @require_POST
@@ -146,14 +152,6 @@ def signup_view(request):
     if not email or not password:
         return JsonResponse({"error": "Email and password are required"}, status=400)
 
-    from django.contrib.auth import get_user_model
-
-    UserModel = get_user_model()
-
-    from django.contrib.auth.password_validation import validate_password
-    from django.core.exceptions import ValidationError as _ValidationError
-    from django.db import IntegrityError
-
     try:
         validate_password(password)
     except _ValidationError as e:
@@ -169,23 +167,7 @@ def signup_view(request):
 
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
 
-    return JsonResponse(
-        {
-            "id": str(user.id),
-            "email": user.email,
-            "name": user.get_full_name(),
-            "is_staff": user.is_staff,
-        },
-        status=201,
-    )
-
-
-PROVIDER_DISPLAY = {
-    "google": "Google",
-    "github": "GitHub",
-    "commcare": "CommCare",
-    "commcare_connect": "CommCare Connect",
-}
+    return JsonResponse(_user_response(user), status=201)
 
 
 @require_POST
@@ -219,12 +201,6 @@ def providers_view(request):
         refresh_oauth_token,
         token_needs_refresh,
     )
-
-    # Map provider IDs to their token endpoint URLs for refresh
-    PROVIDER_TOKEN_URLS = {
-        "commcare": "https://www.commcarehq.org/oauth/token/",
-        "commcare_connect": "https://connect.commcarehq.org/oauth/token/",
-    }
 
     current_site = Site.objects.get_current()
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")

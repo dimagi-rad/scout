@@ -16,4 +16,11 @@ def record_attempt(username: str, success: bool) -> None:
     if success:
         cache.delete(key)
     else:
-        cache.set(key, cache.get(key, 0) + 1, AUTH_LOCKOUT_SECONDS)
+        # Use get_or_set + incr for atomicity. get_or_set initializes to 0
+        # with the lockout TTL if the key doesn't exist, then incr bumps it.
+        cache.get_or_set(key, 0, AUTH_LOCKOUT_SECONDS)
+        try:
+            cache.incr(key)
+        except ValueError:
+            # Key expired between get_or_set and incr — set fresh
+            cache.set(key, 1, AUTH_LOCKOUT_SECONDS)

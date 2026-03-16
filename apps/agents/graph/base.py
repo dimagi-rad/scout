@@ -539,6 +539,16 @@ When results are truncated, suggest adding filters or using aggregations to redu
     result = "\n".join(sections)
 
     _system_prompt_cache[cache_key] = (result, time.monotonic())
+
+    # Evict expired entries to prevent unbounded growth
+    if len(_system_prompt_cache) > 256:
+        now = time.monotonic()
+        expired = [
+            k for k, (_, ts) in _system_prompt_cache.items() if now - ts > _SYSTEM_PROMPT_TTL
+        ]
+        for k in expired:
+            del _system_prompt_cache[k]
+
     return result
 
 
