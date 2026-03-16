@@ -7,7 +7,10 @@ from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 
 from apps.chat.checkpointer import ensure_checkpointer
-from apps.chat.helpers import _resolve_workspace_and_membership, get_user_if_authenticated
+from apps.chat.helpers import (
+    _resolve_workspace_and_membership,
+    async_login_required,
+)
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread
 
@@ -106,6 +109,7 @@ async def _load_thread_messages(thread_id) -> list[dict]:
     return langchain_messages_to_ui(lc_messages)
 
 
+@async_login_required
 async def thread_list_view(request, workspace_id):
     """
     GET /api/workspaces/<workspace_id>/threads/
@@ -115,9 +119,7 @@ async def thread_list_view(request, workspace_id):
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
-    user = await get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     threads = await _list_threads(user, workspace_id=workspace_id)
     if threads is None:
@@ -125,6 +127,7 @@ async def thread_list_view(request, workspace_id):
     return JsonResponse(threads, safe=False)
 
 
+@async_login_required
 async def thread_messages_view(request, workspace_id, thread_id):
     """
     GET /api/chat/threads/<thread_id>/messages/
@@ -134,9 +137,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
-    user = await get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
@@ -150,14 +151,13 @@ async def thread_messages_view(request, workspace_id, thread_id):
     return JsonResponse(ui_messages, safe=False)
 
 
+@async_login_required
 async def thread_share_view(request, workspace_id, thread_id):
     """
     GET  /api/chat/threads/<thread_id>/share/  — get sharing settings
     PATCH /api/chat/threads/<thread_id>/share/ — update sharing settings
     """
-    user = await get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:

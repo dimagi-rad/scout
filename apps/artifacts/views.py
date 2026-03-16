@@ -17,6 +17,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
+from apps.chat.helpers import LoginRequiredJsonMixin
 from apps.projects.workspace_resolver import aresolve_workspace, resolve_workspace_raw
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
@@ -608,7 +609,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
-class ArtifactSandboxView(View):
+class ArtifactSandboxView(LoginRequiredJsonMixin, View):
     """
     Serves the sandbox HTML template for rendering artifacts in an iframe.
 
@@ -618,9 +619,6 @@ class ArtifactSandboxView(View):
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> HttpResponse:
         """Return the sandbox HTML with strict CSP headers."""
-        if not request.user.is_authenticated:
-            return HttpResponse("Authentication required", status=401)
-
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return HttpResponse("Access denied", status=403)
@@ -658,7 +656,7 @@ class ArtifactSandboxView(View):
         return response
 
 
-class ArtifactDataView(View):
+class ArtifactDataView(LoginRequiredJsonMixin, View):
     """
     API endpoint to fetch artifact code and data.
 
@@ -668,9 +666,6 @@ class ArtifactDataView(View):
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         """Fetch artifact data for rendering."""
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
-
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return err
@@ -792,15 +787,12 @@ class ArtifactQueryDataView(View):
         return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
 
-class ArtifactListView(View):
+class ArtifactListView(LoginRequiredJsonMixin, View):
     """
     GET /api/artifacts/<workspace_id>/ - List artifacts for the specified workspace.
     """
 
     def get(self, request: HttpRequest, workspace_id) -> JsonResponse:
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
-
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return err
@@ -833,15 +825,13 @@ class ArtifactListView(View):
         return JsonResponse({"results": results})
 
 
-class ArtifactDetailView(View):
+class ArtifactDetailView(LoginRequiredJsonMixin, View):
     """
     PATCH /api/artifacts/<workspace_id>/<artifact_id>/ - Update title/description.
     DELETE /api/artifacts/<workspace_id>/<artifact_id>/ - Delete artifact.
     """
 
     def _get_artifact_with_access(self, request: HttpRequest, workspace_id, artifact_id: str):
-        if not request.user.is_authenticated:
-            return None, JsonResponse({"error": "Authentication required"}, status=401)
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return None, err
@@ -878,12 +868,10 @@ class ArtifactDetailView(View):
         return HttpResponse(status=204)
 
 
-class ArtifactUndeleteView(View):
+class ArtifactUndeleteView(LoginRequiredJsonMixin, View):
     """POST /api/artifacts/<workspace_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
 
     def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return err
@@ -892,7 +880,7 @@ class ArtifactUndeleteView(View):
         return JsonResponse({"id": str(artifact.id), "is_deleted": False})
 
 
-class ArtifactExportView(View):
+class ArtifactExportView(LoginRequiredJsonMixin, View):
     """
     Export artifacts to various formats (HTML, PNG, PDF).
 
@@ -914,9 +902,6 @@ class ArtifactExportView(View):
         Returns:
             HttpResponse with the exported content
         """
-        if not request.user.is_authenticated:
-            return JsonResponse({"error": "Authentication required"}, status=401)
-
         workspace, err = resolve_workspace_raw(request.user, workspace_id)
         if err:
             return err

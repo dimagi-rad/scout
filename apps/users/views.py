@@ -12,6 +12,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 
+from apps.chat.helpers import async_login_required
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.tenant_verification import (
     CommCareVerificationError,
@@ -21,13 +22,6 @@ from apps.users.services.tenant_verification import (
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 
 logger = logging.getLogger(__name__)
-
-
-@sync_to_async
-def _get_user_if_authenticated(request):
-    if request.user.is_authenticated:
-        return request.user
-    return None
 
 
 def _get_commcare_token(user) -> str | None:
@@ -53,15 +47,14 @@ def _get_connect_token(user) -> str | None:
 
 
 @require_http_methods(["GET"])
+@async_login_required
 async def tenant_list_view(request):
     """GET /api/auth/tenants/ — List the user's tenant memberships.
 
     If the user has a CommCare OAuth token, refreshes domain list from
     CommCare API before returning results.
     """
-    user = await _get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     # Refresh domains from CommCare if the user has an OAuth token
     commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
@@ -111,11 +104,10 @@ async def tenant_list_view(request):
 # It does NOT affect API workspace resolution — all resource endpoints
 # use explicit tenant_id path parameters.
 @require_http_methods(["POST"])
+@async_login_required
 async def tenant_select_view(request):
     """POST /api/auth/tenants/select/ — Mark a tenant as the active selection."""
-    user = await _get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     try:
         body = json.loads(request.body)
@@ -137,12 +129,11 @@ async def tenant_select_view(request):
 
 
 @require_http_methods(["GET", "POST"])
+@async_login_required
 async def tenant_credential_list_view(request):
     """GET  /api/auth/tenant-credentials/ — list configured tenant credentials
     POST /api/auth/tenant-credentials/ — create a new API-key-based tenant"""
-    user = await _get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     if request.method == "GET":
         results = []
@@ -233,12 +224,11 @@ async def tenant_credential_list_view(request):
 
 
 @require_http_methods(["DELETE", "PATCH"])
+@async_login_required
 async def tenant_credential_detail_view(request, membership_id):
     """DELETE /api/auth/tenant-credentials/<membership_id>/ — remove a credential
     PATCH  /api/auth/tenant-credentials/<membership_id>/ — update credential"""
-    user = await _get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     if request.method == "DELETE":
 
@@ -308,6 +298,7 @@ async def tenant_credential_detail_view(request, membership_id):
 
 
 @require_http_methods(["POST"])
+@async_login_required
 async def tenant_ensure_view(request):
     """POST /api/auth/tenants/ensure/ — Find or create a TenantMembership and select it.
 
@@ -315,9 +306,7 @@ async def tenant_ensure_view(request):
     has an OAuth token for the provider and no matching membership exists, one
     is created.
     """
-    user = await _get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     try:
         body = json.loads(request.body)

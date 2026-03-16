@@ -14,6 +14,7 @@ from django.middleware.csrf import get_token
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
+from apps.chat.helpers import login_required_json
 from apps.chat.rate_limiting import check_rate_limit, record_attempt
 from apps.users.models import TenantMembership
 from apps.users.services.tenant_resolution import (
@@ -71,10 +72,9 @@ def csrf_view(request):
 
 
 @require_GET
+@login_required_json
 def me_view(request):
     """Return current user info or 401."""
-    if not request.user.is_authenticated:
-        return JsonResponse({"error": "Not authenticated"}, status=401)
     user = request.user
 
     onboarding_complete = TenantMembership.objects.filter(
@@ -180,11 +180,9 @@ def signup_view(request):
 
 
 @require_POST
+@login_required_json
 def disconnect_provider_view(request, provider_id):
     """Revoke OAuth API token for a provider, keeping the SocialAccount for login."""
-    if not request.user.is_authenticated:
-        return JsonResponse({"error": "Not authenticated"}, status=401)
-
     # Find tokens for this provider — check both provider class id and provider_id
     tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
     if not tokens.exists():

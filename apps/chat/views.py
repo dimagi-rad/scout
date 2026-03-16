@@ -21,7 +21,10 @@ from django.views.decorators.csrf import csrf_protect
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.chat.checkpointer import ensure_checkpointer
-from apps.chat.helpers import _resolve_workspace_and_membership, get_user_if_authenticated
+from apps.chat.helpers import (
+    _resolve_workspace_and_membership,
+    async_login_required,
+)
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.projects.services.workspace_service import touch_workspace_schemas
@@ -63,6 +66,7 @@ MAX_MESSAGE_LENGTH = 10_000
 
 
 @csrf_protect
+@async_login_required
 async def chat_view(request):
     """
     POST /api/chat/
@@ -73,10 +77,7 @@ async def chat_view(request):
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
 
-    # Access request.user via sync_to_async to avoid SynchronousOnlyOperation
-    user = await get_user_if_authenticated(request)
-    if user is None:
-        return JsonResponse({"error": "Authentication required"}, status=401)
+    user = request._authenticated_user
 
     # Parse body
     try:
