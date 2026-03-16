@@ -18,7 +18,7 @@ from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.chat.helpers import LoginRequiredJsonMixin
-from apps.projects.workspace_resolver import aresolve_workspace, resolve_workspace_raw
+from apps.projects.workspace_resolver import aresolve_workspace, resolve_workspace
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
 
@@ -619,7 +619,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> HttpResponse:
         """Return the sandbox HTML with strict CSP headers."""
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return HttpResponse("Access denied", status=403)
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
@@ -666,7 +666,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
         """Fetch artifact data for rendering."""
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
@@ -793,7 +793,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
     """
 
     def get(self, request: HttpRequest, workspace_id) -> JsonResponse:
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
 
@@ -832,7 +832,7 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
     """
 
     def _get_artifact_with_access(self, request: HttpRequest, workspace_id, artifact_id: str):
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return None, err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
@@ -872,7 +872,7 @@ class ArtifactUndeleteView(LoginRequiredJsonMixin, View):
     """POST /api/artifacts/<workspace_id>/<artifact_id>/undelete/ — Restore a soft-deleted artifact."""
 
     def post(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact.all_objects, pk=artifact_id, workspace=workspace)
@@ -902,7 +902,7 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
         Returns:
             HttpResponse with the exported content
         """
-        workspace, err = resolve_workspace_raw(request.user, workspace_id)
+        workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)

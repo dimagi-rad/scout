@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from apps.projects.models import SchemaState, TenantSchema, WorkspaceRole
 from apps.projects.services.schema_manager import SchemaManager
 from apps.projects.tasks import refresh_tenant_schema
-from apps.projects.workspace_resolver import resolve_workspace
+from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
 from apps.users.models import TenantMembership
 
 logger = logging.getLogger(__name__)

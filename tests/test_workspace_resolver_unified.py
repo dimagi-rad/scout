@@ -17,17 +17,17 @@ class TestResolveWorkspaceRaw:
     """Tests for sync non-DRF workspace resolution."""
 
     def test_returns_workspace_on_valid_membership(self, user, workspace):
-        from apps.projects.workspace_resolver import resolve_workspace_raw
+        from apps.projects.workspace_resolver import resolve_workspace
 
-        ws, err = resolve_workspace_raw(user, workspace.id)
+        ws, err = resolve_workspace(user, workspace.id)
         assert ws is not None
         assert ws.id == workspace.id
         assert err is None
 
     def test_returns_error_on_missing_membership(self, user):
-        from apps.projects.workspace_resolver import resolve_workspace_raw
+        from apps.projects.workspace_resolver import resolve_workspace
 
-        ws, err = resolve_workspace_raw(user, uuid.uuid4())
+        ws, err = resolve_workspace(user, uuid.uuid4())
         assert ws is None
         assert isinstance(err, JsonResponse)
         assert err.status_code == 403

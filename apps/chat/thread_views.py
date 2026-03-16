@@ -72,9 +72,9 @@ def _get_thread_artifacts(thread_id):
 @sync_to_async
 def _list_threads(user, *, workspace_id):
     """Return recent threads for a workspace/user."""
-    from apps.projects.workspace_resolver import resolve_workspace_raw
+    from apps.projects.workspace_resolver import resolve_workspace
 
-    workspace, err = resolve_workspace_raw(user, workspace_id)
+    workspace, err = resolve_workspace(user, workspace_id)
     if workspace is None:
         return None
 

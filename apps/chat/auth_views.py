@@ -200,6 +200,7 @@ def disconnect_provider_view(request, provider_id):
     return JsonResponse({"status": "disconnected"})
 
 
+@login_required_json
 @require_GET
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
@@ -212,54 +213,49 @@ def providers_view(request):
     current_site = Site.objects.get_current()
     apps = SocialApp.objects.filter(sites=current_site).order_by("provider")
 
-    connected_providers = set()
+    connected_providers = set(
+        SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
+    )
+    # Check token validity for connected providers
     token_status = {}  # provider -> "connected" | "expired"
-    if request.user.is_authenticated:
-        connected_providers = set(
-            SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
-        )
-        # Check token validity for connected providers
-        tokens = SocialToken.objects.filter(
-            account__user=request.user,
-        ).select_related("account", "app")
-        for social_token in tokens:
-            provider = social_token.account.provider
-            if token_needs_refresh(social_token.expires_at):
-                # Attempt refresh
-                token_url = PROVIDER_TOKEN_URLS.get(provider)
-                if token_url and social_token.token_secret:
-                    try:
-                        refresh_oauth_token(social_token, token_url)
-                        token_status[provider] = "connected"
-                    except TokenRefreshError:
-                        token_status[provider] = "expired"
-                else:
+    tokens = SocialToken.objects.filter(
+        account__user=request.user,
+    ).select_related("account", "app")
+    for social_token in tokens:
+        provider = social_token.account.provider
+        if token_needs_refresh(social_token.expires_at):
+            # Attempt refresh
+            token_url = PROVIDER_TOKEN_URLS.get(provider)
+            if token_url and social_token.token_secret:
+                try:
+                    refresh_oauth_token(social_token, token_url)
+                    token_status[provider] = "connected"
+                except TokenRefreshError:
                     token_status[provider] = "expired"
             else:
-                token_status[provider] = "connected"
+                token_status[provider] = "expired"
+        else:
+            token_status[provider] = "connected"
 
     providers = []
     for app in apps:
+        # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
+        # not the provider class id (e.g. "commcare"), so check both.
+        is_connected = app.provider in connected_providers or app.provider_id in connected_providers
         entry = {
             "id": app.provider,
             "name": PROVIDER_DISPLAY.get(app.provider, app.name),
             "login_url": f"/accounts/{app.provider}/login/",
+            "connected": is_connected,
         }
-        if request.user.is_authenticated:
-            # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
-            # not the provider class id (e.g. "commcare"), so check both.
-            is_connected = (
-                app.provider in connected_providers or app.provider_id in connected_providers
+        if is_connected:
+            # No token_status entry means the SocialAccount exists but no token
+            # (user revoked API access) — treat as disconnected
+            entry["status"] = token_status.get(
+                app.provider, token_status.get(app.provider_id, "disconnected")
             )
-            entry["connected"] = is_connected
-            if is_connected:
-                # No token_status entry means the SocialAccount exists but no token
-                # (user revoked API access) — treat as disconnected
-                entry["status"] = token_status.get(
-                    app.provider, token_status.get(app.provider_id, "disconnected")
-                )
-            else:
-                entry["status"] = None
+        else:
+            entry["status"] = None
         providers.append(entry)
 
     return JsonResponse({"providers": providers})

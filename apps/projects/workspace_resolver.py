@@ -9,7 +9,7 @@ from apps.projects.models import WorkspaceMembership
 _ACCESS_DENIED = {"error": "Workspace not found or access denied."}
 
 
-def resolve_workspace(request, workspace_id):
+def resolve_workspace_drf(request, workspace_id):
     """Resolve Workspace from workspace_id URL path parameter (DRF views).
 
     workspace_id is the Workspace.id (UUID) and the requesting user must be a member.
@@ -32,7 +32,7 @@ def resolve_workspace(request, workspace_id):
     return membership.workspace, membership, None
 
 
-def resolve_workspace_raw(user, workspace_id):
+def resolve_workspace(user, workspace_id):
     """Resolve Workspace for non-DRF views (sync).
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.

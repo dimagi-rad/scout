@@ -16,7 +16,7 @@ from apps.projects.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.projects.workspace_resolver import resolve_workspace
+from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
 from apps.users.models import Tenant, TenantMembership
 
 
