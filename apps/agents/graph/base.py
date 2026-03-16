@@ -24,7 +24,9 @@ The graph uses:
 from __future__ import annotations
 
 import copy
+import hashlib
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from asgiref.sync import sync_to_async
@@ -72,6 +74,22 @@ MCP_TOOL_NAMES = frozenset(
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
+
+# Simple TTL cache for system prompts
+_system_prompt_cache: dict[str, tuple[str, float]] = {}
+_SYSTEM_PROMPT_TTL = 60  # 60 seconds — short to limit staleness from knowledge/schema changes
+
+
+def _system_prompt_cache_key(workspace, user) -> str:
+    """Build a cache key from workspace + user properties that affect the prompt.
+
+    Includes user.id because _fetch_schema_context scopes TenantMetadata
+    lookup to the specific user. Includes workspace.system_prompt hash
+    so edits invalidate immediately.
+    """
+    prompt_hash = hashlib.md5((workspace.system_prompt or "").encode()).hexdigest()[:8]
+    user_id = getattr(user, "id", "anon")
+    return f"{workspace.id}:{user_id}:{prompt_hash}"
 
 
 def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
@@ -461,6 +479,13 @@ async def _build_system_prompt(workspace: Workspace, user) -> str:
     Returns:
         Complete system prompt string.
     """
+    cache_key = _system_prompt_cache_key(workspace, user)
+    cached = _system_prompt_cache.get(cache_key)
+    if cached is not None:
+        value, timestamp = cached
+        if time.monotonic() - timestamp < _SYSTEM_PROMPT_TTL:
+            return value
+
     sections = [BASE_SYSTEM_PROMPT]
     sections.append(ARTIFACT_PROMPT_ADDITION)
 
@@ -511,7 +536,10 @@ When results are truncated, suggest adding filters or using aggregations to redu
             "Call `list_tables` to see available tables.\n"
         )
 
-    return "\n".join(sections)
+    result = "\n".join(sections)
+
+    _system_prompt_cache[cache_key] = (result, time.monotonic())
+    return result
 
 
 __all__ = [
