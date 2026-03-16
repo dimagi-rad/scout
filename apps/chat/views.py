@@ -522,16 +522,11 @@ def _get_thread_artifacts(thread_id):
 @sync_to_async
 def _list_threads(user, *, workspace_id):
     """Return recent threads for a workspace/user."""
-    from apps.projects.models import WorkspaceMembership
+    from apps.projects.workspace_resolver import resolve_workspace_raw
 
-    try:
-        wm = WorkspaceMembership.objects.select_related("workspace").get(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
+    workspace, err = resolve_workspace_raw(user, workspace_id)
+    if workspace is None:
         return None
-
-    workspace = wm.workspace
 
     qs = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     return [
@@ -541,7 +536,6 @@ def _list_threads(user, *, workspace_id):
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
             "is_shared": t.is_shared,
-            # share_token is intentionally omitted here; use the /share/ endpoint to retrieve it
         }
         for t in qs
     ]
