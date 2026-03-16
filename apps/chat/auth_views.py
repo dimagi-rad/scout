@@ -152,18 +152,27 @@ def signup_view(request):
     if not email or not password:
         return JsonResponse({"error": "Email and password are required"}, status=400)
 
+    if check_rate_limit(email):
+        return JsonResponse({"error": "Too many attempts. Try again later."}, status=429)
+
     try:
         validate_password(password)
     except _ValidationError as e:
         return JsonResponse({"error": "; ".join(e.messages)}, status=400)
 
     if UserModel.objects.filter(email=email).exists():
-        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+        return JsonResponse(
+            {"error": "Unable to create account. If you already have an account, try logging in."},
+            status=400,
+        )
 
     try:
         user = UserModel.objects.create_user(email=email, password=password)
     except IntegrityError:
-        return JsonResponse({"error": "An account with this email already exists"}, status=400)
+        return JsonResponse(
+            {"error": "Unable to create account. If you already have an account, try logging in."},
+            status=400,
+        )
 
     login(request, user, backend="django.contrib.auth.backends.ModelBackend")
 

@@ -7,7 +7,7 @@ from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 
 from apps.chat.checkpointer import ensure_checkpointer
-from apps.chat.helpers import get_user_if_authenticated
+from apps.chat.helpers import _resolve_workspace_and_membership, get_user_if_authenticated
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.chat.models import Thread
 
@@ -88,6 +88,24 @@ def _list_threads(user, *, workspace_id):
     ]
 
 
+async def _load_thread_messages(thread_id) -> list[dict]:
+    """Load messages from checkpointer and convert to UI format."""
+    try:
+        checkpointer = await ensure_checkpointer()
+        config = {"configurable": {"thread_id": str(thread_id)}}
+        checkpoint_tuple = await checkpointer.aget_tuple(config)
+    except Exception:
+        logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
+        return []
+
+    if checkpoint_tuple is None:
+        return []
+
+    checkpoint = checkpoint_tuple.checkpoint
+    lc_messages = (checkpoint.get("channel_values") or {}).get("messages", [])
+    return langchain_messages_to_ui(lc_messages)
+
+
 async def thread_list_view(request, workspace_id):
     """
     GET /api/workspaces/<workspace_id>/threads/
@@ -120,8 +138,6 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
 
-    from apps.chat.views import _resolve_workspace_and_membership
-
     workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
@@ -130,20 +146,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     if thread is None:
         return JsonResponse([], safe=False)
 
-    try:
-        checkpointer = await ensure_checkpointer()
-        config = {"configurable": {"thread_id": str(thread_id)}}
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-    except Exception:
-        logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
-        return JsonResponse([], safe=False)
-
-    if checkpoint_tuple is None:
-        return JsonResponse([], safe=False)
-
-    checkpoint = checkpoint_tuple.checkpoint
-    lc_messages = (checkpoint.get("channel_values") or {}).get("messages", [])
-    ui_messages = langchain_messages_to_ui(lc_messages)
+    ui_messages = await _load_thread_messages(thread_id)
     return JsonResponse(ui_messages, safe=False)
 
 
@@ -155,8 +158,6 @@ async def thread_share_view(request, workspace_id, thread_id):
     user = await get_user_if_authenticated(request)
     if user is None:
         return JsonResponse({"error": "Authentication required"}, status=401)
-
-    from apps.chat.views import _resolve_workspace_and_membership
 
     workspace, _, _is_multi = await _resolve_workspace_and_membership(user, workspace_id)
     if workspace is None:
@@ -205,19 +206,7 @@ async def public_thread_view(request, share_token):
         return JsonResponse({"error": "Thread not found"}, status=404)
 
     # Load messages from checkpointer
-    try:
-        checkpointer = await ensure_checkpointer()
-        config = {"configurable": {"thread_id": str(thread.id)}}
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-    except Exception:
-        logger.warning("Failed to load checkpoint for shared thread %s", thread.id, exc_info=True)
-        checkpoint_tuple = None
-
-    messages = []
-    if checkpoint_tuple is not None:
-        checkpoint = checkpoint_tuple.checkpoint
-        lc_messages = (checkpoint.get("channel_values") or {}).get("messages", [])
-        messages = langchain_messages_to_ui(lc_messages)
+    messages = await _load_thread_messages(thread.id)
 
     # Load associated artifacts
     artifacts = await _get_thread_artifacts(thread.id)

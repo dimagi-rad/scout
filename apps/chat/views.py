@@ -21,7 +21,7 @@ from django.views.decorators.csrf import csrf_protect
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.chat.checkpointer import ensure_checkpointer
-from apps.chat.helpers import get_user_if_authenticated
+from apps.chat.helpers import _resolve_workspace_and_membership, get_user_if_authenticated
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.projects.services.workspace_service import touch_workspace_schemas
@@ -53,47 +53,6 @@ def _upsert_thread(thread_id, user, title, *, workspace):
         id=thread_id,
         create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
     )
-
-
-@sync_to_async
-def _resolve_workspace_and_membership(user, workspace_id):
-    """Resolve workspace access for a user.
-
-    Returns (workspace, tenant_membership, is_multi_tenant):
-    - (None, None, False): workspace not found or user lacks WorkspaceMembership
-    - (workspace, None, True): multi-tenant workspace; WorkspaceMembership is sufficient
-    - (workspace, None, False): single-tenant workspace but user lacks TenantMembership
-    - (workspace, tm, False): single-tenant workspace with a valid TenantMembership
-    """
-    from apps.projects.models import WorkspaceMembership
-
-    try:
-        wm = WorkspaceMembership.objects.select_related("workspace").get(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return None, None, False
-
-    workspace = wm.workspace
-
-    # Read tenant count exactly once so callers don't need a second DB query.
-    # Multi-tenant workspaces grant access by WorkspaceMembership alone;
-    # TenantMembership is irrelevant (and must not be checked) for multi-tenant access.
-    is_multi_tenant = workspace.workspace_tenants.count() > 1
-    if is_multi_tenant:
-        return workspace, None, True
-
-    tenant = workspace.tenant
-    if tenant is None:
-        return workspace, None, False
-
-    from apps.users.models import TenantMembership
-
-    try:
-        tm = TenantMembership.objects.get(user=user, tenant=tenant)
-    except TenantMembership.DoesNotExist:
-        return workspace, None, False
-    return workspace, tm, False
 
 
 # ---------------------------------------------------------------------------
