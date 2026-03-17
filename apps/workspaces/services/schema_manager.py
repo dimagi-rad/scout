@@ -353,8 +353,20 @@ class SchemaManager:
             conn.close()
 
     def _drop_readonly_role(self, cursor, schema_name: str) -> None:
-        """Drop the read-only PostgreSQL role for a schema."""
+        """Drop the read-only PostgreSQL role for a schema.
+
+        Issues DROP OWNED BY first to revoke all privileges the role holds
+        (including cross-schema grants from view schema roles), then drops
+        the role itself.
+        """
         role_name = readonly_role_name(schema_name)
+        # Check if role exists before DROP OWNED BY (which errors on missing roles)
+        cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
+        if not cursor.fetchone():
+            return
+        cursor.execute(
+            psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
+        )
         cursor.execute(
             psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
         )
@@ -373,9 +385,14 @@ class SchemaManager:
             (role_name,),
         )
         if not cursor.fetchone():
-            cursor.execute(
-                psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(psycopg.sql.Identifier(role_name))
-            )
+            try:
+                cursor.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        psycopg.sql.Identifier(role_name)
+                    )
+                )
+            except psycopg.errors.DuplicateObject:
+                pass  # Race condition: another process created it between check and create
         cursor.execute(
             psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
                 psycopg.sql.Identifier(schema_name),

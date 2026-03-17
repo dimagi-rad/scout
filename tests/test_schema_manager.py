@@ -116,6 +116,7 @@ class TestSchemaManagerRoleTeardown:
 
         role_name = readonly_role_name(ts.schema_name)
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP OWNED BY" in c and role_name in c for c in calls)
         assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
 
     def test_teardown_view_schema_drops_readonly_role(self, workspace):
@@ -140,6 +141,7 @@ class TestSchemaManagerRoleTeardown:
 
         role_name = readonly_role_name(vs.schema_name)
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP OWNED BY" in c and role_name in c for c in calls)
         assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
 
 
