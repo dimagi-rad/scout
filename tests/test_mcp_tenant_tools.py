@@ -896,6 +896,7 @@ class TestExecuteSyncIntegration:
             "password": parsed.password or "",
         }
         self.schema = "test_query_exec"
+        self.ro_role = f"{self.schema}_ro"
 
         conn = psycopg.connect(**self.connection_params, autocommit=True)
         try:
@@ -916,6 +917,12 @@ class TestExecuteSyncIntegration:
                     VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
                     """
                 )
+                # Create the read-only role required by _execute_sync SET ROLE
+                cur.execute(f'CREATE ROLE "{self.ro_role}"')
+                cur.execute(f'GRANT USAGE ON SCHEMA "{self.schema}" TO "{self.ro_role}"')
+                cur.execute(
+                    f'GRANT SELECT ON ALL TABLES IN SCHEMA "{self.schema}" TO "{self.ro_role}"'
+                )
         finally:
             conn.close()
 
@@ -925,6 +932,7 @@ class TestExecuteSyncIntegration:
         try:
             with conn.cursor() as cur:
                 cur.execute(f'DROP SCHEMA IF EXISTS "{self.schema}" CASCADE')
+                cur.execute(f'DROP ROLE IF EXISTS "{self.ro_role}"')
         finally:
             conn.close()
 
