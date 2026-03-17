@@ -42,8 +42,8 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.development
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
-    ports:
-      - "8100:8100"
+    expose:
+      - "8100"
     depends_on:
       platform-db:
         condition: service_healthy
