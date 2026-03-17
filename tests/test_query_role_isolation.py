@@ -1,7 +1,9 @@
 from unittest.mock import MagicMock, patch
 
+import psycopg.errors
+
 from mcp_server.context import QueryContext
-from mcp_server.services.query import _execute_sync
+from mcp_server.services.query import _classify_error, _execute_sync
 
 
 class TestQueryContextReadonlyRole:
@@ -78,3 +80,11 @@ class TestSetRoleIsolation:
         # RESET ROLE should still have been called
         last_call_str = str(mock_cursor.execute.call_args_list[-1])
         assert "RESET ROLE" in last_call_str
+
+
+class TestRoleErrorClassification:
+    def test_invalid_role_classified_as_connection_error(self):
+        exc = psycopg.errors.InsufficientPrivilege("role 'test_domain_ro' does not exist")
+        code, message = _classify_error(exc)
+        assert code == "CONNECTION_ERROR"
+        assert "administrator" in message.lower()

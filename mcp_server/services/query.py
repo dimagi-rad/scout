@@ -168,6 +168,12 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
     if isinstance(exc, psycopg.errors.QueryCanceled):
         return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
 
+    if isinstance(exc, psycopg.errors.InsufficientPrivilege):
+        return (
+            CONNECTION_ERROR,
+            "Schema configuration error. Please contact an administrator.",
+        )
+
     if isinstance(exc, psycopg.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
