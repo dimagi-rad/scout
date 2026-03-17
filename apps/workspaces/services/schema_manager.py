@@ -19,6 +19,11 @@ from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchem
 logger = logging.getLogger(__name__)
 
 
+def readonly_role_name(schema_name: str) -> str:
+    """Derive the read-only PostgreSQL role name for a schema."""
+    return f"{schema_name}_ro"
+
+
 def get_managed_db_connection():
     """Get a psycopg connection to the managed database."""
     url = settings.MANAGED_DATABASE_URL
@@ -74,6 +79,7 @@ class SchemaManager:
                         psycopg.sql.Identifier(schema_name)
                     )
                 )
+                self._create_readonly_role(cursor, schema_name)
                 cursor.close()
             finally:
                 conn.close()
@@ -107,6 +113,7 @@ class SchemaManager:
                     psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
             )
+            self._create_readonly_role(cursor, tenant_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
@@ -139,6 +146,7 @@ class SchemaManager:
                     psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
             )
+            self._drop_readonly_role(cursor, tenant_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
@@ -272,6 +280,26 @@ class SchemaManager:
                 )
                 cursor.execute(view_sql)
 
+            # Create read-only role for the view schema
+            self._create_readonly_role(cursor, view_schema_name)
+
+            # Grant read access to each constituent tenant schema
+            # (views reference tables in these schemas directly)
+            view_role = readonly_role_name(view_schema_name)
+            for tenant_schema_name, _ in tenant_schemas:
+                cursor.execute(
+                    psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(tenant_schema_name),
+                        psycopg.sql.Identifier(view_role),
+                    )
+                )
+                cursor.execute(
+                    psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(tenant_schema_name),
+                        psycopg.sql.Identifier(view_role),
+                    )
+                )
+
             cursor.close()
         except Exception:
             # Drop any partially-created schema before marking FAILED to avoid leaving debris
@@ -319,9 +347,73 @@ class SchemaManager:
                     psycopg.sql.Identifier(view_schema.schema_name)
                 )
             )
+            self._drop_readonly_role(cursor, view_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
+
+    def _drop_readonly_role(self, cursor, schema_name: str) -> None:
+        """Drop the read-only PostgreSQL role for a schema.
+
+        Issues DROP OWNED BY first to revoke all privileges the role holds
+        (including cross-schema grants from view schema roles), then drops
+        the role itself.
+        """
+        role_name = readonly_role_name(schema_name)
+        # Check if role exists before DROP OWNED BY (which errors on missing roles)
+        cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
+        if not cursor.fetchone():
+            return
+        # DROP OWNED BY revokes all privileges granted TO this role (e.g. USAGE
+        # and SELECT on constituent tenant schemas for view schema roles). It does
+        # NOT drop or modify the tenant schemas themselves — only the grants that
+        # this specific role holds. Tenant schemas and their own _ro roles are
+        # unaffected. This is required because PostgreSQL refuses to DROP ROLE
+        # while the role still holds any privileges.
+        cursor.execute(
+            psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
+        )
+        cursor.execute(
+            psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
+        )
+
+    def _create_readonly_role(self, cursor, schema_name: str) -> None:
+        """Create a read-only PostgreSQL role for a schema.
+
+        Idempotent — checks pg_roles before creating. Grants USAGE on the
+        schema and sets ALTER DEFAULT PRIVILEGES so tables created later by
+        the materializer are automatically readable.
+        """
+        role_name = readonly_role_name(schema_name)
+        # Idempotent role creation — pg doesn't have CREATE ROLE IF NOT EXISTS
+        cursor.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (role_name,),
+        )
+        if not cursor.fetchone():
+            try:
+                cursor.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        psycopg.sql.Identifier(role_name)
+                    )
+                )
+            except psycopg.errors.DuplicateObject:
+                pass  # Race condition: another process created it between check and create
+        cursor.execute(
+            psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+        cursor.execute(
+            psycopg.sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
+                "GRANT SELECT ON TABLES TO {}"
+            ).format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
         """Convert a tenant_id to a valid PostgreSQL schema name."""

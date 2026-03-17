@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from apps.workspaces.models import TenantSchema
-from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
 
 @pytest.mark.django_db
@@ -41,3 +41,161 @@ class TestSchemaManager:
 
         assert TenantSchema.objects.count() == 1  # no duplicate
         assert ts.schema_name == schema_name
+
+
+@pytest.mark.django_db
+class TestSchemaManagerRoleCreation:
+    def test_provision_creates_readonly_role(self, tenant_membership):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = None  # role doesn't exist yet
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            ts = mgr.provision(tenant_membership.tenant)
+
+        role_name = readonly_role_name(ts.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE ROLE" in c and role_name in c for c in calls), (
+            f"Expected CREATE ROLE for {role_name} in DDL calls"
+        )
+        assert any("GRANT USAGE ON SCHEMA" in c for c in calls)
+        assert any("ALTER DEFAULT PRIVILEGES" in c for c in calls)
+
+    def test_create_physical_schema_creates_readonly_role(self, tenant_membership):
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = None  # role doesn't exist yet
+
+        from apps.workspaces.models import TenantSchema
+
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="test_domain_r1a2b3c4",
+            state="provisioning",
+        )
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            mgr.create_physical_schema(ts)
+
+        role_name = readonly_role_name(ts.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("CREATE ROLE" in c and role_name in c for c in calls)
+
+
+@pytest.mark.django_db
+class TestSchemaManagerRoleTeardown:
+    def test_teardown_drops_readonly_role(self, tenant_membership):
+        from apps.workspaces.models import TenantSchema
+
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="test_domain",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            mgr.teardown(ts)
+
+        role_name = readonly_role_name(ts.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP OWNED BY" in c and role_name in c for c in calls)
+        assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
+
+    def test_teardown_view_schema_drops_readonly_role(self, workspace):
+        from apps.workspaces.models import WorkspaceViewSchema
+
+        vs = WorkspaceViewSchema.objects.create(
+            workspace=workspace,
+            schema_name="ws_abc1234def56789",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            mgr.teardown_view_schema(vs)
+
+        role_name = readonly_role_name(vs.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP OWNED BY" in c and role_name in c for c in calls)
+        assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
+
+
+@pytest.mark.django_db
+class TestViewSchemaRoleCreation:
+    def test_build_view_schema_creates_readonly_role_with_tenant_grants(
+        self, workspace, tenant_membership
+    ):
+        from apps.workspaces.models import TenantSchema
+
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="test_domain",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_conn.closed = False
+        # Return empty columns result for information_schema query
+        mock_cursor.fetchall.return_value = []
+        # fetchone returns None so _create_readonly_role creates the role
+        mock_cursor.fetchone.return_value = None
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            vs = mgr.build_view_schema(workspace)
+
+        view_role_name = readonly_role_name(vs.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        # View schema role should be created
+        assert any("CREATE ROLE" in c and view_role_name in c for c in calls), (
+            f"Expected CREATE ROLE for {view_role_name}"
+        )
+        # Should grant USAGE on view schema
+        assert any("GRANT USAGE ON SCHEMA" in c and vs.schema_name in c for c in calls)
+        # Should grant SELECT on constituent tenant schema tables
+        assert any(
+            "GRANT SELECT ON ALL TABLES IN SCHEMA" in c and ts.schema_name in c for c in calls
+        )
+        # Should grant USAGE on constituent tenant schema
+        assert any("GRANT USAGE ON SCHEMA" in c and ts.schema_name in c for c in calls)
+
+
+class TestReadonlyRoleName:
+    def test_basic(self):
+        assert readonly_role_name("tenant_abc123") == "tenant_abc123_ro"
+
+    def test_view_schema(self):
+        assert readonly_role_name("ws_abc1234def56789") == "ws_abc1234def56789_ro"
+
+    def test_refresh_schema(self):
+        assert readonly_role_name("test_domain_r1a2b3c4") == "test_domain_r1a2b3c4_ro"

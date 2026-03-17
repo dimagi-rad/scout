@@ -41,30 +41,34 @@ def _get_connection(ctx: QueryContext):
 
 
 def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
-    """Run a SQL query synchronously."""
+    """Run a SQL query synchronously under the tenant's read-only role."""
     from psycopg import sql as psql
 
     with _get_connection(ctx) as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
-            )
-            cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-            cursor.execute(sql)
+            cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
+            try:
+                cursor.execute(
+                    psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
+                )
+                cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
+                cursor.execute(sql)
 
-            columns: list[str] = []
-            rows: list[list[Any]] = []
+                columns: list[str] = []
+                rows: list[list[Any]] = []
 
-            if cursor.description:
-                columns = [desc[0] for desc in cursor.description]
-                rows = [list(row) for row in cursor.fetchall()]
+                if cursor.description:
+                    columns = [desc[0] for desc in cursor.description]
+                    rows = [list(row) for row in cursor.fetchall()]
 
-            return {
-                "columns": columns,
-                "rows": rows,
-                "row_count": len(rows),
-            }
+                return {
+                    "columns": columns,
+                    "rows": rows,
+                    "row_count": len(rows),
+                }
+            finally:
+                cursor.execute("RESET ROLE")
         finally:
             cursor.close()
 
@@ -163,6 +167,12 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
 
     if isinstance(exc, psycopg.errors.QueryCanceled):
         return QUERY_TIMEOUT, "Query timed out. Consider adding filters or limiting the data range."
+
+    if isinstance(exc, psycopg.errors.InsufficientPrivilege):
+        return (
+            CONNECTION_ERROR,
+            "Schema configuration error. Please contact an administrator.",
+        )
 
     if isinstance(exc, psycopg.Error):
         msg = str(exc)

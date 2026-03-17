@@ -21,6 +21,11 @@ class QueryContext:
     max_query_timeout_seconds: int = 30
     connection_params: dict[str, Any] = None  # type: ignore[assignment]
 
+    @property
+    def readonly_role(self) -> str:
+        """Derive the read-only PostgreSQL role name for this context's schema."""
+        return f"{self.schema_name}_ro"
+
 
 @dataclass(frozen=True)
 class TenantContext:
