@@ -143,6 +143,51 @@ class TestSchemaManagerRoleTeardown:
         assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
 
 
+@pytest.mark.django_db
+class TestViewSchemaRoleCreation:
+    def test_build_view_schema_creates_readonly_role_with_tenant_grants(
+        self, workspace, tenant_membership
+    ):
+        from apps.workspaces.models import TenantSchema
+
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="test_domain",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_conn.closed = False
+        # Return empty columns result for information_schema query
+        mock_cursor.fetchall.return_value = []
+        # fetchone returns None so _create_readonly_role creates the role
+        mock_cursor.fetchone.return_value = None
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            vs = mgr.build_view_schema(workspace)
+
+        view_role_name = readonly_role_name(vs.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        # View schema role should be created
+        assert any("CREATE ROLE" in c and view_role_name in c for c in calls), (
+            f"Expected CREATE ROLE for {view_role_name}"
+        )
+        # Should grant USAGE on view schema
+        assert any("GRANT USAGE ON SCHEMA" in c and vs.schema_name in c for c in calls)
+        # Should grant SELECT on constituent tenant schema tables
+        assert any(
+            "GRANT SELECT ON ALL TABLES IN SCHEMA" in c and ts.schema_name in c for c in calls
+        )
+        # Should grant USAGE on constituent tenant schema
+        assert any("GRANT USAGE ON SCHEMA" in c and ts.schema_name in c for c in calls)
+
+
 class TestReadonlyRoleName:
     def test_basic(self):
         assert readonly_role_name("tenant_abc123") == "tenant_abc123_ro"

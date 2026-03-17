@@ -280,6 +280,26 @@ class SchemaManager:
                 )
                 cursor.execute(view_sql)
 
+            # Create read-only role for the view schema
+            self._create_readonly_role(cursor, view_schema_name)
+
+            # Grant read access to each constituent tenant schema
+            # (views reference tables in these schemas directly)
+            view_role = readonly_role_name(view_schema_name)
+            for tenant_schema_name, _ in tenant_schemas:
+                cursor.execute(
+                    psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(tenant_schema_name),
+                        psycopg.sql.Identifier(view_role),
+                    )
+                )
+                cursor.execute(
+                    psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
+                        psycopg.sql.Identifier(tenant_schema_name),
+                        psycopg.sql.Identifier(view_role),
+                    )
+                )
+
             cursor.close()
         except Exception:
             # Drop any partially-created schema before marking FAILED to avoid leaving debris
