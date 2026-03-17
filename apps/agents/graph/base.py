@@ -2,22 +2,18 @@
 LangGraph agent graph builder for the Scout data agent platform.
 
 This module provides the `build_agent_graph` function which assembles the
-complete agent graph with self-correction capabilities. The graph structure
-implements a retry loop that allows the agent to diagnose and fix errors
-automatically, up to a configurable maximum number of retries.
+agent graph. The graph uses a simple loop: agent -> tools -> agent, relying
+on the LLM to self-correct from error ToolMessages naturally. A recursion
+limit prevents runaway loops.
 
 Graph Architecture:
-    START -> agent -> should_continue? -> tools -> check_result -> result_ok?
-                   |                                                    |
-                   +-> END                                    yes -> agent
-                                                               |
-                                                              no -> diagnose_and_retry -> agent
-                                                                    (max 3 retries)
+    START -> agent -> should_continue? -> tools -> agent
+                   |
+                   +-> END
 
 The graph uses:
 - ChatAnthropic as the LLM backend
 - ToolNode for tool execution
-- Custom nodes for error checking and correction
 - Optional checkpointer for conversation persistence
 """
 
@@ -35,7 +31,6 @@ from langchain_core.messages import SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.nodes import check_result_node, diagnose_and_retry_node
 from apps.agents.graph.state import AgentState
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
@@ -368,25 +363,12 @@ async def build_agent_graph(
 
         return END
 
-    def result_ok(state: AgentState) -> Literal["agent", "diagnose"]:
-        """
-        After checking results, decide whether to proceed or diagnose errors.
-
-        Routes to the diagnosis node if needs_correction is set,
-        otherwise continues to the agent for the next response.
-        """
-        if state.get("needs_correction", False):
-            return "diagnose"
-        return "agent"
-
     # --- Build the graph ---
     graph = StateGraph(AgentState)
 
     # Add nodes
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
-    graph.add_node("check_result", check_result_node)
-    graph.add_node("diagnose_and_retry", diagnose_and_retry_node)
 
     # Set entry point
     graph.set_entry_point("agent")
@@ -402,24 +384,12 @@ async def build_agent_graph(
         },
     )
 
-    # tools -> check_result
-    graph.add_edge("tools", "check_result")
-
-    # check_result -> result_ok? -> agent or diagnose
-    graph.add_conditional_edges(
-        "check_result",
-        result_ok,
-        {
-            "agent": "agent",
-            "diagnose": "diagnose_and_retry",
-        },
-    )
-
-    # diagnose_and_retry -> agent (to try the corrected query)
-    graph.add_edge("diagnose_and_retry", "agent")
+    # tools -> agent (the LLM sees error ToolMessages and self-corrects)
+    graph.add_edge("tools", "agent")
 
     # --- Compile and return ---
-    compiled = graph.compile(checkpointer=checkpointer)
+    # recursion_limit caps agent↔tools round trips to prevent runaway loops
+    compiled = graph.compile(checkpointer=checkpointer, recursion_limit=25)
 
     logger.info(
         "Agent graph compiled for workspace %s (checkpointer: %s)",

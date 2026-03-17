@@ -226,9 +226,6 @@ class RecipeRunner:
                 else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
-                "needs_correction": False,
-                "retry_count": 0,
-                "correction_context": {},
             }
 
             response = graph.invoke(initial_state, config=config)
@@ -318,9 +315,6 @@ class RecipeRunner:
                 else "",
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
-                "needs_correction": False,
-                "retry_count": 0,
-                "correction_context": {},
             }
 
             response = await graph.ainvoke(initial_state, config=config)

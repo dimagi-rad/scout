@@ -194,9 +194,6 @@ async def chat_view(request):
         "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "user_role": "analyst",
-        "needs_correction": False,
-        "retry_count": 0,
-        "correction_context": {},
     }
     config = {
         "configurable": {"thread_id": thread_id},

@@ -212,7 +212,7 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 description=description.strip(),
                 category=category,
                 applies_to_tables=tables,
-                original_error="",  # Set from correction_context if available
+                original_error="",
                 original_sql=original_sql,
                 corrected_sql=corrected_sql,
                 confidence_score=0.5,  # Start at neutral confidence

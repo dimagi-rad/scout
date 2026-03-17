@@ -33,9 +33,6 @@ async def test_injecting_node_includes_workspace_id():
         "workspace_id": "ws-uuid-456",
         "user_id": "user-1",
         "user_role": "analyst",
-        "needs_correction": False,
-        "retry_count": 0,
-        "correction_context": {},
     }
 
     mock_base_node = AsyncMock()

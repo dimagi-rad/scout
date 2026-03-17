@@ -85,7 +85,6 @@ class AgentState(TypedDict):
     and gets checkpointed to the database. LangGraph uses this state to:
     - Track conversation history with automatic message deduplication
     - Maintain user and tenant context for permission scoping
-    - Enable the self-correction loop when queries fail
 
     Attributes
     ----------
@@ -111,27 +110,6 @@ class AgentState(TypedDict):
         - 'analyst': Can run queries and create artifacts
         - 'admin': Full access including knowledge management
 
-    needs_correction : bool
-        Flag set by the error handling node when a query fails.
-        When True, the graph routes back to the agent node for retry
-        with the error context. Set to False on successful execution
-        or when max retries exceeded.
-
-    retry_count : int
-        Number of correction attempts made for the current query.
-        Incremented each time needs_correction triggers a retry.
-        Reset to 0 when a new user message arrives.
-        Max retries is typically 3 (configured in graph builder).
-
-    correction_context : dict
-        Structured information about what went wrong and potential fixes.
-        Populated by the error analysis node. Contents:
-        - 'error_type': Category (syntax, permission, timeout, data)
-        - 'error_message': The actual error text
-        - 'failed_sql': The SQL that caused the error
-        - 'suggestion': Agent-generated fix suggestion
-        - 'relevant_learnings': Past learnings that might help
-
     Example
     -------
     Initial state for a new conversation::
@@ -141,9 +119,6 @@ class AgentState(TypedDict):
             workspace_id="ws-uuid-123",
             user_id="user-123",
             user_role="analyst",
-            needs_correction=False,
-            retry_count=0,
-            correction_context={},
         )
 
     Notes
@@ -152,8 +127,6 @@ class AgentState(TypedDict):
       automatic message list management with deduplication by message ID.
     - All UUID fields are stored as strings because TypedDict values
       must be JSON-serializable for checkpoint persistence.
-    - The correction loop (needs_correction + retry_count) implements
-      the agent's self-healing capability described in the architecture.
     """
 
     # Conversation history with automatic deduplication
@@ -165,8 +138,3 @@ class AgentState(TypedDict):
     # User context - for permissions and audit
     user_id: str
     user_role: str
-
-    # Error correction loop state
-    needs_correction: bool
-    retry_count: int
-    correction_context: dict
