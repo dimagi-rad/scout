@@ -1,0 +1,7 @@
+# Local development overrides — auto-loaded by `docker compose up`.
+# Re-publishes the MCP server port so host-side Django (uv run manage.py runserver)
+# can reach it at localhost:8100.
+services:
+  mcp-server:
+    ports:
+      - "8100:8100"
