@@ -108,7 +108,6 @@ export function Sidebar() {
         <NavItem to="/knowledge" icon={BookOpen} label="Knowledge" />
         <NavItem to="/recipes" icon={ChefHat} label="Recipes" />
         <NavItem to="/data-dictionary" icon={Database} label="Data Dictionary" />
-        <NavItem to="/datasources" icon={Database} label="Connections" />
       </nav>
 
       {/* Thread History */}

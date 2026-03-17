@@ -3,7 +3,6 @@ import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
-import { DataSourcesPage } from "@/pages/DataSourcesPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
@@ -25,7 +24,6 @@ export const router = createBrowserRouter([
       { path: "recipes/:id", element: <RecipesPage /> },
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
       { path: "data-dictionary", element: <DataDictionaryPage /> },
-      { path: "datasources", element: <DataSourcesPage /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
