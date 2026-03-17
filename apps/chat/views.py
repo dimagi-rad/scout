@@ -26,6 +26,7 @@ from apps.chat.helpers import (
     async_login_required,
 )
 from apps.chat.models import Thread
+from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
@@ -67,6 +68,7 @@ MAX_MESSAGE_LENGTH = 10_000
 
 @csrf_protect
 @async_login_required
+@chat_rate_limit
 async def chat_view(request):
     """
     POST /api/chat/
