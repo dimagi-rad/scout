@@ -67,6 +67,10 @@ Examples:
 
 No model changes. No migration. The role name is derived wherever needed.
 
+**Implementation note:** All DDL statements embedding role names must use `psycopg.sql.Identifier()` for the role name, consistent with how schema names are already handled. Schema names are constrained to `[a-z][a-z0-9_]*` by `_sanitize_schema_name`, so injection risk is low, but parameterized identifiers are the right practice.
+
+**Length note:** PostgreSQL role names are limited to 63 characters. The `_ro` suffix adds 3 characters. Refresh schema names (`{tenant}_r{hex8}_ro`) are the longest variant. With `_sanitize_schema_name` not truncating, very long tenant IDs could approach this limit — but in practice, CommCare domain names and Connect org IDs are short.
+
 ### Role lifecycle — tenant schemas
 
 In `SchemaManager.provision()` and `create_physical_schema()`, after `CREATE SCHEMA`:
@@ -79,13 +83,15 @@ BEGIN
     END IF;
 END $$;
 GRANT USAGE ON SCHEMA {schema_name} TO {schema_name}_ro;
-ALTER DEFAULT PRIVILEGES IN SCHEMA {schema_name}
+ALTER DEFAULT PRIVILEGES FOR ROLE {managed_db_user} IN SCHEMA {schema_name}
     GRANT SELECT ON TABLES TO {schema_name}_ro;
 ```
 
 - `NOLOGIN` — the role cannot be used to connect directly; only via `SET ROLE`
 - `GRANT USAGE` — allows the role to see the schema exists and access objects within it
-- `ALTER DEFAULT PRIVILEGES` — tables created later by the materializer are automatically readable; no re-granting needed after each materialization run
+- `ALTER DEFAULT PRIVILEGES FOR ROLE {managed_db_user}` — tables created later by the materializer (which connects as the managed DB user) are automatically readable; no re-granting needed after each materialization run. The `FOR ROLE` clause is required so the default applies to objects created by the managed DB user specifically, not just the current session role.
+
+This also covers **refresh schemas** (`{tenant}_r{hex8}` naming pattern). Refresh schemas are created via `create_physical_schema()`, which adds the role. When the refresh completes and the old schema is torn down, its role is dropped too. The active refresh schema's `_ro` role has a different name than the original, but `QueryContext` derives the role from whichever schema name is currently active — so this is transparent.
 
 In `SchemaManager.teardown()`, after `DROP SCHEMA ... CASCADE`:
 
@@ -109,7 +115,7 @@ END $$;
 
 -- Grant access to the view schema itself
 GRANT USAGE ON SCHEMA {ws_schema_name} TO {ws_schema_name}_ro;
-ALTER DEFAULT PRIVILEGES IN SCHEMA {ws_schema_name}
+ALTER DEFAULT PRIVILEGES FOR ROLE {managed_db_user} IN SCHEMA {ws_schema_name}
     GRANT SELECT ON TABLES TO {ws_schema_name}_ro;
 
 -- Grant read access to each constituent tenant schema (views reference them)
@@ -119,6 +125,8 @@ GRANT SELECT ON ALL TABLES IN SCHEMA {tenant1_schema} TO {ws_schema_name}_ro;
 ```
 
 View schemas contain `UNION ALL` views that reference tables in the underlying tenant schemas. The view schema role needs `USAGE` + `SELECT` on each constituent tenant schema for the views to resolve.
+
+**Note:** The constituent tenant schema grants (`SELECT ON ALL TABLES`) are point-in-time. If a materialization run adds new tables to a tenant schema after the view schema role was granted, those tables won't be readable through the view schema role until `build_view_schema()` is called again. This is acceptable because `build_view_schema()` is re-invoked after each materialization run that changes the table set, and the views themselves would also need rebuilding to include new tables.
 
 In `SchemaManager.teardown_view_schema()`, after `DROP SCHEMA ... CASCADE`:
 
@@ -150,7 +158,9 @@ finally:
 
 `RESET ROLE` is in a `finally` block so it always executes, even on query errors. This prevents a failed query from leaving the connection in a restricted role state (important for future connection pooling).
 
-**Only `execute_query` uses `SET ROLE`.** `execute_internal_query` continues to run on the privileged role because it queries `information_schema` with trusted, parameterized SQL.
+**Note on `search_path`:** The connection params in `_parse_db_url` already set `search_path` via the `options` string at connect time. However, `SET ROLE` changes the session's effective role, so the explicit `SET search_path` inside `_execute_sync` (after `SET ROLE`) is the one that matters. The read-only role has `USAGE` on its own schema and inherits `USAGE` on `public` (granted to the `PUBLIC` pseudo-role by default in PostgreSQL), so `SET search_path TO {schema},public` works under the restricted role.
+
+**Only `execute_query` uses `SET ROLE`.** `execute_internal_query` (and its backing function `_execute_sync_parameterized`) continues to run on the privileged role because it queries `information_schema` with trusted, parameterized SQL.
 
 ### Context changes
 
@@ -181,6 +191,8 @@ The command is idempotent and safe to run multiple times.
 If `SET ROLE` fails (e.g., role does not exist), the query fails with a clear error. The MCP server does **not** fall back to the privileged role. This is intentional — a missing role means the schema was provisioned without the role, which is a bug that should be surfaced, not silently ignored.
 
 The error message returned to the user should be generic (e.g., "Schema configuration error — please contact an administrator") to avoid leaking internal details.
+
+Schemas in `FAILED` state won't have a role, but this is fine — failed schemas can't be queried (context loading only finds `ACTIVE`/`MATERIALIZING` states). If a failed schema is retried, it goes through `provision()` or `create_physical_schema()` which create the role.
 
 ### Prerequisites
 
