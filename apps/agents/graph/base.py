@@ -388,8 +388,7 @@ async def build_agent_graph(
     graph.add_edge("tools", "agent")
 
     # --- Compile and return ---
-    # recursion_limit caps agent↔tools round trips to prevent runaway loops
-    compiled = graph.compile(checkpointer=checkpointer, recursion_limit=25)
+    compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
         "Agent graph compiled for workspace %s (checkpointer: %s)",
