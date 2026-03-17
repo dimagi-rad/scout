@@ -92,6 +92,57 @@ class TestSchemaManagerRoleCreation:
         assert any("CREATE ROLE" in c and role_name in c for c in calls)
 
 
+@pytest.mark.django_db
+class TestSchemaManagerRoleTeardown:
+    def test_teardown_drops_readonly_role(self, tenant_membership):
+        from apps.workspaces.models import TenantSchema
+
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="test_domain",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            mgr.teardown(ts)
+
+        role_name = readonly_role_name(ts.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
+
+    def test_teardown_view_schema_drops_readonly_role(self, workspace):
+        from apps.workspaces.models import WorkspaceViewSchema
+
+        vs = WorkspaceViewSchema.objects.create(
+            workspace=workspace,
+            schema_name="ws_abc1234def56789",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            mgr = SchemaManager()
+            mgr.teardown_view_schema(vs)
+
+        role_name = readonly_role_name(vs.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
+
+
 class TestReadonlyRoleName:
     def test_basic(self):
         assert readonly_role_name("tenant_abc123") == "tenant_abc123_ro"

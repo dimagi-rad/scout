@@ -146,6 +146,7 @@ class SchemaManager:
                     psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
             )
+            self._drop_readonly_role(cursor, tenant_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
@@ -326,9 +327,17 @@ class SchemaManager:
                     psycopg.sql.Identifier(view_schema.schema_name)
                 )
             )
+            self._drop_readonly_role(cursor, view_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
+
+    def _drop_readonly_role(self, cursor, schema_name: str) -> None:
+        """Drop the read-only PostgreSQL role for a schema."""
+        role_name = readonly_role_name(schema_name)
+        cursor.execute(
+            psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
+        )
 
     def _create_readonly_role(self, cursor, schema_name: str) -> None:
         """Create a read-only PostgreSQL role for a schema.
