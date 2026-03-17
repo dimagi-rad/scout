@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from apps.workspaces.models import TenantSchema
-from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
 
 @pytest.mark.django_db
@@ -41,3 +41,14 @@ class TestSchemaManager:
 
         assert TenantSchema.objects.count() == 1  # no duplicate
         assert ts.schema_name == schema_name
+
+
+class TestReadonlyRoleName:
+    def test_basic(self):
+        assert readonly_role_name("tenant_abc123") == "tenant_abc123_ro"
+
+    def test_view_schema(self):
+        assert readonly_role_name("ws_abc1234def56789") == "ws_abc1234def56789_ro"
+
+    def test_refresh_schema(self):
+        assert readonly_role_name("test_domain_r1a2b3c4") == "test_domain_r1a2b3c4_ro"

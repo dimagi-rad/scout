@@ -19,6 +19,11 @@ from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchem
 logger = logging.getLogger(__name__)
 
 
+def readonly_role_name(schema_name: str) -> str:
+    """Derive the read-only PostgreSQL role name for a schema."""
+    return f"{schema_name}_ro"
+
+
 def get_managed_db_connection():
     """Get a psycopg connection to the managed database."""
     url = settings.MANAGED_DATABASE_URL
