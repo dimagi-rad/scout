@@ -364,6 +364,12 @@ class SchemaManager:
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not cursor.fetchone():
             return
+        # DROP OWNED BY revokes all privileges granted TO this role (e.g. USAGE
+        # and SELECT on constituent tenant schemas for view schema roles). It does
+        # NOT drop or modify the tenant schemas themselves — only the grants that
+        # this specific role holds. Tenant schemas and their own _ro roles are
+        # unaffected. This is required because PostgreSQL refuses to DROP ROLE
+        # while the role still holds any privileges.
         cursor.execute(
             psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
         )
