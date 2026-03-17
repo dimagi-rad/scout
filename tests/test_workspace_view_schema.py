@@ -1,7 +1,7 @@
 import pytest
 
-from apps.projects.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
 from apps.users.models import Tenant
+from apps.workspaces.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def workspace(db):
 
     User = get_user_model()
     user = User.objects.create_user(email="user@example.com", password="pass")
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     ws = Workspace.objects.create(name="Multi-Tenant WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)

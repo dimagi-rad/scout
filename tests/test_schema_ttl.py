@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import freezegun
 import pytest
 
-from apps.projects.models import SchemaState, TenantSchema
+from apps.workspaces.models import SchemaState, TenantSchema
 
 
 @pytest.fixture

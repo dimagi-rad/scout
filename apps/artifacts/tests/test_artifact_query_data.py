@@ -10,8 +10,8 @@ from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.users.models import TenantMembership, User
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
 
 @pytest.fixture

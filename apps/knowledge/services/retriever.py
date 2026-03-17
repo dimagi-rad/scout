@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 
 if TYPE_CHECKING:
-    from apps.projects.models import Workspace
+    from apps.workspaces.models import Workspace
 
 
 class KnowledgeRetriever:

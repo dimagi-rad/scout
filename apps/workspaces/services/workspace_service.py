@@ -5,7 +5,7 @@ from __future__ import annotations
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from apps.projects.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
 
 
 def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
@@ -17,7 +17,7 @@ def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
     """
-    from apps.projects.tasks import rebuild_workspace_view_schema
+    from apps.workspaces.tasks import rebuild_workspace_view_schema
 
     with transaction.atomic():
         wt, created = WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
@@ -38,7 +38,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
 
     Raises ValidationError if wt is the last tenant in the workspace.
     """
-    from apps.projects.tasks import rebuild_workspace_view_schema
+    from apps.workspaces.tasks import rebuild_workspace_view_schema
 
     with transaction.atomic():
         # Lock all tenant rows for this workspace before counting to prevent
@@ -65,7 +65,7 @@ async def touch_workspace_schemas(workspace) -> None:
     """
     from asgiref.sync import sync_to_async
 
-    from apps.projects.models import TenantSchema
+    from apps.workspaces.models import TenantSchema
 
     tenant_count = await workspace.workspace_tenants.acount()
     if tenant_count == 1:

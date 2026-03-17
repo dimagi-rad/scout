@@ -14,7 +14,7 @@ import psycopg
 import psycopg.sql
 from django.conf import settings
 
-from apps.projects.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
 
 logger = logging.getLogger(__name__)
 

@@ -493,7 +493,7 @@ class TestLoadTenantContext:
 
     async def test_schema_name_in_context(self, tenant_membership):
         """Verify the schema name from TenantSchema flows into QueryContext.schema_name."""
-        from apps.projects.models import SchemaState, TenantSchema
+        from apps.workspaces.models import SchemaState, TenantSchema
         from mcp_server.context import load_tenant_context
 
         await TenantSchema.objects.acreate(
@@ -518,7 +518,7 @@ class TestLoadTenantContext:
             await load_tenant_context("dimagi")
 
     async def test_raises_when_no_managed_db_url(self, tenant_membership):
-        from apps.projects.models import SchemaState, TenantSchema
+        from apps.workspaces.models import SchemaState, TenantSchema
         from mcp_server.context import load_tenant_context
 
         await TenantSchema.objects.acreate(
@@ -579,8 +579,8 @@ class TestParseDbUrl:
 # get_schema_status tool
 # ---------------------------------------------------------------------------
 
-PATCH_TENANT_SCHEMA = "apps.projects.models.TenantSchema"
-PATCH_MATERIALIZATION_RUN = "apps.projects.models.MaterializationRun"
+PATCH_TENANT_SCHEMA = "apps.workspaces.models.TenantSchema"
+PATCH_MATERIALIZATION_RUN = "apps.workspaces.models.MaterializationRun"
 
 
 class TestGetSchemaStatusTool:
@@ -670,7 +670,7 @@ class TestGetSchemaStatusTool:
 # teardown_schema tool
 # ---------------------------------------------------------------------------
 
-PATCH_SCHEMA_MANAGER = "apps.projects.services.schema_manager.SchemaManager"
+PATCH_SCHEMA_MANAGER = "apps.workspaces.services.schema_manager.SchemaManager"
 
 
 class TestTeardownSchemaTool:

@@ -1,10 +1,10 @@
 from django.apps import AppConfig
 
 
-class ProjectsConfig(AppConfig):
+class WorkspacesConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
-    name = "apps.projects"
-    verbose_name = "Projects"
+    name = "apps.workspaces"
+    verbose_name = "Workspaces"
 
     def ready(self):
         import logging

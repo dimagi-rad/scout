@@ -13,7 +13,12 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
     """Auto-create a workspace for newly created TenantMembership records."""
     if not created:
         return
-    from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+    from apps.workspaces.models import (
+        Workspace,
+        WorkspaceMembership,
+        WorkspaceRole,
+        WorkspaceTenant,
+    )
 
     # Idempotent: skip if an auto-created workspace for this user+tenant already exists
     existing = Workspace.objects.filter(

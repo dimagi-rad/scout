@@ -10,12 +10,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from apps.projects.models import MaterializationRun
+from apps.workspaces.models import MaterializationRun
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_sync_parameterized
 
 if TYPE_CHECKING:
-    from apps.projects.models import TenantMetadata, TenantSchema
+    from apps.workspaces.models import TenantMetadata, TenantSchema
     from mcp_server.context import QueryContext
 
 logger = logging.getLogger(__name__)

@@ -3,7 +3,7 @@
 import pytest
 from django.db.utils import IntegrityError
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
 
 @pytest.mark.django_db

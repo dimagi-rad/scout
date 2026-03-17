@@ -3,8 +3,8 @@ from unittest.mock import patch
 import pytest
 from rest_framework.test import APIClient
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ def setup(transactional_db):
 def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
     user, ws, t2 = setup
 
-    with patch("apps.projects.tasks.rebuild_workspace_view_schema") as mock_task:
+    with patch("apps.workspaces.tasks.rebuild_workspace_view_schema") as mock_task:
         api_client.force_login(user)
         resp = api_client.post(
             f"/api/workspaces/{ws.id}/tenants/",

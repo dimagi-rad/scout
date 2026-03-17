@@ -2,7 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apps.projects.models import (
+from apps.users.models import Tenant
+from apps.workspaces.models import (
     SchemaState,
     Workspace,
     WorkspaceMembership,
@@ -10,7 +11,6 @@ from apps.projects.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.users.models import Tenant
 
 
 @pytest.fixture
@@ -29,7 +29,7 @@ def tenant(db):
 
 @pytest.fixture
 def workspace(db, user, tenant):
-    from apps.projects.models import TenantSchema
+    from apps.workspaces.models import TenantSchema
 
     ws = Workspace.objects.create(name="Task WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
@@ -39,9 +39,9 @@ def workspace(db, user, tenant):
 
 
 def test_rebuild_view_schema_calls_build_view_schema(workspace):
-    from apps.projects.tasks import rebuild_workspace_view_schema
+    from apps.workspaces.tasks import rebuild_workspace_view_schema
 
-    with patch("apps.projects.tasks.SchemaManager") as MockSM:
+    with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
         mock_vs = MagicMock()
         mock_vs.schema_name = "ws_abc123"
         MockSM.return_value.build_view_schema.return_value = mock_vs
@@ -54,8 +54,8 @@ def test_rebuild_view_schema_calls_build_view_schema(workspace):
 
 
 def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):
-    from apps.projects.models import TenantSchema
-    from apps.projects.tasks import rebuild_workspace_view_schema
+    from apps.workspaces.models import TenantSchema
+    from apps.workspaces.tasks import rebuild_workspace_view_schema
 
     TenantSchema.objects.filter(tenant__workspace_tenants__workspace=workspace).update(
         state=SchemaState.EXPIRED
@@ -66,9 +66,9 @@ def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):
 
 
 def test_rebuild_view_schema_marks_failed_on_exception(workspace):
-    from apps.projects.tasks import rebuild_workspace_view_schema
+    from apps.workspaces.tasks import rebuild_workspace_view_schema
 
-    with patch("apps.projects.tasks.SchemaManager") as MockSM:
+    with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
         MockSM.return_value.build_view_schema.side_effect = Exception("boom")
 
         result = rebuild_workspace_view_schema(str(workspace.id))

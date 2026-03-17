@@ -7,7 +7,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.models import (
+from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
@@ -16,8 +17,7 @@ from apps.projects.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
-from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 
 def _is_last_manager(workspace, membership):
@@ -346,7 +346,7 @@ class WorkspaceTenantView(APIView):
         return Response(tenants)
 
     def post(self, request, workspace_id):
-        from apps.projects.services.workspace_service import add_workspace_tenant
+        from apps.workspaces.services.workspace_service import add_workspace_tenant
 
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:
@@ -392,7 +392,7 @@ class WorkspaceTenantView(APIView):
         )
 
     def delete(self, request, workspace_id, wt_id):
-        from apps.projects.services.workspace_service import remove_workspace_tenant
+        from apps.workspaces.services.workspace_service import remove_workspace_tenant
 
         workspace, membership, err = resolve_workspace(request, workspace_id)
         if err:

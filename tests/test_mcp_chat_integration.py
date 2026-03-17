@@ -60,7 +60,7 @@ def auth_async_client(async_client, user):
 @pytest.fixture
 def workspace_from_membership(tenant_membership):
     """Return the Workspace auto-created for the tenant_membership."""
-    from apps.projects.models import Workspace
+    from apps.workspaces.models import Workspace
 
     return Workspace.objects.get(
         is_auto_created=True,

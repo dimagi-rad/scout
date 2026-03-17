@@ -14,7 +14,7 @@ from rest_framework.views import APIView
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry
 from apps.knowledge.utils import parse_frontmatter, render_frontmatter
-from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
+from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 from .serializers import AgentLearningSerializer, KnowledgeEntrySerializer
 

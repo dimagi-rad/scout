@@ -29,7 +29,7 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
-from apps.projects.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -564,11 +564,11 @@ async def get_schema_status(tenant_id: str, workspace_id: str = "") -> dict:
         tenant_id: The tenant identifier (e.g. CommCare domain name).
         workspace_id: Optional workspace UUID. When provided, checks WorkspaceViewSchema state.
     """
-    from apps.projects.models import MaterializationRun, SchemaState, TenantSchema
+    from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
     async with tool_context("get_schema_status", tenant_id) as tc:
         if workspace_id:
-            from apps.projects.models import WorkspaceViewSchema
+            from apps.workspaces.models import WorkspaceViewSchema
 
             vs = await WorkspaceViewSchema.objects.filter(
                 workspace_id=workspace_id,
@@ -664,8 +664,8 @@ async def teardown_schema(tenant_id: str, confirm: bool = False, workspace_id: s
     """
     from asgiref.sync import sync_to_async
 
-    from apps.projects.models import SchemaState, TenantSchema
-    from apps.projects.services.schema_manager import SchemaManager
+    from apps.workspaces.models import SchemaState, TenantSchema
+    from apps.workspaces.services.schema_manager import SchemaManager
 
     async with tool_context("teardown_schema", tenant_id, confirm=confirm) as tc:
         if not confirm:

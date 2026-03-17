@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("artifacts", "0001_initial"),
-        ("projects", "0001_initial"),
+        ("workspaces", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -59,7 +59,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="artifacts",
-                to="projects.workspace",
+                to="workspaces.workspace",
             ),
         ),
         migrations.AddIndex(

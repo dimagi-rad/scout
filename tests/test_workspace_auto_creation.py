@@ -2,8 +2,8 @@
 
 import pytest
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole
 from apps.users.models import TenantMembership
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 
 @pytest.mark.django_db

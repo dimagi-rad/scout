@@ -1,12 +1,12 @@
 import pytest
 from rest_framework.test import APIClient
 
-from apps.projects.models import (
+from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.users.models import Tenant, TenantMembership
 
 
 @pytest.fixture

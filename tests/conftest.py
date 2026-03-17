@@ -59,7 +59,12 @@ def other_user(db):
 @pytest.fixture
 def workspace(db, user, tenant):
     """Create a test Workspace with WorkspaceTenant and WorkspaceMembership."""
-    from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+    from apps.workspaces.models import (
+        Workspace,
+        WorkspaceMembership,
+        WorkspaceRole,
+        WorkspaceTenant,
+    )
 
     ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
@@ -70,7 +75,7 @@ def workspace(db, user, tenant):
 @pytest.fixture
 def read_user(db, workspace):
     User = get_user_model()
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="reader@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ)
@@ -80,7 +85,7 @@ def read_user(db, workspace):
 @pytest.fixture
 def write_user(db, workspace):
     User = get_user_model()
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="writer@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)

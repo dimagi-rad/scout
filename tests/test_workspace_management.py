@@ -4,7 +4,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 User = get_user_model()
 

@@ -1,6 +1,6 @@
 import pytest
 
-from apps.projects.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def test_add_workspace_tenant_creates_record_and_marks_provisioning(
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
     )
-    from apps.projects.services.workspace_service import add_workspace_tenant
+    from apps.workspaces.services.workspace_service import add_workspace_tenant
 
     add_workspace_tenant(workspace, tenant2)
 
@@ -43,7 +43,7 @@ def test_remove_workspace_tenant_deletes_record_and_marks_provisioning(
     vs = WorkspaceViewSchema.objects.create(
         workspace=workspace, schema_name="ws_test", state=SchemaState.ACTIVE
     )
-    from apps.projects.services.workspace_service import remove_workspace_tenant
+    from apps.workspaces.services.workspace_service import remove_workspace_tenant
 
     remove_workspace_tenant(workspace, wt)
 

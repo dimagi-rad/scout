@@ -10,8 +10,8 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.projects.workspace_resolver import resolve_workspace_drf as resolve_workspace
 from apps.recipes.models import Recipe, RecipeRun
+from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 from .serializers import (
     PublicRecipeRunSerializer,
@@ -111,7 +111,7 @@ class RecipeRunView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Touch the schema to reset the inactivity TTL on user-initiated recipe runs
-        from apps.projects.models import SchemaState, TenantSchema
+        from apps.workspaces.models import SchemaState, TenantSchema
 
         tenant = workspace.tenant
         if tenant:

@@ -4,7 +4,7 @@ from django.http import JsonResponse
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.projects.models import WorkspaceMembership
+from apps.workspaces.models import WorkspaceMembership
 
 _ACCESS_DENIED = {"error": "Workspace not found or access denied."}
 

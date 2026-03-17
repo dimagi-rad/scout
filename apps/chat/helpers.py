@@ -2,13 +2,13 @@
 
 from asgiref.sync import sync_to_async
 
-from apps.projects.models import WorkspaceMembership
 from apps.users.decorators import (  # noqa: F401 — re-exported for backwards compat
     LoginRequiredJsonMixin,
     async_login_required,
     get_user_if_authenticated,
     login_required_json,
 )
+from apps.workspaces.models import WorkspaceMembership
 
 
 @sync_to_async

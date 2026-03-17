@@ -27,7 +27,7 @@ from apps.chat.helpers import (
 )
 from apps.chat.models import Thread
 from apps.chat.stream import langgraph_to_ui_stream
-from apps.projects.services.workspace_service import touch_workspace_schemas
+from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
 

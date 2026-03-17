@@ -57,7 +57,7 @@ INSTALLED_APPS = [
     "apps.users.providers.commcare_connect",
     # Local apps
     "apps.users",
-    "apps.projects",
+    "apps.workspaces",
     "apps.knowledge",
     "apps.agents",
     "apps.artifacts",
@@ -311,7 +311,7 @@ SCHEMA_TTL_HOURS = 24  # schemas inactive longer than this are expired
 
 CELERY_BEAT_SCHEDULE = {
     "expire-inactive-schemas": {
-        "task": "apps.projects.tasks.expire_inactive_schemas",
+        "task": "apps.workspaces.tasks.expire_inactive_schemas",
         "schedule": 30 * 60,  # every 30 minutes
     },
 }

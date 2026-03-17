@@ -64,7 +64,7 @@ def membership_b(db, user_a, tenant_b):
 @pytest.fixture
 def workspace_a(membership_a):
     """The auto-created workspace for user_a in tenant_a."""
-    from apps.projects.models import Workspace
+    from apps.workspaces.models import Workspace
 
     return Workspace.objects.get(
         is_auto_created=True,
@@ -76,7 +76,7 @@ def workspace_a(membership_a):
 @pytest.fixture
 def workspace_b(membership_b):
     """The auto-created workspace for user_a in tenant_b."""
-    from apps.projects.models import Workspace
+    from apps.workspaces.models import Workspace
 
     return Workspace.objects.get(
         is_auto_created=True,
@@ -200,7 +200,7 @@ class TestRefreshSchemaWorkspaceScoped:
         from unittest.mock import patch
 
         client.force_login(user_a)
-        with patch("apps.projects.api.views.transaction.on_commit"):
+        with patch("apps.workspaces.api.views.transaction.on_commit"):
             response = client.post(f"/api/workspaces/{workspace_a.id}/refresh/")
         assert response.status_code == 202
 

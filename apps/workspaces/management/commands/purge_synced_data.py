@@ -4,8 +4,8 @@ import logging
 
 from django.core.management.base import BaseCommand
 
-from apps.projects.models import TenantMetadata, TenantSchema, Workspace
-from apps.projects.services.schema_manager import SchemaManager
+from apps.workspaces.models import TenantMetadata, TenantSchema, Workspace
+from apps.workspaces.services.schema_manager import SchemaManager
 
 logger = logging.getLogger(__name__)
 

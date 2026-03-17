@@ -7,7 +7,7 @@ from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.http import JsonResponse
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 User = get_user_model()
 
@@ -17,7 +17,7 @@ class TestResolveWorkspaceRaw:
     """Tests for sync non-DRF workspace resolution."""
 
     def test_returns_workspace_on_valid_membership(self, user, workspace):
-        from apps.projects.workspace_resolver import resolve_workspace
+        from apps.workspaces.workspace_resolver import resolve_workspace
 
         ws, err = resolve_workspace(user, workspace.id)
         assert ws is not None
@@ -25,7 +25,7 @@ class TestResolveWorkspaceRaw:
         assert err is None
 
     def test_returns_error_on_missing_membership(self, user):
-        from apps.projects.workspace_resolver import resolve_workspace
+        from apps.workspaces.workspace_resolver import resolve_workspace
 
         ws, err = resolve_workspace(user, uuid.uuid4())
         assert ws is None
@@ -39,7 +39,7 @@ class TestAresolveWorkspace:
     """Tests for async workspace resolution."""
 
     async def test_returns_workspace_on_valid_membership(self):
-        from apps.projects.workspace_resolver import aresolve_workspace
+        from apps.workspaces.workspace_resolver import aresolve_workspace
 
         user = await sync_to_async(User.objects.create_user)(
             email="async-resolve@example.com", password="pass"
@@ -55,7 +55,7 @@ class TestAresolveWorkspace:
         assert err is None
 
     async def test_returns_error_on_missing_membership(self):
-        from apps.projects.workspace_resolver import aresolve_workspace
+        from apps.workspaces.workspace_resolver import aresolve_workspace
 
         user = await sync_to_async(User.objects.create_user)(
             email="async-resolve-denied@example.com", password="pass"

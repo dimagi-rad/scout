@@ -24,8 +24,8 @@ from typing import Any
 
 from psycopg import sql as psql
 
-from apps.projects.models import MaterializationRun, TenantMetadata
-from apps.projects.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.models import MaterializationRun, TenantMetadata
+from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader

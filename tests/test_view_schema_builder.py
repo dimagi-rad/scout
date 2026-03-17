@@ -3,14 +3,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apps.projects.models import (
+from apps.users.models import Tenant
+from apps.workspaces.models import (
     SchemaState,
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
 )
-from apps.users.models import Tenant
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MANAGED_DATABASE_URL"),
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 def managed_db_connection():
-    from apps.projects.services.schema_manager import get_managed_db_connection
+    from apps.workspaces.services.schema_manager import get_managed_db_connection
 
     conn = get_managed_db_connection()
     yield conn
@@ -48,8 +48,8 @@ def two_tenant_workspace(db):
 
 
 def test_build_view_schema_creates_record(two_tenant_workspace, managed_db_connection):
-    from apps.projects.models import TenantSchema, WorkspaceViewSchema
-    from apps.projects.services.schema_manager import SchemaManager
+    from apps.workspaces.models import TenantSchema, WorkspaceViewSchema
+    from apps.workspaces.services.schema_manager import SchemaManager
 
     ws, t1, t2 = two_tenant_workspace
 
@@ -115,8 +115,8 @@ def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from apps.projects.models import TenantSchema
-    from apps.projects.services.schema_manager import SchemaManager
+    from apps.workspaces.models import TenantSchema
+    from apps.workspaces.services.schema_manager import SchemaManager
 
     ts = TenantSchema.objects.create(
         tenant=tenant, schema_name="test_domain_bulk", state=SchemaState.ACTIVE
@@ -124,7 +124,7 @@ def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
     try:
         with CaptureQueriesContext(connection) as ctx:
             with patch(
-                "apps.projects.services.schema_manager.get_managed_db_connection"
+                "apps.workspaces.services.schema_manager.get_managed_db_connection"
             ) as mock_conn_fn:
                 mock_cursor = MagicMock()
                 mock_cursor.fetchall.return_value = []
@@ -151,7 +151,7 @@ def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
 @pytest.mark.django_db
 def test_build_view_schema_returns_active_record(workspace, tenant):
     """build_view_schema must return a record with state=ACTIVE — it owns the full lifecycle."""
-    from apps.projects.services.schema_manager import SchemaManager
+    from apps.workspaces.services.schema_manager import SchemaManager
 
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = []
@@ -160,14 +160,14 @@ def test_build_view_schema_returns_active_record(workspace, tenant):
     mock_conn.cursor.return_value = mock_cursor
 
     # tenant needs an active TenantSchema for the workspace to have something to build
-    from apps.projects.models import TenantSchema
+    from apps.workspaces.models import TenantSchema
 
     ts = TenantSchema.objects.create(
         tenant=tenant, schema_name="test_domain_schema", state=SchemaState.ACTIVE
     )
     try:
         with patch(
-            "apps.projects.services.schema_manager.get_managed_db_connection",
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
             return_value=mock_conn,
         ):
             vs = SchemaManager().build_view_schema(workspace)

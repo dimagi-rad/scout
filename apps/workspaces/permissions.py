@@ -2,7 +2,7 @@
 
 from rest_framework.permissions import BasePermission
 
-from apps.projects.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 
 def _get_membership(request, view):

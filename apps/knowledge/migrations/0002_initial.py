@@ -10,7 +10,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("knowledge", "0001_initial"),
-        ("projects", "0001_initial"),
+        ("workspaces", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
@@ -30,7 +30,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="learnings",
-                to="projects.workspace",
+                to="workspaces.workspace",
             ),
         ),
         migrations.AddField(
@@ -48,7 +48,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="knowledge_entries",
-                to="projects.workspace",
+                to="workspaces.workspace",
             ),
         ),
         migrations.AddField(
@@ -66,7 +66,7 @@ class Migration(migrations.Migration):
                 null=True,
                 on_delete=django.db.models.deletion.CASCADE,
                 related_name="table_knowledge",
-                to="projects.workspace",
+                to="workspaces.workspace",
             ),
         ),
         migrations.AddIndex(

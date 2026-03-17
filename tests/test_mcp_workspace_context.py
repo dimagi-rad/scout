@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from asgiref.sync import sync_to_async
 
-from apps.projects.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, Workspace, WorkspaceTenant, WorkspaceViewSchema
 
 
 @pytest.mark.asyncio
@@ -11,8 +11,8 @@ from apps.projects.models import SchemaState, Workspace, WorkspaceTenant, Worksp
 async def test_load_workspace_context_single_tenant_delegates_to_tenant_context():
     from django.contrib.auth import get_user_model
 
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
     from apps.users.models import Tenant
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await sync_to_async(User.objects.create_user)(email="ctx@example.com", password="pass")
@@ -39,8 +39,8 @@ async def test_load_workspace_context_multi_tenant_uses_view_schema():
     from django.conf import settings
     from django.contrib.auth import get_user_model
 
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
     from apps.users.models import Tenant
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await sync_to_async(User.objects.create_user)(email="ctx2@example.com", password="pass")
@@ -76,8 +76,8 @@ async def test_load_workspace_context_multi_tenant_uses_view_schema():
 async def test_load_workspace_context_multi_tenant_raises_if_no_active_view_schema():
     from django.contrib.auth import get_user_model
 
-    from apps.projects.models import WorkspaceMembership, WorkspaceRole
     from apps.users.models import Tenant
+    from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     User = get_user_model()
     user = await sync_to_async(User.objects.create_user)(email="ctx3@example.com", password="pass")

@@ -5,7 +5,7 @@ import json
 import pytest
 from django.test import Client
 
-from apps.projects.models import Workspace
+from apps.workspaces.models import Workspace
 
 
 @pytest.fixture

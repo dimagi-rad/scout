@@ -11,15 +11,15 @@ from django.urls import include, path
 from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
-from apps.projects.api.workspace_views import (
+from apps.recipes.api.views import PublicRecipeRunView
+from apps.workspaces.api.workspace_views import (
     WorkspaceDetailView,
     WorkspaceListView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListView,
     WorkspaceTenantView,
 )
-from apps.projects.views import health_check
-from apps.recipes.api.views import PublicRecipeRunView
+from apps.workspaces.views import health_check
 from config.views import widget_js_view
 
 
@@ -65,7 +65,7 @@ workspace_urlpatterns = [
     path("recipes/", include("apps.recipes.urls")),
     path("knowledge/", include("apps.knowledge.urls")),
     path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
-    path("", include("apps.projects.api.urls")),
+    path("", include("apps.workspaces.api.urls")),
     # Workspace management
     path("members/", WorkspaceMemberListView.as_view(), name="workspace_members"),
     path(

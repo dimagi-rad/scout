@@ -3,7 +3,7 @@
 import pytest
 from rest_framework.test import APIClient
 
-from apps.projects.models import SchemaState, TenantSchema
+from apps.workspaces.models import SchemaState, TenantSchema
 
 
 @pytest.fixture

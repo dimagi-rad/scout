@@ -99,8 +99,8 @@ class RecipeRunner:
             return self._provided_graph
 
         if self._graph is None:
-            from apps.projects.models import WorkspaceTenant
             from apps.users.models import TenantMembership
+            from apps.workspaces.models import WorkspaceTenant
 
             workspace_tenant = (
                 await WorkspaceTenant.objects.select_related("tenant")
@@ -305,7 +305,7 @@ class RecipeRunner:
         try:
             workspace = self.recipe.workspace
             # Fetch tenant info asynchronously to avoid sync query in async context
-            from apps.projects.models import WorkspaceTenant as _WT
+            from apps.workspaces.models import WorkspaceTenant as _WT
 
             _wt = await _WT.objects.select_related("tenant").filter(workspace=workspace).afirst()
             _tenant = _wt.tenant if _wt else None

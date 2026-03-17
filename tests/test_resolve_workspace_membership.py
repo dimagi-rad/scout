@@ -4,8 +4,8 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 
-from apps.projects.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 from apps.users.models import Tenant, TenantMembership
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
 User = get_user_model()
 

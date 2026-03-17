@@ -46,7 +46,7 @@ uv run ruff format .                      # Python format
 | App | Purpose |
 |-----|---------|
 | users | Custom User model, session auth, OAuth (Google/GitHub/CommCare) |
-| projects | Projects, DB connections (encrypted), memberships |
+| workspaces | Workspaces, DB connections (encrypted), memberships |
 | knowledge | KnowledgeEntry, table metadata, golden queries, eval runs |
 | agents | LangGraph agent graph, MCP client, tools, prompts, memory (checkpointer) |
 | chat | Streaming chat threads with LangGraph agent |

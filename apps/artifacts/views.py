@@ -17,8 +17,8 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views import View
 
-from apps.projects.workspace_resolver import aresolve_workspace, resolve_workspace
 from apps.users.decorators import LoginRequiredJsonMixin
+from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 from mcp_server.context import load_tenant_context
 from mcp_server.services.query import execute_query
 
@@ -749,7 +749,7 @@ class ArtifactQueryDataView(View):
             return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
         # Touch the schema to reset the inactivity TTL on user-initiated queries
-        from apps.projects.models import TenantSchema
+        from apps.workspaces.models import TenantSchema
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
         if ts is not None:

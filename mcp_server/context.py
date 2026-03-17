@@ -47,7 +47,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
     from asgiref.sync import sync_to_async
     from django.conf import settings
 
-    from apps.projects.models import SchemaState, TenantSchema
+    from apps.workspaces.models import SchemaState, TenantSchema
 
     ts = await TenantSchema.objects.filter(
         tenant__external_id=tenant_id,
@@ -88,7 +88,7 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
     from asgiref.sync import sync_to_async
     from django.conf import settings
 
-    from apps.projects.models import SchemaState, Workspace, WorkspaceViewSchema
+    from apps.workspaces.models import SchemaState, Workspace, WorkspaceViewSchema
 
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)

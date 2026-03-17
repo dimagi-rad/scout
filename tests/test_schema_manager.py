@@ -2,8 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from apps.projects.models import TenantSchema
-from apps.projects.services.schema_manager import SchemaManager
+from apps.workspaces.models import TenantSchema
+from apps.workspaces.services.schema_manager import SchemaManager
 
 
 @pytest.mark.django_db
@@ -14,7 +14,7 @@ class TestSchemaManager:
         mock_conn.cursor.return_value = mock_cursor
 
         with patch(
-            "apps.projects.services.schema_manager.get_managed_db_connection",
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
             return_value=mock_conn,
         ):
             mgr = SchemaManager()
