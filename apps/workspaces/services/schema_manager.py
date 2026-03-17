@@ -79,6 +79,7 @@ class SchemaManager:
                         psycopg.sql.Identifier(schema_name)
                     )
                 )
+                self._create_readonly_role(cursor, schema_name)
                 cursor.close()
             finally:
                 conn.close()
@@ -112,6 +113,7 @@ class SchemaManager:
                     psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
             )
+            self._create_readonly_role(cursor, tenant_schema.schema_name)
             cursor.close()
         finally:
             conn.close()
@@ -327,6 +329,39 @@ class SchemaManager:
             cursor.close()
         finally:
             conn.close()
+
+    def _create_readonly_role(self, cursor, schema_name: str) -> None:
+        """Create a read-only PostgreSQL role for a schema.
+
+        Idempotent — checks pg_roles before creating. Grants USAGE on the
+        schema and sets ALTER DEFAULT PRIVILEGES so tables created later by
+        the materializer are automatically readable.
+        """
+        role_name = readonly_role_name(schema_name)
+        # Idempotent role creation — pg doesn't have CREATE ROLE IF NOT EXISTS
+        cursor.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (role_name,),
+        )
+        if not cursor.fetchone():
+            cursor.execute(
+                psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(psycopg.sql.Identifier(role_name))
+            )
+        cursor.execute(
+            psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+        cursor.execute(
+            psycopg.sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
+                "GRANT SELECT ON TABLES TO {}"
+            ).format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
         """Convert a tenant_id to a valid PostgreSQL schema name."""
