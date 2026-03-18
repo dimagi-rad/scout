@@ -37,6 +37,14 @@ export default function App() {
     }
   }, [fetchMe, isPublicPage, isEmbedPage])
 
+  // Auto-close OAuth popup after redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get("popup_close") === "1" && window.opener) {
+      window.close()
+    }
+  }, [])
+
   if (isPublicPage) {
     return getPublicPageComponent()
   }
