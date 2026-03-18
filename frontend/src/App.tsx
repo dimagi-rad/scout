@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { RouterProvider } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { BASE_PATH } from "@/config"
 import { NetworkStatusProvider } from "@/contexts/NetworkStatusContext"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { OnboardingWizard } from "@/components/OnboardingWizard/OnboardingWizard"
@@ -10,8 +11,13 @@ import { PublicRecipeRunPage } from "@/pages/PublicRecipeRunPage"
 import { PublicThreadPage } from "@/pages/PublicThreadPage"
 import { EmbedPage } from "@/pages/EmbedPage"
 
+/** Strip the deploy prefix (e.g. "/scout") so route matching works at any mount point. */
+function stripBasePath(pathname: string): string {
+  return BASE_PATH ? pathname.replace(new RegExp(`^${BASE_PATH}`), "") : pathname
+}
+
 function getPublicPageComponent(): React.ReactNode | null {
-  const path = window.location.pathname
+  const path = stripBasePath(window.location.pathname)
   if (/^\/shared\/runs\/[^/]+\/?$/.test(path)) return <PublicRecipeRunPage />
   if (/^\/shared\/threads\/[^/]+\/?$/.test(path)) return <PublicThreadPage />
   return null
@@ -21,8 +27,9 @@ export default function App() {
   const authStatus = useAppStore((s) => s.authStatus)
   const user = useAppStore((s) => s.user)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
-  const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(window.location.pathname)
-  const isEmbedPage = window.location.pathname.startsWith("/embed")
+  const pathname = stripBasePath(window.location.pathname)
+  const isPublicPage = /^\/shared\/(runs|threads)\/[^/]+\/?$/.test(pathname)
+  const isEmbedPage = pathname.startsWith("/embed")
 
   useEffect(() => {
     if (!isPublicPage && !isEmbedPage) {

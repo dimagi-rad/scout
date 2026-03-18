@@ -1,4 +1,5 @@
 import { useMemo } from "react"
+import { BASE_PATH } from "@/config"
 
 export type EmbedMode = "chat" | "chat+artifacts" | "full"
 export type EmbedTheme = "light" | "dark" | "auto"
@@ -14,7 +15,8 @@ export interface EmbedParams {
 export function useEmbedParams(): EmbedParams {
   return useMemo(() => {
     const params = new URLSearchParams(window.location.search)
-    const isEmbed = window.location.pathname.startsWith("/embed")
+    const pathname = window.location.pathname.replace(new RegExp(`^${BASE_PATH}`), "")
+    const isEmbed = pathname.startsWith("/embed")
     return {
       mode: (params.get("mode") as EmbedMode) || "chat",
       tenant: params.get("tenant"),

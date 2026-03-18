@@ -1,4 +1,5 @@
 import { createBrowserRouter, Navigate } from "react-router-dom"
+import { BASE_PATH } from "@/config"
 import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
@@ -30,4 +31,4 @@ export const router = createBrowserRouter([
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },
-])
+], { basename: BASE_PATH || undefined })
