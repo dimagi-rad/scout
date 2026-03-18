@@ -3,14 +3,16 @@ import { Sidebar } from "@/components/Sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
+import { useAutoResize } from "@/hooks/useAutoResize"
 
 export function EmbedLayout() {
   const { mode } = useEmbedParams()
   const showSidebar = mode === "full"
   const showArtifacts = mode === "full" || mode === "chat+artifacts"
+  useAutoResize()
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen min-h-[600px]">
       {showSidebar && <Sidebar />}
       <main className="flex-1 min-w-0 overflow-auto">
         <ErrorBoundary>

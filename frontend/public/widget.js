@@ -1,17 +1,24 @@
 (function () {
   "use strict";
 
-  var SCOUT_ORIGIN = (function () {
+  var SCOUT_WIDGET_VERSION = "0.2.0";
+
+  // Detect base URL from the script src, including any path prefix (e.g. /scout)
+  var SCOUT_BASE = (function () {
     var scripts = document.getElementsByTagName("script");
     for (var i = 0; i < scripts.length; i++) {
       var src = scripts[i].src || "";
       if (src.indexOf("widget.js") !== -1) {
         var url = new URL(src);
-        return url.origin;
+        var basePath = url.pathname.replace(/\/widget\.js$/, "");
+        return url.origin + basePath;
       }
     }
     return window.location.origin;
   })();
+
+  // Origin-only for postMessage security checks
+  var SCOUT_ORIGIN = new URL(SCOUT_BASE).origin;
 
   var instances = {};
   var instanceId = 0;
@@ -62,13 +69,14 @@
     if (this.opts.tenant) params.push("tenant=" + encodeURIComponent(this.opts.tenant));
     if (this.opts.provider) params.push("provider=" + encodeURIComponent(this.opts.provider));
     if (this.opts.theme) params.push("theme=" + encodeURIComponent(this.opts.theme));
-    var src = SCOUT_ORIGIN + "/embed/" + (params.length ? "?" + params.join("&") : "");
+    var src = SCOUT_BASE + "/embed/" + (params.length ? "?" + params.join("&") : "");
 
-    // Create iframe
+    // Create iframe — absolute positioning resolves height:100% correctly
+    // even when ancestor elements use min-height instead of height
     this.iframe = document.createElement("iframe");
     this.iframe.src = src;
     this.iframe.style.cssText =
-      "width:100%;height:100%;border:none;display:block;";
+      "position:absolute;top:0;left:0;width:100%;height:100%;border:none;";
     this.iframe.setAttribute("allow", "clipboard-write");
     this.iframe.setAttribute("title", "Scout");
 
@@ -88,6 +96,7 @@
     }.bind(this);
 
     this.container.innerHTML = "";
+    this.container.style.position = "relative";
     this.container.appendChild(this.iframe);
 
     instances[this.id] = this;
@@ -101,6 +110,12 @@
     if (data.type === "scout:ready") {
       this.ready = true;
       if (typeof this.opts.onReady === "function") this.opts.onReady();
+    }
+
+    if (data.type === "scout:resize" && typeof data.height === "number") {
+      if (this.opts.autoResize !== false && this.container) {
+        this.container.style.minHeight = data.height + "px";
+      }
     }
 
     if (typeof this.opts.onEvent === "function") {
@@ -134,6 +149,7 @@
 
   // Public API
   var ScoutWidget = {
+    version: SCOUT_WIDGET_VERSION,
     init: function (opts) {
       return new ScoutWidgetInstance(opts || {});
     },
