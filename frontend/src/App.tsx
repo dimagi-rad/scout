@@ -13,7 +13,7 @@ import { EmbedPage } from "@/pages/EmbedPage"
 
 /** Strip the deploy prefix (e.g. "/scout") so route matching works at any mount point. */
 function stripBasePath(pathname: string): string {
-  return BASE_PATH ? pathname.replace(new RegExp(`^${BASE_PATH}`), "") : pathname
+  return BASE_PATH && pathname.startsWith(BASE_PATH) ? pathname.slice(BASE_PATH.length) : pathname
 }
 
 function getPublicPageComponent(): React.ReactNode | null {

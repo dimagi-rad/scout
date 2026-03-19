@@ -15,7 +15,8 @@ export interface EmbedParams {
 export function useEmbedParams(): EmbedParams {
   return useMemo(() => {
     const params = new URLSearchParams(window.location.search)
-    const pathname = window.location.pathname.replace(new RegExp(`^${BASE_PATH}`), "")
+    const raw = window.location.pathname
+    const pathname = BASE_PATH && raw.startsWith(BASE_PATH) ? raw.slice(BASE_PATH.length) : raw
     const isEmbed = pathname.startsWith("/embed")
     return {
       mode: (params.get("mode") as EmbedMode) || "chat",
