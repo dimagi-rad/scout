@@ -182,6 +182,8 @@ ACCOUNT_DEFAULT_HTTP_PROTOCOL = env("ACCOUNT_DEFAULT_HTTP_PROTOCOL", default="ht
 # Auto-create Django user on first OAuth login
 SOCIALACCOUNT_LOGIN_ON_GET = True
 SOCIALACCOUNT_AUTO_SIGNUP = True
+# Don't require email for OAuth signups (Connect doesn't provide one)
+SOCIALACCOUNT_EMAIL_REQUIRED = False
 # Auto-connect social account to existing user with matching email
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
 # Allow OAuth users to skip email verification since provider already verified
