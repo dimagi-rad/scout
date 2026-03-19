@@ -122,7 +122,7 @@ export function LoginForm() {
                     data-testid={`oauth-login-${provider.id}`}
                   >
                     <a
-                      href={`${provider.login_url}?next=/`}
+                      href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}
                       onClick={(e) => handleOAuthClick(e, provider)}
                     >
                       {provider.name}
