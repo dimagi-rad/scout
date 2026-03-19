@@ -2,6 +2,8 @@
  * Thin fetch wrapper that handles CSRF tokens and session cookies.
  */
 
+import { BASE_PATH } from "@/config"
+
 export function getCsrfToken(): string {
   const match = document.cookie.match(/(?:^|;\s*)csrftoken_scout=([^;]+)/)
   return match ? match[1] : ""
@@ -25,7 +27,8 @@ async function request<T>(
     headers["X-CSRFToken"] = getCsrfToken()
   }
 
-  const res = await fetch(url, {
+  const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
+  const res = await fetch(prefixedUrl, {
     ...fetchOptions,
     headers,
     credentials: "include",
@@ -66,7 +69,8 @@ export const api = {
   upload: <T>(url: string, formData: FormData) =>
     request<T>(url, { method: "POST", body: formData, rawBody: true }),
   getBlob: async (url: string): Promise<Blob> => {
-    const res = await fetch(url, { credentials: "include" })
+    const prefixedUrl = url.startsWith("/") ? `${BASE_PATH}${url}` : url
+    const res = await fetch(prefixedUrl, { credentials: "include" })
     if (!res.ok) {
       throw new ApiError(res.status, res.statusText)
     }

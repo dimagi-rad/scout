@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { BASE_PATH } from "@/config"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -198,7 +199,7 @@ export function PublicThreadPage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`/api/chat/threads/shared/${token}/`)
+    fetch(`${BASE_PATH}/api/chat/threads/shared/${token}/`)
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Thread not found" : "Failed to load thread")
         return res.json()
