@@ -37,10 +37,11 @@ export default function App() {
     }
   }, [fetchMe, isPublicPage, isEmbedPage])
 
-  // Auto-close OAuth popup after redirect
+  // Auto-close OAuth popup after redirect.
+  // Don't require window.opener — cross-origin OAuth redirects can clear it.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
-    if (params.get("popup_close") === "1" && window.opener) {
+    if (params.get("popup_close") === "1") {
       window.close()
     }
   }, [])
