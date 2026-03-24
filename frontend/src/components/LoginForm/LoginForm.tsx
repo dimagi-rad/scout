@@ -47,7 +47,7 @@ export function LoginForm() {
 
     e.preventDefault()
     const nextUrl = `${BASE_PATH}/embed/?popup_close=1`
-    const authUrl = `${provider.login_url}?next=${encodeURIComponent(nextUrl)}`
+    const authUrl = `${BASE_PATH}${provider.login_url}?next=${encodeURIComponent(nextUrl)}`
     const popup = window.open(authUrl, "scout-oauth", "width=500,height=700")
 
     if (!popup) return
