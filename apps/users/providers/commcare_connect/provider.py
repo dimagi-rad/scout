@@ -48,7 +48,7 @@ class CommCareConnectProvider(OAuth2Provider):
     def extract_common_fields(self, data: dict) -> dict:
         name = data.get("name", "")
         return {
-            "email": data.get("email", ""),
+            "email": data.get("email") or None,
             "username": data.get("username", name),
             "first_name": name,
             "last_name": "",
