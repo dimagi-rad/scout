@@ -29,8 +29,6 @@
     this.iframe = null;
     this.container = null;
     this.ready = false;
-    this._authPopup = null;
-    this._authPollInterval = null;
     this._boundMessageHandler = this._onMessage.bind(this);
     this._init();
   }
@@ -114,8 +112,11 @@
       if (typeof this.opts.onReady === "function") this.opts.onReady();
     }
 
+    // Don't forward scout:auth-required to the host app — Scout's own LoginForm
+    // inside the iframe handles OAuth with a popup flow. Forwarding this event
+    // causes hosts like ConnectLabs to show an overlay that hides the LoginForm.
     if (data.type === "scout:auth-required") {
-      this._openAuthPopup();
+      return;
     }
 
     if (data.type === "scout:resize" && typeof data.height === "number") {
@@ -127,39 +128,6 @@
     if (typeof this.opts.onEvent === "function") {
       this.opts.onEvent(data);
     }
-  };
-
-  /**
-   * Open a popup directly to the OAuth provider login URL.
-   * The popup window.name is set to "scout-oauth" so Scout's index.html
-   * inline script can close it instantly after the OAuth callback redirects back.
-   */
-  ScoutWidgetInstance.prototype._openAuthPopup = function () {
-    // Don't open multiple popups
-    if (this._authPopup && !this._authPopup.closed) {
-      this._authPopup.focus();
-      return;
-    }
-
-    var provider = this.opts.provider || "commcare_connect";
-    var authUrl = SCOUT_BASE + "/accounts/" + provider + "/login/";
-    this._authPopup = window.open(authUrl, "scout-oauth", "width=500,height=700");
-
-    if (!this._authPopup) return;
-
-    // Poll for popup close — when it closes, reload the iframe to pick up the session
-    var self = this;
-    this._authPollInterval = setInterval(function () {
-      if (!self._authPopup || self._authPopup.closed) {
-        clearInterval(self._authPollInterval);
-        self._authPollInterval = null;
-        self._authPopup = null;
-        // Reload the iframe to re-check auth
-        if (self.iframe) {
-          self.iframe.contentWindow.location.reload();
-        }
-      }
-    }, 500);
   };
 
   ScoutWidgetInstance.prototype._postMessage = function (type, payload) {
@@ -180,7 +148,6 @@
 
   ScoutWidgetInstance.prototype.destroy = function () {
     window.removeEventListener("message", this._boundMessageHandler);
-    if (this._authPollInterval) clearInterval(this._authPollInterval);
     if (this.iframe && this.iframe.parentNode) {
       this.iframe.parentNode.removeChild(this.iframe);
     }
