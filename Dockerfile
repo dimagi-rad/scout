@@ -18,11 +18,18 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Set work directory
 WORKDIR /app
 
-# Copy project
+# Copy dependency files first (cache layer — only re-installs when deps change)
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies from lock file (cached unless pyproject.toml/uv.lock change)
+RUN uv export --frozen --no-dev --no-emit-project > /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt
+
+# Copy the rest of the project (code changes don't bust the dep cache above)
 COPY . .
 
-# Install dependencies (production only, no dev dependencies)
-RUN uv pip install --system -e .
+# Install the project itself (fast — deps already installed)
+RUN uv pip install --system --no-deps -e .
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
