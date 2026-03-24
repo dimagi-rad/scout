@@ -7,7 +7,7 @@
     <title>Scout</title>
   </head>
   <body class="min-h-screen bg-background text-foreground">
-    <script>if(new URLSearchParams(location.search).get("popup_close")==="1")window.close()</script>
+    <script>if(window.name==="scout-oauth")window.close()</script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
