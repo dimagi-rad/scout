@@ -396,6 +396,31 @@ class TestRepeatGroupGeneration:
         )
         assert "::integer AS child_age" in repeat.sql_content
 
+    def test_repeat_sql_uses_original_field_name_for_json_key(self, tenant):
+        """JSON key should use the original leaf name, not the slugified alias."""
+        metadata = _make_metadata(
+            form_definitions={
+                "xmlns_repeat": {
+                    "name": "Mixed Case Form",
+                    "app_name": "App",
+                    "questions": [
+                        {
+                            "label": "First Name",
+                            "value": "/data/items/First_Name",
+                            "type": "Text",
+                            "repeat": "/data/items",
+                        },
+                    ],
+                },
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        repeat = next(a for a in assets if "__repeat_" in a.name)
+        sql = repeat.sql_content
+        # Should use original "First_Name", not slugified "first_name"
+        assert "elem.value->>'First_Name'" in sql
+        assert "AS first_name" in sql
+
 
 # ── Disambiguation ──────────────────────────────────────────────────────────
 

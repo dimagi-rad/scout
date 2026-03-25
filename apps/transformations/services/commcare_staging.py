@@ -63,7 +63,7 @@ def slugify_model_name(name: str) -> str:
 
 def _question_path_to_json_path(value_path: str) -> str:
     """Convert ``/data/patient_name`` → ``{data,patient_name}``."""
-    parts = [p for p in value_path.split("/") if p]
+    parts = [_sql_escape(p) for p in value_path.split("/") if p]
     return "{" + ",".join(parts) + "}"
 
 
@@ -205,8 +205,9 @@ def _generate_repeat_group_asset(
         value_path = q.get("value", "")
         if not value_path:
             continue
+        leaf_name = value_path.rsplit("/", 1)[-1]
         col_name = _column_name_from_path(value_path)
-        raw_expr = f"elem.value->>'{col_name}'"
+        raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f"    {_typed_expression(raw_expr, q_type)} AS {col_name}")
 
