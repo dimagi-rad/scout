@@ -42,30 +42,15 @@ export function LoginForm() {
     }
   }
 
-  function handleOAuthClick(e: React.MouseEvent, provider: OAuthProvider) {
-    if (!isEmbed) return // Let the <a> navigate normally
-
-    e.preventDefault()
-    const nextUrl = `${BASE_PATH}/embed/?popup_close=1`
-    const authUrl = `${provider.login_url}?next=${encodeURIComponent(nextUrl)}`
-    const popup = window.open(authUrl, "scout-oauth", "width=500,height=700")
+  function openLoginPopup() {
+    // Open standalone Scout in a popup — user logs in there normally.
+    // A cookie signals that this is a popup, so App.tsx auto-closes it
+    // once authenticated. The iframe polls for popup close then re-fetches auth.
+    document.cookie = "scout_auth_popup=1;path=/;max-age=300;SameSite=Lax"
+    const popup = window.open(`${BASE_PATH}/`, "scout-oauth", "width=500,height=700")
 
     if (!popup) return
 
-    // Auto-submit the allauth confirmation form in the popup.
-    // SOCIALACCOUNT_LOGIN_ON_GET is False (prevents Login CSRF), so allauth
-    // renders a POST form with CSRF token. We auto-submit it so the user
-    // doesn't have to click "Continue" in the popup.
-    popup.addEventListener("load", () => {
-      try {
-        const form = popup.document.querySelector("form")
-        if (form) form.submit()
-      } catch {
-        // Cross-origin — popup navigated to OAuth provider, ignore
-      }
-    })
-
-    // Poll for popup close — when it closes, re-fetch auth status
     const interval = setInterval(() => {
       if (!popup || popup.closed) {
         clearInterval(interval)
@@ -127,20 +112,29 @@ export function LoginForm() {
               </div>
               <div className="space-y-2">
                 {providers.map((provider) => (
-                  <Button
-                    key={provider.id}
-                    variant="outline"
-                    className="w-full"
-                    asChild
-                    data-testid={`oauth-login-${provider.id}`}
-                  >
-                    <a
-                      href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}
-                      onClick={(e) => handleOAuthClick(e, provider)}
+                  isEmbed ? (
+                    <Button
+                      key={provider.id}
+                      variant="outline"
+                      className="w-full"
+                      data-testid={`oauth-login-${provider.id}`}
+                      onClick={openLoginPopup}
                     >
                       {provider.name}
-                    </a>
-                  </Button>
+                    </Button>
+                  ) : (
+                    <Button
+                      key={provider.id}
+                      variant="outline"
+                      className="w-full"
+                      asChild
+                      data-testid={`oauth-login-${provider.id}`}
+                    >
+                      <a href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}>
+                        {provider.name}
+                      </a>
+                    </Button>
+                  )
                 ))}
               </div>
             </>
