@@ -93,6 +93,20 @@ def run_pipeline(
         report(f"Discovering tenant metadata from {pipeline.provider}...")
         _run_discover_phase(tenant_membership, credential, pipeline)
 
+        # Generate system staging assets from discovered metadata
+        if pipeline.provider == "commcare":
+            from apps.transformations.services.commcare_staging import upsert_system_assets
+
+            tenant_meta = TenantMetadata.objects.filter(tenant_membership=tenant_membership).first()
+            if tenant_meta:
+                asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
+                logger.info(
+                    "System assets for %s: %d created, %d updated",
+                    tenant_membership.tenant.external_id,
+                    asset_result["created"],
+                    asset_result["updated"],
+                )
+
         # ── 3. LOAD ───────────────────────────────────────────────────────────
         run.state = MaterializationRun.RunState.LOADING
         run.save(update_fields=["state"])
