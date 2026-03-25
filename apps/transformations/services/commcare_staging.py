@@ -72,6 +72,11 @@ def _column_name_from_path(value_path: str) -> str:
     return slugify_model_name(value_path.rsplit("/", 1)[-1])
 
 
+def _sql_escape(value: str) -> str:
+    """Escape single quotes for safe interpolation into SQL string literals."""
+    return value.replace("'", "''")
+
+
 def _typed_expression(expr: str, question_type: str | None) -> str:
     """Wrap *expr* with a NULLIF + cast if the question type requires it."""
     cast = _TYPE_CAST.get(question_type or "")
@@ -116,11 +121,11 @@ def _generate_case_type_asset(
 
     for prop in properties:
         col = slugify_model_name(prop)
-        select_parts.append(f"    properties->>'{prop}' AS {col}")
+        select_parts.append(f"    properties->>'{_sql_escape(prop)}' AS {col}")
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_cases")
-    lines.append(f"WHERE case_type = '{case_type_name}'")
+    lines.append(f"WHERE case_type = '{_sql_escape(case_type_name)}'")
 
     model_name = f"stg_case_{slugify_model_name(case_type_name)}"
     return TransformationAsset(
@@ -148,6 +153,7 @@ def _generate_form_asset(
         "    xmlns",
         "    received_on::timestamp AS received_on",
         "    app_id",
+        "    form_data",
     ]
 
     for q in questions:
@@ -165,7 +171,7 @@ def _generate_form_asset(
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_forms")
-    lines.append(f"WHERE xmlns = '{form_xmlns}'")
+    lines.append(f"WHERE xmlns = '{_sql_escape(form_xmlns)}'")
 
     model_name = f"stg_form_{model_name_slug}"
     return TransformationAsset(

@@ -320,6 +320,13 @@ class TestFormGeneration:
         assert "form_data #>> '{data,notes}' AS notes" in sql
         assert "NULLIF" not in sql.split("AS notes")[0].split("\n")[-1]
 
+    def test_form_sql_passes_through_form_data(self, tenant):
+        assets = generate_system_assets(tenant, _make_full_metadata())
+        reg_asset = next(a for a in assets if a.name == "stg_form_patient_registration")
+        sql = reg_asset.sql_content
+        # form_data must be in SELECT so repeat group children can reference it via ref()
+        assert "form_data" in sql.split("FROM")[0]
+
     def test_form_sql_references_raw_forms_directly(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
         reg_asset = next(a for a in assets if a.name == "stg_form_patient_registration")
@@ -419,6 +426,55 @@ class TestDisambiguation:
         names = {a.name for a in assets}
         assert "stg_form_registration" in names
         assert "stg_form_registration_app_two" in names
+
+
+# ── SQL escaping ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestSqlEscaping:
+    def test_case_type_with_single_quote_is_escaped(self, tenant):
+        metadata = _make_metadata(
+            case_types=[{"name": "O'Brien", "app_id": "a", "app_name": "App"}],
+        )
+        assets = generate_system_assets(tenant, metadata)
+        case_asset = next(a for a in assets if a.name.startswith("stg_case_"))
+        assert "O''Brien" in case_asset.sql_content
+        assert "O'Brien'" not in case_asset.sql_content
+
+    def test_form_xmlns_with_single_quote_is_escaped(self, tenant):
+        metadata = _make_metadata(
+            form_definitions={
+                "http://example.com/f'rm": {
+                    "name": "Test Form",
+                    "app_name": "App",
+                    "questions": [],
+                },
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        form_asset = next(a for a in assets if a.name.startswith("stg_form_"))
+        assert "f''rm" in form_asset.sql_content
+
+    def test_case_property_with_single_quote_is_escaped(self, tenant):
+        metadata = _make_metadata(
+            app_definitions=[
+                {
+                    "id": "a",
+                    "name": "App",
+                    "modules": [
+                        {
+                            "case_type": "test",
+                            "case_properties": [{"key": "mother's_name"}],
+                        }
+                    ],
+                }
+            ],
+            case_types=[{"name": "test", "app_id": "a", "app_name": "App"}],
+        )
+        assets = generate_system_assets(tenant, metadata)
+        case_asset = next(a for a in assets if a.name == "stg_case_test")
+        assert "mother''s_name" in case_asset.sql_content
 
 
 # ── Asset properties ────────────────────────────────────────────────────────
