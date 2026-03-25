@@ -250,8 +250,8 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         (q.columns || []).forEach((col, i) => { obj[col] = row[i]; });
                         return obj;
                     });
-                    // If only one row, expose as object; otherwise as array
-                    merged[q.name] = rows.length === 1 ? rows[0] : rows;
+                    // Always expose as array so components can reliably call .map()
+                    merged[q.name] = rows;
                 }
                 return merged;
             },

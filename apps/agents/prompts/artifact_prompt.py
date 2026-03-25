@@ -26,7 +26,6 @@ Create an artifact when:
 Do NOT create an artifact when:
 - A simple markdown table suffices
 - The user just wants raw numbers
-- The data set is very small (< 5 rows) and simple
 - The user explicitly asks for text/table format
 
 ### Artifact Types
@@ -90,12 +89,17 @@ export default function MyChart({ data }) {
 - Use inline styles for dynamic values
 - Keep visualizations responsive with relative widths
 
-### Live Data via source_queries (IMPORTANT)
+### Live Data via source_queries (CRITICAL — ALWAYS USE)
 
 Artifacts fetch live data at render time. You MUST provide `source_queries` with
-the SQL queries that produce the data your component needs. Do NOT embed query
-result rows in the `data` parameter -- the system executes the queries against
-the project database every time the artifact is viewed, so data is always fresh.
+the SQL queries that produce the data your component needs. NEVER embed query
+result rows in the `data` parameter or hard-code data arrays in the component
+code — doing so creates a stale snapshot that never updates. The system executes
+the queries against the project database every time the artifact is viewed, so
+data is always fresh.
+
+Even for small result sets, always use source_queries. The user expects to reopen
+any artifact later and see current data.
 
 Each source query is a dict with "name" and "sql" keys:
 ```python
@@ -106,8 +110,7 @@ source_queries=[
 ```
 
 The component receives `data.monthly_revenue` (array of row objects with column-name
-keys) and `data.top_products`. If a query returns exactly one row, it is provided as
-a single object instead of an array.
+keys) and `data.top_products`. Results are always arrays, even for single-row queries.
 
 ### Example: React Artifact with Live Queries
 
@@ -146,8 +149,9 @@ export default function RevenueChart({ data }) {
 
 ### Data Best Practices
 
-1. **Always provide source_queries**: For any data-driven artifact, pass the SQL
-   queries that produce the data. This is how the artifact gets live data.
+1. **ALWAYS provide source_queries**: Every data-driven artifact MUST have
+   source_queries with the SQL. Never put query results in `data` or hard-code
+   them in the component. This is what makes artifacts reusable with live data.
 
 2. **Name queries to match component expectations**: The query "name" becomes the
    key on the data prop. Pick clear, descriptive names.
