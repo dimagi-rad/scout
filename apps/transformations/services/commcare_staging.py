@@ -61,6 +61,11 @@ def slugify_model_name(name: str) -> str:
     return slug.strip("_")
 
 
+def _sql_escape(value: str) -> str:
+    """Escape single quotes for safe interpolation into SQL string literals."""
+    return value.replace("'", "''")
+
+
 def _question_path_to_json_path(value_path: str) -> str:
     """Convert ``/data/patient_name`` → ``{data,patient_name}``."""
     parts = [_sql_escape(p) for p in value_path.split("/") if p]
@@ -70,11 +75,6 @@ def _question_path_to_json_path(value_path: str) -> str:
 def _column_name_from_path(value_path: str) -> str:
     """Extract the leaf segment of a question path as a column alias."""
     return slugify_model_name(value_path.rsplit("/", 1)[-1])
-
-
-def _sql_escape(value: str) -> str:
-    """Escape single quotes for safe interpolation into SQL string literals."""
-    return value.replace("'", "''")
 
 
 def _typed_expression(expr: str, question_type: str | None) -> str:
