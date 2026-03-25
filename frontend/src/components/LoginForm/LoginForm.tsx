@@ -54,6 +54,19 @@ export function LoginForm() {
 
     if (!popup) return
 
+    // Auto-submit the allauth confirmation form in the popup.
+    // SOCIALACCOUNT_LOGIN_ON_GET is False (prevents Login CSRF), so allauth
+    // renders a POST form with CSRF token. We auto-submit it so the user
+    // doesn't have to click "Continue" in the popup.
+    popup.addEventListener("load", () => {
+      try {
+        const form = popup.document.querySelector("form")
+        if (form) form.submit()
+      } catch {
+        // Cross-origin — popup navigated to OAuth provider, ignore
+      }
+    })
+
     // Poll for popup close — when it closes, re-fetch auth status
     const interval = setInterval(() => {
       if (!popup || popup.closed) {
