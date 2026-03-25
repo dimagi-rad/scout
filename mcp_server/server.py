@@ -443,9 +443,11 @@ async def run_materialization(
                         f"Pipeline '{pipeline}' not found in registry",
                     )
                     return tc["result"]
-                tm = await qs.aget(
+                tm = await qs.filter(
                     tenant__external_id=tenant_id, tenant__provider=pipeline_config.provider
-                )
+                ).afirst()
+                if tm is None:
+                    raise TenantMembership.DoesNotExist
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
