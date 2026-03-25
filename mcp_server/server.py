@@ -430,9 +430,13 @@ async def run_materialization(
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
         # ── Resolve TenantMembership ──────────────────────────────────────────
+        # Scope to workspace to prevent cross-tenant credential leakage.
+        # workspace_id is injected server-side by the agent graph, not controllable by the LLM.
         registry = get_registry()
         try:
             qs = TenantMembership.objects.select_related("user", "tenant")
+            if workspace_id:
+                qs = qs.filter(tenant__workspaces__id=workspace_id)
             if tenant_membership_id:
                 tm = await qs.aget(id=tenant_membership_id, tenant__external_id=tenant_id)
             else:
