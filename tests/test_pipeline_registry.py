@@ -74,6 +74,18 @@ relationships:
         assert r.to_column == "case_id"
         assert r.description == "Forms reference cases"
 
+    def test_source_config_physical_table_name_defaults_to_raw_prefix(self):
+        from mcp_server.pipeline_registry import SourceConfig
+
+        s = SourceConfig(name="cases")
+        assert s.physical_table_name == "raw_cases"
+
+    def test_source_config_physical_table_name_explicit_override(self):
+        from mcp_server.pipeline_registry import SourceConfig
+
+        s = SourceConfig(name="cases", table_name="my_cases")
+        assert s.physical_table_name == "my_cases"
+
     def test_loads_connect_sync_pipeline(self):
         """Test that the real connect_sync.yml loads correctly from the pipelines dir."""
         registry = PipelineRegistry()
@@ -92,6 +104,10 @@ relationships:
         assert "completed_modules" in source_names
         assert config.has_metadata_discovery
         assert len(config.relationships) == 5
+        rel_from_tables = {r.from_table for r in config.relationships}
+        rel_to_tables = {r.to_table for r in config.relationships}
+        assert all(t.startswith("raw_") for t in rel_from_tables)
+        assert all(t.startswith("raw_") for t in rel_to_tables)
 
     def test_relationships_defaults_to_empty(self, tmp_path):
         yml = tmp_path / "no_rel.yml"

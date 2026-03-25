@@ -17,6 +17,12 @@ _DEFAULT_PIPELINES_DIR = pathlib.Path(__file__).parent.parent / "pipelines"
 class SourceConfig:
     name: str
     description: str = ""
+    table_name: str = ""  # Explicit override; empty = use default
+
+    @property
+    def physical_table_name(self) -> str:
+        """Physical PostgreSQL table name. Defaults to raw_{name}."""
+        return self.table_name or f"raw_{self.name}"
 
 
 @dataclass
@@ -90,7 +96,11 @@ class PipelineRegistry:
 
 def _parse_pipeline(data: dict) -> PipelineConfig:
     sources = [
-        SourceConfig(name=s["name"], description=s.get("description", ""))
+        SourceConfig(
+            name=s["name"],
+            description=s.get("description", ""),
+            table_name=s.get("table_name", ""),
+        )
         for s in data.get("sources", [])
     ]
     md_raw = data.get("metadata_discovery")
