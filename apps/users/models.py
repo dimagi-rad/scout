@@ -14,11 +14,12 @@ from django.db import models
 class UserManager(BaseUserManager):
     """Custom manager for User model with email as the unique identifier."""
 
-    def create_user(self, email, password=None, **extra_fields):
+    def create_user(self, email=None, password=None, **extra_fields):
         """Create and save a regular user with the given email and password."""
-        if not email:
-            raise ValueError("The Email field must be set")
-        email = self.normalize_email(email)
+        if email:
+            email = self.normalize_email(email)
+        else:
+            email = None  # store NULL, not empty string, to avoid unique constraint collisions
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)
@@ -44,7 +45,7 @@ class User(AbstractUser):
     Uses email as the primary identifier for authentication.
     """
 
-    email = models.EmailField(unique=True)
+    email = models.EmailField(unique=True, blank=True, null=True)
 
     # Override username to make it optional
     username = models.CharField(max_length=150, blank=True)
@@ -65,13 +66,18 @@ class User(AbstractUser):
     class Meta:
         ordering = ["email"]
 
+    def save(self, *args, **kwargs):
+        if not self.email:
+            self.email = None
+        super().save(*args, **kwargs)
+
     def __str__(self):
-        return self.email
+        return self.email or self.username or f"user-{self.pk}"
 
     def get_full_name(self):
         """Return the first_name plus the last_name, with a space in between."""
         full_name = f"{self.first_name} {self.last_name}".strip()
-        return full_name or self.email
+        return full_name or self.email or self.username or ""
 
 
 PROVIDER_CHOICES = [

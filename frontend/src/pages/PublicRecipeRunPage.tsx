@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { BASE_PATH } from "@/config"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -59,7 +60,7 @@ export function PublicRecipeRunPage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`/api/recipes/runs/shared/${token}/`)
+    fetch(`${BASE_PATH}/api/recipes/runs/shared/${token}/`)
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Run not found" : "Failed to load run")
         return res.json()

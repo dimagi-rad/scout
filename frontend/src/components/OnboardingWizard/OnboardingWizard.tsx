@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react"
+import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import { Button } from "@/components/ui/button"
@@ -123,7 +124,7 @@ export function OnboardingWizard() {
             data-testid="onboarding-oauth"
             asChild
           >
-            <a href="/accounts/commcare/login/?next=/">Connect with OAuth</a>
+            <a href={`${BASE_PATH}/accounts/commcare/login/?next=${BASE_PATH}/`}>Connect with OAuth</a>
           </Button>
           <Button
             className="w-full"

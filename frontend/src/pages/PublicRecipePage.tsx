@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { BASE_PATH } from "@/config"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -51,7 +52,7 @@ export function PublicRecipePage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`/api/recipes/shared/${token}/`)
+    fetch(`${BASE_PATH}/api/recipes/shared/${token}/`)
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Recipe not found" : "Failed to load recipe")
         return res.json()

@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { useEmbedParams } from "@/hooks/useEmbedParams"
+import { BASE_PATH } from "@/config"
 
 interface OAuthProvider {
   id: string
@@ -19,6 +21,8 @@ export function LoginForm() {
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const authError = useAppStore((s) => s.authError)
   const login = useAppStore((s) => s.authActions.login)
+  const fetchMe = useAppStore((s) => s.authActions.fetchMe)
+  const { isEmbed } = useEmbedParams()
 
   useEffect(() => {
     api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
@@ -36,6 +40,25 @@ export function LoginForm() {
     } finally {
       setLoading(false)
     }
+  }
+
+  function handleOAuthClick(e: React.MouseEvent, provider: OAuthProvider) {
+    if (!isEmbed) return // Let the <a> navigate normally
+
+    e.preventDefault()
+    const nextUrl = `${BASE_PATH}/embed/?popup_close=1`
+    const authUrl = `${provider.login_url}?next=${encodeURIComponent(nextUrl)}`
+    const popup = window.open(authUrl, "scout-oauth", "width=500,height=700")
+
+    if (!popup) return
+
+    // Poll for popup close — when it closes, re-fetch auth status
+    const interval = setInterval(() => {
+      if (!popup || popup.closed) {
+        clearInterval(interval)
+        fetchMe()
+      }
+    }, 500)
   }
 
   return (
@@ -98,7 +121,10 @@ export function LoginForm() {
                     asChild
                     data-testid={`oauth-login-${provider.id}`}
                   >
-                    <a href={`${provider.login_url}?next=/`}>
+                    <a
+                      href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}
+                      onClick={(e) => handleOAuthClick(e, provider)}
+                    >
                       {provider.name}
                     </a>
                   </Button>

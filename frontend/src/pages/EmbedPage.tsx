@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from "react"
 import { RouterProvider, createBrowserRouter } from "react-router-dom"
+import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -26,7 +27,7 @@ const embedRouter = createBrowserRouter([
       { path: "recipes/:id", element: <RecipesPage /> },
     ],
   },
-])
+], { basename: BASE_PATH || undefined })
 
 export function EmbedPage() {
   const authStatus = useAppStore((s) => s.authStatus)
@@ -51,6 +52,20 @@ export function EmbedPage() {
 
   useEffect(() => {
     fetchMe()
+
+    // Re-check auth when the iframe regains visibility (e.g. after popup login).
+    // Only re-fetch if we're not already authenticated — avoids re-triggering
+    // the tenant setup chain on alt-tab.
+    const handleVisibility = () => {
+      if (
+        document.visibilityState === "visible" &&
+        useAppStore.getState().authStatus !== "authenticated"
+      ) {
+        fetchMe()
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibility)
+    return () => document.removeEventListener("visibilitychange", handleVisibility)
   }, [fetchMe])
 
   useEffect(() => {
