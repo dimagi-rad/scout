@@ -46,8 +46,10 @@ export function LoginForm() {
     if (!isEmbed) return // Let the <a> navigate normally
 
     e.preventDefault()
-    const nextUrl = `${BASE_PATH}/embed/?popup_close=1`
-    const authUrl = `${provider.login_url}?next=${encodeURIComponent(nextUrl)}`
+    // Set cookie so the popup auto-closes when it returns to Scout after OAuth.
+    // window.name gets cleared by COOP headers during cross-origin OAuth redirects.
+    document.cookie = "scout_auth_popup=1;path=/;max-age=300;SameSite=Lax"
+    const authUrl = `${BASE_PATH}${provider.login_url}`
     const popup = window.open(authUrl, "scout-oauth", "width=500,height=700")
 
     if (!popup) return

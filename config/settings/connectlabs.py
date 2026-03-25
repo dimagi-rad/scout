@@ -19,5 +19,11 @@ SECURE_SSL_REDIRECT = False
 # Scout is served under /scout/ path prefix on the ALB
 FORCE_SCRIPT_NAME = env("FORCE_SCRIPT_NAME", default="/scout")
 
+# Override redirect URLs to include the path prefix — Django doesn't prepend
+# FORCE_SCRIPT_NAME to these literal paths, so the OAuth popup would land on
+# ConnectLabs (/) instead of Scout (/scout/) after login.
+LOGIN_REDIRECT_URL = "/scout/"
+LOGOUT_REDIRECT_URL = "/scout/"
+
 # Allow iframe embedding from labs.connect.dimagi.com (same origin)
 X_FRAME_OPTIONS = "SAMEORIGIN"

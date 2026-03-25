@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var SCOUT_WIDGET_VERSION = "0.2.0";
+  var SCOUT_WIDGET_VERSION = "0.3.0-popup-fix";
 
   // Detect base URL from the script src, including any path prefix (e.g. /scout)
   var SCOUT_BASE = (function () {
@@ -110,6 +110,13 @@
     if (data.type === "scout:ready") {
       this.ready = true;
       if (typeof this.opts.onReady === "function") this.opts.onReady();
+    }
+
+    // Don't forward scout:auth-required to the host app — Scout's own LoginForm
+    // inside the iframe handles OAuth with a popup flow. Forwarding this event
+    // causes hosts like ConnectLabs to show an overlay that hides the LoginForm.
+    if (data.type === "scout:auth-required") {
+      return;
     }
 
     if (data.type === "scout:resize" && typeof data.height === "number") {
