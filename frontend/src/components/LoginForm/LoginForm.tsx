@@ -42,19 +42,15 @@ export function LoginForm() {
     }
   }
 
-  function handleOAuthClick(e: React.MouseEvent, provider: OAuthProvider) {
-    if (!isEmbed) return // Let the <a> navigate normally
-
-    e.preventDefault()
-    // Set cookie so the popup auto-closes when it returns to Scout after OAuth.
-    // window.name gets cleared by COOP headers during cross-origin OAuth redirects.
+  function openLoginPopup() {
+    // Open standalone Scout in a popup — user logs in there normally.
+    // A cookie signals that this is a popup, so App.tsx auto-closes it
+    // once authenticated. The iframe polls for popup close then re-fetches auth.
     document.cookie = "scout_auth_popup=1;path=/;max-age=300;SameSite=Lax"
-    const authUrl = `${BASE_PATH}${provider.login_url}`
-    const popup = window.open(authUrl, "scout-oauth", "width=500,height=700")
+    const popup = window.open(`${BASE_PATH}/`, "scout-oauth", "width=500,height=700")
 
     if (!popup) return
 
-    // Poll for popup close — when it closes, re-fetch auth status
     const interval = setInterval(() => {
       if (!popup || popup.closed) {
         clearInterval(interval)
@@ -116,20 +112,29 @@ export function LoginForm() {
               </div>
               <div className="space-y-2">
                 {providers.map((provider) => (
-                  <Button
-                    key={provider.id}
-                    variant="outline"
-                    className="w-full"
-                    asChild
-                    data-testid={`oauth-login-${provider.id}`}
-                  >
-                    <a
-                      href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}
-                      onClick={(e) => handleOAuthClick(e, provider)}
+                  isEmbed ? (
+                    <Button
+                      key={provider.id}
+                      variant="outline"
+                      className="w-full"
+                      data-testid={`oauth-login-${provider.id}`}
+                      onClick={openLoginPopup}
                     >
                       {provider.name}
-                    </a>
-                  </Button>
+                    </Button>
+                  ) : (
+                    <Button
+                      key={provider.id}
+                      variant="outline"
+                      className="w-full"
+                      asChild
+                      data-testid={`oauth-login-${provider.id}`}
+                    >
+                      <a href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}>
+                        {provider.name}
+                      </a>
+                    </Button>
+                  )
                 ))}
               </div>
             </>
