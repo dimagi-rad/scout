@@ -230,9 +230,13 @@ class SchemaManager:
                 prefix_to_tenant[prefix] = tenant_external_id
                 tenant_prefixes.append((schema_name, tenant_external_id, prefix))
 
-            views_created = 0
-            for schema_name, _tenant_external_id, prefix in tenant_prefixes:
-
+            # Collect all (view_name, schema_name, table_name) and detect full
+            # view name collisions before executing any DDL. This catches cases
+            # where the __ delimiter is ambiguous (e.g. prefix "foo__bar" + table
+            # "baz" vs prefix "foo" + table "bar__baz").
+            planned_views: list[tuple[str, str, str]] = []
+            seen_view_names: dict[str, str] = {}  # view_name → tenant_external_id
+            for schema_name, tenant_external_id, prefix in tenant_prefixes:
                 cursor.execute(
                     "SELECT table_name FROM information_schema.tables "
                     "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')",
@@ -240,17 +244,26 @@ class SchemaManager:
                 )
                 for (table_name,) in cursor.fetchall():
                     view_name = f"{prefix}__{table_name}"
-                    cursor.execute(
-                        psycopg.sql.SQL(
-                            "CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}"
-                        ).format(
-                            psycopg.sql.Identifier(view_schema_name),
-                            psycopg.sql.Identifier(view_name),
-                            psycopg.sql.Identifier(schema_name),
-                            psycopg.sql.Identifier(table_name),
+                    if view_name in seen_view_names:
+                        raise ValueError(
+                            f"View name collision: '{view_name}' produced by both "
+                            f"tenant '{seen_view_names[view_name]}' and '{tenant_external_id}'"
                         )
+                    seen_view_names[view_name] = tenant_external_id
+                    planned_views.append((view_name, schema_name, table_name))
+
+            for view_name, schema_name, table_name in planned_views:
+                cursor.execute(
+                    psycopg.sql.SQL(
+                        "CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}"
+                    ).format(
+                        psycopg.sql.Identifier(view_schema_name),
+                        psycopg.sql.Identifier(view_name),
+                        psycopg.sql.Identifier(schema_name),
+                        psycopg.sql.Identifier(table_name),
                     )
-                    views_created += 1
+                )
+            views_created = len(planned_views)
 
             # Create read-only role for the view schema
             self._create_readonly_role(cursor, view_schema_name)
