@@ -214,10 +214,24 @@ class SchemaManager:
             # Step 2+3: Create per-tenant namespaced views
             from apps.users.models import Tenant
 
-            views_created = 0
+            # Pre-compute prefixes and detect collisions before creating any views
+            prefix_to_tenant: dict[str, str] = {}
+            tenant_prefixes: list[tuple[str, str, str]] = (
+                []
+            )  # (schema_name, tenant_external_id, prefix)
             for schema_name, tenant_external_id in tenant_schemas:
                 tenant_obj = Tenant.objects.get(external_id=tenant_external_id)
                 prefix = self._sanitize_schema_name(tenant_obj.canonical_name)
+                if prefix in prefix_to_tenant:
+                    raise ValueError(
+                        f"Canonical name collision: tenants '{prefix_to_tenant[prefix]}' and "
+                        f"'{tenant_external_id}' both sanitize to prefix '{prefix}'"
+                    )
+                prefix_to_tenant[prefix] = tenant_external_id
+                tenant_prefixes.append((schema_name, tenant_external_id, prefix))
+
+            views_created = 0
+            for schema_name, _tenant_external_id, prefix in tenant_prefixes:
 
                 cursor.execute(
                     "SELECT table_name FROM information_schema.tables "
