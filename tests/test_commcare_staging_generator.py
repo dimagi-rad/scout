@@ -237,6 +237,14 @@ class TestSlugifyModelName:
     def test_lowercase(self):
         assert slugify_model_name("MyForm") == "myform"
 
+    def test_empty_result_raises(self):
+        with pytest.raises(ValueError, match="Cannot generate a valid model name"):
+            slugify_model_name("---")
+
+    def test_unicode_only_raises(self):
+        with pytest.raises(ValueError, match="Cannot generate a valid model name"):
+            slugify_model_name("日本語")
+
 
 # ── Case type generation ───────────────────────────────────────────────────
 
@@ -255,9 +263,9 @@ class TestCaseTypeGeneration:
         assets = generate_system_assets(tenant, _make_full_metadata())
         patient_asset = next(a for a in assets if a.name == "stg_case_patient")
         sql = patient_asset.sql_content
-        assert "properties->>'dob' AS dob" in sql
-        assert "properties->>'gender' AS gender" in sql
-        assert "properties->>'village' AS village" in sql
+        assert """properties->>'dob' AS "dob\"""" in sql
+        assert """properties->>'gender' AS "gender\"""" in sql
+        assert """properties->>'village' AS "village\"""" in sql
 
     def test_case_sql_has_core_columns(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
@@ -267,8 +275,8 @@ class TestCaseTypeGeneration:
         assert "case_type" in sql
         assert "case_name" in sql
         assert "owner_id" in sql
-        assert "date_opened::timestamp AS date_opened" in sql
-        assert "last_modified::timestamp AS last_modified" in sql
+        assert 'date_opened::timestamp AS "date_opened"' in sql
+        assert 'last_modified::timestamp AS "last_modified"' in sql
 
     def test_case_sql_filters_by_case_type(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
@@ -298,27 +306,30 @@ class TestFormGeneration:
         assets = generate_system_assets(tenant, _make_full_metadata())
         reg_asset = next(a for a in assets if a.name == "stg_form_patient_registration")
         sql = reg_asset.sql_content
-        assert "form_data #>> '{data,patient_name}'" in sql
-        assert "AS patient_name" in sql
+        assert "form_data #>> ARRAY['data','patient_name']::text[]" in sql
+        assert 'AS "patient_name"' in sql
 
     def test_form_sql_applies_type_cast(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
         reg_asset = next(a for a in assets if a.name == "stg_form_patient_registration")
         sql = reg_asset.sql_content
-        assert "NULLIF(form_data #>> '{data,age}', '')::integer AS age" in sql
+        assert "NULLIF(form_data #>> ARRAY['data','age']::text[], '')::integer AS \"age\"" in sql
 
     def test_form_sql_date_cast(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
         visit_asset = next(a for a in assets if a.name == "stg_form_household_visit")
         sql = visit_asset.sql_content
-        assert "NULLIF(form_data #>> '{data,visit_date}', '')::date AS visit_date" in sql
+        assert (
+            "NULLIF(form_data #>> ARRAY['data','visit_date']::text[], '')::date"
+            ' AS "visit_date"' in sql
+        )
 
     def test_form_sql_no_cast_for_text(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
         visit_asset = next(a for a in assets if a.name == "stg_form_household_visit")
         sql = visit_asset.sql_content
-        assert "form_data #>> '{data,notes}' AS notes" in sql
-        assert "NULLIF" not in sql.split("AS notes")[0].split("\n")[-1]
+        assert """form_data #>> ARRAY['data','notes']::text[] AS "notes\"""" in sql
+        assert "NULLIF" not in sql.split('"notes"')[0].split("\n")[-1]
 
     def test_form_sql_passes_through_form_data(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
@@ -339,7 +350,7 @@ class TestFormGeneration:
         sql = follow_asset.sql_content
         assert "child_name" not in sql
         assert "child_age" not in sql
-        assert "AS status" in sql
+        assert 'AS "status"' in sql
 
 
 # ── Repeat group generation ─────────────────────────────────────────────────
@@ -376,7 +387,7 @@ class TestRepeatGroupGeneration:
             for a in generate_system_assets(tenant, _make_full_metadata())
             if "__repeat_" in a.name
         )
-        assert "repeat_index" in repeat.sql_content
+        assert '"repeat_index"' in repeat.sql_content
 
     def test_repeat_sql_extracts_child_questions(self, tenant):
         repeat = next(
@@ -385,8 +396,8 @@ class TestRepeatGroupGeneration:
             if "__repeat_" in a.name
         )
         sql = repeat.sql_content
-        assert "AS child_name" in sql
-        assert "AS child_age" in sql
+        assert 'AS "child_name"' in sql
+        assert 'AS "child_age"' in sql
 
     def test_repeat_sql_applies_type_cast_to_children(self, tenant):
         repeat = next(
@@ -394,7 +405,7 @@ class TestRepeatGroupGeneration:
             for a in generate_system_assets(tenant, _make_full_metadata())
             if "__repeat_" in a.name
         )
-        assert "::integer AS child_age" in repeat.sql_content
+        assert '::integer AS "child_age"' in repeat.sql_content
 
     def test_repeat_sql_uses_original_field_name_for_json_key(self, tenant):
         """JSON key should use the original leaf name, not the slugified alias."""
@@ -419,7 +430,7 @@ class TestRepeatGroupGeneration:
         sql = repeat.sql_content
         # Should use original "First_Name", not slugified "first_name"
         assert "elem.value->>'First_Name'" in sql
-        assert "AS first_name" in sql
+        assert 'AS "first_name"' in sql
 
 
 # ── Disambiguation ──────────────────────────────────────────────────────────
@@ -450,7 +461,116 @@ class TestDisambiguation:
         assets = generate_system_assets(tenant, metadata)
         names = {a.name for a in assets}
         assert "stg_form_registration" in names
-        assert "stg_form_registration_app_two" in names
+        assert "stg_form_registration_app_two_1" in names
+
+
+# ── Column alias deduplication ──────────────────────────────────────────────
+
+
+@pytest.mark.django_db
+class TestColumnAliasDeduplication:
+    def test_duplicate_property_slugs_get_numeric_suffix(self, tenant):
+        """Properties that slugify identically get _2, _3 suffixes."""
+        metadata = _make_metadata(
+            app_definitions=[
+                {
+                    "id": "a",
+                    "name": "App",
+                    "modules": [
+                        {
+                            "case_type": "test",
+                            "case_properties": [
+                                {"key": "foo-bar"},
+                                {"key": "foo.bar"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+            case_types=[{"name": "test", "app_id": "a", "app_name": "App"}],
+        )
+        assets = generate_system_assets(tenant, metadata)
+        case_asset = next(a for a in assets if a.name == "stg_case_test")
+        sql = case_asset.sql_content
+        assert '"foo_bar"' in sql
+        assert '"foo_bar_2"' in sql
+
+    def test_property_colliding_with_core_column_gets_suffix(self, tenant):
+        """A property named 'closed' (same as core column) gets _2 suffix."""
+        metadata = _make_metadata(
+            app_definitions=[
+                {
+                    "id": "a",
+                    "name": "App",
+                    "modules": [
+                        {
+                            "case_type": "test",
+                            "case_properties": [{"key": "closed"}],
+                        }
+                    ],
+                }
+            ],
+            case_types=[{"name": "test", "app_id": "a", "app_name": "App"}],
+        )
+        assets = generate_system_assets(tenant, metadata)
+        case_asset = next(a for a in assets if a.name == "stg_case_test")
+        sql = case_asset.sql_content
+        # Core "closed" column is bare, property gets suffixed alias
+        assert '"closed_2"' in sql
+
+    def test_form_question_colliding_with_fixed_column_gets_suffix(self, tenant):
+        """A question whose leaf slugifies to 'form_id' gets _2 suffix."""
+        metadata = _make_metadata(
+            form_definitions={
+                "xmlns_x": {
+                    "name": "Collision Form",
+                    "app_name": "App",
+                    "questions": [
+                        {"label": "Form ID", "value": "/data/form_id", "type": "Text"},
+                    ],
+                },
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        form_asset = next(a for a in assets if a.name.startswith("stg_form_"))
+        sql = form_asset.sql_content
+        assert '"form_id_2"' in sql
+
+    def test_repeat_question_colliding_with_fixed_column_gets_suffix(self, tenant):
+        """A repeat child question whose leaf slugifies to 'form_id' gets _2 suffix."""
+        metadata = _make_metadata(
+            form_definitions={
+                "xmlns_r": {
+                    "name": "Repeat Collision",
+                    "app_name": "App",
+                    "questions": [
+                        {
+                            "label": "Form ID",
+                            "value": "/data/items/form_id",
+                            "type": "Text",
+                            "repeat": "/data/items",
+                        },
+                    ],
+                },
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        repeat = next(a for a in assets if "__repeat_" in a.name)
+        sql = repeat.sql_content
+        assert '"form_id_2"' in sql
+
+    def test_three_plus_form_name_collisions_stay_unique(self, tenant):
+        """3+ forms with the same name from the same app get unique slugs."""
+        metadata = _make_metadata(
+            form_definitions={
+                "xmlns_a": {"name": "Follow-up", "app_name": "App", "questions": []},
+                "xmlns_b": {"name": "Follow-up", "app_name": "App", "questions": []},
+                "xmlns_c": {"name": "Follow-up", "app_name": "App", "questions": []},
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        names = [a.name for a in assets]
+        assert len(names) == len(set(names)), f"Duplicate model names: {names}"
 
 
 # ── SQL escaping ────────────────────────────────────────────────────────────
@@ -481,6 +601,25 @@ class TestSqlEscaping:
         form_asset = next(a for a in assets if a.name.startswith("stg_form_"))
         assert "f''rm" in form_asset.sql_content
 
+    def test_json_path_with_comma_uses_array_syntax(self, tenant):
+        """Commas in path segments are safely handled by ARRAY[] syntax."""
+        metadata = _make_metadata(
+            form_definitions={
+                "xmlns_comma": {
+                    "name": "Comma Form",
+                    "app_name": "App",
+                    "questions": [
+                        {"label": "Field", "value": "/data/foo,bar", "type": "Text"},
+                    ],
+                },
+            },
+        )
+        assets = generate_system_assets(tenant, metadata)
+        form_asset = next(a for a in assets if a.name.startswith("stg_form_"))
+        sql = form_asset.sql_content
+        # ARRAY syntax keeps 'foo,bar' as a single element
+        assert "ARRAY['data','foo,bar']::text[]" in sql
+
     def test_case_property_with_single_quote_is_escaped(self, tenant):
         metadata = _make_metadata(
             app_definitions=[
@@ -499,7 +638,30 @@ class TestSqlEscaping:
         )
         assets = generate_system_assets(tenant, metadata)
         case_asset = next(a for a in assets if a.name == "stg_case_test")
-        assert "mother''s_name" in case_asset.sql_content
+        assert "mother''s_name'" in case_asset.sql_content
+
+    def test_reserved_word_column_alias_is_quoted(self, tenant):
+        """PostgreSQL reserved words are safe because all aliases are double-quoted."""
+        metadata = _make_metadata(
+            app_definitions=[
+                {
+                    "id": "a",
+                    "name": "App",
+                    "modules": [
+                        {
+                            "case_type": "test",
+                            "case_properties": [{"key": "order"}, {"key": "group"}],
+                        }
+                    ],
+                }
+            ],
+            case_types=[{"name": "test", "app_id": "a", "app_name": "App"}],
+        )
+        assets = generate_system_assets(tenant, metadata)
+        case_asset = next(a for a in assets if a.name == "stg_case_test")
+        sql = case_asset.sql_content
+        assert 'AS "order"' in sql
+        assert 'AS "group"' in sql
 
 
 # ── Asset properties ────────────────────────────────────────────────────────
