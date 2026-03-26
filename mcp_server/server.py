@@ -458,6 +458,7 @@ async def run_materialization(
     tenant_membership_id: str = "",
     pipeline: str = "commcare_sync",
     workspace_id: str = "",
+    user_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
     """Materialize data from a provider into the tenant's schema.
@@ -470,6 +471,8 @@ async def run_materialization(
         tenant_id: The tenant identifier (domain or opportunity slug).
         tenant_membership_id: UUID of the specific TenantMembership to use.
         pipeline: Pipeline to run (default: commcare_sync).
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: User UUID (injected server-side by the agent graph).
     """
     from apps.users.models import TenantCredential, TenantMembership
     from mcp_server.loaders.commcare_base import CommCareAuthError
@@ -477,9 +480,14 @@ async def run_materialization(
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
         # ── Resolve TenantMembership ──────────────────────────────────────────
+        # Scope to user to prevent cross-tenant credential leakage.
+        # user_id is injected server-side by the agent graph,
+        # not controllable by the LLM.
         registry = get_registry()
         try:
             qs = TenantMembership.objects.select_related("user", "tenant")
+            if user_id:
+                qs = qs.filter(user_id=user_id)
             if tenant_membership_id:
                 tm = await qs.aget(id=tenant_membership_id, tenant__external_id=tenant_id)
             else:
@@ -490,9 +498,11 @@ async def run_materialization(
                         f"Pipeline '{pipeline}' not found in registry",
                     )
                     return tc["result"]
-                tm = await qs.aget(
+                tm = await qs.filter(
                     tenant__external_id=tenant_id, tenant__provider=pipeline_config.provider
-                )
+                ).afirst()
+                if tm is None:
+                    raise TenantMembership.DoesNotExist
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
