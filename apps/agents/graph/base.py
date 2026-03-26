@@ -303,8 +303,8 @@ async def build_agent_graph(
     tools = _build_tools(workspace, user, mcp_tools or [])
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
-    # --- Inject workspace_id into MCP tool calls from agent state ---
-    injections = {"workspace_id": "workspace_id"}
+    # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
+    injections = {"workspace_id": "workspace_id", "user_id": "user_id"}
     hidden_params = list(injections.keys())
 
     # --- Build LLM with tools ---
