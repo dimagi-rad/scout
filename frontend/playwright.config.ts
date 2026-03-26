@@ -44,5 +44,10 @@ export default defineConfig({
       testMatch: "connect-tenant.spec.ts",
       use: { ...devices["Desktop Chrome"] },
     },
+    {
+      name: "labs-smoke",
+      testMatch: "labs-smoke.spec.ts",
+      use: { ...devices["Desktop Chrome"], headless: false },
+    },
   ],
 });
