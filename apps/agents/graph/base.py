@@ -501,8 +501,10 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
         sections.append(
             "\n## Data Availability\n\n"
-            "This is a multi-tenant workspace. Use workspace_id when calling MCP tools. "
-            "Call `list_tables` to see available tables.\n"
+            "This is a multi-tenant workspace. Tables are prefixed with the tenant name "
+            "using double underscore: `{tenant_name}__{table_name}`.\n"
+            "To query across tenants, use explicit JOINs between namespaced tables.\n"
+            "Call `list_tables` to see all available tables.\n"
         )
 
     result = "\n".join(sections)

@@ -44,12 +44,13 @@ def pipeline_list_tables(
     materialized_at = run.completed_at.isoformat() if run.completed_at else None
     sources_result: dict[str, Any] = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
+    source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
 
     tables = []
     for source_name, source_data in sources_result.items():
         tables.append(
             {
-                "name": source_name,
+                "name": source_physical_names.get(source_name, f"raw_{source_name}"),
                 "type": "table",
                 "description": source_descriptions.get(source_name, ""),
                 "row_count": source_data.get("rows"),
@@ -69,6 +70,32 @@ def pipeline_list_tables(
         )
 
     return tables
+
+
+def workspace_list_tables(ctx: QueryContext) -> list[dict]:
+    """Return table list for a workspace view schema by querying information_schema directly.
+
+    Used when the schema is a WorkspaceViewSchema (namespaced views) rather than a
+    TenantSchema backed by a MaterializationRun. Returns one entry per view found.
+    """
+    result = _execute_sync_parameterized(
+        ctx,
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_type = 'VIEW' "
+        "ORDER BY table_name",
+        (ctx.schema_name,),
+        ctx.max_query_timeout_seconds,
+    )
+    return [
+        {
+            "name": row[0],
+            "type": "view",
+            "description": "",
+            "row_count": None,
+            "materialized_at": None,
+        }
+        for row in (result.get("rows") or [])
+    ]
 
 
 def pipeline_describe_table(
@@ -95,7 +122,7 @@ def pipeline_describe_table(
     if not result.get("rows"):
         return None
 
-    source_descriptions = {s.name: s.description for s in pipeline_config.sources}
+    source_descriptions = {s.physical_table_name: s.description for s in pipeline_config.sources}
     jsonb_annotations = _build_jsonb_annotations(table_name, tenant_metadata)
 
     columns = []
@@ -130,13 +157,13 @@ def _build_jsonb_annotations(
 
     metadata = tenant_metadata.metadata or {}
 
-    if table_name == "cases":
+    if table_name == "raw_cases":
         case_types = metadata.get("case_types", [])
         if case_types:
             names = ", ".join(ct["name"] for ct in case_types)
             return {"properties": f"Contains case properties. Available case types: {names}"}
 
-    elif table_name == "forms":
+    elif table_name == "raw_forms":
         form_definitions = metadata.get("form_definitions", {})
         if form_definitions:
             names = []

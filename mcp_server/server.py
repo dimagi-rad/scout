@@ -29,7 +29,13 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
-from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantMetadata,
+    TenantSchema,
+    WorkspaceViewSchema,
+)
 from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -46,6 +52,7 @@ from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_get_metadata,
     pipeline_list_tables,
+    workspace_list_tables,
 )
 from mcp_server.services.query import execute_query
 
@@ -81,6 +88,22 @@ async def list_tables(tenant_id: str, workspace_id: str | None = None) -> dict:
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
+
+        # For multi-tenant workspaces, the context points at a WorkspaceViewSchema
+        # (namespaced views). Use information_schema directly instead of MaterializationRun.
+        if workspace_id:
+            is_view_schema = await WorkspaceViewSchema.objects.filter(
+                schema_name=ctx.schema_name, state=SchemaState.ACTIVE
+            ).aexists()
+            if is_view_schema:
+                tables = await sync_to_async(workspace_list_tables)(ctx)
+                tc["result"] = success_response(
+                    {"tables": tables, "note": None},
+                    tenant_id=tenant_id,
+                    schema=ctx.schema_name,
+                    timing_ms=tc["timer"].elapsed_ms,
+                )
+                return tc["result"]
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
         if ts is None:

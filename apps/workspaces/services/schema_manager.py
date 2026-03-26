@@ -211,74 +211,59 @@ class SchemaManager:
                 )
             )
 
-            # Step 2: Collect tables and columns per tenant schema
-            all_tables: dict[str, dict[str, list[str]]] = {}
-            # all_tables[table_name][schema_name] = [col1, col2, ...]
+            # Step 2+3: Create per-tenant namespaced views
+            from apps.users.models import Tenant
 
-            for schema_name, _ in tenant_schemas:
+            # Pre-compute prefixes and detect collisions before creating any views
+            prefix_to_tenant: dict[str, str] = {}
+            tenant_prefixes: list[tuple[str, str, str]] = (
+                []
+            )  # (schema_name, tenant_external_id, prefix)
+            for schema_name, tenant_external_id in tenant_schemas:
+                tenant_obj = Tenant.objects.get(external_id=tenant_external_id)
+                prefix = self._sanitize_schema_name(tenant_obj.canonical_name)
+                if prefix in prefix_to_tenant:
+                    raise ValueError(
+                        f"Canonical name collision: tenants '{prefix_to_tenant[prefix]}' and "
+                        f"'{tenant_external_id}' both sanitize to prefix '{prefix}'"
+                    )
+                prefix_to_tenant[prefix] = tenant_external_id
+                tenant_prefixes.append((schema_name, tenant_external_id, prefix))
+
+            # Collect all (view_name, schema_name, table_name) and detect full
+            # view name collisions before executing any DDL. This catches cases
+            # where the __ delimiter is ambiguous (e.g. prefix "foo__bar" + table
+            # "baz" vs prefix "foo" + table "bar__baz").
+            planned_views: list[tuple[str, str, str]] = []
+            seen_view_names: dict[str, str] = {}  # view_name → tenant_external_id
+            for schema_name, tenant_external_id, prefix in tenant_prefixes:
                 cursor.execute(
-                    "SELECT table_name, column_name "
-                    "FROM information_schema.columns "
-                    "WHERE table_schema = %s "
-                    "ORDER BY table_name, ordinal_position",
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')",
                     (schema_name,),
                 )
-                for table_name, col_name in cursor.fetchall():
-                    all_tables.setdefault(table_name, {})
-                    all_tables[table_name].setdefault(schema_name, []).append(col_name)
-
-            # Step 3: Build UNION ALL views
-            for table_name, schema_cols in all_tables.items():
-                # Union of all column names (preserving first-seen order)
-                seen: set[str] = set()
-                union_cols: list[str] = []
-                for schema_name, _ in tenant_schemas:
-                    for col in schema_cols.get(schema_name, []):
-                        if col not in seen:
-                            union_cols.append(col)
-                            seen.add(col)
-
-                # Build one SELECT per tenant schema that has this table
-                select_parts: list[psycopg.sql.Composed] = []
-                for schema_name, tenant_external_id in tenant_schemas:
-                    if schema_name not in schema_cols:
-                        continue  # This tenant doesn't have this table — skip
-                    existing = set(schema_cols[schema_name])
-                    select_list = []
-                    for col in union_cols:
-                        if col in existing:
-                            select_list.append(
-                                psycopg.sql.SQL("{}.{}").format(
-                                    psycopg.sql.Identifier(table_name),
-                                    psycopg.sql.Identifier(col),
-                                )
-                            )
-                        else:
-                            select_list.append(
-                                psycopg.sql.SQL("NULL AS {}").format(psycopg.sql.Identifier(col))
-                            )
-                    select_list.append(
-                        psycopg.sql.SQL("{} AS _tenant").format(
-                            psycopg.sql.Literal(tenant_external_id)
+                for (table_name,) in cursor.fetchall():
+                    view_name = f"{prefix}__{table_name}"
+                    if view_name in seen_view_names:
+                        raise ValueError(
+                            f"View name collision: '{view_name}' produced by both "
+                            f"tenant '{seen_view_names[view_name]}' and '{tenant_external_id}'"
                         )
-                    )
-                    select_parts.append(
-                        psycopg.sql.SQL("SELECT {} FROM {}.{}").format(
-                            psycopg.sql.SQL(", ").join(select_list),
-                            psycopg.sql.Identifier(schema_name),
-                            psycopg.sql.Identifier(table_name),
-                        )
-                    )
+                    seen_view_names[view_name] = tenant_external_id
+                    planned_views.append((view_name, schema_name, table_name))
 
-                if not select_parts:
-                    continue
-
-                view_sql = psycopg.sql.SQL("CREATE OR REPLACE VIEW {}.{} AS {}").format(
-                    psycopg.sql.Identifier(view_schema_name),
-                    psycopg.sql.Identifier(table_name),
-                    psycopg.sql.SQL(" UNION ALL ").join(select_parts),
+            for view_name, schema_name, table_name in planned_views:
+                cursor.execute(
+                    psycopg.sql.SQL(
+                        "CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}"
+                    ).format(
+                        psycopg.sql.Identifier(view_schema_name),
+                        psycopg.sql.Identifier(view_name),
+                        psycopg.sql.Identifier(schema_name),
+                        psycopg.sql.Identifier(table_name),
+                    )
                 )
-                cursor.execute(view_sql)
+            views_created = len(planned_views)
 
             # Create read-only role for the view schema
             self._create_readonly_role(cursor, view_schema_name)
@@ -329,11 +314,11 @@ class SchemaManager:
         vs.save(update_fields=["state"])
 
         logger.info(
-            "Built view schema '%s' for workspace '%s' (%d tenants, %d tables)",
+            "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",
             view_schema_name,
             workspace.id,
             len(tenant_schemas),
-            len(all_tables),
+            views_created,
         )
         return vs
 
