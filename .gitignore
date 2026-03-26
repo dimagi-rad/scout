@@ -79,3 +79,4 @@ docs/site/
 node_modules/
 bun.lockb
 .superpowers/
+.gstack/
