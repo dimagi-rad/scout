@@ -71,6 +71,32 @@ def pipeline_list_tables(
     return tables
 
 
+def workspace_list_tables(ctx: QueryContext) -> list[dict]:
+    """Return table list for a workspace view schema by querying information_schema directly.
+
+    Used when the schema is a WorkspaceViewSchema (namespaced views) rather than a
+    TenantSchema backed by a MaterializationRun. Returns one entry per view found.
+    """
+    result = _execute_sync_parameterized(
+        ctx,
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = %s AND table_type = 'VIEW' "
+        "ORDER BY table_name",
+        (ctx.schema_name,),
+        ctx.max_query_timeout_seconds,
+    )
+    return [
+        {
+            "name": row[0],
+            "type": "view",
+            "description": "",
+            "row_count": None,
+            "materialized_at": None,
+        }
+        for row in (result.get("rows") or [])
+    ]
+
+
 def pipeline_describe_table(
     table_name: str,
     ctx: QueryContext,
