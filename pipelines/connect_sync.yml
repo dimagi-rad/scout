@@ -23,28 +23,28 @@ metadata_discovery:
   description: "Fetch opportunity detail and org/program structure from Connect API"
 
 relationships:
-  - from_table: visits
+  - from_table: raw_visits
     from_column: username
-    to_table: users
+    to_table: raw_users
     to_column: username
     description: "Visits reference the FLW who performed them"
-  - from_table: completed_works
+  - from_table: raw_completed_works
     from_column: username
-    to_table: users
+    to_table: raw_users
     to_column: username
     description: "Completed works reference the FLW"
-  - from_table: payments
+  - from_table: raw_payments
     from_column: username
-    to_table: users
+    to_table: raw_users
     to_column: username
     description: "Payments reference the FLW who earned them"
-  - from_table: assessments
+  - from_table: raw_assessments
     from_column: username
-    to_table: users
+    to_table: raw_users
     to_column: username
     description: "Assessments reference the FLW"
-  - from_table: completed_modules
+  - from_table: raw_completed_modules
     from_column: username
-    to_table: users
+    to_table: raw_users
     to_column: username
     description: "Module completions reference the FLW"

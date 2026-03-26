@@ -44,12 +44,13 @@ def pipeline_list_tables(
     materialized_at = run.completed_at.isoformat() if run.completed_at else None
     sources_result: dict[str, Any] = (run.result or {}).get("sources", {})
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
+    source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
 
     tables = []
     for source_name, source_data in sources_result.items():
         tables.append(
             {
-                "name": source_name,
+                "name": source_physical_names.get(source_name, f"raw_{source_name}"),
                 "type": "table",
                 "description": source_descriptions.get(source_name, ""),
                 "row_count": source_data.get("rows"),
@@ -121,7 +122,7 @@ def pipeline_describe_table(
     if not result.get("rows"):
         return None
 
-    source_descriptions = {s.name: s.description for s in pipeline_config.sources}
+    source_descriptions = {s.physical_table_name: s.description for s in pipeline_config.sources}
     jsonb_annotations = _build_jsonb_annotations(table_name, tenant_metadata)
 
     columns = []
@@ -156,13 +157,13 @@ def _build_jsonb_annotations(
 
     metadata = tenant_metadata.metadata or {}
 
-    if table_name == "cases":
+    if table_name == "raw_cases":
         case_types = metadata.get("case_types", [])
         if case_types:
             names = ", ".join(ct["name"] for ct in case_types)
             return {"properties": f"Contains case properties. Available case types: {names}"}
 
-    elif table_name == "forms":
+    elif table_name == "raw_forms":
         form_definitions = metadata.get("form_definitions", {})
         if form_definitions:
             names = []

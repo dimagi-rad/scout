@@ -290,7 +290,7 @@ class TestWriteCases:
             conn.commit()
             assert count == 1
             with conn.cursor() as cur:
-                cur.execute(f"SELECT case_id FROM {test_schema}.cases")
+                cur.execute(f"SELECT case_id FROM {test_schema}.raw_cases")
                 rows = cur.fetchall()
             assert rows[0][0] == "c1"
         finally:
