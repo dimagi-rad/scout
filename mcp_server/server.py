@@ -267,6 +267,49 @@ async def get_metadata(tenant_id: str, workspace_id: str | None = None) -> dict:
 
 
 @mcp.tool()
+async def get_lineage(tenant_id: str, model_name: str, workspace_id: str | None = None) -> dict:
+    """Get the transformation lineage for a model.
+
+    Returns the chain of transformations from the given model back to the raw
+    source data, showing what each step does and why. Use this when the user
+    asks about data provenance, how a table was created, or what cleaning
+    or transformations were applied to the data.
+
+    Args:
+        tenant_id: The tenant identifier.
+        model_name: Name of the model to trace lineage for.
+        workspace_id: Optional workspace UUID.
+    """
+    from apps.transformations.services.lineage import get_lineage_chain
+    from apps.users.models import Tenant
+
+    async with tool_context("get_lineage", tenant_id, model_name=model_name) as tc:
+        try:
+            tenant = await Tenant.objects.aget(external_id=tenant_id)
+        except Tenant.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
+            return tc["result"]
+
+        chain = await sync_to_async(get_lineage_chain)(
+            model_name, tenant_ids=[tenant.id], workspace_id=workspace_id
+        )
+
+        if not chain:
+            tc["result"] = error_response(
+                NOT_FOUND, f"No transformation asset named '{model_name}' found"
+            )
+            return tc["result"]
+
+        tc["result"] = success_response(
+            {"model": model_name, "lineage": chain},
+            tenant_id=tenant_id,
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
 async def query(tenant_id: str, sql: str, workspace_id: str | None = None) -> dict:
     """Execute a read-only SQL query against the tenant's database.
 

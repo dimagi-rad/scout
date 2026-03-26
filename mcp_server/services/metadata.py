@@ -179,6 +179,53 @@ def _build_jsonb_annotations(
     return {}
 
 
+def transformation_aware_list_tables(
+    tenant_schema: TenantSchema,
+    pipeline_config: PipelineConfig,
+    tenant_ids: list,
+    workspace_id=None,
+) -> list[dict]:
+    """List tables combining raw sources with terminal transformation assets.
+
+    If TransformationAsset records exist for the tenant, terminal models
+    replace their upstream tables in the listing. Otherwise falls back
+    to the standard pipeline_list_tables behavior.
+    """
+    from apps.transformations.services.lineage import get_terminal_assets
+
+    terminal_assets = get_terminal_assets(tenant_ids, workspace_id)
+
+    if not terminal_assets:
+        # No transformation assets — use existing pipeline-based listing
+        return pipeline_list_tables(tenant_schema, pipeline_config)
+
+    # Build set of replaced table names (walk replaces chains)
+    replaced_names = set()
+    for asset in terminal_assets:
+        current = asset.replaces
+        while current:
+            replaced_names.add(current.name)
+            current = current.replaces
+
+    # Start with raw tables, excluding replaced ones
+    raw_tables = pipeline_list_tables(tenant_schema, pipeline_config)
+    result = [t for t in raw_tables if t["name"] not in replaced_names]
+
+    # Add terminal transformation assets
+    for asset in terminal_assets:
+        result.append(
+            {
+                "name": asset.name,
+                "type": "table",
+                "description": asset.description,
+                "row_count": None,
+                "materialized_at": None,
+            }
+        )
+
+    return result
+
+
 def pipeline_get_metadata(
     tenant_schema: TenantSchema,
     ctx: QueryContext,
