@@ -129,7 +129,10 @@ def run_dbt_test(
         models: Optional list of model names to scope tests to.
 
     Returns:
-        {"success": bool, "tests": {test_unique_id: {"status": str, "message": str}}, "error": str | None}
+        {"success": bool, "tests": {model_name: [{"test": str, "status": str, "message": str}]}, "error": str | None}
+
+    Test results are grouped by the model name they test (extracted from
+    ``node.attached_node``), so the caller can look up results by model name.
     """
     cli_args = ["test", "--project-dir", dbt_project_dir, "--profiles-dir", profiles_dir]
     if models:
@@ -146,13 +149,25 @@ def run_dbt_test(
         logger.error("dbt test failed: %s", error_msg)
         return {"success": False, "tests": {}, "error": error_msg}
 
-    test_results = {}
+    # Group test results by the model they test.
+    # Schema test nodes expose ``attached_node`` = "model.<project>.<model_name>".
+    test_results: dict[str, list[dict]] = {}
     for r in res.result or []:
-        if hasattr(r, "node") and hasattr(r, "status"):
-            test_results[r.node.unique_id] = {
-                "status": str(r.status),
-                "message": getattr(r, "message", ""),
-            }
+        if not (hasattr(r, "node") and hasattr(r, "status")):
+            continue
+        attached = getattr(r.node, "attached_node", None) or ""
+        model_name = attached.split(".")[-1] if attached.startswith("model.") else None
+        entry = {
+            "test": r.node.name,
+            "status": str(r.status),
+            "message": getattr(r, "message", ""),
+        }
+        if model_name:
+            test_results.setdefault(model_name, []).append(entry)
 
-    logger.info("dbt test complete: %d tests", len(test_results))
+    logger.info(
+        "dbt test complete: %d tests across %d models",
+        sum(len(v) for v in test_results.values()),
+        len(test_results),
+    )
     return {"success": True, "tests": test_results, "error": None}

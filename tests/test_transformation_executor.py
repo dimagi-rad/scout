@@ -12,6 +12,13 @@ from apps.transformations.models import (
 )
 from apps.transformations.services.executor import run_transformation_pipeline
 
+pytestmark = pytest.mark.usefixtures("_managed_db_url")
+
+
+@pytest.fixture
+def _managed_db_url(settings):
+    settings.MANAGED_DATABASE_URL = "postgresql://user:pass@localhost:5432/testdb"
+
 
 def _dbt_success(*model_names):
     """Return a successful run_dbt result for the given model names."""
@@ -87,8 +94,14 @@ def test_system_stage_creates_asset_runs(mock_profiles, mock_dbt, tenant, system
 @pytest.mark.django_db
 @patch("apps.transformations.services.executor.run_dbt")
 @patch("apps.transformations.services.executor.generate_profiles_yml")
-def test_tenant_stage_runs_after_system(mock_profiles, mock_dbt, tenant, system_assets, tenant_assets):
-    mock_dbt.return_value = {"success": True, "models": {a.name: "success" for a in system_assets + tenant_assets}, "error": None}
+def test_tenant_stage_runs_after_system(
+    mock_profiles, mock_dbt, tenant, system_assets, tenant_assets
+):
+    mock_dbt.return_value = {
+        "success": True,
+        "models": {a.name: "success" for a in system_assets + tenant_assets},
+        "error": None,
+    }
 
     run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
 
@@ -101,7 +114,9 @@ def test_tenant_stage_runs_after_system(mock_profiles, mock_dbt, tenant, system_
 @pytest.mark.django_db
 @patch("apps.transformations.services.executor.run_dbt")
 @patch("apps.transformations.services.executor.generate_profiles_yml")
-def test_workspace_stage_only_runs_with_workspace(mock_profiles, mock_dbt, tenant, workspace, workspace_assets):
+def test_workspace_stage_only_runs_with_workspace(
+    mock_profiles, mock_dbt, tenant, workspace, workspace_assets
+):
     mock_dbt.return_value = _dbt_success("ws_analysis")
 
     # Without workspace — no workspace stage
@@ -109,7 +124,9 @@ def test_workspace_stage_only_runs_with_workspace(mock_profiles, mock_dbt, tenan
     assert run_no_ws.asset_runs.count() == 0
 
     # With workspace — workspace stage runs
-    run_with_ws = run_transformation_pipeline(tenant=tenant, schema_name="test_schema", workspace=workspace)
+    run_with_ws = run_transformation_pipeline(
+        tenant=tenant, schema_name="test_schema", workspace=workspace
+    )
     assert run_with_ws.asset_runs.count() == 1
     assert run_with_ws.asset_runs.first().asset.name == "ws_analysis"
 
@@ -153,6 +170,29 @@ def test_partial_dbt_failure(mock_profiles, mock_dbt, tenant, system_assets):
 @pytest.mark.django_db
 @patch("apps.transformations.services.executor.run_dbt")
 @patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_skipped_model_marked_as_skipped(mock_profiles, mock_dbt, tenant, system_assets):
+    """A skipped model (e.g. upstream failure) is marked SKIPPED, not FAILED."""
+    mock_dbt.return_value = {
+        "success": True,
+        "models": {
+            "stg_model_0": "success",
+            "stg_model_1": "skipped",
+            "stg_model_2": "success",
+        },
+        "error": None,
+    }
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    statuses = {ar.asset.name: ar.status for ar in run.asset_runs.all()}
+    assert statuses["stg_model_0"] == AssetRunStatus.SUCCESS
+    assert statuses["stg_model_1"] == AssetRunStatus.SKIPPED
+    assert statuses["stg_model_2"] == AssetRunStatus.SUCCESS
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
 def test_total_dbt_failure(mock_profiles, mock_dbt, tenant, system_assets):
     """dbt crashes entirely — TransformationRun is FAILED."""
     mock_dbt.side_effect = RuntimeError("dbt crashed")
@@ -178,7 +218,9 @@ def test_test_yaml_triggers_dbt_test(mock_profiles, mock_dbt, mock_test, tenant)
     mock_dbt.return_value = _dbt_success("stg_tested")
     mock_test.return_value = {
         "success": True,
-        "tests": {"stg_tested": {"status": "pass", "message": ""}},
+        "tests": {
+            "stg_tested": [{"test": "unique_stg_tested_id", "status": "pass", "message": ""}],
+        },
         "error": None,
     }
 
@@ -186,7 +228,9 @@ def test_test_yaml_triggers_dbt_test(mock_profiles, mock_dbt, mock_test, tenant)
 
     mock_test.assert_called_once()
     ar = run.asset_runs.first()
-    assert ar.test_results == {"status": "pass", "message": ""}
+    assert ar.test_results == [
+        {"test": "unique_stg_tested_id", "status": "pass", "message": ""},
+    ]
 
 
 @pytest.mark.django_db
@@ -204,10 +248,16 @@ def test_no_test_yaml_skips_dbt_test(mock_profiles, mock_dbt, tenant, system_ass
 @patch("apps.transformations.services.executor.run_dbt")
 @patch("apps.transformations.services.executor.generate_profiles_yml")
 def test_progress_callback_called(mock_profiles, mock_dbt, tenant, system_assets, tenant_assets):
-    mock_dbt.return_value = {"success": True, "models": {a.name: "success" for a in system_assets + tenant_assets}, "error": None}
+    mock_dbt.return_value = {
+        "success": True,
+        "models": {a.name: "success" for a in system_assets + tenant_assets},
+        "error": None,
+    }
     callback = MagicMock()
 
-    run_transformation_pipeline(tenant=tenant, schema_name="test_schema", progress_callback=callback)
+    run_transformation_pipeline(
+        tenant=tenant, schema_name="test_schema", progress_callback=callback
+    )
 
     assert callback.call_count == 2  # system + tenant stages
     calls = [c.args[0] for c in callback.call_args_list]

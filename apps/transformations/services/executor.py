@@ -48,12 +48,24 @@ def run_transformation_pipeline(
     )
 
     stages = [
-        ("system", TransformationScope.SYSTEM, {"tenant": tenant, "scope": TransformationScope.SYSTEM}),
-        ("tenant", TransformationScope.TENANT, {"tenant": tenant, "scope": TransformationScope.TENANT}),
+        (
+            "system",
+            TransformationScope.SYSTEM,
+            {"tenant": tenant, "scope": TransformationScope.SYSTEM},
+        ),
+        (
+            "tenant",
+            TransformationScope.TENANT,
+            {"tenant": tenant, "scope": TransformationScope.TENANT},
+        ),
     ]
     if workspace:
         stages.append(
-            ("workspace", TransformationScope.WORKSPACE, {"workspace": workspace, "scope": TransformationScope.WORKSPACE})
+            (
+                "workspace",
+                TransformationScope.WORKSPACE,
+                {"workspace": workspace, "scope": TransformationScope.WORKSPACE},
+            )
         )
 
     try:
@@ -104,6 +116,8 @@ def _run_stage(run, assets, schema_name, stage_name):
         )
 
         db_url = getattr(settings, "MANAGED_DATABASE_URL", "")
+        if not db_url:
+            raise RuntimeError("MANAGED_DATABASE_URL is not configured")
         generate_profiles_yml(
             output_path=profiles_dir / "profiles.yml",
             schema_name=schema_name,
@@ -136,6 +150,8 @@ def _run_stage(run, assets, schema_name, stage_name):
 
             if model_status in ("success", "pass"):
                 ar.status = AssetRunStatus.SUCCESS
+            elif model_status == "skipped":
+                ar.status = AssetRunStatus.SKIPPED
             elif result.get("success") and model_status == "unknown":
                 # dbt reported overall success but didn't list this model specifically
                 ar.status = AssetRunStatus.SUCCESS
@@ -150,6 +166,4 @@ def _run_stage(run, assets, schema_name, stage_name):
             ar.save(update_fields=["status", "logs", "test_results", "completed_at"])
 
         if not result.get("success"):
-            logger.warning(
-                "Stage '%s' had failures: %s", stage_name, result.get("error")
-            )
+            logger.warning("Stage '%s' had failures: %s", stage_name, result.get("error"))

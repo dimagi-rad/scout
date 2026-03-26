@@ -43,9 +43,7 @@ def write_dbt_project(
         "test-paths": ["tests"],
         "models": {"+materialized": "table"},
     }
-    (output_dir / "dbt_project.yml").write_text(
-        yaml.dump(project_config, default_flow_style=False)
-    )
+    (output_dir / "dbt_project.yml").write_text(yaml.dump(project_config, default_flow_style=False))
 
     # Model SQL files
     for asset in assets:
@@ -62,8 +60,6 @@ def write_dbt_project(
 
     if merged_models:
         schema = {"version": 2, "models": merged_models}
-        (models_dir / "schema.yml").write_text(
-            yaml.dump(schema, default_flow_style=False)
-        )
+        (models_dir / "schema.yml").write_text(yaml.dump(schema, default_flow_style=False))
 
     return output_dir
