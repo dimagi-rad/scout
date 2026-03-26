@@ -29,6 +29,12 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
+from apps.users.auth_views import PROVIDER_TOKEN_URLS
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    refresh_oauth_token,
+    token_needs_refresh,
+)
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -55,13 +61,6 @@ from mcp_server.services.metadata import (
     workspace_list_tables,
 )
 from mcp_server.services.query import execute_query
-
-from apps.users.auth_views import PROVIDER_TOKEN_URLS
-from apps.users.services.token_refresh import (
-    TokenRefreshError,
-    refresh_oauth_token,
-    token_needs_refresh,
-)
 
 logger = logging.getLogger(__name__)
 
