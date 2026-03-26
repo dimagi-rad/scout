@@ -50,7 +50,15 @@ direnv allow   # loads .env and activates the uv virtualenv automatically
 uv sync
 ```
 
-### 3. Configure environment
+### 3. Install pre-commit hooks
+
+```bash
+uv run pre-commit install
+```
+
+This sets up linting (ruff + eslint) to run automatically on every commit.
+
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
@@ -58,13 +66,13 @@ cp .env.example .env
 # ANTHROPIC_API_KEY, and DB_CREDENTIAL_KEY
 ```
 
-### 4. Install frontend dependencies
+### 5. Install frontend dependencies
 
 ```bash
 inv frontend-install   # runs: cd frontend && bun install
 ```
 
-### 5. Start PostgreSQL and Redis
+### 6. Start PostgreSQL and Redis
 
 Install PostgreSQL 14+ and Redis via your platform's package manager (e.g. `apt`, `brew`, Postgres.app) and ensure both are running. Then create the database:
 
@@ -78,19 +86,19 @@ Alternatively, use Docker for just the backing services:
 inv deps   # docker compose up platform-db redis
 ```
 
-### 6. Run migrations
+### 7. Run migrations
 
 ```bash
 inv migrate
 ```
 
-### 7. Create a superuser
+### 8. Create a superuser
 
 ```bash
 inv createsuperuser   # prompts for email and password
 ```
 
-### 8. Start all dev servers
+### 9. Start all dev servers
 
 ```bash
 inv dev   # Django :8000, MCP :8100, Vite :5173

@@ -103,4 +103,5 @@ dev = [
     "prek>=0.3.3",
     "invoke>=2.2",
     "freezegun>=1.5.5",
+    "pre-commit>=4.5.1",
 ]
