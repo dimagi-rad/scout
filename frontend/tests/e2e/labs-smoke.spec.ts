@@ -106,7 +106,7 @@ test("full labs flow: login → select workspace → chat", async () => {
     // ── Step 4: Find chat input ──
     console.log("── Step 4: Looking for chat input...")
 
-    let chatInput = page.locator('input[placeholder*="Ask about your data"], textarea, [contenteditable="true"], [role="textbox"]').first()
+    const chatInput = page.locator('input[placeholder*="Ask about your data"], textarea, [contenteditable="true"], [role="textbox"]').first()
 
     await page.screenshot({ path: "/tmp/labs-06-chat.png" })
 
