@@ -23,6 +23,7 @@ export function KnowledgePage() {
   const navigate = useNavigate()
   const importInputRef = useRef<HTMLInputElement>(null)
 
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const knowledgeItems = useAppStore((s) => s.knowledgeItems)
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const knowledgeFilter = useAppStore((s) => s.knowledgeFilter)
@@ -47,11 +48,12 @@ export function KnowledgePage() {
   const isNew = location.pathname.endsWith("/new")
 
   useEffect(() => {
+    if (!activeDomainId) return
     fetchKnowledge({
       type: knowledgeFilter ?? undefined,
       search: knowledgeSearch || undefined,
     })
-  }, [knowledgeFilter, knowledgeSearch, fetchKnowledge])
+  }, [activeDomainId, knowledgeFilter, knowledgeSearch, fetchKnowledge])
 
   useEffect(() => {
     if (isNew) {

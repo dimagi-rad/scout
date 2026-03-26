@@ -61,10 +61,14 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
 
     ensureTenant: async (provider: string, tenantId: string) => {
       try {
-        await api.post("/api/auth/tenants/ensure/", {
+        const result = await api.post<{ workspace_id?: string }>("/api/auth/tenants/ensure/", {
           provider,
           tenant_id: tenantId,
         })
+        // Set the workspace ID before fetchDomains so it's preserved
+        if (result.workspace_id) {
+          set({ activeDomainId: result.workspace_id })
+        }
         await get().domainActions.fetchDomains()
       } catch (error) {
         console.error("[Scout] Failed to ensure tenant:", error)

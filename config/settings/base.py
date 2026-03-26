@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "apps.artifacts",
     "apps.recipes",
     "apps.chat",
+    "apps.transformations",
 ]
 
 MIDDLEWARE = [
