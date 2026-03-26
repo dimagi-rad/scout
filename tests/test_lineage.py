@@ -343,3 +343,33 @@ def test_transformation_aware_mixed(tenant):
     assert "stg_form_reg" in names
     assert "raw_cases" in names
     assert "raw_forms" in names
+
+
+@pytest.mark.django_db
+def test_transformation_aware_no_duplicates(tenant):
+    """Terminal asset whose name matches a pipeline table should not produce duplicates."""
+    from mcp_server.services.metadata import transformation_aware_list_tables
+
+    TransformationAsset.objects.create(
+        name="stg_cases",
+        scope=TransformationScope.SYSTEM,
+        tenant=tenant,
+        sql_content="SELECT * FROM raw_cases WHERE case_type = 'patient'",
+        description="Staged cases",
+    )
+
+    mock_raw_tables = [
+        {"name": "raw_cases", "type": "table", "description": "Cases", "row_count": 100},
+        {"name": "stg_cases", "type": "table", "description": "Staged", "row_count": 80},
+    ]
+
+    with patch("mcp_server.services.metadata.pipeline_list_tables", return_value=mock_raw_tables):
+        result = transformation_aware_list_tables(
+            tenant_schema=None,
+            pipeline_config=None,
+            tenant_ids=[tenant.id],
+        )
+
+    names = [t["name"] for t in result]
+    assert names.count("stg_cases") == 1
+    assert "raw_cases" in names

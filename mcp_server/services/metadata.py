@@ -203,13 +203,18 @@ def transformation_aware_list_tables(
     replaced_names = set()
     for asset in terminal_assets:
         current = asset.replaces
-        while current:
+        visited = set()
+        while current and current.id not in visited:
+            visited.add(current.id)
             replaced_names.add(current.name)
             current = current.replaces
 
-    # Start with raw tables, excluding replaced ones
+    # Start with raw tables, excluding replaced ones and terminal asset names
     raw_tables = pipeline_list_tables(tenant_schema, pipeline_config)
-    result = [t for t in raw_tables if t["name"] not in replaced_names]
+    terminal_names = {asset.name for asset in terminal_assets}
+    result = [
+        t for t in raw_tables if t["name"] not in replaced_names and t["name"] not in terminal_names
+    ]
 
     # Add terminal transformation assets
     for asset in terminal_assets:

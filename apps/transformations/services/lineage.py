@@ -46,8 +46,6 @@ def get_lineage_chain(
     ]
 
     If the asset has no replaces chain, returns just the single asset.
-    The raw source table is appended as the final entry if identifiable
-    from the SQL (i.e., the terminal system model references raw_cases).
     """
     q = models.Q(tenant_id__in=tenant_ids)
     if workspace_id:
@@ -58,8 +56,10 @@ def get_lineage_chain(
     except TransformationAsset.DoesNotExist:
         return []
     except TransformationAsset.MultipleObjectsReturned:
-        # If multiple assets match (different scopes), prefer the most downstream one
-        asset = TransformationAsset.objects.filter(q, name=asset_name).first()
+        # If multiple assets match (different scopes), prefer the most downstream one.
+        # Default ordering is ["scope", "name"] which sorts system < tenant < workspace,
+        # so reverse to get workspace (most downstream) first.
+        asset = TransformationAsset.objects.filter(q, name=asset_name).order_by("-scope").first()
 
     chain = []
     current = asset
