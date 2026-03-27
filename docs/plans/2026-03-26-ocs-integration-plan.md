@@ -1,8 +1,20 @@
 # OCS (Open Chat Studio) Integration Plan
 
-**Date:** 2026-03-26
+**Date:** 2026-03-26 (revised 2026-03-27)
 **Branch:** `feature/ocs-integration`
 **Goal:** Add OCS as a third workspace provider in Scout, enabling users to query chatbot session data.
+
+## Revision Notes
+
+Revised based on [PR #116 review](https://github.com/dimagi-rad/scout/pull/116#issuecomment-4139697208). Key changes:
+- **Dropped `OCSTeamCredential`** — uses existing `TenantCredential` + `credential_resolver.py` pipeline (#1)
+- **Dropped `ocs_team` FK on Tenant** — uses `OCSTeam` as a standalone group record linked via `team_slug` stored on Tenant metadata (#2)
+- **Resolved message_id** — use deterministic composite key `{session_id}:{message_index}` with stable ordering (#3)
+- **Added PROVIDER_TOKEN_URLS entry** for OCS token refresh (#4)
+- **Added all missing integration points** — credential_resolver, me_view, PROVIDER_DISPLAY, apps.py, admin registration (#5-12)
+- **Added chatbot lifecycle, incremental sync, rate limiting, and negative-path testing** (#13-20)
+
+---
 
 ## Context
 
@@ -12,7 +24,7 @@ Scout currently supports two providers: **CommCare HQ** (domains) and **CommCare
 
 | OCS Concept | Scout Concept | Notes |
 |-------------|---------------|-------|
-| Team | Auth/credential scope | Selected during OAuth consent screen |
+| Team | Auth/credential scope | Selected during OAuth consent screen; stored as `OCSTeam` |
 | Experiment (Chatbot) | Tenant → Workspace | Each chatbot = one entry in workspace dropdown |
 | Session | Materialized data (raw_sessions) | Conversation instance with a chatbot |
 | Message | Materialized data (raw_messages) | Individual message within a session |
@@ -20,7 +32,7 @@ Scout currently supports two providers: **CommCare HQ** (domains) and **CommCare
 
 ### Key Design Decision: Chatbot-as-Tenant
 
-Each OCS chatbot becomes its own `Tenant` (provider=`"ocs"`, external_id=experiment UUID). The OAuth token is team-scoped, so multiple chatbot tenants share one team credential. A new `OCSTeam` model links chatbot tenants to their team-level credential.
+Each OCS chatbot becomes its own `Tenant` (provider=`"ocs"`, external_id=experiment UUID). The OAuth token is team-scoped via allauth's `SocialToken`, so multiple chatbot tenants share one token naturally. An `OCSTeam` model tracks team membership for experiment discovery, but credentials flow through the existing `TenantCredential` → `credential_resolver.py` pipeline.
 
 ---
 
@@ -30,7 +42,6 @@ Each OCS chatbot becomes its own `Tenant` (provider=`"ocs"`, external_id=experim
 
 **File:** `apps/users/models.py`
 
-Add to `PROVIDER_CHOICES`:
 ```python
 PROVIDER_CHOICES = [
     ("commcare", "CommCare HQ"),
@@ -43,58 +54,50 @@ PROVIDER_CHOICES = [
 
 **File:** `apps/users/models.py`
 
+Tracks which OCS teams a user has authorized. Used during experiment discovery to know which team's experiments to fetch. Does NOT hold credentials — those go through `SocialToken` (OAuth) or `TenantCredential` (API key).
+
 ```python
 class OCSTeam(models.Model):
-    """Stores team-level OCS credentials shared across chatbot tenants."""
+    """Tracks a user's authorized OCS team for experiment discovery."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     team_slug = models.CharField(max_length=255)
     team_name = models.CharField(max_length=255)
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ocs_teams")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="ocs_teams"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = [["user", "team_slug"]]
+
+    def __str__(self):
+        return f"OCSTeam({self.team_name} [{self.team_slug}] for {self.user})"
 ```
 
-### 1.3 Add `ocs_team` FK to `Tenant`
-
-**File:** `apps/users/models.py`
-
-Add nullable FK on Tenant:
+Register in `apps/users/admin.py`:
 ```python
-ocs_team = models.ForeignKey(
-    "OCSTeam", null=True, blank=True,
-    on_delete=models.SET_NULL, related_name="tenants",
-    help_text="For OCS tenants: links to the team holding the OAuth credential.",
-)
+@admin.register(OCSTeam)
+class OCSTeamAdmin(admin.ModelAdmin):
+    list_display = ("team_name", "team_slug", "user", "created_at")
+    search_fields = ("team_name", "team_slug", "user__email")
 ```
 
-### 1.4 Credential storage for OCSTeam
+### 1.3 Credential flow (existing pipeline, no new models)
 
-**File:** `apps/users/models.py`
+**OAuth (primary path):**
+- OCS OAuth token is stored in `allauth.socialaccount.SocialToken` automatically
+- Each OCS chatbot Tenant gets a `TenantCredential(credential_type=OAUTH)` via the existing resolver pattern
+- `credential_resolver.py` resolves the token by matching `account__provider__startswith="ocs"`
 
-```python
-class OCSTeamCredential(models.Model):
-    """OAuth or API key credential for an OCS team."""
-    OAUTH = "oauth"
-    API_KEY = "api_key"
-    TYPE_CHOICES = [(OAUTH, "OAuth Token"), (API_KEY, "API Key")]
+**API key (secondary path):**
+- Stored in `TenantCredential(credential_type=API_KEY, encrypted_credential=...)` — same as CommCare API keys
+- Each chatbot Tenant gets its own `TenantCredential` pointing to the same encrypted key
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    ocs_team = models.OneToOneField(OCSTeam, on_delete=models.CASCADE, related_name="credential")
-    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
-    encrypted_credential = models.CharField(
-        max_length=2000, blank=True,
-        help_text="Fernet-encrypted API key. Empty for OAuth type.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-```
+This keeps a **single credential resolution path** through `credential_resolver.py`.
 
-### 1.5 Migration
+### 1.4 Migration
 
-Generate migration for all model changes:
 ```bash
 uv run python manage.py makemigrations users
 ```
@@ -108,35 +111,59 @@ uv run python manage.py makemigrations users
 **New directory:** `apps/users/providers/ocs/`
 
 Files to create:
-- `__init__.py`
+- `__init__.py` — empty or with `default_app_config`
+- `apps.py` — `OCSProviderConfig(AppConfig)` with `name = "apps.users.providers.ocs"`
 - `provider.py` — `OCSProvider(OAuth2Provider)` with:
   - `id = "ocs"`
   - `name = "Open Chat Studio"`
-  - Scopes: `chatbots:read`, `sessions:read`, `sessions:write`, `files:read`, `openid`
-  - `extract_uid()` from userinfo response
-  - `extract_common_fields()` for email/name
-- `views.py` — `OCSAdapter(OAuth2Adapter)` with:
-  - `authorize_url = "{OCS_URL}/o/authorize/"`
-  - `access_token_url = "{OCS_URL}/o/token/"`
-  - `profile_url = "{OCS_URL}/o/userinfo/"`
-  - PKCE support (code_challenge_method=S256)
-- `urls.py` — Standard allauth OAuth URL patterns
+  - `oauth2_adapter_class = OCSOAuth2Adapter`
+  - `get_default_scope()` → `["chatbots:read", "sessions:read", "files:read", "openid"]`
+  - `extract_uid(data)` from userinfo response
+  - `extract_common_fields(data)` for email/name
+- `views.py` — `OCSOAuth2Adapter(OAuth2Adapter)` with:
+  - `authorize_url` = `f"{settings.OCS_URL}/o/authorize/"`
+  - `access_token_url` = `f"{settings.OCS_URL}/o/token/"`
+  - `profile_url` = `f"{settings.OCS_URL}/o/userinfo/"`
+  - PKCE support via `SOCIALACCOUNT_PROVIDERS` config
+- `urls.py` — `default_urlpatterns(OCSProvider)` (allauth auto-discovers via `config/urls.py` include of `allauth.urls`)
 
 **Settings additions** (`config/settings/base.py`):
 ```python
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
+
+INSTALLED_APPS += ["apps.users.providers.ocs"]
+
+SOCIALACCOUNT_PROVIDERS["ocs"] = {
+    "OAUTH_PKCE_ENABLED": True,
+}
 ```
 
-Add `"apps.users.providers.ocs"` to `INSTALLED_APPS`.
+### 2.2 Update auth_views.py integration points
 
-### 2.2 API key auth support
+**File:** `apps/users/auth_views.py`
+
+```python
+# Add to PROVIDER_DISPLAY
+PROVIDER_DISPLAY = {
+    ...
+    "ocs": "Open Chat Studio",
+}
+
+# Add to PROVIDER_TOKEN_URLS
+PROVIDER_TOKEN_URLS = {
+    ...
+    "ocs": f"{settings.OCS_URL}/o/token/",
+}
+```
+
+### 2.3 API key auth support
 
 **File:** `apps/users/api/views.py` (or new endpoint)
 
-Add endpoint for users to submit an OCS API key manually:
-- Accepts: `api_key`, `ocs_url` (optional, defaults to production)
-- Validates the key by calling `GET {ocs_url}/api/experiments/` with `X-api-key` header
-- On success: creates `OCSTeam` + `OCSTeamCredential(API_KEY)` + triggers experiment discovery (Phase 3)
+Add endpoint for users to submit an OCS API key:
+- Accepts: `api_key`, `team_slug`, `ocs_url` (optional)
+- Validates by calling `GET {ocs_url}/api/experiments/` with `X-api-key` header
+- On success: creates `OCSTeam`, triggers experiment discovery, creates `TenantCredential(API_KEY)` per chatbot tenant
 
 ---
 
@@ -146,37 +173,52 @@ Add endpoint for users to submit an OCS API key manually:
 
 **File:** `apps/users/services/tenant_resolution.py`
 
+Follows the same signature pattern as existing resolvers (`user, access_token: str`):
+
 ```python
-def resolve_ocs_experiments(user, credential, ocs_team):
-    """Fetch all experiments for the team and create Tenant + Workspace per chatbot."""
-    experiments = _fetch_all_ocs_experiments(credential, ocs_team)
+class OCSAuthError(Exception):
+    """Raised when OCS returns a 401/403 during experiment resolution."""
+
+def resolve_ocs_experiments(user, access_token: str) -> list[TenantMembership]:
+    """Fetch all experiments for the user's OCS team and create Tenant + Workspace per chatbot."""
+    ocs_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com")
+    experiments = _fetch_all_ocs_experiments(access_token, ocs_url)
     memberships = []
     for exp in experiments:
         tenant, _ = Tenant.objects.update_or_create(
             provider="ocs",
-            external_id=str(exp["id"]),  # experiment UUID
-            defaults={
-                "canonical_name": exp["name"],
-                "ocs_team": ocs_team,
-            },
+            external_id=str(exp["id"]),
+            defaults={"canonical_name": exp["name"]},
         )
         tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+        TenantCredential.objects.get_or_create(
+            tenant_membership=tm,
+            defaults={"credential_type": TenantCredential.OAUTH},
+        )
         memberships.append(tm)
     return memberships
 ```
 
-Note: OCS chatbot tenants do NOT get their own `TenantCredential`. Credential resolution for OCS tenants follows `tenant.ocs_team.credential` instead.
-
 ### 3.2 Experiment list pagination
 
-**Helper in** `apps/users/services/tenant_resolution.py`:
-
 ```python
-def _fetch_all_ocs_experiments(credential, ocs_team):
+def _fetch_all_ocs_experiments(access_token: str, base_url: str) -> list[dict]:
     """Paginate through GET /api/experiments/ using cursor pagination."""
-    # Auth: X-api-key header (API key) or Authorization: Bearer (OAuth)
-    # Follow cursor-based pagination until no next page
-    # Returns list of {"id": uuid, "name": str, ...}
+    results = []
+    url = f"{base_url.rstrip('/')}/api/experiments/"
+    while url:
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise OCSAuthError(f"OCS returned {resp.status_code}")
+        resp.raise_for_status()
+        data = resp.json()
+        results.extend(data.get("results", []))
+        url = data.get("next")  # cursor pagination next URL
+    return results
 ```
 
 ### 3.3 Hook into signals
@@ -186,13 +228,59 @@ def _fetch_all_ocs_experiments(credential, ocs_team):
 Add OCS branch to `resolve_tenant_on_social_login()`:
 ```python
 elif provider == "ocs":
-    # Get or create OCSTeam from OAuth token (team info from userinfo endpoint)
-    # Call resolve_ocs_experiments(user, credential, ocs_team)
+    try:
+        from apps.users.services.tenant_resolution import resolve_ocs_experiments
+        resolve_ocs_experiments(sociallogin.user, token.token)
+    except Exception:
+        logger.warning("Failed to resolve OCS experiments after OAuth", exc_info=True)
 ```
 
-### 3.4 Workspace auto-creation
+### 3.4 Update me_view for lazy resolution
 
-The existing `auto_create_workspace_on_membership` signal handler already creates one Workspace per TenantMembership. Since each chatbot becomes its own Tenant, this works as-is. Each chatbot will appear in the workspace dropdown.
+**File:** `apps/users/auth_views.py`
+
+Add OCS to the lazy provider resolution chain in `me_view()`:
+```python
+# Add _get_ocs_token helper in apps/users/views.py
+_try_resolve_provider(user, _get_ocs_token, resolve_ocs_experiments, "OCS")
+```
+
+### 3.5 Update credential_resolver.py
+
+**File:** `apps/users/services/credential_resolver.py`
+
+Add OCS branch to the OAuth token lookup:
+```python
+provider = membership.tenant.provider
+if provider == "commcare_connect":
+    token_obj = SocialToken.objects.filter(
+        account__user=membership.user,
+        account__provider__startswith="commcare_connect",
+    ).first()
+elif provider == "ocs":
+    token_obj = SocialToken.objects.filter(
+        account__user=membership.user,
+        account__provider__startswith="ocs",
+    ).first()
+else:
+    # CommCare HQ (existing logic)
+    token_obj = (
+        SocialToken.objects.filter(...)
+        .exclude(...)
+        .first()
+    )
+```
+
+### 3.6 Workspace auto-creation
+
+The existing `auto_create_workspace_on_membership` signal handler creates one Workspace per TenantMembership — works as-is.
+
+### 3.7 Tenant lifecycle management
+
+When `resolve_ocs_experiments` runs, it should also handle deletions:
+- After fetching current experiments, compare with existing OCS tenants for this user
+- Mark orphaned tenants (chatbots deleted in OCS) — either soft-delete or archive
+- Do NOT auto-delete workspaces that may contain materialized data; flag for user review
 
 ---
 
@@ -203,19 +291,33 @@ The existing `auto_create_workspace_on_membership` signal handler already create
 **New file:** `mcp_server/loaders/ocs_base.py`
 
 ```python
+class OCSAuthError(Exception):
+    """Raised when OCS returns a 401 or 403 response."""
+
 class OCSBaseLoader:
     """Base class for OCS API loaders."""
     DEFAULT_BASE_URL = "https://www.openchatstudio.com"
+    HTTP_TIMEOUT = (10, 120)  # (connect, read)
 
     def __init__(self, experiment_id, credential, base_url=None):
         self.experiment_id = experiment_id
         self.base_url = base_url or self._get_base_url()
         self._session = requests.Session()
-        # Support both API key and OAuth
         if credential["type"] == "api_key":
             self._session.headers["X-api-key"] = credential["value"]
         else:
             self._session.headers["Authorization"] = f"Bearer {credential['value']}"
+
+    def _get(self, url, params=None):
+        resp = self._session.get(url, params=params, timeout=self.HTTP_TIMEOUT)
+        if resp.status_code in (401, 403):
+            raise OCSAuthError(f"OCS auth failed: HTTP {resp.status_code}")
+        if resp.status_code == 429:
+            # Rate limited — log and raise
+            retry_after = resp.headers.get("Retry-After", "unknown")
+            raise OCSRateLimitError(f"Rate limited, retry after {retry_after}s")
+        resp.raise_for_status()
+        return resp
 ```
 
 ### 4.2 Session loader
@@ -223,10 +325,14 @@ class OCSBaseLoader:
 **New file:** `mcp_server/loaders/ocs_sessions.py`
 
 - `OCSSessionLoader(OCSBaseLoader)`
-- Endpoint: `GET /api/sessions/?experiment={experiment_id}`
-- Cursor-based pagination (page_size=500)
-- `load_pages()` yields lists of session dicts, each including full message history from the session detail endpoint
-- Returns: `{"session_id", "experiment_id", "created_at", "updated_at", "status", "tags", "state", "messages": [...]}`
+- List endpoint: `GET /api/sessions/?experiment={experiment_id}&page_size=500`
+- Cursor-based pagination
+- The sessions list endpoint returns messages inline per session (no N+1 detail calls needed — verify during implementation; if not, batch with controlled concurrency)
+- `load_pages()` yields lists of session dicts with embedded messages
+
+**Incremental sync strategy:**
+- Filter sessions by `ordering=-created_at` and stop pagination when reaching sessions already in the schema (compare `created_at` with latest in `raw_sessions`)
+- Full re-sync available via explicit user action
 
 ### 4.3 Experiment metadata loader
 
@@ -241,9 +347,16 @@ class OCSBaseLoader:
 **New file:** `mcp_server/loaders/ocs_files.py`
 
 - `OCSFileLoader(OCSBaseLoader)`
-- Extracts file references from session messages
-- Fetches file metadata (not content) for the files table
+- Extracts file references from session message metadata/attachments
+- Stores file metadata (id, name, content_type, size) — not binary content
 - Content download: `GET /api/files/{id}/content` (on-demand, not during materialization)
+
+### 4.5 Rate limiting
+
+All loaders implement:
+- Respect `Retry-After` headers from 429 responses
+- Configurable delay between pagination requests (default 0, increase if rate-limited)
+- Exponential backoff on transient 5xx errors (max 3 retries)
 
 ---
 
@@ -285,7 +398,7 @@ relationships:
 
 **File:** `mcp_server/services/materializer.py`
 
-Add OCS branch to:
+Add OCS imports and branches to:
 
 **`_run_discover_phase()`:**
 ```python
@@ -302,19 +415,28 @@ elif provider == "ocs":
     return _load_ocs_source(source_name, tenant_membership, credential, schema_name, conn)
 ```
 
-**New function `_load_ocs_source()`** — dispatches to session/file loaders similar to `_load_connect_source()`.
+**New function `_load_ocs_source()`:**
+```python
+def _load_ocs_source(source_name, tenant_membership, credential, schema_name, conn):
+    exp_id = tenant_membership.tenant.external_id
+    loader_map = {
+        "sessions": (OCSSessionLoader, _write_ocs_sessions),
+        "files": (OCSFileLoader, _write_ocs_files),
+    }
+    loader_cls, writer_fn = loader_map[source_name]
+    loader = loader_cls(experiment_id=exp_id, credential=credential)
+    return writer_fn(loader.load_pages(), schema_name, conn)
+```
 
 ### 5.3 Table writers
 
-Add to `mcp_server/services/materializer.py`:
-
-**`raw_sessions` table:**
+**`raw_sessions` table** (uses TIMESTAMPTZ for proper time queries):
 ```sql
 CREATE TABLE {schema}.raw_sessions (
     session_id TEXT PRIMARY KEY,
     experiment_id TEXT,
-    created_at TEXT,
-    updated_at TEXT,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
     status TEXT,
     tags JSONB DEFAULT '[]'::jsonb,
     state JSONB DEFAULT '{}'::jsonb
@@ -322,13 +444,17 @@ CREATE TABLE {schema}.raw_sessions (
 ```
 
 **`raw_messages` table:**
+
+Message IDs use a deterministic composite key: `{session_id}:{zero_padded_index}` where index is the message's position in the session's message array. This is stable across re-syncs as long as OCS preserves message ordering (messages are append-only within a session).
+
 ```sql
 CREATE TABLE {schema}.raw_messages (
     message_id TEXT PRIMARY KEY,
     session_id TEXT REFERENCES {schema}.raw_sessions(session_id),
+    message_index INTEGER NOT NULL,
     role TEXT,
     content TEXT,
-    created_at TEXT,
+    created_at TIMESTAMPTZ,
     metadata JSONB DEFAULT '{}'::jsonb,
     tags JSONB DEFAULT '[]'::jsonb
 )
@@ -345,37 +471,29 @@ CREATE TABLE {schema}.raw_files (
 )
 ```
 
-### 5.4 Credential resolution for OCS
-
-**File:** `mcp_server/server.py` (or credential resolution utility)
-
-When resolving credentials for an OCS tenant during materialization:
-```python
-if tenant.provider == "ocs" and tenant.ocs_team:
-    cred = tenant.ocs_team.credential
-    # Return {"type": cred.credential_type, "value": decrypted_value_or_oauth_token}
-```
-
-This replaces the normal `TenantCredential` lookup path for OCS tenants.
-
 ---
 
 ## Phase 6: Frontend
 
 ### 6.1 Connection UI
 
-The existing connections/settings page needs an "Add OCS Connection" option alongside CommCare and Connect. This should:
-- Show "Connect with OCS" button (triggers OAuth flow)
-- Show "Use API Key" alternative (opens form for key entry)
-- After auth: show which team was authorized and list of discovered chatbots
+The existing connections/settings page needs an "Add OCS Connection" option:
+- "Connect with OCS" button (triggers OAuth flow)
+- "Use API Key" alternative (form for key + team slug entry)
+- After auth: show team name and count of discovered chatbots
 
 ### 6.2 Workspace dropdown
 
-No changes needed — chatbot workspaces auto-populate via the existing Tenant → Workspace signal. Each chatbot appears as a selectable workspace.
+No structural changes needed. Each chatbot auto-populates via the existing signal.
+
+**UX consideration for chatbot proliferation (#13):** If a team has many chatbots (50+), the dropdown becomes unwieldy. Options to address:
+- Add search/filter to the workspace dropdown (general UX improvement, not OCS-specific)
+- Group OCS workspaces under a "OCS: {team_name}" header in the dropdown
+- Defer to a follow-up UX pass if volume becomes a real issue
 
 ### 6.3 Provider branding
 
-Add OCS logo/icon for workspace dropdown items and connection cards. Display "Open Chat Studio" as the provider label.
+Add to `PROVIDER_DISPLAY`: "Open Chat Studio". Add OCS logo/icon for workspace dropdown items.
 
 ---
 
@@ -396,8 +514,6 @@ OCS_OAUTH_CLIENT_SECRET=
 
 ```python
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
-OCS_OAUTH_CLIENT_ID = env("OCS_OAUTH_CLIENT_ID", default="")
-OCS_OAUTH_CLIENT_SECRET = env("OCS_OAUTH_CLIENT_SECRET", default="")
 ```
 
 ---
@@ -406,33 +522,60 @@ OCS_OAUTH_CLIENT_SECRET = env("OCS_OAUTH_CLIENT_SECRET", default="")
 
 | Step | Phase | Description | Dependencies |
 |------|-------|-------------|--------------|
-| 1 | 1 | Data model changes + migration | None |
+| 1 | 1 | Data model (provider choice + OCSTeam + migration) | None |
 | 2 | 7 | Settings and env vars | None |
-| 3 | 2 | OAuth provider (allauth adapter) | Step 1, 2 |
-| 4 | 3 | Tenant resolution + experiment discovery | Step 1, 3 |
-| 5 | 4 | MCP data loaders (base, sessions, metadata, files) | Step 1 |
-| 6 | 5 | Pipeline config + materializer updates + table writers | Step 5 |
-| 7 | 5.4 | Credential resolution for OCS in MCP server | Step 1, 6 |
-| 8 | 6 | Frontend connection UI + provider branding | Step 3, 4 |
-| 9 | 2.2 | API key auth endpoint | Step 1, 4 |
+| 3 | 2.1 | OAuth provider (allauth adapter, apps.py, urls.py) | Step 1, 2 |
+| 4 | 2.2 | auth_views.py updates (PROVIDER_DISPLAY, PROVIDER_TOKEN_URLS) | Step 3 |
+| 5 | 3 | Tenant resolution + credential_resolver + signals + me_view | Step 3, 4 |
+| 6 | 4 | MCP data loaders (base, sessions, metadata, files) | Step 1 |
+| 7 | 5 | Pipeline config + materializer updates + table writers | Step 6 |
+| 8 | 6 | Frontend connection UI + provider branding | Step 4, 5 |
+| 9 | 2.3 | API key auth endpoint | Step 5 |
 
-Steps 1-2 can be done in parallel. Steps 3-4 are sequential. Steps 5-6 can be done in parallel with 3-4.
+Steps 1-2 are parallel. Steps 6-7 can run in parallel with steps 3-5.
 
 ---
 
 ## Testing Strategy
 
-- **Unit tests** for each loader (mock OCS API responses)
-- **Unit tests** for tenant resolution (mock experiment list)
-- **Unit tests** for credential resolution (OCSTeam → credential lookup)
-- **Integration test** for full pipeline: experiment discovery → materialization → query
-- **Manual QA** for OAuth flow end-to-end (requires OCS OAuth app registration)
+### Happy-path tests
+- Unit tests for each loader (mock OCS API responses with realistic payloads)
+- Unit tests for tenant resolution (mock experiment list, verify Tenant/Workspace creation)
+- Unit tests for credential resolution — verify OCS branch in `credential_resolver.py` returns correct token, and that existing CommCare/Connect resolution is not broken
+- Integration test for full pipeline: experiment discovery → materialization → query
+
+### Negative-path tests
+- Invalid/expired API key → verify `OCSAuthError` raised, no partial state created
+- Expired OAuth token → verify token refresh via `PROVIDER_TOKEN_URLS["ocs"]`
+- OCS API 4xx/5xx responses → verify graceful failure, no data corruption
+- Rate limit (429) responses → verify backoff and retry
+- Partial experiment list (pagination error mid-stream) → verify partial results handled
+- Chatbot deleted in OCS → verify tenant lifecycle cleanup
+
+### Manual QA
+- OAuth flow end-to-end (requires OCS OAuth app registration)
+- Team selection on OCS consent screen → correct experiments discovered
+- Workspace dropdown populated with chatbot names
+- Materialization produces queryable session/message data
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **OCS team info from OAuth**: Does the OCS `/o/userinfo/` endpoint return team slug/name? If not, we may need to extract it from the token response or call another endpoint after auth.
-2. **Message IDs**: OCS session detail returns messages as an array. Are individual messages assigned unique IDs, or do we need to generate synthetic IDs (e.g., `{session_id}_{index}`)?
-3. **File discovery**: Are file references embedded in message content/metadata, or is there a separate endpoint to list files per session?
-4. **Rate limits**: OCS documents 30-second minimum between poll requests. Do the list/detail endpoints have separate rate limits we need to respect during bulk materialization?
+1. **Message IDs:** OCS messages don't have individual IDs. We use deterministic composite keys: `{session_id}:{zero_padded_index}`. This is stable because messages are append-only within a session — existing messages never reorder.
+
+2. **Timestamps:** All timestamp columns use `TIMESTAMPTZ` instead of `TEXT` for proper time-range queries and indexing.
+
+3. **Credential resolution:** Uses the existing `TenantCredential` → `credential_resolver.py` pipeline. No parallel credential system.
+
+4. **Token refresh:** OCS entry added to `PROVIDER_TOKEN_URLS` so `_resolve_oauth_credential()` handles expired tokens during materialization.
+
+## Remaining Open Questions
+
+1. **OCS team info from OAuth:** Does the OCS `/o/userinfo/` endpoint return team slug/name? If not, we need to extract it from the token response or call another endpoint. This determines whether `OCSTeam` can be auto-populated on OAuth or requires a separate step.
+
+2. **Session list message inclusion:** Does `GET /api/sessions/` include full message history inline, or does it require per-session detail calls? This determines whether the N+1 concern (#16) applies.
+
+3. **File attachment structure:** Are file references embedded in message metadata/attachments, or is there a separate list endpoint? This determines the file loader implementation.
+
+4. **Rate limits for bulk endpoints:** The 30-second poll minimum applies to chat polling. Do list/detail endpoints have separate limits? Determines whether we need request throttling during materialization.
