@@ -5,6 +5,6 @@ echo "Ensuring Docker network 'scout_shared' exists on remote server..."
 
 SSH_USER="scout"
 
-ssh "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect scout_shared >/dev/null 2>&1 || docker network create scout_shared"
+ssh -o StrictHostKeyChecking=no "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect scout_shared >/dev/null 2>&1 || docker network create scout_shared"
 
 echo "Network setup complete"
