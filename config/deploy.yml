@@ -1,0 +1,48 @@
+# Scout Django API — Primary Kamal config
+# Internal only (no proxy) — reached via nginx in frontend container
+#
+# Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+
+service: scout
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_shared"
+      network-alias: "scout-web"
+    cmd: >
+      uvicorn config.asgi:application
+        --host 0.0.0.0 --port 8000
+        --workers 4 --timeout-keep-alive 120
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    DJANGO_ALLOWED_HOSTS: "scout.dimagi.com"
+    CSRF_TRUSTED_ORIGINS: "https://scout.dimagi.com"
+    SECURE_SSL_REDIRECT: "False"
+    MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    REDIS_URL: "redis://<%= ENV.fetch('SCOUT_REDIS_ENDPOINT') %>:6379/0"
+    EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
+    MAX_CONNECTIONS_PER_PROJECT: 5
+    MAX_QUERIES_PER_MINUTE: 60
+  secret:
+    - DATABASE_URL
+    - DJANGO_SECRET_KEY
+    - DB_CREDENTIAL_KEY
+    - ANTHROPIC_API_KEY
+    - SENTRY_DSN
+
+ssh:
+  user: scout
+
+# No proxy — API is internal only, reached via nginx in frontend container

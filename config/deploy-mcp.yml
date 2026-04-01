@@ -1,0 +1,38 @@
+# Scout MCP Server — Internal only (no proxy)
+# Reached by API via Docker network at scout-mcp-web:8100
+#
+# Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+
+service: scout-mcp
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_shared"
+      network-alias: "scout-mcp-web"
+    cmd: >
+      python -m mcp_server
+        --transport streamable-http
+        --host 0.0.0.0 --port 8100
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+  secret:
+    - DATABASE_URL
+    - DB_CREDENTIAL_KEY
+    - DJANGO_SECRET_KEY
+
+ssh:
+  user: scout
+
+# No proxy — MCP is internal only, reached by API via Docker network
