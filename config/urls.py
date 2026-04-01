@@ -12,6 +12,7 @@ from apps.chat.thread_views import public_thread_view
 from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
+from apps.users.auth_views import popup_complete_view
 from apps.workspaces.api.workspace_views import (
     WorkspaceDetailView,
     WorkspaceListView,
@@ -83,6 +84,7 @@ urlpatterns = [
     path("health/", health_check, name="health_check"),
     path("admin/", admin.site.urls),
     path("accounts/", include("allauth.urls")),
+    path("auth/popup-complete/", popup_complete_view, name="popup-complete"),
     # Workspace-scoped content APIs
     path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(

@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from "react"
+import { useState, useEffect, useRef, type FormEvent } from "react"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import { Button } from "@/components/ui/button"
@@ -19,15 +19,49 @@ export function LoginForm() {
   const [password, setPassword] = useState("")
   const [loading, setLoading] = useState(false)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
+  const [popupProvider, setPopupProvider] = useState<string | null>(null)
   const authError = useAppStore((s) => s.authError)
   const login = useAppStore((s) => s.authActions.login)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const { isEmbed } = useEmbedParams()
+  const popupRef = useRef<Window | null>(null)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     api.get<{ providers: OAuthProvider[] }>("/api/auth/providers/")
       .then((data) => setProviders(data.providers))
       .catch(() => {})
+  }, [])
+
+  // Listen for postMessage from the popup (token relay)
+  useEffect(() => {
+    if (!isEmbed) return
+
+    function handleMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin) return
+      if (event.data?.type !== "scout:auth-token") return
+
+      const token = event.data.token
+      if (!token) return
+
+      // Exchange the token for a session cookie in this iframe's context
+      api.post("/api/auth/token-exchange/", { token })
+        .then(() => fetchMe())
+        .catch(() => {
+          // Token exchange failed, reset to login form
+          setPopupProvider(null)
+        })
+    }
+
+    window.addEventListener("message", handleMessage)
+    return () => window.removeEventListener("message", handleMessage)
+  }, [isEmbed, fetchMe])
+
+  // Clean up polling on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
   }, [])
 
   async function handleSubmit(e: FormEvent) {
@@ -42,21 +76,69 @@ export function LoginForm() {
     }
   }
 
-  function openLoginPopup() {
-    // Open standalone Scout in a popup — user logs in there normally.
-    // A cookie signals that this is a popup, so App.tsx auto-closes it
-    // once authenticated. The iframe polls for popup close then re-fetches auth.
-    document.cookie = "scout_auth_popup=1;path=/;max-age=300;SameSite=Lax"
-    const popup = window.open(`${BASE_PATH}/`, "scout-oauth", "width=500,height=700")
+  function openLoginPopup(providerId: string) {
+    // Open popup directly to the OAuth provider (LOGIN_ON_GET=True skips
+    // the intermediate page). After OAuth, the callback redirects to
+    // /auth/popup-complete/ which sends the token via postMessage.
+    const callbackUrl = `${BASE_PATH}/auth/popup-complete/`
+    const loginUrl = `${BASE_PATH}/accounts/${providerId}/login/?next=${encodeURIComponent(callbackUrl)}`
+    const popup = window.open(loginUrl, "scout-oauth", "width=500,height=700")
+    popupRef.current = popup
 
-    if (!popup) return
+    if (!popup) {
+      // Popup was blocked
+      setPopupProvider(null)
+      return
+    }
 
-    const interval = setInterval(() => {
+    setPopupProvider(providerId)
+
+    // Fallback: poll for popup.closed in case postMessage doesn't arrive
+    // (e.g. user closes popup manually)
+    pollRef.current = setInterval(() => {
       if (!popup || popup.closed) {
-        clearInterval(interval)
-        fetchMe()
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+        popupRef.current = null
+        setPopupProvider(null)
       }
     }, 500)
+  }
+
+  function cancelPopup() {
+    if (popupRef.current && !popupRef.current.closed) {
+      popupRef.current.close()
+    }
+    if (pollRef.current) clearInterval(pollRef.current)
+    pollRef.current = null
+    popupRef.current = null
+    setPopupProvider(null)
+  }
+
+  // Show a "signing in" state while the popup is open
+  if (popupProvider) {
+    const providerName = providers.find((p) => p.id === popupProvider)?.name ?? popupProvider
+    return (
+      <div className="flex min-h-screen items-center justify-center p-4">
+        <Card className="w-full max-w-sm">
+          <CardHeader className="text-center">
+            <CardTitle className="text-2xl">Scout</CardTitle>
+            <CardDescription>Signing in via {providerName}...</CardDescription>
+          </CardHeader>
+          <CardContent className="text-center space-y-4">
+            <div className="flex justify-center">
+              <div className="h-8 w-8 animate-spin rounded-full border-4 border-muted border-t-primary" />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Complete the login in the popup window.
+            </p>
+            <Button variant="ghost" size="sm" onClick={cancelPopup}>
+              Cancel
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    )
   }
 
   return (
@@ -118,7 +200,7 @@ export function LoginForm() {
                       variant="outline"
                       className="w-full"
                       data-testid={`oauth-login-${provider.id}`}
-                      onClick={openLoginPopup}
+                      onClick={() => openLoginPopup(provider.id)}
                     >
                       {provider.name}
                     </Button>
