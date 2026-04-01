@@ -1,10 +1,16 @@
 #!/bin/bash
-# Run migrations in the newly-built API container before swapping
-# Only runs for the main API service — skipped for MCP, worker, and frontend deploys
+set -euo pipefail
+
+# Run migrations in the newly-built API container before swapping.
+# Only runs for the main API service — skipped for MCP, worker, and frontend deploys.
+# Aborts the deploy if migrations fail.
 
 if [ "$KAMAL_SERVICE" = "scout" ]; then
   echo "Running database migrations..."
-  kamal app exec --version=$KAMAL_VERSION -- python manage.py migrate
+  kamal app exec --version=$KAMAL_VERSION -- python manage.py migrate || {
+    echo "ERROR: Migrations failed — aborting deploy" >&2
+    exit 1
+  }
   echo "Migrations complete"
 else
   echo "Skipping migrations (service: $KAMAL_SERVICE)"
