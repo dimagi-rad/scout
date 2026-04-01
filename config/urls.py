@@ -96,6 +96,8 @@ urlpatterns = [
         "api/workspaces/<uuid:workspace_id>/",
         include(workspace_urlpatterns),
     ),
+    # Transformation assets and runs
+    path("api/transformations/", include("apps.transformations.urls")),
     # Chat streaming (workspace_id in body)
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),

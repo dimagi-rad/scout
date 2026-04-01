@@ -334,9 +334,10 @@ class RefreshSchemaView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            tenant_membership = TenantMembership.objects.get(user=request.user, tenant=tenant)
-        except TenantMembership.DoesNotExist:
+        tenant_membership = TenantMembership.objects.filter(
+            user=request.user, tenant=tenant
+        ).first()
+        if tenant_membership is None:
             return Response(
                 {"error": "No tenant membership found for this workspace."},
                 status=status.HTTP_400_BAD_REQUEST,

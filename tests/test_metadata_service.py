@@ -74,7 +74,7 @@ class TestPipelineListTables:
             result = pipeline_list_tables(mock_ts, pipeline_config)
 
         assert len(result) == 2
-        cases = next(t for t in result if t["name"] == "cases")
+        cases = next(t for t in result if t["name"] == "raw_cases")
         assert cases["description"] == "CommCare case records"
         assert cases["row_count"] == 4823
         assert cases["materialized_at"] == completed_at.isoformat()
@@ -147,10 +147,10 @@ class TestPipelineDescribeTable:
                 ],
                 "row_count": 2,
             }
-            result = pipeline_describe_table("cases", ctx, None, pipeline_config)
+            result = pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
 
         assert result is not None
-        assert result["name"] == "cases"
+        assert result["name"] == "raw_cases"
         assert result["description"] == "CommCare case records"
         assert len(result["columns"]) == 2
         assert result["columns"][0] == {
@@ -181,7 +181,7 @@ class TestPipelineDescribeTable:
                 "rows": [["properties", "jsonb", "YES", "'{}'::jsonb"]],
                 "row_count": 1,
             }
-            result = pipeline_describe_table("cases", ctx, mock_tenant_metadata, pipeline_config)
+            result = pipeline_describe_table("raw_cases", ctx, mock_tenant_metadata, pipeline_config)
 
         col = result["columns"][0]
         assert "pregnancy" in col["description"]
@@ -208,7 +208,7 @@ class TestPipelineDescribeTable:
                 "rows": [["form_data", "jsonb", "YES", "'{}'::jsonb"]],
                 "row_count": 1,
             }
-            result = pipeline_describe_table("forms", ctx, mock_tenant_metadata, pipeline_config)
+            result = pipeline_describe_table("raw_forms", ctx, mock_tenant_metadata, pipeline_config)
 
         col = result["columns"][0]
         assert "ANC Registration" in col["description"]
@@ -227,7 +227,7 @@ class TestPipelineDescribeTable:
                 "rows": [["properties", "jsonb", "YES", None]],
                 "row_count": 1,
             }
-            result = pipeline_describe_table("cases", ctx, None, pipeline_config)
+            result = pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
 
         assert result is not None
         assert result["columns"][0]["description"] == ""
@@ -298,7 +298,7 @@ class TestPipelineGetMetadata:
 
             result = pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
 
-        assert "cases" in result["tables"]
+        assert "raw_cases" in result["tables"]
         assert len(result["relationships"]) == 1
         rel = result["relationships"][0]
         assert rel["from_table"] == "forms"

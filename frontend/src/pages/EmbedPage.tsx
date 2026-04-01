@@ -11,6 +11,8 @@ import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
 import { ConnectionsPage } from "@/pages/ConnectionsPage"
+import { WorkspacesPage } from "@/pages/WorkspacesPage"
+import { WorkspaceDetailPage } from "@/pages/WorkspaceDetailPage"
 import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
 import { useEmbedParams } from "@/hooks/useEmbedParams"
 
@@ -30,6 +32,8 @@ const embedRouter = createBrowserRouter([
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
       { path: "data-dictionary", element: <DataDictionaryPage /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
+      { path: "workspaces", element: <WorkspacesPage /> },
+      { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
       { path: "*", element: <Navigate to="/embed" replace /> },
     ],
   },

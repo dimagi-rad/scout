@@ -41,7 +41,11 @@ from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.workspaces.models import SchemaState, TenantSchema
 from mcp_server.context import load_tenant_context
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.metadata import pipeline_describe_table, pipeline_list_tables
+from mcp_server.services.metadata import (
+    pipeline_describe_table,
+    pipeline_list_tables,
+    transformation_aware_list_tables,
+)
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -61,6 +65,7 @@ MCP_TOOL_NAMES = frozenset(
         "run_materialization",
         "get_schema_status",
         "teardown_schema",
+        "get_lineage",
     }
 )
 
@@ -169,7 +174,18 @@ async def _fetch_schema_context(tenant, user) -> str:
     registry = get_registry()
     pipeline_config = registry.get(pipeline_name) or registry.get("commcare_sync")
 
-    tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+    # Try transformation-aware listing (prefers terminal models over replaced ones)
+    from apps.transformations.services.lineage import get_terminal_assets
+
+    terminal_assets = await sync_to_async(get_terminal_assets)(tenant_ids=[tenant.id])
+
+    if terminal_assets:
+        tables = await sync_to_async(transformation_aware_list_tables)(
+            ts, pipeline_config, tenant_ids=[tenant.id]
+        )
+    else:
+        tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+
     if not tables:
         return "Data is loaded but no tables are available yet. The materialization may still be completing."
 
@@ -193,6 +209,14 @@ async def _fetch_schema_context(tenant, user) -> str:
                 column_map[t["name"]] = detail.get("columns", [])
 
         full_text = _render_full_schema(tables, column_map, last_materialized_at)
+
+        # Add lineage tool hint when transformation assets exist
+        if terminal_assets:
+            full_text += (
+                "\n\nThese tables are produced by a transformation pipeline. "
+                "Use the `get_lineage` tool to explore how any table was built."
+            )
+
         if len(full_text) <= SCHEMA_CONTEXT_CHAR_BUDGET:
             return full_text
     except Exception:
@@ -201,7 +225,13 @@ async def _fetch_schema_context(tenant, user) -> str:
         )
 
     # Fall back to compact
-    return _render_compact_schema(tables, last_materialized_at)
+    compact = _render_compact_schema(tables, last_materialized_at)
+    if terminal_assets:
+        compact += (
+            "\n\nThese tables are produced by a transformation pipeline. "
+            "Use the `get_lineage` tool to explore how any table was built."
+        )
+    return compact
 
 
 def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
@@ -501,8 +531,10 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
         sections.append(
             "\n## Data Availability\n\n"
-            "This is a multi-tenant workspace. Use workspace_id when calling MCP tools. "
-            "Call `list_tables` to see available tables.\n"
+            "This is a multi-tenant workspace. Tables are prefixed with the tenant name "
+            "using double underscore: `{tenant_name}__{table_name}`.\n"
+            "To query across tenants, use explicit JOINs between namespaced tables.\n"
+            "Call `list_tables` to see all available tables.\n"
         )
 
     result = "\n".join(sections)

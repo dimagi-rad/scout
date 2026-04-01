@@ -29,7 +29,19 @@ from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 
-from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
+from apps.users.auth_views import PROVIDER_TOKEN_URLS
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    refresh_oauth_token,
+    token_needs_refresh,
+)
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantMetadata,
+    TenantSchema,
+    WorkspaceViewSchema,
+)
 from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.envelope import (
     AUTH_TOKEN_EXPIRED,
@@ -46,6 +58,7 @@ from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_get_metadata,
     pipeline_list_tables,
+    workspace_list_tables,
 )
 from mcp_server.services.query import execute_query
 
@@ -81,6 +94,22 @@ async def list_tables(tenant_id: str, workspace_id: str | None = None) -> dict:
         except (ValueError, _ValidationError) as e:
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
+
+        # For multi-tenant workspaces, the context points at a WorkspaceViewSchema
+        # (namespaced views). Use information_schema directly instead of MaterializationRun.
+        if workspace_id:
+            is_view_schema = await WorkspaceViewSchema.objects.filter(
+                schema_name=ctx.schema_name, state=SchemaState.ACTIVE
+            ).aexists()
+            if is_view_schema:
+                tables = await sync_to_async(workspace_list_tables)(ctx)
+                tc["result"] = success_response(
+                    {"tables": tables, "note": None},
+                    tenant_id=tenant_id,
+                    schema=ctx.schema_name,
+                    timing_ms=tc["timer"].elapsed_ms,
+                )
+                return tc["result"]
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
         if ts is None:
@@ -232,6 +261,49 @@ async def get_metadata(tenant_id: str, workspace_id: str | None = None) -> dict:
             },
             tenant_id=tenant_id,
             schema=ctx.schema_name,
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def get_lineage(tenant_id: str, model_name: str, workspace_id: str | None = None) -> dict:
+    """Get the transformation lineage for a model.
+
+    Returns the chain of transformations from the given model back to the raw
+    source data, showing what each step does and why. Use this when the user
+    asks about data provenance, how a table was created, or what cleaning
+    or transformations were applied to the data.
+
+    Args:
+        tenant_id: The tenant identifier.
+        model_name: Name of the model to trace lineage for.
+        workspace_id: Optional workspace UUID.
+    """
+    from apps.transformations.services.lineage import get_lineage_chain
+    from apps.users.models import Tenant
+
+    async with tool_context("get_lineage", tenant_id, model_name=model_name) as tc:
+        try:
+            tenant = await Tenant.objects.aget(external_id=tenant_id)
+        except Tenant.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
+            return tc["result"]
+
+        chain = await sync_to_async(get_lineage_chain)(
+            model_name, tenant_ids=[tenant.id], workspace_id=workspace_id
+        )
+
+        if not chain:
+            tc["result"] = error_response(
+                NOT_FOUND, f"No transformation asset named '{model_name}' found"
+            )
+            return tc["result"]
+
+        tc["result"] = success_response(
+            {"model": model_name, "lineage": chain},
+            tenant_id=tenant_id,
+            schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
@@ -405,6 +477,23 @@ async def cancel_materialization(run_id: str) -> dict:
         return tc["result"]
 
 
+def _resolve_oauth_credential(token_obj, provider: str) -> dict:
+    """Build an OAuth credential dict, refreshing the token if expired."""
+    token_value = token_obj.token
+
+    if token_needs_refresh(token_obj.expires_at):
+        token_url = PROVIDER_TOKEN_URLS.get(provider)
+        if token_url and token_obj.token_secret:
+            try:
+                token_value = refresh_oauth_token(token_obj, token_url)
+            except TokenRefreshError:
+                logger.warning(
+                    "Token refresh failed for provider %s, using existing token", provider
+                )
+
+    return {"type": "oauth", "value": token_value}
+
+
 @mcp.tool()
 async def run_materialization(
     tenant_id: str,
@@ -433,16 +522,14 @@ async def run_materialization(
 
     async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
         # ── Resolve TenantMembership ──────────────────────────────────────────
-        # Scope to workspace + user to prevent cross-tenant credential leakage.
-        # Both workspace_id and user_id are injected server-side by the agent graph,
+        # Scope to user to prevent cross-tenant credential leakage.
+        # user_id is injected server-side by the agent graph,
         # not controllable by the LLM.
         registry = get_registry()
         try:
             qs = TenantMembership.objects.select_related("user", "tenant")
             if user_id:
                 qs = qs.filter(user_id=user_id)
-            if workspace_id:
-                qs = qs.filter(tenant__workspaces__id=workspace_id)
             if tenant_membership_id:
                 tm = await qs.aget(id=tenant_membership_id, tenant__external_id=tenant_id)
             else:
@@ -453,9 +540,11 @@ async def run_materialization(
                         f"Pipeline '{pipeline}' not found in registry",
                     )
                     return tc["result"]
-                tm = await qs.aget(
+                tm = await qs.filter(
                     tenant__external_id=tenant_id, tenant__provider=pipeline_config.provider
-                )
+                ).afirst()
+                if tm is None:
+                    raise TenantMembership.DoesNotExist
         except TenantMembership.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
             return tc["result"]
@@ -498,13 +587,18 @@ async def run_materialization(
             from allauth.socialaccount.models import SocialToken
 
             if tm.tenant.provider == "commcare_connect":
-                token_obj = await SocialToken.objects.filter(
-                    account__user=tm.user,
-                    account__provider__startswith="commcare_connect",
-                ).afirst()
+                token_obj = (
+                    await SocialToken.objects.select_related("app")
+                    .filter(
+                        account__user=tm.user,
+                        account__provider__startswith="commcare_connect",
+                    )
+                    .afirst()
+                )
             else:
                 token_obj = (
-                    await SocialToken.objects.filter(
+                    await SocialToken.objects.select_related("app")
+                    .filter(
                         account__user=tm.user,
                         account__provider__startswith="commcare",
                     )
@@ -517,7 +611,9 @@ async def run_materialization(
                     f"No OAuth token found for provider '{tm.tenant.provider}'",
                 )
                 return tc["result"]
-            credential = {"type": "oauth", "value": token_obj.token}
+            credential = await sync_to_async(_resolve_oauth_credential)(
+                token_obj, tm.tenant.provider
+            )
 
         # ── Build progress callback ───────────────────────────────────────────
         # run_pipeline runs in a thread (via sync_to_async), so we bridge back

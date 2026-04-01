@@ -352,11 +352,20 @@ async def tenant_ensure_view(request):
     tm.last_selected_at = timezone.now()
     await tm.asave(update_fields=["last_selected_at"])
 
+    # Find the auto-created workspace for this tenant
+    from apps.workspaces.models import Workspace
+
+    workspace = await Workspace.objects.filter(
+        workspace_tenants__tenant=tm.tenant,
+        memberships__user=user,
+    ).afirst()
+
     return JsonResponse(
         {
             "id": str(tm.id),
             "provider": tm.tenant.provider,
             "tenant_id": tm.tenant.external_id,
             "tenant_name": tm.tenant.canonical_name,
+            "workspace_id": str(workspace.id) if workspace else None,
         }
     )

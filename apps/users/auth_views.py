@@ -40,7 +40,7 @@ PROVIDER_DISPLAY = {
 
 PROVIDER_TOKEN_URLS = {
     "commcare": "https://www.commcarehq.org/oauth/token/",
-    "commcare_connect": "https://connect.commcarehq.org/oauth/token/",
+    "commcare_connect": "https://connect.dimagi.com/o/token/",
 }
 
 
@@ -88,16 +88,16 @@ def me_view(request):
 
     # If the user just completed CommCare OAuth but tenant resolution hasn't
     # run yet, resolve now so onboarding can complete.
+    # Both providers are tried independently — a successful CommCare
+    # resolution must not skip Connect.
     if not onboarding_complete:
-        onboarding_complete = _try_resolve_provider(
+        commcare_ok = _try_resolve_provider(
             user, _get_commcare_token, resolve_commcare_domains, "CommCare"
         )
-
-    # Same for Connect OAuth — resolve opportunities if token exists.
-    if not onboarding_complete:
-        onboarding_complete = _try_resolve_provider(
+        connect_ok = _try_resolve_provider(
             user, _get_connect_token, resolve_connect_opportunities, "Connect"
         )
+        onboarding_complete = commcare_ok or connect_ok
 
     return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
 
@@ -242,12 +242,14 @@ def providers_view(request):
             else:
                 token_status[provider] = "connected"
 
+    _prefix = getattr(settings, "FORCE_SCRIPT_NAME", "") or ""
+
     providers = []
     for app in apps:
         entry = {
             "id": app.provider,
             "name": PROVIDER_DISPLAY.get(app.provider, app.name),
-            "login_url": f"/accounts/{app.provider}/login/",
+            "login_url": f"{_prefix}/accounts/{app.provider}/login/",
         }
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),

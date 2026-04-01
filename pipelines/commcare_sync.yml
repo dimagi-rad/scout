@@ -12,15 +12,9 @@ sources:
 metadata_discovery:
   description: "Extract application structure, case types, and form definitions"
 
-transforms:
-  dbt_project: transforms/commcare
-  models:
-    - stg_cases
-    - stg_forms
-
 relationships:
-  - from_table: forms
+  - from_table: raw_forms
     from_column: case_ids
-    to_table: cases
+    to_table: raw_cases
     to_column: case_id
     description: "Form submissions reference the cases they update (case_ids is a JSON array)"

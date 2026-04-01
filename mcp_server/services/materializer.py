@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import pathlib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
@@ -93,6 +92,30 @@ def run_pipeline(
         report(f"Discovering tenant metadata from {pipeline.provider}...")
         _run_discover_phase(tenant_membership, credential, pipeline)
 
+        # Generate system staging assets from discovered metadata.
+        # Failures are logged but do not fail the pipeline — the discover phase
+        # has already stored metadata, and load can proceed without assets.
+        if pipeline.provider == "commcare":
+            try:
+                from apps.transformations.services.commcare_staging import upsert_system_assets
+
+                tenant_meta = TenantMetadata.objects.filter(
+                    tenant_membership=tenant_membership
+                ).first()
+                if tenant_meta:
+                    asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
+                    logger.info(
+                        "System assets for %s: %d created, %d updated",
+                        tenant_membership.tenant.external_id,
+                        asset_result["created"],
+                        asset_result["updated"],
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to generate system assets for %s; continuing pipeline",
+                    tenant_membership.tenant.external_id,
+                )
+
         # ── 3. LOAD ───────────────────────────────────────────────────────────
         run.state = MaterializationRun.RunState.LOADING
         run.save(update_fields=["state"])
@@ -132,15 +155,21 @@ def run_pipeline(
     run.save(update_fields=["state"])
     transform_result: dict = {}
 
-    if pipeline.transforms and pipeline.dbt_models:
-        report("Running DBT transforms...")
+    # Check if there are any TransformationAssets to execute
+    from apps.transformations.models import TransformationAsset
+
+    has_assets = TransformationAsset.objects.filter(tenant=tenant_membership.tenant).exists()
+    if has_assets:
+        report("Running transforms...")
         try:
-            transform_result = _run_transform_phase(pipeline, schema_name)
+            transform_result = _run_transform_phase(
+                pipeline, schema_name, tenant=tenant_membership.tenant
+            )
         except Exception as e:
             logger.error("Transform phase failed for schema %s: %s", schema_name, e)
             transform_result = {"error": str(e)}
     else:
-        report("No DBT transforms configured — skipping")
+        report("No transforms configured — skipping")
 
     # ── 5. COMPLETE ───────────────────────────────────────────────────────────
     # Conditional UPDATE: only transition to COMPLETED if still in TRANSFORMING
@@ -266,23 +295,23 @@ def _load_connect_source(
     return writer_fn(loader.load_pages(), schema_name, conn)
 
 
-def _run_transform_phase(pipeline: PipelineConfig, schema_name: str) -> dict:
-    import tempfile
+def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
+    """Run the three-stage transformation pipeline using TransformationAsset records."""
+    from apps.transformations.services.executor import run_transformation_pipeline
 
-    from django.conf import settings
+    run = run_transformation_pipeline(
+        tenant=tenant,
+        schema_name=schema_name,
+    )
 
-    from mcp_server.services.dbt_runner import generate_profiles_yml, run_dbt
-
-    db_url = getattr(settings, "MANAGED_DATABASE_URL", "")
-    repo_root = pathlib.Path(__file__).parent.parent.parent
-    dbt_project_dir = str(repo_root / pipeline.transforms.dbt_project)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        profiles_path = pathlib.Path(tmpdir) / "profiles.yml"
-        generate_profiles_yml(output_path=profiles_path, schema_name=schema_name, db_url=db_url)
-        return run_dbt(
-            dbt_project_dir=dbt_project_dir, profiles_dir=tmpdir, models=pipeline.dbt_models
-        )
+    result = {
+        "run_id": str(run.id),
+        "status": run.status,
+        "asset_count": run.asset_runs.count(),
+    }
+    if run.error_message:
+        result["error"] = run.error_message
+    return result
 
 
 # ── Table writers ──────────────────────────────────────────────────────────────
@@ -291,7 +320,7 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str) -> dict:
 
 _CASES_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.cases
+    INSERT INTO {schema}.raw_cases
         (case_id, case_type, case_name, external_id, owner_id,
          date_opened, last_modified, server_last_modified, indexed_on,
          closed, date_closed, properties, indices)
@@ -308,7 +337,7 @@ _CASES_INSERT = psql.SQL(
 
 _FORMS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.forms
+    INSERT INTO {schema}.raw_forms
         (form_id, xmlns, received_on, server_modified_on, app_id, form_data, case_ids)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (form_id) DO UPDATE SET
@@ -325,11 +354,11 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.cases CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_cases CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.cases (
+        CREATE TABLE {schema}.raw_cases (
             case_id TEXT PRIMARY KEY,
             case_type TEXT,
             case_name TEXT,
@@ -382,11 +411,11 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.forms CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_forms CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.forms (
+        CREATE TABLE {schema}.raw_forms (
             form_id TEXT PRIMARY KEY,
             xmlns TEXT,
             received_on TEXT,
@@ -426,7 +455,7 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
 
 _CONNECT_VISITS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.visits
+    INSERT INTO {schema}.raw_visits
         (visit_id, opportunity_id, username, deliver_unit, entity_id, entity_name,
          visit_date, status, reason, location, flagged, flag_reason, form_json,
          completed_work, status_modified_date, review_status, review_created_on,
@@ -440,7 +469,7 @@ _CONNECT_VISITS_INSERT = psql.SQL(
 
 _CONNECT_USERS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.users
+    INSERT INTO {schema}.raw_users
         (username, name, phone, date_learn_started, user_invite_status,
          payment_accrued, suspended, suspension_date, suspension_reason,
          invited_date, completed_learn_date, last_active, date_claimed, claim_limits)
@@ -453,7 +482,7 @@ _CONNECT_USERS_INSERT = psql.SQL(
 
 _CONNECT_COMPLETED_WORKS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.completed_works
+    INSERT INTO {schema}.raw_completed_works
         (username, opportunity_id, payment_unit_id, status, last_modified,
          entity_id, entity_name, reason, status_modified_date, payment_date,
          date_created, saved_completed_count, saved_approved_count,
@@ -465,7 +494,7 @@ _CONNECT_COMPLETED_WORKS_INSERT = psql.SQL(
 
 _CONNECT_PAYMENTS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.payments
+    INSERT INTO {schema}.raw_payments
         (username, opportunity_id, created_at, amount, amount_usd, date_paid,
          payment_unit, confirmed, confirmation_date, organization, invoice_id,
          payment_method, payment_operator)
@@ -475,7 +504,7 @@ _CONNECT_PAYMENTS_INSERT = psql.SQL(
 
 _CONNECT_INVOICES_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.invoices
+    INSERT INTO {schema}.raw_invoices
         (opportunity_id, amount, amount_usd, date, invoice_number,
          service_delivery, exchange_rate)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -484,7 +513,7 @@ _CONNECT_INVOICES_INSERT = psql.SQL(
 
 _CONNECT_ASSESSMENTS_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.assessments
+    INSERT INTO {schema}.raw_assessments
         (username, app, opportunity_id, date, score, passing_score, passed)
     VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
@@ -492,7 +521,7 @@ _CONNECT_ASSESSMENTS_INSERT = psql.SQL(
 
 _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
     """
-    INSERT INTO {schema}.completed_modules
+    INSERT INTO {schema}.raw_completed_modules
         (username, module, opportunity_id, date, duration)
     VALUES (%s, %s, %s, %s, %s)
     """
@@ -504,11 +533,11 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.visits CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_visits CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.visits (
+        CREATE TABLE {schema}.raw_visits (
             visit_id TEXT PRIMARY KEY,
             opportunity_id TEXT,
             username TEXT,
@@ -579,11 +608,11 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.users CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_users CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.users (
+        CREATE TABLE {schema}.raw_users (
             username TEXT PRIMARY KEY,
             name TEXT,
             phone TEXT,
@@ -638,11 +667,11 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.completed_works CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_works CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.completed_works (
+        CREATE TABLE {schema}.raw_completed_works (
             username TEXT,
             opportunity_id TEXT,
             payment_unit_id TEXT,
@@ -703,11 +732,11 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.payments CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_payments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.payments (
+        CREATE TABLE {schema}.raw_payments (
             username TEXT,
             opportunity_id TEXT,
             created_at TEXT,
@@ -760,11 +789,11 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.invoices CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_invoices CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.invoices (
+        CREATE TABLE {schema}.raw_invoices (
             opportunity_id TEXT,
             amount TEXT,
             amount_usd TEXT,
@@ -805,11 +834,11 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.assessments CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_assessments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.assessments (
+        CREATE TABLE {schema}.raw_assessments (
             username TEXT,
             app TEXT,
             opportunity_id TEXT,
@@ -852,11 +881,11 @@ def _write_connect_completed_modules(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.completed_modules CASCADE").format(sid))
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_modules CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.completed_modules (
+        CREATE TABLE {schema}.raw_completed_modules (
             username TEXT,
             module TEXT,
             opportunity_id TEXT,

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, useLocation, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
   BookOpen,
@@ -12,7 +12,6 @@ import {
   ChevronDown,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import {
@@ -26,8 +25,6 @@ import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 
 export function Sidebar() {
   const navigate = useNavigate()
-  const { isEmbed } = useEmbedParams()
-  const prefix = isEmbed ? "/embed" : ""
   const user = useAppStore((s) => s.user)
   const domains = useAppStore((s) => s.domains)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
@@ -40,6 +37,8 @@ export function Sidebar() {
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const location = useLocation()
+  const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
 
   // Fetch domains on mount
   useEffect(() => {
@@ -57,7 +56,7 @@ export function Sidebar() {
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
       {/* Logo */}
       <div className="flex h-14 items-center border-b px-4">
-        <Link to={`${prefix}/`} className="flex items-center gap-2 font-semibold">
+        <Link to={`${pathPrefix}/`} className="flex items-center gap-2 font-semibold">
           <span className="text-lg">Scout</span>
         </Link>
       </div>
@@ -90,7 +89,7 @@ export function Sidebar() {
               </DropdownMenuItem>
             ))}
             <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => navigate(`${prefix}/workspaces`)}>
+            <DropdownMenuItem onSelect={() => navigate(`${pathPrefix}/workspaces`)}>
               Manage workspaces…
             </DropdownMenuItem>
             {/* Defer modal open so Radix can finish closing the dropdown before the Dialog mounts its own focus trap */}
@@ -106,11 +105,11 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">
-        <NavItem to={`${prefix}/`} icon={MessageSquare} label="Chat" />
-        <NavItem to={`${prefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
-        <NavItem to={`${prefix}/knowledge`} icon={BookOpen} label="Knowledge" />
-        <NavItem to={`${prefix}/recipes`} icon={ChefHat} label="Recipes" />
-        <NavItem to={`${prefix}/data-dictionary`} icon={Database} label="Data Dictionary" />
+        <NavItem to={`${pathPrefix}/`} icon={MessageSquare} label="Chat" />
+        <NavItem to={`${pathPrefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
+        <NavItem to={`${pathPrefix}/knowledge`} icon={BookOpen} label="Knowledge" />
+        <NavItem to={`${pathPrefix}/recipes`} icon={ChefHat} label="Recipes" />
+        <NavItem to={`${pathPrefix}/data-dictionary`} icon={Database} label="Data Dictionary" />
       </nav>
 
       {/* Thread History */}
@@ -123,7 +122,7 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={() => { newThread(); navigate(`${prefix}/chat`) }}
+            onClick={() => { newThread(); navigate(`${pathPrefix}/chat`) }}
             data-testid="sidebar-new-chat"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -133,7 +132,7 @@ export function Sidebar() {
           {threads.map((thread) => (
             <button
               key={thread.id}
-              onClick={() => { selectThread(thread.id); navigate(`${prefix}/chat`) }}
+              onClick={() => { selectThread(thread.id); navigate(`${pathPrefix}/chat`) }}
               data-testid={`sidebar-thread-${thread.id}`}
               className={`w-full rounded-md px-3 py-1.5 text-left text-sm truncate transition-colors ${
                 thread.id === threadId
@@ -159,7 +158,7 @@ export function Sidebar() {
           asChild
           data-testid="sidebar-connections"
         >
-          <Link to={`${prefix}/settings/connections`}>
+          <Link to={`${pathPrefix}/settings/connections`}>
             <Link2 className="mr-2 h-4 w-4" />
             Connected Accounts
           </Link>

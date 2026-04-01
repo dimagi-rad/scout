@@ -45,6 +45,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("apps.transformations.models.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
@@ -55,6 +56,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -91,6 +93,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("apps.transformations.models.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
@@ -101,6 +104,7 @@ class TestRunPipeline:
                 "form_definitions": {},
             }
             mock_cases.return_value.load_pages.return_value = iter([])
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -142,10 +146,12 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.TenantMetadata") as mock_meta_model,
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta_loader,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("apps.transformations.models.TransformationAsset") as mock_asset_cls,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
             self._setup_run_mock(mock_run_cls)
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
@@ -157,7 +163,7 @@ class TestRunPipeline:
 
     def test_transform_failure_does_not_mark_run_failed(self):
         """A DBT transform failure should NOT change state to FAILED."""
-        from mcp_server.pipeline_registry import PipelineConfig, TransformConfig
+        from mcp_server.pipeline_registry import PipelineConfig
         from mcp_server.services.materializer import run_pipeline
 
         pipeline = PipelineConfig(
@@ -166,7 +172,6 @@ class TestRunPipeline:
             version="1.0",
             provider="commcare",
             sources=[],
-            transforms=TransformConfig(dbt_project="transforms/commcare", models=["stg_cases"]),
         )
 
         with (
@@ -175,6 +180,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.TenantMetadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("apps.transformations.models.TransformationAsset") as mock_asset_cls,
             patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
         ):
             schema = self._make_schema()
@@ -188,6 +194,7 @@ class TestRunPipeline:
             conn = MagicMock()
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
+            mock_asset_cls.objects.filter.return_value.exists.return_value = True
             mock_transform.side_effect = RuntimeError("dbt compilation error")
 
             result = run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
@@ -290,7 +297,7 @@ class TestWriteCases:
             conn.commit()
             assert count == 1
             with conn.cursor() as cur:
-                cur.execute(f"SELECT case_id FROM {test_schema}.cases")
+                cur.execute(f"SELECT case_id FROM {test_schema}.raw_cases")
                 rows = cur.fetchall()
             assert rows[0][0] == "c1"
         finally:

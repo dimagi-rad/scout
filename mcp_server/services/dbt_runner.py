@@ -114,3 +114,62 @@ def run_dbt(
 
     logger.info("dbt run complete: %s", model_results)
     return {"success": True, "models": model_results}
+
+
+def run_dbt_test(
+    dbt_project_dir: str,
+    profiles_dir: str,
+    models: list[str] | None = None,
+) -> dict:
+    """Run dbt tests via the programmatic Python API.
+
+    Args:
+        dbt_project_dir: Directory containing dbt_project.yml.
+        profiles_dir: Directory containing the generated profiles.yml.
+        models: Optional list of model names to scope tests to.
+
+    Returns:
+        {"success": bool, "tests": {model_name: [{"test": str, "status": str, "message": str}]}, "error": str | None}
+
+    Test results are grouped by the model name they test (extracted from
+    ``node.attached_node``), so the caller can look up results by model name.
+    """
+    cli_args = ["test", "--project-dir", dbt_project_dir, "--profiles-dir", profiles_dir]
+    if models:
+        cli_args.extend(["--select", " ".join(models)])
+
+    logger.info("Invoking dbt test: %s", " ".join(cli_args))
+
+    with _dbt_lock:
+        dbt = dbtRunner()
+        res = dbt.invoke(cli_args)
+
+    # Always parse results — dbt sets success=False on test failures but still
+    # populates res.result with per-test RunResult objects.
+    # Group test results by the model they test.
+    # Schema test nodes expose ``attached_node`` = "model.<project>.<model_name>".
+    test_results: dict[str, list[dict]] = {}
+    for r in res.result or []:
+        if not (hasattr(r, "node") and hasattr(r, "status")):
+            continue
+        attached = getattr(r.node, "attached_node", None) or ""
+        model_name = attached.split(".")[-1] if attached.startswith("model.") else None
+        entry = {
+            "test": r.node.name,
+            "status": str(r.status),
+            "message": getattr(r, "message", ""),
+        }
+        if model_name:
+            test_results.setdefault(model_name, []).append(entry)
+
+    if not res.success:
+        error_msg = str(res.exception) if res.exception else "dbt test failed"
+        logger.error("dbt test failed: %s", error_msg)
+        return {"success": False, "tests": test_results, "error": error_msg}
+
+    logger.info(
+        "dbt test complete: %d tests across %d models",
+        sum(len(v) for v in test_results.values()),
+        len(test_results),
+    )
+    return {"success": True, "tests": test_results, "error": None}
