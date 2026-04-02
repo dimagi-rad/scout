@@ -1,21 +1,18 @@
-"""Auth endpoints: csrf, me, login, logout, signup, providers, disconnect, popup token exchange."""
+"""Auth endpoints: csrf, me, login, logout, signup, providers, disconnect."""
 
 import json
 import logging
-import secrets
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.sites.models import Site
-from django.core.cache import cache
 from django.core.exceptions import ValidationError as _ValidationError
-from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db import IntegrityError
-from django.http import HttpResponse, JsonResponse
+from django.http import JsonResponse
 from django.middleware.csrf import get_token
-from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
+from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.users.decorators import login_required_json
@@ -269,160 +266,3 @@ def providers_view(request):
         providers.append(entry)
 
     return JsonResponse({"providers": providers})
-
-
-# ---------------------------------------------------------------------------
-# Popup OAuth token relay (for embed iframe authentication)
-# ---------------------------------------------------------------------------
-
-POPUP_TOKEN_CACHE_PREFIX = "popup_token:"
-POPUP_TOKEN_MAX_AGE = 30  # seconds
-
-
-def popup_complete_view(request):
-    """Minimal page rendered after OAuth callback in the popup window.
-
-    Generates a signed one-time token and sends it to the opener (the embed
-    iframe) via postMessage so the iframe can exchange it for a session cookie
-    with the correct SameSite attributes.
-    """
-    if not request.user.is_authenticated:
-        # OAuth didn't complete — redirect to login
-        from django.shortcuts import redirect
-
-        return redirect(settings.LOGIN_URL or "/accounts/login/")
-
-    nonce = secrets.token_urlsafe(16)
-    signer = TimestampSigner()
-    token = signer.sign(f"{request.user.id}:{nonce}")
-
-    # Store nonce in cache for one-time validation
-    cache.set(f"{POPUP_TOKEN_CACHE_PREFIX}{nonce}", str(request.user.id), POPUP_TOKEN_MAX_AGE)
-
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Scout — Login Complete</title>
-<style>
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; margin: 0; background: #f8fafc; color: #1e293b;
-    text-align: center;
-  }}
-  .card {{ max-width: 20rem; }}
-  h2 {{ font-size: 1.25rem; margin-bottom: 0.5rem; }}
-  p {{ color: #64748b; font-size: 0.9rem; }}
-</style>
-</head>
-<body>
-<div class="card">
-  <h2>Login successful</h2>
-  <p id="status">Returning to the app...</p>
-</div>
-<script>
-(function() {{
-  var token = {json.dumps(token)};
-  var sent = false;
-  if (window.opener) {{
-    try {{
-      window.opener.postMessage(
-        {{type: 'scout:auth-token', token: token}},
-        window.location.origin
-      );
-      sent = true;
-    }} catch (e) {{
-      // opener may have been closed or cross-origin
-    }}
-  }}
-  if (sent) {{
-    setTimeout(function() {{ window.close(); }}, 1500);
-  }} else {{
-    document.getElementById('status').textContent = 'You can close this window.';
-  }}
-}})();
-</script>
-</body>
-</html>"""
-    return HttpResponse(html)
-
-
-@csrf_exempt
-@require_POST
-def token_exchange_view(request):
-    """Exchange a signed popup token for a session cookie.
-
-    Called by the embed iframe after receiving the token via postMessage.
-    Sets session and CSRF cookies with SameSite=None so they work in
-    cross-site iframe contexts.
-    """
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, ValueError):
-        return JsonResponse({"error": "Invalid JSON"}, status=400)
-
-    token = body.get("token", "")
-    if not token:
-        return JsonResponse({"error": "Token required"}, status=400)
-
-    # Validate signature and expiry
-    signer = TimestampSigner()
-    try:
-        payload = signer.unsign(token, max_age=POPUP_TOKEN_MAX_AGE)
-    except SignatureExpired:
-        return JsonResponse({"error": "Token expired"}, status=401)
-    except BadSignature:
-        return JsonResponse({"error": "Invalid token"}, status=401)
-
-    # Parse user_id and nonce
-    try:
-        user_id_str, nonce = payload.rsplit(":", 1)
-    except ValueError:
-        return JsonResponse({"error": "Invalid token"}, status=401)
-
-    # One-time use: check and consume nonce
-    cache_key = f"{POPUP_TOKEN_CACHE_PREFIX}{nonce}"
-    cached_user_id = cache.get(cache_key)
-    if cached_user_id is None or cached_user_id != user_id_str:
-        return JsonResponse({"error": "Token already used or invalid"}, status=401)
-    cache.delete(cache_key)
-
-    # Look up user and create session
-    user = UserModel.objects.filter(id=user_id_str).first()
-    if user is None or not user.is_active:
-        return JsonResponse({"error": "Invalid token"}, status=401)
-
-    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
-
-    onboarding_complete = TenantMembership.objects.filter(
-        user=user, credential__isnull=False
-    ).exists()
-
-    response = JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
-
-    # Set cookies with SameSite=None for cross-site iframe usage
-    session_cookie = settings.SESSION_COOKIE_NAME
-    response.set_cookie(
-        session_cookie,
-        request.session.session_key,
-        max_age=settings.SESSION_COOKIE_AGE,
-        path=settings.SESSION_COOKIE_PATH,
-        domain=settings.SESSION_COOKIE_DOMAIN,
-        secure=True,
-        httponly=settings.SESSION_COOKIE_HTTPONLY,
-        samesite="None",
-    )
-    response.set_cookie(
-        settings.CSRF_COOKIE_NAME,
-        get_token(request),
-        max_age=settings.CSRF_COOKIE_AGE,
-        path=settings.CSRF_COOKIE_PATH,
-        domain=settings.CSRF_COOKIE_DOMAIN,
-        secure=True,
-        httponly=False,
-        samesite="None",
-    )
-
-    return response

@@ -37,22 +37,6 @@ export default function App() {
     }
   }, [fetchMe, isPublicPage, isEmbedPage])
 
-  // If this window was opened as a popup for embed OAuth, redirect to the
-  // popup-complete page which sends the auth token to the iframe via postMessage.
-  // This handles the case where allauth doesn't preserve the `next` URL through
-  // the OAuth flow and falls back to LOGIN_REDIRECT_URL.
-  useEffect(() => {
-    if (authStatus !== "authenticated" || !window.opener) return
-    try {
-      // Same-origin check — confirms this is our embed iframe's popup
-      if (window.opener.location.origin === window.location.origin) {
-        window.location.href = `${BASE_PATH}/auth/popup-complete/`
-      }
-    } catch {
-      // Cross-origin opener, not our popup — ignore
-    }
-  }, [authStatus])
-
   if (isPublicPage) {
     return getPublicPageComponent()
   }

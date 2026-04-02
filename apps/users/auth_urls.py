@@ -10,7 +10,6 @@ from apps.users.auth_views import (
     me_view,
     providers_view,
     signup_view,
-    token_exchange_view,
 )
 from apps.users.views import (
     tenant_credential_detail_view,
@@ -34,7 +33,6 @@ urlpatterns = [
         name="disconnect-provider",
     ),
     path("signup/", signup_view, name="signup"),
-    path("token-exchange/", token_exchange_view, name="token-exchange"),
     path("tenants/", tenant_list_view, name="tenant-list"),
     path("tenants/select/", tenant_select_view, name="tenant-select"),
     path("tenants/ensure/", tenant_ensure_view, name="tenant-ensure"),
