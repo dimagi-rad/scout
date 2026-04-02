@@ -37,16 +37,6 @@ export default function App() {
     }
   }, [fetchMe, isPublicPage, isEmbedPage])
 
-  // If opened as a popup (e.g. for OAuth from the embed widget), close
-  // automatically once the user is authenticated so control returns to
-  // the parent page. This is the original approach that worked reliably.
-  useEffect(() => {
-    if (document.cookie.includes("scout_auth_popup=1") && authStatus === "authenticated") {
-      document.cookie = "scout_auth_popup=;max-age=0;path=/"
-      window.close()
-    }
-  }, [authStatus])
-
   if (isPublicPage) {
     return getPublicPageComponent()
   }

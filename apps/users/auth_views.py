@@ -4,7 +4,6 @@ import json
 import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from django.conf import settings as django_settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.sites.models import Site
@@ -239,14 +238,13 @@ def providers_view(request):
             else:
                 token_status[provider] = "connected"
 
-    _prefix = getattr(django_settings, "FORCE_SCRIPT_NAME", "") or ""
-
     providers = []
     for app in apps:
         entry = {
             "id": app.provider,
             "name": PROVIDER_DISPLAY.get(app.provider, app.name),
-            "login_url": f"{_prefix}/accounts/{app.provider}/login/",
+            # No prefix — the frontend prepends BASE_PATH to all API-provided URLs
+            "login_url": f"/accounts/{app.provider}/login/",
         }
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
