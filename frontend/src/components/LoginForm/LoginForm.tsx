@@ -21,7 +21,6 @@ export function LoginForm() {
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const authError = useAppStore((s) => s.authError)
   const login = useAppStore((s) => s.authActions.login)
-  const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const { isEmbed } = useEmbedParams()
 
   useEffect(() => {
@@ -42,22 +41,13 @@ export function LoginForm() {
     }
   }
 
-  function openLoginPopup() {
-    // Open standalone Scout in a popup — user logs in there normally.
-    // A cookie signals that this is a popup, so App.tsx auto-closes it
-    // once authenticated. The iframe polls for popup close then re-fetches auth.
-    document.cookie = "scout_auth_popup=1;path=/;max-age=300;SameSite=Lax"
-    const popup = window.open(`${BASE_PATH}/`, "scout-oauth", "width=500,height=700")
-
-    if (!popup) return
-
-    const interval = setInterval(() => {
-      if (!popup || popup.closed) {
-        clearInterval(interval)
-        fetchMe()
-      }
-    }, 500)
-  }
+  // In embed mode, OAuth navigates the top-level page (target="_top") so
+  // the OAuth provider's consent page isn't constrained to the iframe.
+  // After login, LOGIN_REDIRECT_URL sends the user back to the embed page
+  // and the iframe picks up the session cookie (same-origin, no popup needed).
+  const oauthReturnUrl = isEmbed
+    ? (document.referrer ? new URL(document.referrer).pathname : "/labs/scout/")
+    : `${BASE_PATH}/`
 
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
@@ -112,29 +102,20 @@ export function LoginForm() {
               </div>
               <div className="space-y-2">
                 {providers.map((provider) => (
-                  isEmbed ? (
-                    <Button
-                      key={provider.id}
-                      variant="outline"
-                      className="w-full"
-                      data-testid={`oauth-login-${provider.id}`}
-                      onClick={openLoginPopup}
+                  <Button
+                    key={provider.id}
+                    variant="outline"
+                    className="w-full"
+                    asChild
+                    data-testid={`oauth-login-${provider.id}`}
+                  >
+                    <a
+                      href={`${BASE_PATH}${provider.login_url}?next=${encodeURIComponent(oauthReturnUrl)}`}
+                      target={isEmbed ? "_top" : undefined}
                     >
                       {provider.name}
-                    </Button>
-                  ) : (
-                    <Button
-                      key={provider.id}
-                      variant="outline"
-                      className="w-full"
-                      asChild
-                      data-testid={`oauth-login-${provider.id}`}
-                    >
-                      <a href={`${BASE_PATH}${provider.login_url}?next=${BASE_PATH}/`}>
-                        {provider.name}
-                      </a>
-                    </Button>
-                  )
+                    </a>
+                  </Button>
                 ))}
               </div>
             </>
