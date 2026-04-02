@@ -22,13 +22,18 @@ export interface AuthSlice {
   }
 }
 
-export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set) => ({
+export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set, get) => ({
   user: null,
   authStatus: "idle",
   authError: null,
   authActions: {
     fetchMe: async () => {
-      set({ authStatus: "loading", authError: null })
+      // Only show loading skeleton for initial auth check (idle → loading).
+      // Re-checks (e.g. visibilitychange in embed) keep the current view so
+      // popup spinner state in LoginForm isn't lost by unmounting.
+      if (get().authStatus === "idle") {
+        set({ authStatus: "loading", authError: null })
+      }
       try {
         // Ensure CSRF cookie is set
         await api.get("/api/auth/csrf/")

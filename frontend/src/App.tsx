@@ -37,13 +37,19 @@ export default function App() {
     }
   }, [fetchMe, isPublicPage, isEmbedPage])
 
-  // If opened as a popup (e.g. for OAuth from the embed widget), close
-  // automatically once the user is authenticated so control returns to
-  // the parent page. This is the original approach that worked reliably.
+  // If this window was opened as a popup for embed OAuth, redirect to the
+  // popup-complete page which sends the auth token to the iframe via postMessage.
+  // This handles the case where allauth doesn't preserve the `next` URL through
+  // the OAuth flow and falls back to LOGIN_REDIRECT_URL.
   useEffect(() => {
-    if (document.cookie.includes("scout_auth_popup=1") && authStatus === "authenticated") {
-      document.cookie = "scout_auth_popup=;max-age=0;path=/"
-      window.close()
+    if (authStatus !== "authenticated" || !window.opener) return
+    try {
+      // Same-origin check — confirms this is our embed iframe's popup
+      if (window.opener.location.origin === window.location.origin) {
+        window.location.href = `${BASE_PATH}/auth/popup-complete/`
+      }
+    } catch {
+      // Cross-origin opener, not our popup — ignore
     }
   }, [authStatus])
 
