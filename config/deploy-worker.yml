@@ -13,9 +13,7 @@ servers:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
       network: "scout_shared"
-    cmd: >
-      celery -A config worker --beat -l info
-        --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    cmd: "celery -A config worker --beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
 
 registry:
   server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>

@@ -14,10 +14,7 @@ servers:
     options:
       network: "scout_shared"
       network-alias: "scout-mcp-web"
-    cmd: >
-      python -m mcp_server
-        --transport streamable-http
-        --host 0.0.0.0 --port 8100
+    cmd: "python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8100"
 
 registry:
   server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
