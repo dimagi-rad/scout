@@ -6,6 +6,11 @@ set -euo pipefail
 # Aborts the deploy if migrations fail.
 
 if [ "$KAMAL_SERVICE" = "scout" ]; then
+  echo "Pushing env to server..."
+  kamal env push || {
+    echo "ERROR: Failed to push env — aborting deploy" >&2
+    exit 1
+  }
   echo "Running database migrations..."
   kamal app exec --version=$KAMAL_VERSION -- python manage.py migrate || {
     echo "ERROR: Migrations failed — aborting deploy" >&2
