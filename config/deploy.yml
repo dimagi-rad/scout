@@ -15,6 +15,7 @@ servers:
       network: "scout_shared"
       network-alias: "scout-web"
     cmd: "uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 4 --timeout-keep-alive 120"
+    proxy: false
 
 registry:
   server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
