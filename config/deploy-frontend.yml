@@ -28,6 +28,9 @@ ssh:
 
 builder:
   arch: amd64
+  dockerfile: Dockerfile.frontend
+  args:
+    NGINX_CONF: frontend/nginx.prod-kamal.conf
 
 proxy:
   host: scout.dimagi.com
