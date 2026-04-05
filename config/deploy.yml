@@ -45,4 +45,7 @@ env:
 ssh:
   user: scout
 
+builder:
+  arch: amd64
+
 # No proxy — API is internal only, reached via nginx in frontend container

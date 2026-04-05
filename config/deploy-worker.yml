@@ -34,4 +34,7 @@ env:
 ssh:
   user: scout
 
+builder:
+  arch: amd64
+
 # No proxy — worker has no HTTP interface

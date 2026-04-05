@@ -35,4 +35,7 @@ env:
 ssh:
   user: scout
 
+builder:
+  arch: amd64
+
 # No proxy — MCP is internal only, reached by API via Docker network

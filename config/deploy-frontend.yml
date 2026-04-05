@@ -23,6 +23,9 @@ registry:
 ssh:
   user: scout
 
+builder:
+  arch: amd64
+
 proxy:
   host: scout.dimagi.com
   app_port: 3000
