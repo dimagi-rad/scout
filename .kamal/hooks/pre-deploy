@@ -5,8 +5,7 @@ set -euo pipefail
 # Only runs for the main API service — skipped for MCP, worker, and frontend deploys.
 # Aborts the deploy if migrations fail.
 
-# Migrations are run via pre-deploy hook after the first deploy.
-# For initial setup, run manually: kamal app exec -- python manage.py migrate
 if [ "$KAMAL_SERVICE" = "scout" ]; then
-  echo "Skipping migrations in pre-deploy (run manually for initial setup)"
+  echo "Running migrations..."
+  kamal app exec -c config/deploy.yml -- python manage.py migrate --no-input
 fi
