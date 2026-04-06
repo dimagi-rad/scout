@@ -1,0 +1,43 @@
+# Scout Celery Worker + Beat
+# No HTTP interface — runs background tasks and periodic scheduling
+#
+# Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+
+service: scout-worker
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_shared"
+    cmd: "celery -A config worker --beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    REDIS_URL: "redis://<%= ENV.fetch('SCOUT_REDIS_ENDPOINT') %>:6379/0"
+  secret:
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - DJANGO_SECRET_KEY
+    - DB_CREDENTIAL_KEY
+
+ssh:
+  user: scout
+  keys: ["~/.ssh/scout-deploy.pem"]
+  keys_only: true
+  config: false
+
+builder:
+  arch: amd64
+
+# No proxy — worker has no HTTP interface
