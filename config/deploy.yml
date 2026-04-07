@@ -42,8 +42,6 @@ env:
 
 ssh:
   user: scout
-  keys: ["~/.ssh/scout-deploy.pem"]
-  keys_only: true
   config: false
 
 builder:

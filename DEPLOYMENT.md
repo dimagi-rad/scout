@@ -87,7 +87,10 @@ For deploying from your local machine (e.g., debugging or first-time setup):
    aws sso login --profile scout
    ```
 
-3. **SSH key**: `~/.ssh/scout-deploy.pem` (from 1Password: "scout prod ec2 SSH Key" in "GSO: Open Chat Studio Team (OCS)")
+3. **SSH key** loaded into your SSH agent. Either:
+   - Use the **1Password SSH agent** (recommended, configured above), or
+   - Manually add the key: `ssh-add ~/.ssh/scout-deploy.pem`
+     (download from 1Password: "scout prod ec2 SSH Key" in "GSO: Open Chat Studio Team (OCS)")
 
 4. **Ruby + Kamal**: `gem install kamal`
 
