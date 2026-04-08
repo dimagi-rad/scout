@@ -2,16 +2,17 @@ import pytest
 import requests_mock as rm
 
 from mcp_server.loaders.connect_assessments import ConnectAssessmentLoader
+from mcp_server.loaders.connect_base import (
+    EXPORT_ACCEPT_HEADER,
+    ConnectAuthError,
+    ConnectExportError,
+)
 from mcp_server.loaders.connect_completed_modules import ConnectCompletedModuleLoader
 from mcp_server.loaders.connect_completed_works import ConnectCompletedWorkLoader
 from mcp_server.loaders.connect_invoices import ConnectInvoiceLoader
 from mcp_server.loaders.connect_payments import ConnectPaymentLoader
 from mcp_server.loaders.connect_users import ConnectUserLoader
-from mcp_server.loaders.connect_visits import (
-    ConnectVisitLoader,
-    _normalize_visit,
-    _parse_json_field,
-)
+from mcp_server.loaders.connect_visits import ConnectVisitLoader, _normalize_visit
 
 BASE = "https://connect.example.com"
 CRED = {"type": "oauth", "value": "test-token"}
@@ -20,6 +21,11 @@ OPP_ID = 814
 
 def _make_loader(cls):
     return cls(opportunity_id=OPP_ID, credential=CRED, base_url=BASE)
+
+
+def _page(results, next_url=None):
+    """Build a v2 paginated JSON response body."""
+    return {"next": next_url, "previous": None, "results": results}
 
 
 # ---------------------------------------------------------------------------
@@ -32,17 +38,40 @@ class TestConnectVisitLoader:
     def loader(self):
         return _make_loader(ConnectVisitLoader)
 
+    def _visit_record(self, **overrides):
+        record = {
+            "id": 1,
+            "opportunity_id": 814,
+            "username": "alice",
+            "deliver_unit": "du1",
+            "entity_id": "e1",
+            "entity_name": "Entity One",
+            "visit_date": "2025-01-01",
+            "status": "approved",
+            "reason": None,
+            "location": "loc1",
+            "flagged": False,
+            "flag_reason": None,
+            "form_json": {"q1": "yes"},
+            "completed_work": "cw1",
+            "status_modified_date": "2025-01-02",
+            "review_status": "approved",
+            "review_created_on": "2025-01-03",
+            "justification": None,
+            "date_created": "2025-01-01",
+            "completed_work_id": "cw1",
+            "deliver_unit_id": "du1",
+            "images": [],
+        }
+        record.update(overrides)
+        return record
+
     def test_load_pages(self, loader):
-        csv_text = (
-            "id,opportunity_id,username,deliver_unit,entity_id,entity_name,"
-            "visit_date,status,reason,location,flagged,flag_reason,form_json,"
-            "completed_work,status_modified_date,review_status,review_created_on,"
-            "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-            "1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,"
-            '"{""q1"": ""yes""}",cw1,2025-01-02,approved,2025-01-03,,2025-01-01,cw1,du1,[]\n'
-        )
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", text=csv_text)
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record()]),
+            )
             pages = list(loader.load_pages())
             assert len(pages) == 1
             assert len(pages[0]) == 1
@@ -51,214 +80,267 @@ class TestConnectVisitLoader:
             assert row["username"] == "alice"
             assert "id" not in row
 
-    def test_load_convenience(self, loader):
-        csv_text = (
-            "id,opportunity_id,username,deliver_unit,entity_id,entity_name,"
-            "visit_date,status,reason,location,flagged,flag_reason,form_json,"
-            "completed_work,status_modified_date,review_status,review_created_on,"
-            "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-            "1,814,alice,du1,e1,Entity One,2025-01-01,approved,,loc1,False,,"
-            '"{""q1"": ""yes""}",cw1,2025-01-02,approved,2025-01-03,,2025-01-01,cw1,du1,[]\n'
-        )
+    def test_form_json_passes_through_as_dict(self, loader):
+        """v2 JSON returns form_json as a real dict — no parsing required."""
+        record = self._visit_record(form_json={"name": "test", "active": True})
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", text=csv_text)
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([record]),
+            )
             rows = loader.load()
-            assert len(rows) == 1
+            assert rows[0]["form_json"] == {"name": "test", "active": True}
 
-    def test_form_json_python_repr_parsing(self):
-        raw = {
-            "id": "42",
-            "form_json": "{'name': 'test', 'active': True}",
-            "images": "[]",
-        }
-        result = _normalize_visit(raw)
-        assert result["form_json"] == {"name": "test", "active": True}
-        assert result["visit_id"] == "42"
-
-    def test_form_json_standard_json(self):
-        raw = {
-            "id": "5",
-            "form_json": '{"name": "test"}',
-            "images": "[]",
-        }
-        result = _normalize_visit(raw)
-        assert result["form_json"] == {"name": "test"}
-
-    def test_form_json_empty(self):
-        raw = {"id": "5", "form_json": "", "images": ""}
-        result = _normalize_visit(raw)
+    def test_form_json_missing_defaults_to_empty_dict(self):
+        result = _normalize_visit({"id": 5}, opportunity_id=814)
         assert result["form_json"] == {}
-        assert result["images"] == {}
+        assert result["images"] == []
 
-    def test_parse_json_field_invalid(self):
-        assert _parse_json_field("not valid {{{") == {}
+    def test_form_json_non_dict_coerced_to_empty(self):
+        """Defensive: if upstream ever sends a non-dict for form_json, fall back to {}."""
+        result = _normalize_visit(
+            {"id": 5, "form_json": "broken", "images": "broken"},
+            opportunity_id=814,
+        )
+        assert result["form_json"] == {}
+        assert result["images"] == []
 
     def test_id_renamed_to_visit_id(self, loader):
-        csv_text = (
-            "id,opportunity_id,username,deliver_unit,entity_id,entity_name,"
-            "visit_date,status,reason,location,flagged,flag_reason,form_json,"
-            "completed_work,status_modified_date,review_status,review_created_on,"
-            "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-            "99,814,bob,du2,e2,Ent2,2025-02-01,pending,,,,,,,,,,,,,,\n"
-        )
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", text=csv_text)
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record(id=99, username="bob")]),
+            )
             rows = loader.load()
             assert rows[0]["visit_id"] == "99"
             assert "id" not in rows[0]
 
-    def test_empty_csv_yields_nothing(self, loader):
-        csv_text = (
-            "id,opportunity_id,username,deliver_unit,entity_id,entity_name,"
-            "visit_date,status,reason,location,flagged,flag_reason,form_json,"
-            "completed_work,status_modified_date,review_status,review_created_on,"
-            "justification,date_created,completed_work_id,deliver_unit_id,images\n"
-        )
+    def test_opportunity_id_falls_back_to_loader(self, loader):
+        """Some serializers omit opportunity_id from per-row data."""
+        record = self._visit_record()
+        del record["opportunity_id"]
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", text=csv_text)
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([record]),
+            )
+            rows = loader.load()
+            assert rows[0]["opportunity_id"] == "814"
+
+    def test_flagged_bool_stringified(self, loader):
+        """v1 CSV returned 'True'/'False'; ``str(bool)`` preserves that capitalization."""
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record(flagged=True)]),
+            )
+            rows = loader.load()
+            assert rows[0]["flagged"] == "True"
+
+    def test_empty_results_yields_nothing(self, loader):
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([]),
+            )
             pages = list(loader.load_pages())
             assert pages == []
 
-    def test_chunking_large_dataset(self, loader):
-        """Visits with >1000 rows should be yielded in chunks of 1000."""
-        header = (
-            "id,opportunity_id,username,deliver_unit,entity_id,entity_name,"
-            "visit_date,status,reason,location,flagged,flag_reason,form_json,"
-            "completed_work,status_modified_date,review_status,review_created_on,"
-            "justification,date_created,completed_work_id,deliver_unit_id,images"
-        )
-        rows = [
-            f"{i},814,user{i},du,e,Ent,2025-01-01,approved,,,,,,,,,,,,,,[]" for i in range(1, 1502)
-        ]
-        csv_text = header + "\n" + "\n".join(rows) + "\n"
+    def test_pagination_follows_next_url(self, loader):
+        """Loader must follow ``next`` until null and aggregate all pages."""
+        first_url = f"{BASE}/export/opportunity/{OPP_ID}/user_visits/"
+        next_url = f"{first_url}?last_id=1"
+
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 2
-            assert len(pages[0]) == 1000
-            assert len(pages[1]) == 501
+            m.get(first_url, json=_page([self._visit_record(id=1)], next_url=next_url))
+            m.get(next_url, json=_page([self._visit_record(id=2, username="bob")]))
+
+            rows = loader.load()
+            assert [r["visit_id"] for r in rows] == ["1", "2"]
+            assert [r["username"] for r in rows] == ["alice", "bob"]
+
+    def test_sends_versioned_accept_header(self, loader):
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record()]),
+            )
+            loader.load()
+            assert m.last_request.headers["Accept"] == EXPORT_ACCEPT_HEADER
+
+    def test_sends_bearer_auth(self, loader):
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record()]),
+            )
+            loader.load()
+            assert m.last_request.headers["Authorization"] == "Bearer test-token"
+
+    def test_auth_error_on_401(self, loader):
+        with rm.Mocker() as m:
+            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", status_code=401)
+            with pytest.raises(ConnectAuthError):
+                loader.load()
+
+    def test_export_error_on_missing_results_key(self, loader):
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json={"next": None},
+            )
+            with pytest.raises(ConnectExportError):
+                loader.load()
 
 
 # ---------------------------------------------------------------------------
-# Simple loader tests (users, completed_works, payments, invoices,
-#                       assessments, completed_modules)
+# Simple loader tests
 # ---------------------------------------------------------------------------
+#
+# These all share the same shape — paginate JSON, stringify each record. We
+# use a parameterized class to keep the matrix readable.
 
 
-class TestConnectUserLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectUserLoader)
+SIMPLE_LOADER_CASES = [
+    (
+        ConnectUserLoader,
+        "user_data/",
+        {
+            "username": "alice",
+            "name": "Alice Smith",
+            "phone": "555-0001",
+            "payment_accrued": 100,
+            "suspended": False,
+        },
+        ("username", "alice"),
+    ),
+    (
+        ConnectCompletedWorkLoader,
+        "completed_works/",
+        {
+            "username": "alice",
+            "opportunity_id": 814,
+            "payment_unit_id": "pu1",
+            "status": "approved",
+            "saved_completed_count": 5,
+            "saved_payment_accrued": 50,
+        },
+        ("status", "approved"),
+    ),
+    (
+        ConnectPaymentLoader,
+        "payment/",
+        {
+            "username": "alice",
+            "opportunity_id": 814,
+            "amount": 100,
+            "amount_usd": 20,
+            "confirmed": True,
+            "payment_method": "mobile",
+        },
+        ("amount", "100"),
+    ),
+    (
+        ConnectInvoiceLoader,
+        "invoice/",
+        {
+            "opportunity_id": 814,
+            "amount": 500,
+            "amount_usd": 100,
+            "date": "2025-01-01",
+            "invoice_number": "INV-001",
+            "exchange_rate": 5.0,
+        },
+        ("invoice_number", "INV-001"),
+    ),
+    (
+        ConnectAssessmentLoader,
+        "assessment/",
+        {
+            "username": "alice",
+            "app": "app1",
+            "opportunity_id": 814,
+            "date": "2025-01-01",
+            "score": 85,
+            "passing_score": 70,
+            "passed": True,
+        },
+        ("score", "85"),
+    ),
+    (
+        ConnectCompletedModuleLoader,
+        "completed_module/",
+        {
+            "username": "alice",
+            "module": "mod1",
+            "opportunity_id": 814,
+            "date": "2025-01-01",
+            "duration": 30,
+        },
+        ("module", "mod1"),
+    ),
+]
 
-    def test_load_pages(self, loader):
-        csv_text = (
-            "username,name,phone,date_learn_started,user_invite_status,"
-            "payment_accrued,suspended,suspension_date,suspension_reason,"
-            "invited_date,completed_learn_date,last_active,date_claimed,claim_limits\n"
-            "alice,Alice Smith,555-0001,2025-01-01,accepted,100,False,,,2025-01-01,,2025-06-01,,\n"
-        )
+
+@pytest.mark.parametrize(
+    ("loader_cls", "endpoint", "record", "expected"),
+    SIMPLE_LOADER_CASES,
+    ids=[c[0].__name__ for c in SIMPLE_LOADER_CASES],
+)
+class TestSimpleLoaders:
+    def test_load_single_page(self, loader_cls, endpoint, record, expected):
+        loader = _make_loader(loader_cls)
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_data/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["username"] == "alice"
-
-    def test_load(self, loader):
-        csv_text = "username,name,phone\nalice,Alice,555\n"
-        with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_data/", text=csv_text)
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/{endpoint}",
+                json=_page([record]),
+            )
             rows = loader.load()
             assert len(rows) == 1
+            key, value = expected
+            assert rows[0][key] == value
 
-    def test_empty(self, loader):
+    def test_native_types_stringified(self, loader_cls, endpoint, record, expected):
+        """Numbers and booleans become strings to match the v1 CSV contract."""
+        loader = _make_loader(loader_cls)
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_data/", text="username,name\n")
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/{endpoint}",
+                json=_page([record]),
+            )
+            rows = loader.load()
+            for v in rows[0].values():
+                assert isinstance(v, str)
+
+    def test_empty_results(self, loader_cls, endpoint, record, expected):
+        loader = _make_loader(loader_cls)
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/{endpoint}",
+                json=_page([]),
+            )
             assert list(loader.load_pages()) == []
 
+    def test_pagination_aggregates_pages(self, loader_cls, endpoint, record, expected):
+        loader = _make_loader(loader_cls)
+        first_url = f"{BASE}/export/opportunity/{OPP_ID}/{endpoint}"
+        next_url = f"{first_url}?last_id=1"
 
-class TestConnectCompletedWorkLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectCompletedWorkLoader)
+        record2 = {**record}
 
-    def test_load_pages(self, loader):
-        csv_text = (
-            "username,opportunity_id,payment_unit_id,status,last_modified,entity_id,"
-            "entity_name,reason,status_modified_date,payment_date,date_created,"
-            "saved_completed_count,saved_approved_count,saved_payment_accrued,"
-            "saved_payment_accrued_usd,saved_org_payment_accrued,saved_org_payment_accrued_usd\n"
-            "alice,814,pu1,approved,2025-01-01,e1,Entity,,,2025-01-02,2025-01-01,5,5,50,10,50,10\n"
-        )
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/completed_works/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["username"] == "alice"
+            m.get(first_url, json=_page([record], next_url=next_url))
+            m.get(next_url, json=_page([record2]))
 
+            rows = loader.load()
+            assert len(rows) == 2
 
-class TestConnectPaymentLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectPaymentLoader)
-
-    def test_load_pages(self, loader):
-        csv_text = (
-            "username,opportunity_id,created_at,amount,amount_usd,date_paid,"
-            "payment_unit,confirmed,confirmation_date,organization,invoice_id,"
-            "payment_method,payment_operator\n"
-            "alice,814,2025-01-01,100,20,2025-01-02,pu1,True,2025-01-02,dimagi,inv1,mobile,op1\n"
-        )
+    def test_sends_versioned_accept_header(self, loader_cls, endpoint, record, expected):
+        loader = _make_loader(loader_cls)
         with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/payment/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["amount"] == "100"
-
-
-class TestConnectInvoiceLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectInvoiceLoader)
-
-    def test_load_pages(self, loader):
-        csv_text = (
-            "opportunity_id,amount,amount_usd,date,invoice_number,"
-            "service_delivery,exchange_rate\n"
-            "814,500,100,2025-01-01,INV-001,sd1,5.0\n"
-        )
-        with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/invoice/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["invoice_number"] == "INV-001"
-
-
-class TestConnectAssessmentLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectAssessmentLoader)
-
-    def test_load_pages(self, loader):
-        csv_text = (
-            "username,app,opportunity_id,date,score,passing_score,passed\n"
-            "alice,app1,814,2025-01-01,85,70,True\n"
-        )
-        with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/assessment/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["score"] == "85"
-
-
-class TestConnectCompletedModuleLoader:
-    @pytest.fixture
-    def loader(self):
-        return _make_loader(ConnectCompletedModuleLoader)
-
-    def test_load_pages(self, loader):
-        csv_text = "username,module,opportunity_id,date,duration\nalice,mod1,814,2025-01-01,30\n"
-        with rm.Mocker() as m:
-            m.get(f"{BASE}/export/opportunity/{OPP_ID}/completed_module/", text=csv_text)
-            pages = list(loader.load_pages())
-            assert len(pages) == 1
-            assert pages[0][0]["module"] == "mod1"
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/{endpoint}",
+                json=_page([record]),
+            )
+            loader.load()
+            assert m.last_request.headers["Accept"] == EXPORT_ACCEPT_HEADER
