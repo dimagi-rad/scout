@@ -28,6 +28,7 @@ from datetime import UTC, datetime
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.users.auth_views import PROVIDER_TOKEN_URLS
 from apps.users.services.token_refresh import (
@@ -847,6 +848,12 @@ def _run_server(args: argparse.Namespace) -> None:
     if args.transport == "streamable-http":
         mcp.settings.host = args.host
         mcp.settings.port = args.port
+        # Allow internal Docker network hostname in addition to loopback defaults.
+        # The MCP server is internal-only; DNS rebinding protection is still on.
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
+        )
 
     mcp.run(transport=args.transport)
 

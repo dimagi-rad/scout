@@ -1,0 +1,41 @@
+# Scout Frontend — Sole public entry point
+# nginx serving React SPA, proxies /api/ and /admin/ to Django
+#
+# Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+
+service: scout-frontend
+
+image: scout/frontend
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_shared"
+      network-alias: "scout-frontend-web"
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+ssh:
+  user: scout
+  config: false
+
+builder:
+  arch: amd64
+  dockerfile: Dockerfile.frontend
+  args:
+    NGINX_CONF: frontend/nginx.prod-kamal.conf
+
+proxy:
+  host: scout.dimagi.com
+  app_port: 3000
+  ssl: true
+  forward_headers: true
+  healthcheck:
+    interval: 5
+    path: /
+    timeout: 3

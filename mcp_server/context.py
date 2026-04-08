@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 @dataclass(frozen=True)
@@ -151,8 +151,9 @@ def _parse_db_url(url: str, schema: str) -> dict:
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 5432,
         "dbname": parsed.path.lstrip("/") or "scout",
-        "user": parsed.username or "",
-        "password": parsed.password or "",
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+        "sslmode": "require",
         # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
         "options": f"-c search_path={schema},public -c statement_timeout=30000",
     }

@@ -1,0 +1,10 @@
+#!/bin/bash
+# Ensure shared Docker network exists before any service deploys
+
+echo "Ensuring Docker network 'scout_shared' exists on remote server..."
+
+SSH_USER="scout"
+
+ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/scout-deploy.pem "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect scout_shared >/dev/null 2>&1 || docker network create scout_shared"
+
+echo "Network setup complete"
