@@ -14,11 +14,11 @@ REQUESTED_KEY="${1:?Usage: resolve-secrets.sh <KEY>}"
 
 # Build the cache if it doesn't exist or is stale (>5 min)
 if [ ! -f "$CACHE_FILE" ] || [ "$(find "$CACHE_FILE" -mmin +5 2>/dev/null)" ]; then
-  # Load infra config
+  # Load infra config from .env.deploy (local) or expect env vars already set (CI)
   if [ -f "$PROJECT_ROOT/.env.deploy" ]; then
     source "$PROJECT_ROOT/.env.deploy"
-  else
-    echo "ERROR: $PROJECT_ROOT/.env.deploy not found" >&2
+  elif [ -z "${SCOUT_RDS_SECRET_ARN:-}" ]; then
+    echo "ERROR: $PROJECT_ROOT/.env.deploy not found and SCOUT_RDS_SECRET_ARN not set" >&2
     exit 1
   fi
 
