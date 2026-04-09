@@ -1,15 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# Run migrations in the currently-running API container before swapping.
+# Run migrations in the NEW version container before swapping traffic.
 # Only runs for the main API service — skipped for MCP, worker, and frontend deploys.
 # Aborts the deploy if migrations fail.
 #
-# Uses direct SSH + docker exec instead of `kamal app exec` to avoid
-# re-resolving secrets in a nested Kamal invocation (which fails in CI).
+# Uses --version to run in the newly-built container (which has secrets injected),
+# not the currently-running one. Uses -p to run on the primary host only.
 
 if [ "$KAMAL_SERVICE" = "scout" ]; then
   echo "Running migrations..."
-  ssh -o StrictHostKeyChecking=no scout@${SCOUT_EC2_IP} \
-    "docker exec \$(docker ps --filter label=service=scout --format '{{.ID}}' | head -1) python manage.py migrate --no-input"
+  kamal app exec -p --version "$KAMAL_VERSION" -- python manage.py migrate --no-input
 fi
