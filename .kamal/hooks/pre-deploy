@@ -1,14 +1,8 @@
 #!/bin/bash
-set -euo pipefail
-
-# Run migrations in the NEW version container before swapping traffic.
-# Only runs for the main API service — skipped for MCP, worker, and frontend deploys.
-# Aborts the deploy if migrations fail.
+# Pre-deploy hook — runs on the CI runner before deploying.
 #
-# Uses --version to run in the newly-built container (which has secrets injected),
-# not the currently-running one. Uses -p to run on the primary host only.
+# Migrations are handled in docker-entrypoint.sh (runs inside the container
+# on startup with env vars available), not here. The pre-deploy hook runs
+# before Kamal syncs the env file, so secrets aren't available at this point.
 
-if [ "$KAMAL_SERVICE" = "scout" ]; then
-  echo "Running migrations..."
-  kamal app exec -p --version "$KAMAL_VERSION" -- python manage.py migrate --no-input
-fi
+exit 0

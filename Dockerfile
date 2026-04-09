@@ -38,5 +38,7 @@ RUN DJANGO_SECRET_KEY=build-placeholder python manage.py collectstatic --noinput
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+ENTRYPOINT ["./docker-entrypoint.sh"]
+
 # Default command
 CMD ["uvicorn", "config.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
