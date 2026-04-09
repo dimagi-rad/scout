@@ -8,9 +8,14 @@ GITHUB_OAUTH_* env vars and upserts the corresponding allauth SocialApp rows.
 Idempotent — safe to re-run after credential rotation or fresh DB setup.
 
 Usage:
+    # Local dev
     uv run python scripts/setup_oauth_apps.py
+
+    # Production (updates Site domain to match DJANGO_ALLOWED_HOSTS)
+    uv run python scripts/setup_oauth_apps.py --domain scout.dimagi.com
 """
 
+import argparse
 import os
 import sys
 
@@ -34,19 +39,29 @@ PROVIDERS = [
 
 
 def main():
-    site, _ = Site.objects.get_or_create(
-        id=1, defaults={"domain": "localhost:8000", "name": "Scout Dev"}
+    parser = argparse.ArgumentParser(description="Bootstrap OAuth SocialApp records")
+    parser.add_argument(
+        "--domain",
+        default="localhost:8000",
+        help="Site domain for OAuth callbacks (default: localhost:8000)",
     )
-    site.domain = "localhost:8000"
-    site.name = "Scout Dev"
+    args = parser.parse_args()
+
+    site_name = "Scout" if args.domain != "localhost:8000" else "Scout Dev"
+    site, _ = Site.objects.get_or_create(
+        id=1, defaults={"domain": args.domain, "name": site_name}
+    )
+    site.domain = args.domain
+    site.name = site_name
     site.save()
+    print(f"  site   {site.domain} ({site.name})")
 
     for provider_id, name, env_prefix in PROVIDERS:
         client_id = os.environ.get(f"{env_prefix}_CLIENT_ID", "")
         client_secret = os.environ.get(f"{env_prefix}_CLIENT_SECRET", "")
 
         if not client_id or not client_secret:
-            print(f"  skip  {name} ({env_prefix}_CLIENT_ID not set)")
+            print(f"  skip   {name} ({env_prefix}_CLIENT_ID not set)")
             continue
 
         app, created = SocialApp.objects.update_or_create(
@@ -58,7 +73,7 @@ def main():
             },
         )
         app.sites.add(site)
-        print(f"  {'created' if created else 'updated'}  {name} (provider={provider_id})")
+        print(f"  {'create' if created else 'update'} {name} (provider={provider_id})")
 
     print("\nDone.")
 
