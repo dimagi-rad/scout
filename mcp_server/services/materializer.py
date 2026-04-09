@@ -453,6 +453,20 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
 
 # ── Connect table writers ──────────────────────────────────────────────────────
 
+
+def _json_or_none(value: Any) -> str | None:
+    """Serialize a value to a JSON string, or return None for SQL NULL.
+
+    Use for nullable JSONB columns (flag_reason, claim_limits) where the
+    v2 export may return ``null``. json.dumps(None) would produce the
+    literal string "null", which inserts as JSONB ``null`` — not the
+    same as SQL NULL. This helper preserves the distinction.
+    """
+    if value is None:
+        return None
+    return json.dumps(value)
+
+
 _CONNECT_VISITS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_visits
@@ -531,8 +545,13 @@ _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
 def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
     """Create the visits table and bulk-insert all pages. Returns total row count.
 
-    Columns are typed from the v2 JSON export: BIGINT ids, BOOLEAN flagged,
-    TIMESTAMPTZ for all datetime fields, JSONB for form_json/images.
+    Column types mirror the Django model + DRF serializer output:
+    - ``flag_reason`` is a JSONField, serialized as a dict → JSONB
+    - ``deliver_unit``, ``completed_work`` are ForeignKeys, the default
+      ModelSerializer renders them as the related PK (int) → BIGINT
+    - ``deliver_unit_id``, ``completed_work_id`` are the raw FK columns,
+      also int → BIGINT
+    - ``form_json``/``images`` remain JSONB
     """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -545,7 +564,7 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
             visit_id BIGINT PRIMARY KEY,
             opportunity_id BIGINT,
             username TEXT,
-            deliver_unit TEXT,
+            deliver_unit BIGINT,
             entity_id TEXT,
             entity_name TEXT,
             visit_date TIMESTAMPTZ,
@@ -553,16 +572,16 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
             reason TEXT,
             location TEXT,
             flagged BOOLEAN,
-            flag_reason TEXT,
+            flag_reason JSONB,
             form_json JSONB,
-            completed_work TEXT,
+            completed_work BIGINT,
             status_modified_date TIMESTAMPTZ,
             review_status TEXT,
             review_created_on TIMESTAMPTZ,
             justification TEXT,
             date_created TIMESTAMPTZ,
-            completed_work_id TEXT,
-            deliver_unit_id TEXT,
+            completed_work_id BIGINT,
+            deliver_unit_id BIGINT,
             images JSONB
         )
         """
@@ -579,7 +598,7 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
                 r.get("visit_id"),
                 r.get("opportunity_id"),
                 r.get("username", ""),
-                r.get("deliver_unit", ""),
+                r.get("deliver_unit"),
                 r.get("entity_id", ""),
                 r.get("entity_name", ""),
                 r.get("visit_date"),
@@ -587,16 +606,16 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
                 r.get("reason", ""),
                 r.get("location", ""),
                 r.get("flagged"),
-                r.get("flag_reason", ""),
+                _json_or_none(r.get("flag_reason")),
                 json.dumps(r.get("form_json") or {}),
-                r.get("completed_work", ""),
+                r.get("completed_work"),
                 r.get("status_modified_date"),
                 r.get("review_status", ""),
                 r.get("review_created_on"),
                 r.get("justification", ""),
                 r.get("date_created"),
-                r.get("completed_work_id", ""),
-                r.get("deliver_unit_id", ""),
+                r.get("completed_work_id"),
+                r.get("deliver_unit_id"),
                 json.dumps(r.get("images") or []),
             )
             for r in page
@@ -610,9 +629,9 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
 def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
     """Create the users table and bulk-insert all pages. Returns total row count.
 
-    ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, and all
-    date/datetime fields become TIMESTAMPTZ. ``claim_limits`` stays TEXT
-    because its upstream shape varies (sometimes JSON, sometimes a string).
+    ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, all
+    date/datetime fields become TIMESTAMPTZ. ``claim_limits`` is a
+    ``SerializerMethodField`` that returns a list of dicts — store as JSONB.
     """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -635,7 +654,7 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
             completed_learn_date TIMESTAMPTZ,
             last_active TIMESTAMPTZ,
             date_claimed TIMESTAMPTZ,
-            claim_limits TEXT
+            claim_limits JSONB
         )
         """
         ).format(schema=sid)
@@ -661,7 +680,7 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
                 r.get("completed_learn_date"),
                 r.get("last_active"),
                 r.get("date_claimed"),
-                r.get("claim_limits", ""),
+                _json_or_none(r.get("claim_limits")),
             )
             for r in page
         ]
@@ -687,7 +706,7 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
         CREATE TABLE {schema}.raw_completed_works (
             username TEXT,
             opportunity_id BIGINT,
-            payment_unit_id TEXT,
+            payment_unit_id BIGINT,
             status TEXT,
             last_modified TIMESTAMPTZ,
             entity_id TEXT,
@@ -716,7 +735,7 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
             (
                 r.get("username", ""),
                 r.get("opportunity_id"),
-                r.get("payment_unit_id", ""),
+                r.get("payment_unit_id"),
                 r.get("status", ""),
                 r.get("last_modified"),
                 r.get("entity_id", ""),
@@ -761,11 +780,11 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
             amount NUMERIC(14, 2),
             amount_usd NUMERIC(14, 2),
             date_paid TIMESTAMPTZ,
-            payment_unit TEXT,
+            payment_unit BIGINT,
             confirmed BOOLEAN,
             confirmation_date TIMESTAMPTZ,
             organization TEXT,
-            invoice_id TEXT,
+            invoice_id BIGINT,
             payment_method TEXT,
             payment_operator TEXT
         )
@@ -786,11 +805,11 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
                 r.get("amount"),
                 r.get("amount_usd"),
                 r.get("date_paid"),
-                r.get("payment_unit", ""),
+                r.get("payment_unit"),
                 r.get("confirmed"),
                 r.get("confirmation_date"),
                 r.get("organization", ""),
-                r.get("invoice_id", ""),
+                r.get("invoice_id"),
                 r.get("payment_method", ""),
                 r.get("payment_operator", ""),
             )
@@ -805,9 +824,10 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
 def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
 
-    Money fields become NUMERIC(14,2), ``exchange_rate`` uses NUMERIC(14,6)
-    for sub-cent precision, ``date`` is a DATE (invoice dates are day-level),
-    ``opportunity_id`` is BIGINT.
+    Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
+    BIGINT. ``service_delivery`` is a BooleanField (not a text label as the
+    old TEXT column implied), and ``exchange_rate`` is actually a ForeignKey
+    to the ExchangeRate lookup table (the PK, not the rate value) → BIGINT.
     """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -822,8 +842,8 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
             amount_usd NUMERIC(14, 2),
             date DATE,
             invoice_number TEXT,
-            service_delivery TEXT,
-            exchange_rate NUMERIC(14, 6)
+            service_delivery BOOLEAN,
+            exchange_rate BIGINT
         )
         """
         ).format(schema=sid)
@@ -841,7 +861,7 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
                 r.get("amount_usd"),
                 r.get("date"),
                 r.get("invoice_number", ""),
-                r.get("service_delivery", ""),
+                r.get("service_delivery"),
                 r.get("exchange_rate"),
             )
             for r in page
@@ -867,7 +887,7 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
             """
         CREATE TABLE {schema}.raw_assessments (
             username TEXT,
-            app TEXT,
+            app BIGINT,
             opportunity_id BIGINT,
             date TIMESTAMPTZ,
             score INTEGER,
@@ -886,7 +906,7 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
         rows = [
             (
                 r.get("username", ""),
-                r.get("app", ""),
+                r.get("app"),
                 r.get("opportunity_id"),
                 r.get("date"),
                 r.get("score"),
@@ -918,10 +938,10 @@ def _write_connect_completed_modules(
             """
         CREATE TABLE {schema}.raw_completed_modules (
             username TEXT,
-            module TEXT,
+            module BIGINT,
             opportunity_id BIGINT,
             date TIMESTAMPTZ,
-            duration INTEGER
+            duration TEXT
         )
         """
         ).format(schema=sid)
@@ -935,10 +955,10 @@ def _write_connect_completed_modules(
         rows = [
             (
                 r.get("username", ""),
-                r.get("module", ""),
+                r.get("module"),
                 r.get("opportunity_id"),
                 r.get("date"),
-                r.get("duration"),
+                r.get("duration", ""),
             )
             for r in page
         ]

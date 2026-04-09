@@ -39,11 +39,16 @@ class TestConnectVisitLoader:
         return _make_loader(ConnectVisitLoader)
 
     def _visit_record(self, **overrides):
+        # Mirrors what DRF's UserVisitDataSerializer actually produces. FK
+        # fields (deliver_unit, completed_work) are ints — the default
+        # ModelSerializer renders them as the related PK. flag_reason is a
+        # JSONField, so it arrives as a dict or None. form_json/images
+        # already arrive as dict/list.
         record = {
             "id": 1,
             "opportunity_id": 814,
             "username": "alice",
-            "deliver_unit": "du1",
+            "deliver_unit": 42,
             "entity_id": "e1",
             "entity_name": "Entity One",
             "visit_date": "2025-01-01T12:34:56Z",
@@ -53,14 +58,14 @@ class TestConnectVisitLoader:
             "flagged": False,
             "flag_reason": None,
             "form_json": {"q1": "yes"},
-            "completed_work": "cw1",
+            "completed_work": 7,
             "status_modified_date": "2025-01-02T00:00:00Z",
             "review_status": "approved",
             "review_created_on": "2025-01-03T00:00:00Z",
             "justification": None,
             "date_created": "2025-01-01T00:00:00Z",
-            "completed_work_id": "cw1",
-            "deliver_unit_id": "du1",
+            "completed_work_id": 7,
+            "deliver_unit_id": 42,
             "images": [],
         }
         record.update(overrides)
@@ -165,6 +170,42 @@ class TestConnectVisitLoader:
             rows = loader.load()
             assert rows[0]["visit_date"] is None
 
+    def test_flag_reason_dict_passes_through(self, loader):
+        """UserVisit.flag_reason is a Django JSONField; the v2 serializer
+        emits it as a dict. The writer stores it in JSONB via json.dumps.
+        Regression pin for the tenant 765 failure (psycopg couldn't adapt
+        a dict to the old TEXT column)."""
+        record = self._visit_record(
+            flagged=True,
+            flag_reason={"rule": "location_mismatch", "distance_m": 420},
+        )
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([record]),
+            )
+            rows = loader.load()
+            assert rows[0]["flag_reason"] == {"rule": "location_mismatch", "distance_m": 420}
+            assert isinstance(rows[0]["flag_reason"], dict)
+
+    def test_fk_ids_are_ints(self, loader):
+        """DRF's ModelSerializer renders ForeignKey fields as the related
+        PK (int), not a string. The writer's BIGINT columns bind ints
+        directly via psycopg."""
+        record = self._visit_record(deliver_unit=42, completed_work=7)
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([record]),
+            )
+            rows = loader.load()
+            assert rows[0]["deliver_unit"] == 42
+            assert rows[0]["deliver_unit_id"] == 42
+            assert rows[0]["completed_work"] == 7
+            assert rows[0]["completed_work_id"] == 7
+            assert isinstance(rows[0]["deliver_unit"], int)
+            assert isinstance(rows[0]["completed_work_id"], int)
+
     def test_empty_results_yields_nothing(self, loader):
         with rm.Mocker() as m:
             m.get(
@@ -231,6 +272,14 @@ class TestConnectVisitLoader:
 # key/value pair we sample to confirm the row survived a round-trip.
 
 
+# Each fixture mirrors the REAL shape produced by the DRF serializers in
+# commcare_connect.data_export.serializer. Key gotchas:
+#   - ForeignKey fields render as the related PK int, not a string
+#   - payment_accrued (user) is IntegerField → int, not a decimal string
+#   - claim_limits (user) is a SerializerMethodField returning list[dict]
+#   - service_delivery (invoice) is a BooleanField on PaymentInvoice, not a label
+#   - exchange_rate (invoice) is a FK to ExchangeRate → int PK, not the rate
+#   - duration (completed_module) is DurationField → string like "0:30:00"
 SIMPLE_LOADER_CASES = [
     (
         ConnectUserLoader,
@@ -241,7 +290,7 @@ SIMPLE_LOADER_CASES = [
             "phone": "555-0001",
             "date_learn_started": "2025-01-01T00:00:00Z",
             "user_invite_status": "accepted",
-            "payment_accrued": "100.00",
+            "payment_accrued": 100,
             "suspended": False,
             "suspension_date": None,
             "suspension_reason": None,
@@ -249,7 +298,10 @@ SIMPLE_LOADER_CASES = [
             "completed_learn_date": None,
             "last_active": "2025-06-01T00:00:00Z",
             "date_claimed": None,
-            "claim_limits": None,
+            "claim_limits": [
+                {"payment_unit": "pu1", "max_visits": 50},
+                {"payment_unit": "pu2", "max_visits": 100},
+            ],
         },
         ("username", "alice"),
     ),
@@ -259,7 +311,7 @@ SIMPLE_LOADER_CASES = [
         {
             "username": "alice",
             "opportunity_id": 814,
-            "payment_unit_id": "pu1",
+            "payment_unit_id": 11,
             "status": "approved",
             "last_modified": "2025-01-01T00:00:00Z",
             "entity_id": "e1",
@@ -270,9 +322,9 @@ SIMPLE_LOADER_CASES = [
             "date_created": "2025-01-01T00:00:00Z",
             "saved_completed_count": 5,
             "saved_approved_count": 5,
-            "saved_payment_accrued": "50.00",
+            "saved_payment_accrued": 50,
             "saved_payment_accrued_usd": "10.00",
-            "saved_org_payment_accrued": "50.00",
+            "saved_org_payment_accrued": 50,
             "saved_org_payment_accrued_usd": "10.00",
         },
         ("status", "approved"),
@@ -287,11 +339,11 @@ SIMPLE_LOADER_CASES = [
             "amount": "100.00",
             "amount_usd": "20.00",
             "date_paid": "2025-01-02T00:00:00Z",
-            "payment_unit": "pu1",
+            "payment_unit": 11,
             "confirmed": True,
             "confirmation_date": "2025-01-02T00:00:00Z",
             "organization": "dimagi",
-            "invoice_id": "inv1",
+            "invoice_id": 77,
             "payment_method": "mobile",
             "payment_operator": "op1",
         },
@@ -306,8 +358,8 @@ SIMPLE_LOADER_CASES = [
             "amount_usd": "100.00",
             "date": "2025-01-01",
             "invoice_number": "INV-001",
-            "service_delivery": "sd1",
-            "exchange_rate": "5.000000",
+            "service_delivery": True,
+            "exchange_rate": 3,
         },
         ("invoice_number", "INV-001"),
     ),
@@ -316,7 +368,7 @@ SIMPLE_LOADER_CASES = [
         "assessment/",
         {
             "username": "alice",
-            "app": "app1",
+            "app": 9,
             "opportunity_id": 814,
             "date": "2025-01-01T00:00:00Z",
             "score": 85,
@@ -330,12 +382,12 @@ SIMPLE_LOADER_CASES = [
         "completed_module/",
         {
             "username": "alice",
-            "module": "mod1",
+            "module": 5,
             "opportunity_id": 814,
             "date": "2025-01-01T00:00:00Z",
-            "duration": 30,
+            "duration": "0:30:00",
         },
-        ("module", "mod1"),
+        ("module", 5),
     ),
 ]
 
