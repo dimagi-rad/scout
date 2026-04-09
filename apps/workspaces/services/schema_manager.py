@@ -52,6 +52,9 @@ class SchemaManager:
         ).first()
 
         if existing:
+            # Ensure the physical schema still exists — it may have been
+            # dropped externally while the Django record remained ACTIVE.
+            self._ensure_physical_schema(schema_name)
             existing.touch()
             return existing
 
@@ -98,6 +101,25 @@ class SchemaManager:
             tenant.external_id,
         )
         return ts
+
+    def _ensure_physical_schema(self, schema_name: str) -> None:
+        """Ensure the physical PostgreSQL schema and readonly role exist.
+
+        Idempotent — safe to call on every provision(). Handles the case where
+        the physical schema was dropped externally but the Django record remains.
+        """
+        conn = get_managed_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    psycopg.sql.Identifier(schema_name)
+                )
+            )
+            self._create_readonly_role(cursor, schema_name)
+            cursor.close()
+        finally:
+            conn.close()
 
     def create_physical_schema(self, tenant_schema: TenantSchema) -> None:
         """Create the physical PostgreSQL schema for an existing TenantSchema record.

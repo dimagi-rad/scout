@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import psycopg.sql
 import pytest
 
 from apps.workspaces.models import TenantSchema
@@ -36,11 +37,25 @@ class TestSchemaManager:
             state="active",
         )
 
-        # No DB connection should be needed when an active schema is found
-        ts = mgr.provision(tenant_membership.tenant)
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.return_value = (1,)  # role already exists
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            ts = mgr.provision(tenant_membership.tenant)
 
         assert TenantSchema.objects.count() == 1  # no duplicate
         assert ts.schema_name == schema_name
+        # Verify physical schema was ensured even for existing record
+        mock_cursor.execute.assert_any_call(
+            psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                psycopg.sql.Identifier(schema_name)
+            )
+        )
 
 
 @pytest.mark.django_db
