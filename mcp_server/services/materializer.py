@@ -529,7 +529,11 @@ _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
 
 
 def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the visits table and bulk-insert all pages. Returns total row count."""
+    """Create the visits table and bulk-insert all pages. Returns total row count.
+
+    Columns are typed from the v2 JSON export: BIGINT ids, BOOLEAN flagged,
+    TIMESTAMPTZ for all datetime fields, JSONB for form_json/images.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -538,25 +542,25 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
         psql.SQL(
             """
         CREATE TABLE {schema}.raw_visits (
-            visit_id TEXT PRIMARY KEY,
-            opportunity_id TEXT,
+            visit_id BIGINT PRIMARY KEY,
+            opportunity_id BIGINT,
             username TEXT,
             deliver_unit TEXT,
             entity_id TEXT,
             entity_name TEXT,
-            visit_date TEXT,
+            visit_date TIMESTAMPTZ,
             status TEXT,
             reason TEXT,
             location TEXT,
-            flagged TEXT,
+            flagged BOOLEAN,
             flag_reason TEXT,
             form_json JSONB,
             completed_work TEXT,
-            status_modified_date TEXT,
+            status_modified_date TIMESTAMPTZ,
             review_status TEXT,
-            review_created_on TEXT,
+            review_created_on TIMESTAMPTZ,
             justification TEXT,
-            date_created TEXT,
+            date_created TIMESTAMPTZ,
             completed_work_id TEXT,
             deliver_unit_id TEXT,
             images JSONB
@@ -572,28 +576,28 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
             continue
         rows = [
             (
-                r.get("visit_id", ""),
-                r.get("opportunity_id", ""),
+                r.get("visit_id"),
+                r.get("opportunity_id"),
                 r.get("username", ""),
                 r.get("deliver_unit", ""),
                 r.get("entity_id", ""),
                 r.get("entity_name", ""),
-                r.get("visit_date", ""),
+                r.get("visit_date"),
                 r.get("status", ""),
                 r.get("reason", ""),
                 r.get("location", ""),
-                r.get("flagged", ""),
+                r.get("flagged"),
                 r.get("flag_reason", ""),
-                json.dumps(r.get("form_json", {})),
+                json.dumps(r.get("form_json") or {}),
                 r.get("completed_work", ""),
-                r.get("status_modified_date", ""),
+                r.get("status_modified_date"),
                 r.get("review_status", ""),
-                r.get("review_created_on", ""),
+                r.get("review_created_on"),
                 r.get("justification", ""),
-                r.get("date_created", ""),
+                r.get("date_created"),
                 r.get("completed_work_id", ""),
                 r.get("deliver_unit_id", ""),
-                json.dumps(r.get("images", [])),
+                json.dumps(r.get("images") or []),
             )
             for r in page
         ]
@@ -604,7 +608,12 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
 
 
 def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the users table and bulk-insert all pages. Returns total row count."""
+    """Create the users table and bulk-insert all pages. Returns total row count.
+
+    ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, and all
+    date/datetime fields become TIMESTAMPTZ. ``claim_limits`` stays TEXT
+    because its upstream shape varies (sometimes JSON, sometimes a string).
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -616,16 +625,16 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
             username TEXT PRIMARY KEY,
             name TEXT,
             phone TEXT,
-            date_learn_started TEXT,
+            date_learn_started TIMESTAMPTZ,
             user_invite_status TEXT,
-            payment_accrued TEXT,
-            suspended TEXT,
-            suspension_date TEXT,
+            payment_accrued NUMERIC(14, 2),
+            suspended BOOLEAN,
+            suspension_date TIMESTAMPTZ,
             suspension_reason TEXT,
-            invited_date TEXT,
-            completed_learn_date TEXT,
-            last_active TEXT,
-            date_claimed TEXT,
+            invited_date TIMESTAMPTZ,
+            completed_learn_date TIMESTAMPTZ,
+            last_active TIMESTAMPTZ,
+            date_claimed TIMESTAMPTZ,
             claim_limits TEXT
         )
         """
@@ -642,16 +651,16 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
                 r.get("username", ""),
                 r.get("name", ""),
                 r.get("phone", ""),
-                r.get("date_learn_started", ""),
+                r.get("date_learn_started"),
                 r.get("user_invite_status", ""),
-                r.get("payment_accrued", ""),
-                r.get("suspended", ""),
-                r.get("suspension_date", ""),
+                r.get("payment_accrued"),
+                r.get("suspended"),
+                r.get("suspension_date"),
                 r.get("suspension_reason", ""),
-                r.get("invited_date", ""),
-                r.get("completed_learn_date", ""),
-                r.get("last_active", ""),
-                r.get("date_claimed", ""),
+                r.get("invited_date"),
+                r.get("completed_learn_date"),
+                r.get("last_active"),
+                r.get("date_claimed"),
                 r.get("claim_limits", ""),
             )
             for r in page
@@ -663,7 +672,11 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
 
 
 def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the completed_works table and bulk-insert all pages. Returns total row count."""
+    """Create the completed_works table and bulk-insert all pages. Returns total row count.
+
+    Counts become INTEGER, accrued amounts become NUMERIC money, all
+    date/datetime fields become TIMESTAMPTZ, opportunity_id becomes BIGINT.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -673,22 +686,22 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
             """
         CREATE TABLE {schema}.raw_completed_works (
             username TEXT,
-            opportunity_id TEXT,
+            opportunity_id BIGINT,
             payment_unit_id TEXT,
             status TEXT,
-            last_modified TEXT,
+            last_modified TIMESTAMPTZ,
             entity_id TEXT,
             entity_name TEXT,
             reason TEXT,
-            status_modified_date TEXT,
-            payment_date TEXT,
-            date_created TEXT,
-            saved_completed_count TEXT,
-            saved_approved_count TEXT,
-            saved_payment_accrued TEXT,
-            saved_payment_accrued_usd TEXT,
-            saved_org_payment_accrued TEXT,
-            saved_org_payment_accrued_usd TEXT
+            status_modified_date TIMESTAMPTZ,
+            payment_date TIMESTAMPTZ,
+            date_created TIMESTAMPTZ,
+            saved_completed_count INTEGER,
+            saved_approved_count INTEGER,
+            saved_payment_accrued NUMERIC(14, 2),
+            saved_payment_accrued_usd NUMERIC(14, 2),
+            saved_org_payment_accrued NUMERIC(14, 2),
+            saved_org_payment_accrued_usd NUMERIC(14, 2)
         )
         """
         ).format(schema=sid)
@@ -702,22 +715,22 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
         rows = [
             (
                 r.get("username", ""),
-                r.get("opportunity_id", ""),
+                r.get("opportunity_id"),
                 r.get("payment_unit_id", ""),
                 r.get("status", ""),
-                r.get("last_modified", ""),
+                r.get("last_modified"),
                 r.get("entity_id", ""),
                 r.get("entity_name", ""),
                 r.get("reason", ""),
-                r.get("status_modified_date", ""),
-                r.get("payment_date", ""),
-                r.get("date_created", ""),
-                r.get("saved_completed_count", ""),
-                r.get("saved_approved_count", ""),
-                r.get("saved_payment_accrued", ""),
-                r.get("saved_payment_accrued_usd", ""),
-                r.get("saved_org_payment_accrued", ""),
-                r.get("saved_org_payment_accrued_usd", ""),
+                r.get("status_modified_date"),
+                r.get("payment_date"),
+                r.get("date_created"),
+                r.get("saved_completed_count"),
+                r.get("saved_approved_count"),
+                r.get("saved_payment_accrued"),
+                r.get("saved_payment_accrued_usd"),
+                r.get("saved_org_payment_accrued"),
+                r.get("saved_org_payment_accrued_usd"),
             )
             for r in page
         ]
@@ -728,7 +741,12 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
 
 
 def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the payments table and bulk-insert all pages. Returns total row count."""
+    """Create the payments table and bulk-insert all pages. Returns total row count.
+
+    ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
+    BOOLEAN, all date/datetime fields become TIMESTAMPTZ, ``opportunity_id``
+    becomes BIGINT.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -738,14 +756,14 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
             """
         CREATE TABLE {schema}.raw_payments (
             username TEXT,
-            opportunity_id TEXT,
-            created_at TEXT,
-            amount TEXT,
-            amount_usd TEXT,
-            date_paid TEXT,
+            opportunity_id BIGINT,
+            created_at TIMESTAMPTZ,
+            amount NUMERIC(14, 2),
+            amount_usd NUMERIC(14, 2),
+            date_paid TIMESTAMPTZ,
             payment_unit TEXT,
-            confirmed TEXT,
-            confirmation_date TEXT,
+            confirmed BOOLEAN,
+            confirmation_date TIMESTAMPTZ,
             organization TEXT,
             invoice_id TEXT,
             payment_method TEXT,
@@ -763,14 +781,14 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
         rows = [
             (
                 r.get("username", ""),
-                r.get("opportunity_id", ""),
-                r.get("created_at", ""),
-                r.get("amount", ""),
-                r.get("amount_usd", ""),
-                r.get("date_paid", ""),
+                r.get("opportunity_id"),
+                r.get("created_at"),
+                r.get("amount"),
+                r.get("amount_usd"),
+                r.get("date_paid"),
                 r.get("payment_unit", ""),
-                r.get("confirmed", ""),
-                r.get("confirmation_date", ""),
+                r.get("confirmed"),
+                r.get("confirmation_date"),
                 r.get("organization", ""),
                 r.get("invoice_id", ""),
                 r.get("payment_method", ""),
@@ -785,7 +803,12 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
 
 
 def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the invoices table and bulk-insert all pages. Returns total row count."""
+    """Create the invoices table and bulk-insert all pages. Returns total row count.
+
+    Money fields become NUMERIC(14,2), ``exchange_rate`` uses NUMERIC(14,6)
+    for sub-cent precision, ``date`` is a DATE (invoice dates are day-level),
+    ``opportunity_id`` is BIGINT.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -794,13 +817,13 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
         psql.SQL(
             """
         CREATE TABLE {schema}.raw_invoices (
-            opportunity_id TEXT,
-            amount TEXT,
-            amount_usd TEXT,
-            date TEXT,
+            opportunity_id BIGINT,
+            amount NUMERIC(14, 2),
+            amount_usd NUMERIC(14, 2),
+            date DATE,
             invoice_number TEXT,
             service_delivery TEXT,
-            exchange_rate TEXT
+            exchange_rate NUMERIC(14, 6)
         )
         """
         ).format(schema=sid)
@@ -813,13 +836,13 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
             continue
         rows = [
             (
-                r.get("opportunity_id", ""),
-                r.get("amount", ""),
-                r.get("amount_usd", ""),
-                r.get("date", ""),
+                r.get("opportunity_id"),
+                r.get("amount"),
+                r.get("amount_usd"),
+                r.get("date"),
                 r.get("invoice_number", ""),
                 r.get("service_delivery", ""),
-                r.get("exchange_rate", ""),
+                r.get("exchange_rate"),
             )
             for r in page
         ]
@@ -830,7 +853,11 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
 
 
 def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
-    """Create the assessments table and bulk-insert all pages. Returns total row count."""
+    """Create the assessments table and bulk-insert all pages. Returns total row count.
+
+    Scores become INTEGER, ``passed`` becomes BOOLEAN, ``date`` becomes
+    TIMESTAMPTZ, ``opportunity_id`` becomes BIGINT.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -841,11 +868,11 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
         CREATE TABLE {schema}.raw_assessments (
             username TEXT,
             app TEXT,
-            opportunity_id TEXT,
-            date TEXT,
-            score TEXT,
-            passing_score TEXT,
-            passed TEXT
+            opportunity_id BIGINT,
+            date TIMESTAMPTZ,
+            score INTEGER,
+            passing_score INTEGER,
+            passed BOOLEAN
         )
         """
         ).format(schema=sid)
@@ -860,11 +887,11 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
             (
                 r.get("username", ""),
                 r.get("app", ""),
-                r.get("opportunity_id", ""),
-                r.get("date", ""),
-                r.get("score", ""),
-                r.get("passing_score", ""),
-                r.get("passed", ""),
+                r.get("opportunity_id"),
+                r.get("date"),
+                r.get("score"),
+                r.get("passing_score"),
+                r.get("passed"),
             )
             for r in page
         ]
@@ -877,7 +904,11 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
 def _write_connect_completed_modules(
     pages: Iterator[list[dict]], schema_name: str, conn: Any
 ) -> int:
-    """Create the completed_modules table and bulk-insert all pages. Returns total row count."""
+    """Create the completed_modules table and bulk-insert all pages. Returns total row count.
+
+    ``duration`` becomes INTEGER (seconds), ``date`` becomes TIMESTAMPTZ,
+    ``opportunity_id`` becomes BIGINT.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -888,9 +919,9 @@ def _write_connect_completed_modules(
         CREATE TABLE {schema}.raw_completed_modules (
             username TEXT,
             module TEXT,
-            opportunity_id TEXT,
-            date TEXT,
-            duration TEXT
+            opportunity_id BIGINT,
+            date TIMESTAMPTZ,
+            duration INTEGER
         )
         """
         ).format(schema=sid)
@@ -905,9 +936,9 @@ def _write_connect_completed_modules(
             (
                 r.get("username", ""),
                 r.get("module", ""),
-                r.get("opportunity_id", ""),
-                r.get("date", ""),
-                r.get("duration", ""),
+                r.get("opportunity_id"),
+                r.get("date"),
+                r.get("duration"),
             )
             for r in page
         ]

@@ -46,7 +46,7 @@ class TestConnectVisitLoader:
             "deliver_unit": "du1",
             "entity_id": "e1",
             "entity_name": "Entity One",
-            "visit_date": "2025-01-01",
+            "visit_date": "2025-01-01T12:34:56Z",
             "status": "approved",
             "reason": None,
             "location": "loc1",
@@ -54,11 +54,11 @@ class TestConnectVisitLoader:
             "flag_reason": None,
             "form_json": {"q1": "yes"},
             "completed_work": "cw1",
-            "status_modified_date": "2025-01-02",
+            "status_modified_date": "2025-01-02T00:00:00Z",
             "review_status": "approved",
-            "review_created_on": "2025-01-03",
+            "review_created_on": "2025-01-03T00:00:00Z",
             "justification": None,
-            "date_created": "2025-01-01",
+            "date_created": "2025-01-01T00:00:00Z",
             "completed_work_id": "cw1",
             "deliver_unit_id": "du1",
             "images": [],
@@ -76,7 +76,7 @@ class TestConnectVisitLoader:
             assert len(pages) == 1
             assert len(pages[0]) == 1
             row = pages[0][0]
-            assert row["visit_id"] == "1"
+            assert row["visit_id"] == 1
             assert row["username"] == "alice"
             assert "id" not in row
 
@@ -112,11 +112,12 @@ class TestConnectVisitLoader:
                 json=_page([self._visit_record(id=99, username="bob")]),
             )
             rows = loader.load()
-            assert rows[0]["visit_id"] == "99"
+            assert rows[0]["visit_id"] == 99
             assert "id" not in rows[0]
 
     def test_opportunity_id_falls_back_to_loader(self, loader):
-        """Some serializers omit opportunity_id from per-row data."""
+        """Some serializers omit opportunity_id from per-row data. Falls back
+        to the loader's own opportunity_id (which is the int from the URL path)."""
         record = self._visit_record()
         del record["opportunity_id"]
         with rm.Mocker() as m:
@@ -125,17 +126,44 @@ class TestConnectVisitLoader:
                 json=_page([record]),
             )
             rows = loader.load()
-            assert rows[0]["opportunity_id"] == "814"
+            assert rows[0]["opportunity_id"] == 814
+            assert isinstance(rows[0]["opportunity_id"], int)
 
-    def test_flagged_bool_stringified(self, loader):
-        """v1 CSV returned 'True'/'False'; ``str(bool)`` preserves that capitalization."""
+    def test_flagged_bool_passes_through(self, loader):
+        """v2 JSON returns booleans as real bools; we preserve them for the
+        BOOLEAN column in raw_visits.flagged (no more 'True'/'False' strings)."""
         with rm.Mocker() as m:
             m.get(
                 f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
                 json=_page([self._visit_record(flagged=True)]),
             )
             rows = loader.load()
-            assert rows[0]["flagged"] == "True"
+            assert rows[0]["flagged"] is True
+            assert isinstance(rows[0]["flagged"], bool)
+
+    def test_flagged_false_not_coerced_to_none(self, loader):
+        """Guards against the `or` falsy-trap: ``False or default`` returns
+        default, which would wrongly replace a real False with None."""
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([self._visit_record(flagged=False)]),
+            )
+            rows = loader.load()
+            assert rows[0]["flagged"] is False
+
+    def test_missing_datetime_field_is_none(self, loader):
+        """Missing nullable datetime fields arrive as None, not empty string,
+        so psycopg can bind them to NULL for the TIMESTAMPTZ column."""
+        record = self._visit_record()
+        record["visit_date"] = None
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                json=_page([record]),
+            )
+            rows = loader.load()
+            assert rows[0]["visit_date"] is None
 
     def test_empty_results_yields_nothing(self, loader):
         with rm.Mocker() as m:
@@ -156,7 +184,7 @@ class TestConnectVisitLoader:
             m.get(next_url, json=_page([self._visit_record(id=2, username="bob")]))
 
             rows = loader.load()
-            assert [r["visit_id"] for r in rows] == ["1", "2"]
+            assert [r["visit_id"] for r in rows] == [1, 2]
             assert [r["username"] for r in rows] == ["alice", "bob"]
 
     def test_sends_versioned_accept_header(self, loader):
@@ -197,8 +225,10 @@ class TestConnectVisitLoader:
 # Simple loader tests
 # ---------------------------------------------------------------------------
 #
-# These all share the same shape — paginate JSON, stringify each record. We
-# use a parameterized class to keep the matrix readable.
+# These all share the same shape — paginate JSON, yield pages unchanged so
+# native Python types reach the writer's typed columns directly. The
+# parameterized matrix captures one realistic record per endpoint plus the
+# key/value pair we sample to confirm the row survived a round-trip.
 
 
 SIMPLE_LOADER_CASES = [
@@ -209,8 +239,17 @@ SIMPLE_LOADER_CASES = [
             "username": "alice",
             "name": "Alice Smith",
             "phone": "555-0001",
-            "payment_accrued": 100,
+            "date_learn_started": "2025-01-01T00:00:00Z",
+            "user_invite_status": "accepted",
+            "payment_accrued": "100.00",
             "suspended": False,
+            "suspension_date": None,
+            "suspension_reason": None,
+            "invited_date": "2025-01-01T00:00:00Z",
+            "completed_learn_date": None,
+            "last_active": "2025-06-01T00:00:00Z",
+            "date_claimed": None,
+            "claim_limits": None,
         },
         ("username", "alice"),
     ),
@@ -222,8 +261,19 @@ SIMPLE_LOADER_CASES = [
             "opportunity_id": 814,
             "payment_unit_id": "pu1",
             "status": "approved",
+            "last_modified": "2025-01-01T00:00:00Z",
+            "entity_id": "e1",
+            "entity_name": "Entity",
+            "reason": None,
+            "status_modified_date": None,
+            "payment_date": "2025-01-02T00:00:00Z",
+            "date_created": "2025-01-01T00:00:00Z",
             "saved_completed_count": 5,
-            "saved_payment_accrued": 50,
+            "saved_approved_count": 5,
+            "saved_payment_accrued": "50.00",
+            "saved_payment_accrued_usd": "10.00",
+            "saved_org_payment_accrued": "50.00",
+            "saved_org_payment_accrued_usd": "10.00",
         },
         ("status", "approved"),
     ),
@@ -233,23 +283,31 @@ SIMPLE_LOADER_CASES = [
         {
             "username": "alice",
             "opportunity_id": 814,
-            "amount": 100,
-            "amount_usd": 20,
+            "created_at": "2025-01-01T00:00:00Z",
+            "amount": "100.00",
+            "amount_usd": "20.00",
+            "date_paid": "2025-01-02T00:00:00Z",
+            "payment_unit": "pu1",
             "confirmed": True,
+            "confirmation_date": "2025-01-02T00:00:00Z",
+            "organization": "dimagi",
+            "invoice_id": "inv1",
             "payment_method": "mobile",
+            "payment_operator": "op1",
         },
-        ("amount", "100"),
+        ("amount", "100.00"),
     ),
     (
         ConnectInvoiceLoader,
         "invoice/",
         {
             "opportunity_id": 814,
-            "amount": 500,
-            "amount_usd": 100,
+            "amount": "500.00",
+            "amount_usd": "100.00",
             "date": "2025-01-01",
             "invoice_number": "INV-001",
-            "exchange_rate": 5.0,
+            "service_delivery": "sd1",
+            "exchange_rate": "5.000000",
         },
         ("invoice_number", "INV-001"),
     ),
@@ -260,12 +318,12 @@ SIMPLE_LOADER_CASES = [
             "username": "alice",
             "app": "app1",
             "opportunity_id": 814,
-            "date": "2025-01-01",
+            "date": "2025-01-01T00:00:00Z",
             "score": 85,
             "passing_score": 70,
             "passed": True,
         },
-        ("score", "85"),
+        ("score", 85),
     ),
     (
         ConnectCompletedModuleLoader,
@@ -274,7 +332,7 @@ SIMPLE_LOADER_CASES = [
             "username": "alice",
             "module": "mod1",
             "opportunity_id": 814,
-            "date": "2025-01-01",
+            "date": "2025-01-01T00:00:00Z",
             "duration": 30,
         },
         ("module", "mod1"),
@@ -300,8 +358,9 @@ class TestSimpleLoaders:
             key, value = expected
             assert rows[0][key] == value
 
-    def test_native_types_stringified(self, loader_cls, endpoint, record, expected):
-        """Numbers and booleans become strings to match the v1 CSV contract."""
+    def test_native_types_preserved(self, loader_cls, endpoint, record, expected):
+        """v2 JSON types flow through untouched — no stringification. The
+        writer's typed columns bind native int/bool/None directly via psycopg."""
         loader = _make_loader(loader_cls)
         with rm.Mocker() as m:
             m.get(
@@ -309,8 +368,12 @@ class TestSimpleLoaders:
                 json=_page([record]),
             )
             rows = loader.load()
-            for v in rows[0].values():
-                assert isinstance(v, str)
+            # Every value in the returned row must match the type of the
+            # corresponding value in the original record — i.e. the loader
+            # is a pass-through for the simple loaders.
+            for key, original in record.items():
+                assert rows[0][key] == original
+                assert type(rows[0][key]) is type(original)
 
     def test_empty_results(self, loader_cls, endpoint, record, expected):
         loader = _make_loader(loader_cls)

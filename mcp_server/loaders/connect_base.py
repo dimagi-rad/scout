@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
-from typing import Any
 
 import requests
 
@@ -135,27 +134,3 @@ class ConnectBaseLoader:
             # The server's `next` URL already preserves all original params
             # (last_id, page_size, order, plus any caller-supplied filters).
             request_params = None
-
-
-def stringify(value: Any) -> str:
-    """Convert a v2 JSON scalar to the string representation our writers expect.
-
-    The Connect v1 CSV exports always returned strings; downstream
-    ``raw_*`` tables are TEXT columns. v2 JSON returns native Python types
-    (int, bool, float). Coerce to ``str()`` so the existing writer code
-    and stored data shape are unchanged. ``None`` becomes the empty string
-    to match CSV's "" semantics.
-    """
-    if value is None:
-        return ""
-    return str(value)
-
-
-def stringify_record(record: dict, exclude: tuple[str, ...] = ()) -> dict:
-    """Stringify every value in a record except keys listed in ``exclude``.
-
-    ``exclude`` is for fields that must remain as Python objects for the
-    writer (e.g. ``form_json``/``images`` are JSONB columns and the writer
-    calls ``json.dumps()`` on them).
-    """
-    return {k: (v if k in exclude else stringify(v)) for k, v in record.items()}
