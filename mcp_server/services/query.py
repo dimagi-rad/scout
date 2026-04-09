@@ -37,7 +37,7 @@ def _get_connection(ctx: QueryContext):
     """Create a psycopg connection from context params."""
     import psycopg
 
-    return psycopg.connect(**ctx.connection_params)
+    return psycopg.connect(**ctx.connection_params, autocommit=True)
 
 
 def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
