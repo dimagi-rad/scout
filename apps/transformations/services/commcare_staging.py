@@ -288,6 +288,9 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
 
     for xmlns, form_def in form_definitions.items():
         form_name = form_def.get("name", xmlns)
+        if isinstance(form_name, dict):
+            # Localized names: {"en": "Household Registration", "fr": "..."}
+            form_name = form_name.get("en") or next(iter(form_name.values()), xmlns)
         if not isinstance(form_name, str):
             form_name = xmlns
         app_name = form_def.get("app_name", "")
