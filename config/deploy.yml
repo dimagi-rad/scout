@@ -42,7 +42,6 @@ env:
 
 ssh:
   user: scout
-  config: false
 
 builder:
   arch: amd64

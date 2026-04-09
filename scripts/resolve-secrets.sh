@@ -18,8 +18,15 @@ if [ ! -f "$CACHE_FILE" ] || [ "$(find "$CACHE_FILE" -mmin +5 2>/dev/null)" ]; t
   if [ -f "$PROJECT_ROOT/.env.deploy" ]; then
     source "$PROJECT_ROOT/.env.deploy"
   elif [ -z "${SCOUT_RDS_SECRET_ARN:-}" ]; then
-    echo "ERROR: $PROJECT_ROOT/.env.deploy not found and SCOUT_RDS_SECRET_ARN not set" >&2
-    exit 1
+    # Auto-generate .env.deploy if running locally
+    if [ -z "${CI:-}" ]; then
+      echo "Generating .env.deploy..." >&2
+      "$SCRIPT_DIR/fetch-deploy-env.sh" >&2
+      source "$PROJECT_ROOT/.env.deploy"
+    else
+      echo "ERROR: SCOUT_RDS_SECRET_ARN not set in CI environment" >&2
+      exit 1
+    fi
   fi
 
   PROFILE_ARG=""
