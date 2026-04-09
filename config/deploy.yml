@@ -39,6 +39,9 @@ env:
     - DJANGO_SECRET_KEY
     - DB_CREDENTIAL_KEY
     - ANTHROPIC_API_KEY
+    - LANGFUSE_SECRET_KEY
+    - LANGFUSE_PUBLIC_KEY
+    - LANGFUSE_BASE_URL
 
 ssh:
   user: scout

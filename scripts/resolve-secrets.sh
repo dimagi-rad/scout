@@ -4,7 +4,7 @@
 # secret in .kamal/secrets) don't re-fetch from AWS.
 #
 # Usage: scripts/resolve-secrets.sh <KEY>
-# Keys: DATABASE_URL, MANAGED_DATABASE_URL, DJANGO_SECRET_KEY, DB_CREDENTIAL_KEY, ANTHROPIC_API_KEY, SENTRY_DSN
+# Keys: DATABASE_URL, MANAGED_DATABASE_URL, DJANGO_SECRET_KEY, DB_CREDENTIAL_KEY, ANTHROPIC_API_KEY, SENTRY_DSN, LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_BASE_URL
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -61,6 +61,9 @@ if [ ! -f "$CACHE_FILE" ] || [ "$(find "$CACHE_FILE" -mmin +5 2>/dev/null)" ]; t
 
   ANTHROPIC_API_KEY=$(echo "$API_SECRETS" | python3 -c "import sys,json; print(json.load(sys.stdin)['SCOUT_ANTHROPIC_API_KEY'])")
   SENTRY_DSN=$(echo "$API_SECRETS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SCOUT_SENTRY_DSN', ''))")
+  LANGFUSE_SECRET_KEY=$(echo "$API_SECRETS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SCOUT_LANGFUSE_SECRET_KEY', ''))")
+  LANGFUSE_PUBLIC_KEY=$(echo "$API_SECRETS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SCOUT_LANGFUSE_PUBLIC_KEY', ''))")
+  LANGFUSE_BASE_URL=$(echo "$API_SECRETS" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SCOUT_LANGFUSE_BASE_URL', ''))")
 
   # Write cache
   cat > "$CACHE_FILE" <<CACHE
@@ -70,6 +73,9 @@ DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
 DB_CREDENTIAL_KEY=$DB_CREDENTIAL_KEY
 ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 SENTRY_DSN=$SENTRY_DSN
+LANGFUSE_SECRET_KEY=$LANGFUSE_SECRET_KEY
+LANGFUSE_PUBLIC_KEY=$LANGFUSE_PUBLIC_KEY
+LANGFUSE_BASE_URL=$LANGFUSE_BASE_URL
 CACHE
 fi
 
