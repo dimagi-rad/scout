@@ -7,6 +7,10 @@ set -euo pipefail
 if [[ "${1:-}" == "uvicorn" ]]; then
   echo "Running migrations..."
   python manage.py migrate --no-input
+
+  echo "Syncing OAuth apps..."
+  OAUTH_DOMAIN=$(echo "${DJANGO_ALLOWED_HOSTS:-localhost:8000}" | cut -d, -f1)
+  python scripts/setup_oauth_apps.py --domain "$OAUTH_DOMAIN"
 fi
 
 exec "$@"
