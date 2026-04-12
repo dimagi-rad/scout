@@ -238,9 +238,9 @@ class SchemaManager:
 
             # Pre-compute prefixes and detect collisions before creating any views
             prefix_to_tenant: dict[str, str] = {}
-            tenant_prefixes: list[tuple[str, str, str]] = (
-                []
-            )  # (schema_name, tenant_external_id, prefix)
+            tenant_prefixes: list[
+                tuple[str, str, str]
+            ] = []  # (schema_name, tenant_external_id, prefix)
             for schema_name, tenant_external_id in tenant_schemas:
                 tenant_obj = Tenant.objects.get(external_id=tenant_external_id)
                 prefix = self._sanitize_schema_name(tenant_obj.canonical_name)
@@ -276,9 +276,7 @@ class SchemaManager:
 
             for view_name, schema_name, table_name in planned_views:
                 cursor.execute(
-                    psycopg.sql.SQL(
-                        "CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}"
-                    ).format(
+                    psycopg.sql.SQL("CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}").format(
                         psycopg.sql.Identifier(view_schema_name),
                         psycopg.sql.Identifier(view_name),
                         psycopg.sql.Identifier(schema_name),
@@ -290,9 +288,18 @@ class SchemaManager:
             # Create read-only role for the view schema
             self._create_readonly_role(cursor, view_schema_name)
 
+            # Grant SELECT on the views themselves (ALTER DEFAULT PRIVILEGES
+            # only covers future tables, not the views just created above)
+            view_role = readonly_role_name(view_schema_name)
+            cursor.execute(
+                psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
+                    psycopg.sql.Identifier(view_schema_name),
+                    psycopg.sql.Identifier(view_role),
+                )
+            )
+
             # Grant read access to each constituent tenant schema
             # (views reference tables in these schemas directly)
-            view_role = readonly_role_name(view_schema_name)
             for tenant_schema_name, _ in tenant_schemas:
                 cursor.execute(
                     psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
