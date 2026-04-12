@@ -5,10 +5,18 @@
 # Usage:
 #   ./scripts/fetch-deploy-env.sh           # uses default profile "scout"
 #   AWS_PROFILE=myprofile ./scripts/fetch-deploy-env.sh
+#   ./scripts/fetch-deploy-env.sh -q   # quiet mode (no output)
 #
 # The generated .env.deploy is gitignored and sourced before running kamal deploy.
 
 set -euo pipefail
+
+QUIET=false
+for arg in "$@"; do
+  case "$arg" in
+    -q|--quiet) QUIET=true ;;
+  esac
+done
 
 PROFILE="${AWS_PROFILE:-scout}"
 STACK_NAME="scout-production"
@@ -17,11 +25,11 @@ OUTPUT_FILE=".env.deploy"
 
 # Ensure we have valid AWS credentials
 if ! aws sts get-caller-identity --profile "$PROFILE" &>/dev/null; then
-  echo "No valid AWS session. Logging in..."
+  $QUIET || echo "No valid AWS session. Logging in..."
   aws sso login --profile "$PROFILE"
 fi
 
-echo "Fetching CloudFormation outputs from stack '$STACK_NAME'..."
+$QUIET || echo "Fetching CloudFormation outputs from stack '$STACK_NAME'..."
 
 OUTPUTS=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
@@ -48,13 +56,12 @@ cat > "$OUTPUT_FILE" <<EOF
 # Do not commit — this file is gitignored.
 # Re-run the script to refresh after infrastructure changes.
 
-export SCOUT_EC2_IP=$EC2_IP
-export SCOUT_RDS_ENDPOINT=$RDS_ENDPOINT
-export SCOUT_RDS_SECRET_ARN=$RDS_SECRET_ARN
-export SCOUT_REDIS_ENDPOINT=$REDIS_ENDPOINT
-export SCOUT_ECR_REGISTRY=$ECR_REGISTRY
-export SCOUT_GITHUB_DEPLOY_ROLE_ARN=$GITHUB_DEPLOY_ROLE_ARN
+SCOUT_EC2_IP=$EC2_IP
+SCOUT_RDS_ENDPOINT=$RDS_ENDPOINT
+SCOUT_RDS_SECRET_ARN=$RDS_SECRET_ARN
+SCOUT_REDIS_ENDPOINT=$REDIS_ENDPOINT
+SCOUT_ECR_REGISTRY=$ECR_REGISTRY
+SCOUT_GITHUB_DEPLOY_ROLE_ARN=$GITHUB_DEPLOY_ROLE_ARN
 EOF
 
-echo "Written to $OUTPUT_FILE:"
-cat "$OUTPUT_FILE"
+$QUIET || echo "Written to $OUTPUT_FILE:"

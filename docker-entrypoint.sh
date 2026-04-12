@@ -10,7 +10,7 @@ if [[ "${1:-}" == "uvicorn" ]]; then
 
   echo "Syncing OAuth apps..."
   OAUTH_DOMAIN=$(echo "${DJANGO_ALLOWED_HOSTS:-localhost:8000}" | cut -d, -f1)
-  python scripts/setup_oauth_apps.py --domain "$OAUTH_DOMAIN"
+  python manage.py setup_oauth_apps --domain "$OAUTH_DOMAIN"
 fi
 
 exec "$@"

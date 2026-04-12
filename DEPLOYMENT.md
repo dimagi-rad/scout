@@ -42,27 +42,26 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push 
 |--------|--------|
 | `SCOUT_GITHUB_DEPLOY_ROLE_ARN` | CloudFormation output `GitHubDeployRoleArn` |
 | `SSH_PRIVATE_KEY` | `scout-deploy` key pair (1Password: "scout prod ec2 SSH Key" in "GSO: Open Chat Studio Team (OCS)") |
-| `SCOUT_EC2_IP` | CloudFormation output `EC2PublicIP` |
-| `SCOUT_REDIS_ENDPOINT` | CloudFormation output `RedisEndpoint` |
-| `SCOUT_RDS_SECRET_ARN` | CloudFormation output `RDSSecretArn` |
-| `ANTHROPIC_API_KEY` | Anthropic dashboard |
-
-**Variables** (Settings > Variables > Actions):
-
-| Variable | Source |
-|----------|--------|
-| `SCOUT_ECR_REGISTRY` | CloudFormation output `ECRRegistry` |
 
 ### AWS Secrets Manager
 
-The deploy scripts fetch app secrets from two Secrets Manager entries:
+The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
+`aws_secrets_manager` adapter (see `.kamal/secrets`):
 
-| Secret ID | Keys |
-|-----------|------|
-| `scout/django` | `SCOUT_DJANGO_SECRET_KEY`, `SCOUT_DB_CREDENTIAL_KEY` |
-| `scout/api-keys` | `SCOUT_ANTHROPIC_API_KEY`, `SCOUT_SENTRY_DSN` (optional) |
+| Secret | Purpose |
+|--------|---------|
+| `COMMCARE_OAUTH_CLIENT_ID` | CommCare HQ OAuth |
+| `COMMCARE_OAUTH_CLIENT_SECRET` | CommCare HQ OAuth |
+| `CONNECT_OAUTH_CLIENT_ID` | CommCare Connect OAuth |
+| `CONNECT_OAUTH_CLIENT_SECRET` | CommCare Connect OAuth |
+| `SCOUT_LANGFUSE_SECRET_KEY` | Langfuse observability |
+| `SCOUT_LANGFUSE_PUBLIC_KEY` | Langfuse observability |
+| `SCOUT_DJANGO_SECRET_KEY` | Django secret key |
+| `SCOUT_DB_CREDENTIAL_KEY` | Fernet key for DB credential encryption |
+| `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
 
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
+`DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
 
 ## Manual Deployment
 
@@ -98,7 +97,7 @@ For deploying from your local machine (e.g., debugging or first-time setup):
 
 ```bash
 # 1. Generate .env.deploy from CloudFormation outputs
-./scripts/fetch-deploy-env.sh
+./scripts/fetch-deploy-env.sh        # use -q/--quiet to suppress output
 
 # 2. Deploy (first time)
 kamal setup
@@ -132,6 +131,13 @@ kamal details
 # Run Django management commands
 kamal app exec -- python manage.py shell
 kamal app exec -- python manage.py migrate
+kamal app exec -- python manage.py setup_oauth_apps --domain scout.dimagi.com
+
+# Resolve DATABASE_URL from AWS Secrets Manager (no caching)
+./scripts/resolve-database-url.sh
+
+# Debug Kamal secrets
+kamal secrets print
 ```
 
 ## Infrastructure Changes
