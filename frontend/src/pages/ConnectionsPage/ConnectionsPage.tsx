@@ -1,10 +1,31 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import { Badge } from "@/components/ui/badge"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import {
+  SearchFilterBar,
+  type FilterGroup,
+} from "@/components/SearchFilterBar/SearchFilterBar"
 
 interface OAuthProvider {
   id: string
@@ -22,7 +43,21 @@ interface ApiKeyDomain {
   credential_type: string
 }
 
-type FormMode = "hidden" | "add" | { editing: ApiKeyDomain }
+const providerBadgeStyles: Record<string, string> = {
+  commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
+  dhis2: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+}
+
+function ProviderBadge({ provider }: { provider: string }) {
+  return (
+    <Badge
+      variant="secondary"
+      className={providerBadgeStyles[provider] ?? "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"}
+    >
+      {provider}
+    </Badge>
+  )
+}
 
 export function ConnectionsPage() {
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
@@ -36,9 +71,17 @@ export function ConnectionsPage() {
   const [error, setError] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
-  // membershipId awaiting inline confirmation, or null
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
-  const [formMode, setFormMode] = useState<FormMode>("hidden")
+
+  // Search and filter state
+  const [search, setSearch] = useState("")
+  const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
+    provider: null,
+  })
+
+  // Dialog state
+  const [dialogOpen, setDialogOpen] = useState(false)
+  const [editingDomain, setEditingDomain] = useState<ApiKeyDomain | null>(null)
 
   // Form state
   const [formDomain, setFormDomain] = useState("")
@@ -76,66 +119,88 @@ export function ConnectionsPage() {
     fetchDomains()
   }, [fetchProviders, fetchDomains])
 
-  function openAddForm() {
+  // Derived filter options from domain list
+  const providerFilterGroup = useMemo((): FilterGroup => {
+    const counts = new Map<string, number>()
+    for (const d of domains) {
+      counts.set(d.provider, (counts.get(d.provider) ?? 0) + 1)
+    }
+    return {
+      name: "provider",
+      options: [...counts.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([value, count]) => ({ value, label: value, count })),
+    }
+  }, [domains])
+
+  // Filtered domains
+  const filteredDomains = useMemo(() => {
+    const lowerSearch = search.toLowerCase()
+    return domains.filter((d) => {
+      if (activeFilters.provider && d.provider !== activeFilters.provider) return false
+      if (
+        lowerSearch &&
+        !d.tenant_name.toLowerCase().includes(lowerSearch) &&
+        !d.tenant_id.toLowerCase().includes(lowerSearch)
+      ) {
+        return false
+      }
+      return true
+    })
+  }, [domains, search, activeFilters])
+
+  function handleFilterChange(group: string, value: string | null) {
+    setActiveFilters((prev) => ({ ...prev, [group]: value }))
+  }
+
+  function openAddDialog() {
+    setEditingDomain(null)
     setFormDomain("")
     setFormUsername("")
     setFormApiKey("")
     setFormError(null)
-    setConfirmRemoveId(null)
-    setFormMode("add")
+    setDialogOpen(true)
   }
 
-  function openEditForm(domain: ApiKeyDomain) {
+  function openEditDialog(domain: ApiKeyDomain) {
+    setEditingDomain(domain)
     setFormDomain(domain.tenant_id)
     setFormUsername("")
     setFormApiKey("")
     setFormError(null)
-    setConfirmRemoveId(null)
-    setFormMode({ editing: domain })
+    setDialogOpen(true)
   }
 
-  function cancelForm() {
-    setFormMode("hidden")
+  function closeDialog() {
+    setDialogOpen(false)
+    setEditingDomain(null)
     setFormError(null)
   }
 
-  async function handleAddDomain(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setFormLoading(true)
     setFormError(null)
     try {
-      await api.post("/api/auth/tenant-credentials/", {
-        provider: "commcare",
-        tenant_id: formDomain,
-        tenant_name: formDomain,
-        credential: `${formUsername}:${formApiKey}`,
-      })
+      if (editingDomain) {
+        const body: Record<string, string> = { tenant_name: formDomain }
+        if (formUsername && formApiKey) {
+          body.credential = `${formUsername}:${formApiKey}`
+        }
+        await api.patch(`/api/auth/tenant-credentials/${editingDomain.membership_id}/`, body)
+      } else {
+        await api.post("/api/auth/tenant-credentials/", {
+          provider: "commcare",
+          tenant_id: formDomain,
+          tenant_name: formDomain,
+          credential: `${formUsername}:${formApiKey}`,
+        })
+      }
       await fetchDomains()
       void fetchStoreDomains()
-      setFormMode("hidden")
+      closeDialog()
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to add domain.")
-    } finally {
-      setFormLoading(false)
-    }
-  }
-
-  async function handleEditDomain(e: React.FormEvent) {
-    e.preventDefault()
-    if (typeof formMode !== "object") return
-    setFormLoading(true)
-    setFormError(null)
-    const { membership_id } = formMode.editing
-    try {
-      const body: Record<string, string> = { tenant_name: formDomain }
-      if (formUsername && formApiKey) {
-        body.credential = `${formUsername}:${formApiKey}`
-      }
-      await api.patch(`/api/auth/tenant-credentials/${membership_id}/`, body)
-      await fetchDomains()
-      setFormMode("hidden")
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to update domain.")
+      setFormError(err instanceof Error ? err.message : "Failed to save domain.")
     } finally {
       setFormLoading(false)
     }
@@ -145,15 +210,10 @@ export function ConnectionsPage() {
     setRemoving(membershipId)
     setConfirmRemoveId(null)
     setError(null)
-    // If this domain is open for editing, close the form
-    if (typeof formMode === "object" && formMode.editing.membership_id === membershipId) {
-      setFormMode("hidden")
-    }
     try {
       await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
       await fetchDomains()
       await fetchStoreDomains()
-      // If the removed domain was active in the sidebar, switch to the next available one
       if (activeDomainId === membershipId) {
         const next = storeDomains.find((d) => d.id !== membershipId)
         if (next) setActiveDomain(next.id)
@@ -178,11 +238,8 @@ export function ConnectionsPage() {
     }
   }
 
-  const editingId =
-    typeof formMode === "object" ? formMode.editing.membership_id : null
-
   return (
-    <div className="container mx-auto space-y-8 px-8 py-8">
+    <div className="p-6 space-y-8">
       <div>
         <h1 className="text-2xl font-semibold">Connected Accounts</h1>
         <p className="text-sm text-muted-foreground">
@@ -244,227 +301,245 @@ export function ConnectionsPage() {
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-medium">API Key Domains</h2>
-          {formMode === "hidden" && (
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={openAddForm}
-              data-testid="add-domain-button"
-            >
-              Add Domain
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={openAddDialog}
+            data-testid="add-domain-button"
+          >
+            Add Domain
+          </Button>
         </div>
 
         {loadingDomains ? (
           <p className="text-sm text-muted-foreground">Loading domains...</p>
-        ) : domains.length === 0 && formMode === "hidden" ? (
-          <p className="text-sm text-muted-foreground">No API key domains connected.</p>
-        ) : null}
+        ) : (
+          <>
+            {domains.length > 0 && (
+              <SearchFilterBar
+                search={search}
+                onSearchChange={setSearch}
+                placeholder="Search tenants..."
+                filters={providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []}
+                activeFilters={activeFilters}
+                onFilterChange={handleFilterChange}
+              />
+            )}
 
-        {domains.map((domain) => {
-          const isThisEditing = editingId === domain.membership_id
-          const isConfirming = confirmRemoveId === domain.membership_id
+            {filteredDomains.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-8 text-center">
+                <p className="text-muted-foreground">
+                  {domains.length === 0
+                    ? "No API key domains connected."
+                    : "No tenants match your search."}
+                </p>
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Provider</TableHead>
+                    <TableHead>Tenant ID</TableHead>
+                    <TableHead className="text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filteredDomains.map((domain) => {
+                    const isConfirming = confirmRemoveId === domain.membership_id
 
-          // Inline edit: replace card with the edit form
-          if (isThisEditing) {
-            return (
-              <Card key={domain.membership_id} data-testid="domain-form">
-                <CardContent className="p-4">
-                  <form onSubmit={handleEditDomain} className="space-y-4">
-                    <p className="font-medium">Edit Domain</p>
-                    <div className="space-y-2">
-                      <Label htmlFor="form-domain">CommCare Domain</Label>
-                      <Input
-                        id="form-domain"
-                        data-testid="domain-form-domain"
-                        required
-                        placeholder="my-project"
-                        value={formDomain}
-                        onChange={(e) => setFormDomain(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="form-username">
-                        CommCare Username (leave blank to keep existing)
-                      </Label>
-                      <Input
-                        id="form-username"
-                        data-testid="domain-form-username"
-                        type="email"
-                        placeholder="you@example.com"
-                        value={formUsername}
-                        onChange={(e) => setFormUsername(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="form-api-key">
-                        API Key (leave blank to keep existing)
-                      </Label>
-                      <Input
-                        id="form-api-key"
-                        data-testid="domain-form-api-key"
-                        type="password"
-                        value={formApiKey}
-                        onChange={(e) => setFormApiKey(e.target.value)}
-                      />
-                    </div>
-                    {formError && (
-                      <p className="text-sm text-destructive" data-testid="domain-form-error">
-                        {formError}
-                      </p>
-                    )}
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        className="flex-1"
-                        onClick={cancelForm}
-                      >
-                        Cancel
-                      </Button>
-                      <Button type="submit" className="flex-1" disabled={formLoading}>
-                        {formLoading ? "Saving..." : "Save Changes"}
-                      </Button>
-                    </div>
-                  </form>
-                </CardContent>
-              </Card>
-            )
-          }
+                    if (isConfirming) {
+                      return (
+                        <TableRow key={domain.membership_id}>
+                          <TableCell colSpan={4}>
+                            <div className="flex items-center justify-between">
+                              <p className="text-sm font-medium">
+                                Remove <span className="font-semibold">{domain.tenant_name || domain.tenant_id}</span>? This cannot be undone.
+                              </p>
+                              <div className="flex gap-2">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => setConfirmRemoveId(null)}
+                                  data-testid={`cancel-remove-${domain.tenant_id}`}
+                                >
+                                  Cancel
+                                </Button>
+                                <Button
+                                  variant="destructive"
+                                  size="sm"
+                                  onClick={() => confirmRemove(domain.membership_id)}
+                                  disabled={removing === domain.membership_id}
+                                  data-testid={`confirm-remove-${domain.tenant_id}`}
+                                >
+                                  {removing === domain.membership_id ? "Removing..." : "Confirm Remove"}
+                                </Button>
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    }
 
-          return (
-            <Card key={domain.membership_id}>
-              <CardContent className="p-4">
-                {isConfirming ? (
-                  // Inline remove confirmation
-                  <div className="flex items-center justify-between">
-                    <p className="text-sm font-medium">
-                      Remove <span className="font-semibold">{domain.tenant_name || domain.tenant_id}</span>? This cannot be undone.
-                    </p>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setConfirmRemoveId(null)}
-                        data-testid={`cancel-remove-${domain.tenant_id}`}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => confirmRemove(domain.membership_id)}
-                        disabled={removing === domain.membership_id}
-                        data-testid={`confirm-remove-${domain.tenant_id}`}
-                      >
-                        {removing === domain.membership_id ? "Removing..." : "Confirm Remove"}
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  // Normal card row
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
-                        {domain.tenant_name || domain.tenant_id}
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        <span className="capitalize">{domain.provider}</span>
-                        {" \u00b7 "}
-                        {domain.tenant_id}
-                      </p>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => openEditForm(domain)}
-                        disabled={formMode !== "hidden"}
-                        data-testid={`edit-domain-${domain.tenant_id}`}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => setConfirmRemoveId(domain.membership_id)}
-                        data-testid={`remove-domain-${domain.tenant_id}`}
-                      >
-                        Remove
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )
-        })}
-
-        {/* Add form at bottom (only for "add" mode, not edit) */}
-        {formMode === "add" && (
-          <Card data-testid="domain-form-add">
-            <CardContent className="p-4">
-              <form onSubmit={handleAddDomain} className="space-y-4">
-                <p className="font-medium">Add Domain</p>
-                <div className="space-y-2">
-                  <Label htmlFor="form-domain-add">CommCare Domain</Label>
-                  <Input
-                    id="form-domain-add"
-                    data-testid="domain-form-domain"
-                    required
-                    placeholder="my-project"
-                    value={formDomain}
-                    onChange={(e) => setFormDomain(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="form-username-add">CommCare Username</Label>
-                  <Input
-                    id="form-username-add"
-                    data-testid="domain-form-username"
-                    type="email"
-                    required
-                    placeholder="you@example.com"
-                    value={formUsername}
-                    onChange={(e) => setFormUsername(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="form-api-key-add">API Key</Label>
-                  <Input
-                    id="form-api-key-add"
-                    data-testid="domain-form-api-key"
-                    type="password"
-                    required
-                    value={formApiKey}
-                    onChange={(e) => setFormApiKey(e.target.value)}
-                  />
-                </div>
-                {formError && (
-                  <p className="text-sm text-destructive" data-testid="domain-form-error">
-                    {formError}
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="flex-1"
-                    onClick={cancelForm}
-                  >
-                    Cancel
-                  </Button>
-                  <Button type="submit" className="flex-1" disabled={formLoading}>
-                    {formLoading ? "Saving..." : "Add Domain"}
-                  </Button>
-                </div>
-              </form>
-            </CardContent>
-          </Card>
+                    return (
+                      <TableRow key={domain.membership_id}>
+                        <TableCell className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
+                          {domain.tenant_name || domain.tenant_id}
+                        </TableCell>
+                        <TableCell>
+                          <ProviderBadge provider={domain.provider} />
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {domain.tenant_id}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => openEditDialog(domain)}
+                              data-testid={`edit-domain-${domain.tenant_id}`}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-destructive hover:text-destructive"
+                              onClick={() => setConfirmRemoveId(domain.membership_id)}
+                              data-testid={`remove-domain-${domain.tenant_id}`}
+                            >
+                              Remove
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </>
         )}
       </section>
 
+      {/* Add/Edit Domain Dialog */}
+      <DomainDialog
+        open={dialogOpen}
+        editing={editingDomain}
+        formDomain={formDomain}
+        formUsername={formUsername}
+        formApiKey={formApiKey}
+        formLoading={formLoading}
+        formError={formError}
+        onDomainChange={setFormDomain}
+        onUsernameChange={setFormUsername}
+        onApiKeyChange={setFormApiKey}
+        onSubmit={handleSubmit}
+        onClose={closeDialog}
+      />
     </div>
+  )
+}
+
+// -- Dialog sub-component (kept in same file since it's tightly coupled) --
+
+interface DomainDialogProps {
+  open: boolean
+  editing: ApiKeyDomain | null
+  formDomain: string
+  formUsername: string
+  formApiKey: string
+  formLoading: boolean
+  formError: string | null
+  onDomainChange: (v: string) => void
+  onUsernameChange: (v: string) => void
+  onApiKeyChange: (v: string) => void
+  onSubmit: (e: React.FormEvent) => void
+  onClose: () => void
+}
+
+function DomainDialog({
+  open,
+  editing,
+  formDomain,
+  formUsername,
+  formApiKey,
+  formLoading,
+  formError,
+  onDomainChange,
+  onUsernameChange,
+  onApiKeyChange,
+  onSubmit,
+  onClose,
+}: DomainDialogProps) {
+  const isEdit = editing !== null
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose() }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{isEdit ? "Edit Domain" : "Add Domain"}</DialogTitle>
+          <DialogDescription>
+            {isEdit
+              ? "Update the domain name or credentials."
+              : "Connect a new CommCare domain with API key credentials."}
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={onSubmit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="dialog-domain">CommCare Domain</Label>
+            <Input
+              id="dialog-domain"
+              data-testid="domain-form-domain"
+              required
+              placeholder="my-project"
+              value={formDomain}
+              onChange={(e) => onDomainChange(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="dialog-username">
+              CommCare Username{isEdit ? " (leave blank to keep existing)" : ""}
+            </Label>
+            <Input
+              id="dialog-username"
+              data-testid="domain-form-username"
+              type="email"
+              required={!isEdit}
+              placeholder="you@example.com"
+              value={formUsername}
+              onChange={(e) => onUsernameChange(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="dialog-api-key">
+              API Key{isEdit ? " (leave blank to keep existing)" : ""}
+            </Label>
+            <Input
+              id="dialog-api-key"
+              data-testid="domain-form-api-key"
+              type="password"
+              required={!isEdit}
+              value={formApiKey}
+              onChange={(e) => onApiKeyChange(e.target.value)}
+            />
+          </div>
+          {formError && (
+            <p className="text-sm text-destructive" data-testid="domain-form-error">
+              {formError}
+            </p>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={formLoading}>
+              {formLoading ? "Saving..." : isEdit ? "Save Changes" : "Add Domain"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }
