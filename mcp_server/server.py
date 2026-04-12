@@ -495,165 +495,192 @@ def _resolve_oauth_credential(token_obj, provider: str) -> dict:
     return {"type": "oauth", "value": token_value}
 
 
+async def _materialize_tenant(
+    tm,
+    pipeline_config,
+    ctx: Context | None,
+) -> dict:
+    """Run a materialization pipeline for a single TenantMembership.
+
+    Resolves credentials, builds a progress callback, and executes the pipeline.
+    Returns the pipeline result dict on success, or raises on failure.
+    """
+    from apps.users.models import TenantCredential
+    from mcp_server.loaders.commcare_base import CommCareAuthError
+    from mcp_server.loaders.connect_base import ConnectAuthError
+
+    tenant_id = tm.tenant.external_id
+
+    # ── Resolve credential ────────────────────────────────────────────────
+    try:
+        cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
+            tenant_membership=tm
+        )
+    except TenantCredential.DoesNotExist:
+        return error_response("AUTH_TOKEN_MISSING", "No credential configured for this tenant")
+
+    if cred_obj.credential_type == TenantCredential.API_KEY:
+        from apps.users.adapters import decrypt_credential
+
+        try:
+            decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
+        except Exception:
+            logger.exception("Failed to decrypt API key for tenant %s", tenant_id)
+            return error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
+        credential = {"type": "api_key", "value": decrypted}
+    else:
+        from allauth.socialaccount.models import SocialToken
+
+        if tm.tenant.provider == "commcare_connect":
+            token_obj = (
+                await SocialToken.objects.select_related("app")
+                .filter(
+                    account__user=tm.user,
+                    account__provider__startswith="commcare_connect",
+                )
+                .afirst()
+            )
+        else:
+            token_obj = (
+                await SocialToken.objects.select_related("app")
+                .filter(
+                    account__user=tm.user,
+                    account__provider__startswith="commcare",
+                )
+                .exclude(account__provider__startswith="commcare_connect")
+                .afirst()
+            )
+        if not token_obj:
+            return error_response(
+                "AUTH_TOKEN_MISSING",
+                f"No OAuth token found for provider '{tm.tenant.provider}'",
+            )
+        credential = await sync_to_async(_resolve_oauth_credential)(token_obj, tm.tenant.provider)
+
+    # ── Build progress callback ───────────────────────────────────────────
+    progress_callback = None
+    if ctx is not None:
+        loop = asyncio.get_running_loop()
+
+        def _on_progress_done(fut):
+            exc = fut.exception()
+            if exc is not None:
+                logger.warning("Progress notification delivery failed: %s", exc)
+
+        def progress_callback(current: int, total: int, message: str) -> None:
+            fut = asyncio.run_coroutine_threadsafe(
+                ctx.report_progress(current, total, message),
+                loop,
+            )
+            fut.add_done_callback(_on_progress_done)
+
+    # ── Run pipeline ──────────────────────────────────────────────────────
+    try:
+        return await sync_to_async(run_pipeline)(tm, credential, pipeline_config, progress_callback)
+    except (CommCareAuthError, ConnectAuthError) as e:
+        logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
+        return error_response(AUTH_TOKEN_EXPIRED, str(e))
+    except Exception:
+        logger.exception("Pipeline '%s' failed for tenant %s", pipeline_config.name, tenant_id)
+        return error_response(INTERNAL_ERROR, f"Pipeline '{pipeline_config.name}' failed")
+
+
+async def _resolve_workspace_memberships(workspace_id, user_id):
+    """Resolve TenantMemberships for all tenants in a workspace."""
+    from apps.users.models import TenantMembership
+    from apps.workspaces.models import Workspace, WorkspaceTenant
+
+    workspace = await Workspace.objects.filter(id=workspace_id).afirst()
+    if workspace is None:
+        return None, f"Workspace '{workspace_id}' not found"
+
+    tenant_ids = [
+        wt.tenant_id
+        async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant")
+    ]
+    if not tenant_ids:
+        return None, "Workspace has no tenants configured"
+
+    qs = TenantMembership.objects.select_related("user", "tenant").filter(tenant_id__in=tenant_ids)
+    if user_id:
+        qs = qs.filter(user_id=user_id)
+
+    memberships = [tm async for tm in qs]
+    if not memberships:
+        return None, "No tenant memberships found for this user in this workspace"
+
+    return memberships, None
+
+
 @mcp.tool()
 async def run_materialization(
-    tenant_id: str,
-    tenant_membership_id: str = "",
-    pipeline: str = "commcare_sync",
     workspace_id: str = "",
     user_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
-    """Materialize data from a provider into the tenant's schema.
+    """Materialize data for all tenants in the workspace.
 
-    Runs a three-phase pipeline (Discover → Load → Transform). Creates the schema
-    automatically if it doesn't exist. Streams progress via MCP notifications/progress
+    Resolves all tenants linked to the workspace and runs the appropriate
+    materialization pipeline for each one. Creates schemas automatically
+    if they don't exist. Streams progress via MCP notifications/progress
     when the caller provides a progressToken.
 
     Args:
-        tenant_id: The tenant identifier (domain or opportunity slug).
-        tenant_membership_id: UUID of the specific TenantMembership to use.
-        pipeline: Pipeline to run (default: commcare_sync).
         workspace_id: Workspace UUID (injected server-side by the agent graph).
         user_id: User UUID (injected server-side by the agent graph).
     """
-    from apps.users.models import TenantCredential, TenantMembership
-    from mcp_server.loaders.commcare_base import CommCareAuthError
-    from mcp_server.loaders.connect_base import ConnectAuthError
+    async with tool_context("run_materialization", workspace_id) as tc:
+        if not workspace_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
+            return tc["result"]
 
-    async with tool_context("run_materialization", tenant_id, pipeline=pipeline) as tc:
-        # ── Resolve TenantMembership ──────────────────────────────────────────
-        # Scope to user to prevent cross-tenant credential leakage.
-        # user_id is injected server-side by the agent graph,
-        # not controllable by the LLM.
+        memberships, err = await _resolve_workspace_memberships(workspace_id, user_id)
+        if err:
+            tc["result"] = error_response(NOT_FOUND, err)
+            return tc["result"]
+
         registry = get_registry()
-        try:
-            qs = TenantMembership.objects.select_related("user", "tenant")
-            if user_id:
-                qs = qs.filter(user_id=user_id)
-            if tenant_membership_id:
-                tm = await qs.aget(id=tenant_membership_id, tenant__external_id=tenant_id)
-            else:
-                pipeline_config = registry.get(pipeline)
-                if pipeline_config is None:
-                    tc["result"] = error_response(
-                        NOT_FOUND,
-                        f"Pipeline '{pipeline}' not found in registry",
-                    )
-                    return tc["result"]
-                tm = await qs.filter(
-                    tenant__external_id=tenant_id, tenant__provider=pipeline_config.provider
-                ).afirst()
-                if tm is None:
-                    raise TenantMembership.DoesNotExist
-        except TenantMembership.DoesNotExist:
-            tc["result"] = error_response(NOT_FOUND, f"Tenant '{tenant_id}' not found")
-            return tc["result"]
-
-        # ── Auto-select pipeline from TenantMembership provider ───────────────
-        # If the caller used the default pipeline but the tenant is a different
-        # provider, switch to the correct pipeline automatically.
         provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-        correct_pipeline = provider_pipeline_map.get(tm.tenant.provider, pipeline)
-        if correct_pipeline != pipeline:
-            pipeline = correct_pipeline
 
-        pipeline_config = registry.get(pipeline)
-        if pipeline_config is None:
-            tc["result"] = error_response(NOT_FOUND, f"Pipeline '{pipeline}' not found in registry")
-            return tc["result"]
+        results = []
+        for tm in memberships:
+            pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
+            if pipeline_name is None:
+                results.append(
+                    {
+                        "tenant": tm.tenant.external_id,
+                        "success": False,
+                        "error": f"No pipeline for provider '{tm.tenant.provider}'",
+                    }
+                )
+                continue
 
-        # ── Resolve credential ────────────────────────────────────────────────
-        try:
-            cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
-                tenant_membership=tm
-            )
-        except TenantCredential.DoesNotExist:
-            tc["result"] = error_response(
-                "AUTH_TOKEN_MISSING", "No credential configured for this tenant"
-            )
-            return tc["result"]
+            pipeline_config = registry.get(pipeline_name)
+            result = await _materialize_tenant(tm, pipeline_config, ctx)
 
-        if cred_obj.credential_type == TenantCredential.API_KEY:
-            from apps.users.adapters import decrypt_credential
-
-            try:
-                decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
-            except Exception:
-                logger.exception("Failed to decrypt API key for tenant %s", tenant_id)
-                tc["result"] = error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
-                return tc["result"]
-            credential = {"type": "api_key", "value": decrypted}
-        else:
-            from allauth.socialaccount.models import SocialToken
-
-            if tm.tenant.provider == "commcare_connect":
-                token_obj = (
-                    await SocialToken.objects.select_related("app")
-                    .filter(
-                        account__user=tm.user,
-                        account__provider__startswith="commcare_connect",
-                    )
-                    .afirst()
+            # _materialize_tenant returns an error envelope dict or a pipeline result dict
+            if isinstance(result, dict) and not result.get("success", True):
+                results.append(
+                    {
+                        "tenant": tm.tenant.external_id,
+                        "success": False,
+                        "error": result.get("error", {}).get("message", "Unknown error"),
+                    }
                 )
             else:
-                token_obj = (
-                    await SocialToken.objects.select_related("app")
-                    .filter(
-                        account__user=tm.user,
-                        account__provider__startswith="commcare",
-                    )
-                    .exclude(account__provider__startswith="commcare_connect")
-                    .afirst()
+                results.append(
+                    {
+                        "tenant": tm.tenant.external_id,
+                        "success": True,
+                        "result": result,
+                    }
                 )
-            if not token_obj:
-                tc["result"] = error_response(
-                    "AUTH_TOKEN_MISSING",
-                    f"No OAuth token found for provider '{tm.tenant.provider}'",
-                )
-                return tc["result"]
-            credential = await sync_to_async(_resolve_oauth_credential)(
-                token_obj, tm.tenant.provider
-            )
 
-        # ── Build progress callback ───────────────────────────────────────────
-        # run_pipeline runs in a thread (via sync_to_async), so we bridge back
-        # to the async event loop with run_coroutine_threadsafe.
-        # A done-callback logs any silent delivery failures.
-        progress_callback = None
-        if ctx is not None:
-            loop = asyncio.get_running_loop()
-
-            def _on_progress_done(fut):
-                exc = fut.exception()
-                if exc is not None:
-                    logger.warning("Progress notification delivery failed: %s", exc)
-
-            def progress_callback(current: int, total: int, message: str) -> None:
-                fut = asyncio.run_coroutine_threadsafe(
-                    ctx.report_progress(current, total, message),
-                    loop,
-                )
-                fut.add_done_callback(_on_progress_done)
-
-        # ── Run pipeline ──────────────────────────────────────────────────────
-        try:
-            result = await sync_to_async(run_pipeline)(
-                tm, credential, pipeline_config, progress_callback
-            )
-        except (CommCareAuthError, ConnectAuthError) as e:
-            logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
-            tc["result"] = error_response(AUTH_TOKEN_EXPIRED, str(e))
-            return tc["result"]
-        except Exception:
-            logger.exception("Pipeline '%s' failed for tenant %s", pipeline, tenant_id)
-            tc["result"] = error_response(INTERNAL_ERROR, f"Pipeline '{pipeline}' failed")
-            return tc["result"]
-
+        all_succeeded = all(r["success"] for r in results)
         tc["result"] = success_response(
-            result,
-            tenant_id=tenant_id,
-            schema=result.get("schema", ""),
+            {"tenants": results, "all_succeeded": all_succeeded},
+            tenant_id="",
+            schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
