@@ -16,6 +16,9 @@ jobs:
       IMAGE_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -26,34 +29,31 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Prime env vars from AWS
+        run: |
+          ./scripts/fetch-deploy-env.sh -q
+          grep -v '^#' .env.deploy >> $GITHUB_ENV
+
       - name: Build and push API image
         run: |
-          docker build -t ${{ vars.SCOUT_ECR_REGISTRY }}/scout/api:$IMAGE_TAG .
-          docker push ${{ vars.SCOUT_ECR_REGISTRY }}/scout/api:$IMAGE_TAG
+          docker build -t $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG .
+          docker push $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG
 
       - name: Build and push Frontend image
         run: |
-          docker build -t ${{ vars.SCOUT_ECR_REGISTRY }}/scout/frontend:$IMAGE_TAG \
+          docker build -t $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG \
             -f Dockerfile.frontend \
             --build-arg NGINX_CONF=frontend/nginx.prod-kamal.conf \
             .
-          docker push ${{ vars.SCOUT_ECR_REGISTRY }}/scout/frontend:$IMAGE_TAG
+          docker push $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG
 
       - name: Install Kamal
-        run: sudo gem install kamal
+        run: gem install kamal
 
       - name: Setup SSH
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
-
-      - name: Set deploy env vars
-        run: |
-          echo "SCOUT_EC2_IP=${{ secrets.SCOUT_EC2_IP }}" >> $GITHUB_ENV
-          echo "SCOUT_ECR_REGISTRY=${{ vars.SCOUT_ECR_REGISTRY }}" >> $GITHUB_ENV
-          echo "SCOUT_REDIS_ENDPOINT=${{ secrets.SCOUT_REDIS_ENDPOINT }}" >> $GITHUB_ENV
-          echo "SCOUT_RDS_SECRET_ARN=${{ secrets.SCOUT_RDS_SECRET_ARN }}" >> $GITHUB_ENV
-          echo "SCOUT_RDS_ENDPOINT=${{ secrets.SCOUT_RDS_ENDPOINT }}" >> $GITHUB_ENV
 
       - name: Deploy MCP
         run: kamal deploy -c config/deploy-mcp.yml --version=$IMAGE_TAG
