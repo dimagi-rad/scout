@@ -93,27 +93,22 @@ class WorkspaceListView(APIView):
             is_auto_created=False,
             created_by=request.user,
         )
+        tenants = []
         for tenant in Tenant.objects.filter(id__in=tenant_ids):
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
+            tenants.append(
+                {
+                    "id": str(tenant.id),
+                    "tenant_name": tenant.canonical_name,
+                    "provider": tenant.provider,
+                }
+            )
 
         WorkspaceMembership.objects.create(
             workspace=workspace,
             user=request.user,
             role=WorkspaceRole.MANAGE,
         )
-
-        # Build tenants list for the response
-        workspace_tenants = WorkspaceTenant.objects.filter(workspace=workspace).select_related(
-            "tenant"
-        )
-        tenants = [
-            {
-                "id": str(wt.tenant.id),
-                "tenant_name": wt.tenant.canonical_name,
-                "provider": wt.tenant.provider,
-            }
-            for wt in workspace_tenants
-        ]
 
         return Response(
             {

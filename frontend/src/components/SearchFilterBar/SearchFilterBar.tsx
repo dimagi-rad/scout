@@ -48,6 +48,7 @@ export function SearchFilterBar({
             variant={activeFilters[group.name] == null ? "default" : "outline"}
             size="sm"
             onClick={() => onFilterChange(group.name, null)}
+            data-testid={`filter-${group.name}-all`}
           >
             All
           </Button>
