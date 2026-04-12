@@ -39,23 +39,32 @@ class WorkspaceListView(APIView):
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
+            .prefetch_related("workspace__workspace_tenants__tenant")
             .annotate(
-                tenant_count=Count("workspace__workspace_tenants", distinct=True),
                 member_count=Count("workspace__memberships", distinct=True),
             )
         )
-        results = [
-            {
-                "id": str(m.workspace.id),
-                "name": m.workspace.name,
-                "is_auto_created": m.workspace.is_auto_created,
-                "role": m.role,
-                "tenant_count": m.tenant_count,
-                "member_count": m.member_count,
-                "created_at": m.workspace.created_at.isoformat(),
-            }
-            for m in memberships
-        ]
+        results = []
+        for m in memberships:
+            tenants = [
+                {
+                    "id": str(wt.tenant.id),
+                    "tenant_name": wt.tenant.canonical_name,
+                    "provider": wt.tenant.provider,
+                }
+                for wt in m.workspace.workspace_tenants.all()
+            ]
+            results.append(
+                {
+                    "id": str(m.workspace.id),
+                    "name": m.workspace.name,
+                    "is_auto_created": m.workspace.is_auto_created,
+                    "role": m.role,
+                    "tenants": tenants,
+                    "member_count": m.member_count,
+                    "created_at": m.workspace.created_at.isoformat(),
+                }
+            )
         return Response(results)
 
     def post(self, request):
@@ -93,13 +102,26 @@ class WorkspaceListView(APIView):
             role=WorkspaceRole.MANAGE,
         )
 
+        # Build tenants list for the response
+        workspace_tenants = WorkspaceTenant.objects.filter(workspace=workspace).select_related(
+            "tenant"
+        )
+        tenants = [
+            {
+                "id": str(wt.tenant.id),
+                "tenant_name": wt.tenant.canonical_name,
+                "provider": wt.tenant.provider,
+            }
+            for wt in workspace_tenants
+        ]
+
         return Response(
             {
                 "id": str(workspace.id),
                 "name": workspace.name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": WorkspaceRole.MANAGE,
-                "tenant_count": workspace.workspace_tenants.count(),
+                "tenants": tenants,
                 "member_count": 1,
                 "created_at": workspace.created_at.isoformat(),
             },

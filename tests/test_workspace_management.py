@@ -49,14 +49,16 @@ class TestWorkspaceList:
         assert str(workspace.id) in ids
         assert str(other_ws.id) not in ids
 
-    def test_list_includes_role_and_counts(self, client, user, workspace):
+    def test_list_includes_role_and_tenants(self, client, user, workspace, tenant):
         client.force_login(user)
         resp = client.get("/api/workspaces/")
         assert resp.status_code == 200
         entry = next(w for w in resp.json() if w["id"] == str(workspace.id))
         assert entry["role"] == WorkspaceRole.MANAGE
-        assert entry["tenant_count"] == 1
         assert entry["member_count"] == 1
+        assert len(entry["tenants"]) == 1
+        assert entry["tenants"][0]["tenant_name"] == tenant.canonical_name
+        assert entry["tenants"][0]["provider"] == tenant.provider
 
     def test_list_requires_authentication(self, client):
         resp = client.get("/api/workspaces/")
@@ -110,7 +112,7 @@ class TestWorkspaceCreate:
         )
         assert resp.status_code == 201, resp.json()
         assert resp.json()["name"] == "Empty WS"
-        assert resp.json()["tenant_count"] == 0
+        assert resp.json()["tenants"] == []
 
 
 # ---------------------------------------------------------------------------
