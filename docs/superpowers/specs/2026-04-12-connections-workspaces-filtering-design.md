@@ -96,8 +96,16 @@ Uses the existing shadcn `Dialog` component.
    - Two filter groups:
      - **Role:** Read / Read+Write / Manage (options derived from workspace list)
      - **Provider:** CommCare / DHIS2 / etc. (options derived from workspace `providers` field)
-3. Filtered workspace rows (keep existing `WorkspaceRow` clickable card format)
+3. Filtered workspace rows (keep existing `WorkspaceRow` clickable card format, updated to show tenants)
 4. Empty/no-results states for filtered views
+
+### WorkspaceRow Updates
+
+The row currently shows member count and a generic "N sources" count. Replace the sources count with the actual tenant list:
+
+- Show each tenant name with a provider badge (same colored badge style as ConnectionsPage table)
+- If the workspace has many tenants (e.g. 5+), show the first few and a "+N more" overflow indicator
+- Keep member count and role badge as-is
 
 ### Search Logic
 
@@ -106,29 +114,31 @@ Uses the existing shadcn `Dialog` component.
 ### Filter Logic
 
 - **Role:** Exact match on `workspace.role`
-- **Provider:** `workspace.providers.includes(selectedProvider)`
+- **Provider:** `workspace.tenants.some(t => t.provider === selectedProvider)`
 - **Combination:** All active filters AND search combine with AND
 
 ## Backend Change
 
 ### Workspace List API
 
-Add a `providers` field to the workspace list serializer response:
+Replace `tenant_count` with a `tenants` array in the workspace list serializer response:
 
 ```json
 {
   "id": "...",
   "name": "My Workspace",
   "role": "manage",
-  "tenant_count": 3,
   "member_count": 2,
-  "providers": ["commcare", "dhis2"]
+  "tenants": [
+    { "id": "...", "tenant_name": "my-project", "provider": "commcare" },
+    { "id": "...", "tenant_name": "nutrition-tracker", "provider": "dhis2" }
+  ]
 }
 ```
 
-`providers` is a list of distinct provider strings from the workspace's connected tenants. This is derived via a subquery or annotation on the queryset -- no additional API calls needed.
+Each entry in `tenants` is the lightweight shape: `{ id, tenant_name, provider }`. This replaces the `tenant_count` integer -- the count is just `tenants.length` on the frontend.
 
-The `WorkspaceListItem` TypeScript type in `frontend/src/api/workspaces.ts` gains `providers: string[]`.
+The `WorkspaceListItem` TypeScript type in `frontend/src/api/workspaces.ts` replaces `tenant_count: number` with `tenants: { id: string; tenant_name: string; provider: string }[]`. Provider filtering uses `workspace.tenants.some(t => t.provider === selectedProvider)`.
 
 ## Files Changed
 
@@ -139,12 +149,11 @@ The `WorkspaceListItem` TypeScript type in `frontend/src/api/workspaces.ts` gain
 ### Modified
 
 - `frontend/src/pages/ConnectionsPage/ConnectionsPage.tsx` -- table layout, dialog forms, SearchFilterBar
-- `frontend/src/pages/WorkspacesPage/WorkspacesPage.tsx` -- SearchFilterBar, filtering logic
-- `frontend/src/api/workspaces.ts` -- add `providers` to `WorkspaceListItem`
-- Backend workspace list serializer -- annotate `providers` field
+- `frontend/src/pages/WorkspacesPage/WorkspacesPage.tsx` -- SearchFilterBar, filtering logic, WorkspaceRow updated to show tenant names + provider badges
+- `frontend/src/api/workspaces.ts` -- replace `tenant_count` with `tenants` array on `WorkspaceListItem`
+- Backend workspace list serializer -- nest tenants with provider info instead of tenant_count
 
 ### Unchanged
 
 - OAuth Providers section rendering
-- `WorkspaceRow` component internals
 - All other API endpoints
