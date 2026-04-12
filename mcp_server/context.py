@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 @dataclass(frozen=True)
@@ -147,13 +147,17 @@ def _parse_db_url(url: str, schema: str) -> dict:
         raise ValueError(f"Invalid schema name: {schema!r}")
 
     parsed = urlparse(url)
-    return {
+    qs = parse_qs(parsed.query)
+    params = {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 5432,
         "dbname": parsed.path.lstrip("/") or "scout",
         "user": unquote(parsed.username or ""),
         "password": unquote(parsed.password or ""),
-        "sslmode": "require",
         # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
         "options": f"-c search_path={schema},public -c statement_timeout=30000",
     }
+    sslmode = qs.get("sslmode", [None])[0]
+    if sslmode:
+        params["sslmode"] = sslmode
+    return params
