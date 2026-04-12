@@ -4,13 +4,19 @@ export type { UserTenant } from "./auth"
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+export interface WorkspaceListTenant {
+  id: string
+  tenant_name: string
+  provider: string
+}
+
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
   id: string
   name: string
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
-  tenant_count: number
+  tenants: WorkspaceListTenant[]
   member_count: number
   created_at: string
 }
