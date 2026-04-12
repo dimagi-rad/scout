@@ -196,10 +196,54 @@ export function ConnectionsPage() {
         </p>
       )}
 
-      {/* CommCare Domains section */}
+      {/* OAuth Providers section */}
+      <section className="space-y-4">
+        <h2 className="text-lg font-medium">OAuth Providers</h2>
+        {loadingProviders ? (
+          <p className="text-sm text-muted-foreground">Loading providers...</p>
+        ) : providers.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No OAuth providers configured.</p>
+        ) : (
+          providers.map((provider) => (
+            <Card key={provider.id}>
+              <CardContent className="flex items-center justify-between p-4">
+                <div>
+                  <p className="font-medium">{provider.name}</p>
+                  <p className={`text-sm ${provider.status === "expired" ? "text-amber-600" : "text-muted-foreground"}`}>
+                    {provider.status === "connected"
+                      ? "Connected"
+                      : provider.status === "expired"
+                        ? "Connection expired"
+                        : "Not connected"}
+                  </p>
+                </div>
+                {provider.status === "connected" ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleDisconnect(provider.id)}
+                    disabled={disconnecting === provider.id}
+                    data-testid={`disconnect-${provider.id}`}
+                  >
+                    {disconnecting === provider.id ? "Disconnecting..." : "Disconnect"}
+                  </Button>
+                ) : (
+                  <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
+                    <a href={`${provider.login_url}?process=connect&next=/settings/connections`}>
+                      {provider.status === "expired" ? "Reconnect" : "Connect"}
+                    </a>
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          ))
+        )}
+      </section>
+
+      {/* API Key Domains section */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">CommCare Domains (API Key)</h2>
+          <h2 className="text-lg font-medium">API Key Domains</h2>
           {formMode === "hidden" && (
             <Button
               size="sm"
@@ -325,7 +369,11 @@ export function ConnectionsPage() {
                       <p className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
                         {domain.tenant_name || domain.tenant_id}
                       </p>
-                      <p className="text-sm text-muted-foreground">{domain.tenant_id}</p>
+                      <p className="text-sm text-muted-foreground">
+                        <span className="capitalize">{domain.provider}</span>
+                        {" \u00b7 "}
+                        {domain.tenant_id}
+                      </p>
                     </div>
                     <div className="flex gap-2">
                       <Button
@@ -417,49 +465,6 @@ export function ConnectionsPage() {
         )}
       </section>
 
-      {/* OAuth Providers section */}
-      <section className="space-y-4">
-        <h2 className="text-lg font-medium">OAuth Providers</h2>
-        {loadingProviders ? (
-          <p className="text-sm text-muted-foreground">Loading providers...</p>
-        ) : providers.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No OAuth providers configured.</p>
-        ) : (
-          providers.map((provider) => (
-            <Card key={provider.id}>
-              <CardContent className="flex items-center justify-between p-4">
-                <div>
-                  <p className="font-medium">{provider.name}</p>
-                  <p className={`text-sm ${provider.status === "expired" ? "text-amber-600" : "text-muted-foreground"}`}>
-                    {provider.status === "connected"
-                      ? "Connected"
-                      : provider.status === "expired"
-                        ? "Connection expired"
-                        : "Not connected"}
-                  </p>
-                </div>
-                {provider.status === "connected" ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleDisconnect(provider.id)}
-                    disabled={disconnecting === provider.id}
-                    data-testid={`disconnect-${provider.id}`}
-                  >
-                    {disconnecting === provider.id ? "Disconnecting..." : "Disconnect"}
-                  </Button>
-                ) : (
-                  <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
-                    <a href={`${provider.login_url}?process=connect&next=/settings/connections`}>
-                      {provider.status === "expired" ? "Reconnect" : "Connect"}
-                    </a>
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          ))
-        )}
-      </section>
     </div>
   )
 }
