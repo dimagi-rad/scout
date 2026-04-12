@@ -159,6 +159,7 @@ aws cloudformation update-stack \
   --stack-name scout-production \
   --template-body file://infra/scout-stack.yml \
   --capabilities CAPABILITY_NAMED_IAM \
+  --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
   --profile scout \
   --region us-east-1
 ```
