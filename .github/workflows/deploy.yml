@@ -12,6 +12,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -27,6 +29,24 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Prime env vars from AWS
+        run: |
+          ./scripts/fetch-deploy-env.sh -q
+          grep -v '^#' .env.deploy >> $GITHUB_ENV
+
+      - name: Build and push API image
+        run: |
+          docker build -t $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG .
+          docker push $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG
+
+      - name: Build and push Frontend image
+        run: |
+          docker build -t $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG \
+            -f Dockerfile.frontend \
+            --build-arg NGINX_CONF=frontend/nginx.prod-kamal.conf \
+            .
+          docker push $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG
+
       - name: Install Kamal
         run: gem install kamal
 
@@ -35,19 +55,14 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Prime env vars from AWS
-        run: |
-          ./scripts/fetch-deploy-env.sh
-          grep -v '^#' .env.deploy >> $GITHUB_ENV
-
       - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml
+        run: kamal deploy -c config/deploy-mcp.yml --version=$IMAGE_TAG
 
       - name: Deploy API
-        run: kamal deploy
+        run: kamal deploy --version=$IMAGE_TAG
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-worker.yml
+        run: kamal deploy -c config/deploy-worker.yml --version=$IMAGE_TAG
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-frontend.yml
+        run: kamal deploy -c config/deploy-frontend.yml --version=$IMAGE_TAG
