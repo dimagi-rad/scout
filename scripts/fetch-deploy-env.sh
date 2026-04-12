@@ -18,15 +18,20 @@ for arg in "$@"; do
   esac
 done
 
-PROFILE="${AWS_PROFILE:-scout}"
 STACK_NAME="scout-production"
 REGION="us-east-1"
 OUTPUT_FILE=".env.deploy"
 
-# Ensure we have valid AWS credentials
-if ! aws sts get-caller-identity --profile "$PROFILE" &>/dev/null; then
-  $QUIET || echo "No valid AWS session. Logging in..."
-  aws sso login --profile "$PROFILE"
+PROFILE_ARG=""
+if [ -z "${CI:-}" ]; then
+  PROFILE="${AWS_PROFILE:-scout}"
+  PROFILE_ARG="--profile $PROFILE"
+
+  # Ensure we have valid AWS credentials
+  if ! aws sts get-caller-identity $PROFILE_ARG &>/dev/null; then
+    $QUIET || echo "No valid AWS session. Logging in..."
+    aws sso login $PROFILE_ARG
+  fi
 fi
 
 $QUIET || echo "Fetching CloudFormation outputs from stack '$STACK_NAME'..."
@@ -36,7 +41,7 @@ OUTPUTS=$(aws cloudformation describe-stacks \
   --query 'Stacks[0].Outputs' \
   --output json \
   --region "$REGION" \
-  --profile "$PROFILE")
+  $PROFILE_ARG)
 
 # Parse outputs into env vars
 get_output() {
@@ -62,6 +67,7 @@ SCOUT_RDS_SECRET_ARN=$RDS_SECRET_ARN
 SCOUT_REDIS_ENDPOINT=$REDIS_ENDPOINT
 SCOUT_ECR_REGISTRY=$ECR_REGISTRY
 SCOUT_GITHUB_DEPLOY_ROLE_ARN=$GITHUB_DEPLOY_ROLE_ARN
+AWS_PROFILE=${PROFILE:-}
 EOF
 
 $QUIET || echo "Written to $OUTPUT_FILE:"
