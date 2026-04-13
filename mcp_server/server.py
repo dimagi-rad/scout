@@ -690,39 +690,130 @@ async def run_materialization(
 async def get_schema_status(workspace_id: str = "") -> dict:
     """Check whether data has been loaded for this workspace.
 
-    Returns schema existence, state, and last materialization timestamp.
-    Always succeeds — returns exists=False if no schema has been
+    Returns schema existence, state, last materialization timestamp, and table
+    list. Always succeeds — returns exists=False if no schema has been
     provisioned yet. Safe to call before any data has been loaded.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
     """
-    from apps.workspaces.models import SchemaState, WorkspaceViewSchema
+    from apps.workspaces.models import (
+        MaterializationRun,
+        SchemaState,
+        TenantSchema,
+        Workspace,
+        WorkspaceViewSchema,
+    )
 
     async with tool_context("get_schema_status", workspace_id) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
 
+        not_provisioned = success_response(
+            {
+                "exists": False,
+                "state": "not_provisioned",
+                "last_materialized_at": None,
+                "tables": [],
+            },
+            schema="",
+        )
+
+        try:
+            workspace = await Workspace.objects.aget(id=workspace_id)
+        except Workspace.DoesNotExist:
+            tc["result"] = not_provisioned
+            return tc["result"]
+
+        tenant_count = await workspace.tenants.acount()
+
+        if tenant_count == 0:
+            tc["result"] = not_provisioned
+            return tc["result"]
+
+        if tenant_count == 1:
+            # Single-tenant: check TenantSchema directly
+            tenant = await workspace.tenants.afirst()
+            ts = await TenantSchema.objects.filter(
+                tenant=tenant,
+                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            ).afirst()
+
+            if ts is None:
+                tc["result"] = not_provisioned
+                return tc["result"]
+
+            last_run = (
+                await MaterializationRun.objects.filter(
+                    tenant_schema=ts,
+                    state=MaterializationRun.RunState.COMPLETED,
+                )
+                .order_by("-completed_at")
+                .afirst()
+            )
+
+            last_materialized_at = None
+            tables = []
+            if last_run:
+                if last_run.completed_at:
+                    last_materialized_at = last_run.completed_at.isoformat()
+                result_data = last_run.result or {}
+                if "tables" in result_data:
+                    tables = result_data["tables"]
+                elif "table" in result_data and "rows_loaded" in result_data:
+                    tables = [
+                        {"name": result_data["table"], "row_count": result_data["rows_loaded"]}
+                    ]
+
+            tc["result"] = success_response(
+                {
+                    "exists": True,
+                    "state": ts.state,
+                    "last_materialized_at": last_materialized_at,
+                    "tables": tables,
+                },
+                schema=ts.schema_name,
+            )
+            return tc["result"]
+
+        # Multi-tenant: check WorkspaceViewSchema + per-tenant materialization
         vs = await WorkspaceViewSchema.objects.filter(
             workspace_id=workspace_id,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
         ).afirst()
+
         if vs is None:
-            tc["result"] = success_response(
-                {
-                    "exists": False,
-                    "state": "not_provisioned",
-                    "last_materialized_at": None,
-                    "tables": [],
-                },
-                schema="",
+            tc["result"] = not_provisioned
+            return tc["result"]
+
+        # Collect last materialization time across all tenant schemas
+        tenant_ids = [t.id async for t in workspace.tenants.all()]
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema__tenant_id__in=tenant_ids,
+                state=MaterializationRun.RunState.COMPLETED,
             )
-        else:
-            tc["result"] = success_response(
-                {"exists": True, "state": vs.state, "last_materialized_at": None, "tables": []},
-                schema=vs.schema_name,
-            )
+            .order_by("-completed_at")
+            .afirst()
+        )
+        last_materialized_at = None
+        if last_run and last_run.completed_at:
+            last_materialized_at = last_run.completed_at.isoformat()
+
+        # List tables from the view schema via information_schema
+        ctx = await _resolve_mcp_context(workspace_id)
+        tables = await sync_to_async(workspace_list_tables)(ctx)
+
+        tc["result"] = success_response(
+            {
+                "exists": True,
+                "state": vs.state,
+                "last_materialized_at": last_materialized_at,
+                "tables": tables,
+            },
+            schema=vs.schema_name,
+        )
         return tc["result"]
 
 

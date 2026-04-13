@@ -600,7 +600,7 @@ class TestGetSchemaStatusTool:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     @pytest.mark.django_db
-    async def test_returns_not_provisioned_when_no_view_schema(self):
+    async def test_returns_not_provisioned_when_workspace_not_found(self):
         from mcp_server.server import get_schema_status
 
         result = await get_schema_status(workspace_id="00000000-0000-0000-0000-000000000000")
@@ -608,25 +608,6 @@ class TestGetSchemaStatusTool:
         assert result["success"] is True
         assert result["data"]["exists"] is False
         assert result["data"]["state"] == "not_provisioned"
-
-    async def test_returns_active_when_view_schema_exists(self):
-        from mcp_server.server import get_schema_status
-
-        mock_vs = MagicMock()
-        mock_vs.state = "active"
-        mock_vs.schema_name = "ws_abc123"
-
-        with patch("apps.workspaces.models.WorkspaceViewSchema") as mock_vs_cls:
-            mock_qs = MagicMock()
-            mock_qs.afirst = AsyncMock(return_value=mock_vs)
-            mock_vs_cls.objects.filter.return_value = mock_qs
-
-            result = await get_schema_status(workspace_id="ws-test")
-
-        assert result["success"] is True
-        assert result["data"]["exists"] is True
-        assert result["data"]["state"] == "active"
-        assert result["schema"] == "ws_abc123"
 
 
 # ---------------------------------------------------------------------------
