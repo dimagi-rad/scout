@@ -106,7 +106,6 @@ async def list_tables(workspace_id: str = "") -> dict:
                 tables = await sync_to_async(workspace_list_tables)(ctx)
                 tc["result"] = success_response(
                     {"tables": tables, "note": None},
-                    tenant_id="",
                     schema=ctx.schema_name,
                     timing_ms=tc["timer"].elapsed_ms,
                 )
@@ -116,7 +115,6 @@ async def list_tables(workspace_id: str = "") -> dict:
         if ts is None:
             tc["result"] = success_response(
                 {"tables": [], "note": None},
-                tenant_id="",
                 schema=ctx.schema_name,
                 timing_ms=tc["timer"].elapsed_ms,
             )
@@ -142,7 +140,6 @@ async def list_tables(workspace_id: str = "") -> dict:
         )
         tc["result"] = success_response(
             {"tables": tables, "note": note},
-            tenant_id="",
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -198,7 +195,6 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
 
         tc["result"] = success_response(
             table,
-            tenant_id="",
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -226,7 +222,6 @@ async def get_metadata(workspace_id: str = "") -> dict:
         if ts is None:
             tc["result"] = success_response(
                 {"schema": ctx.schema_name, "table_count": 0, "tables": {}, "relationships": []},
-                tenant_id="",
                 schema=ctx.schema_name,
                 timing_ms=tc["timer"].elapsed_ms,
             )
@@ -258,7 +253,6 @@ async def get_metadata(workspace_id: str = "") -> dict:
                 "tables": metadata["tables"],
                 "relationships": metadata["relationships"],
             },
-            tenant_id="",
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -350,7 +344,6 @@ async def query(sql: str, workspace_id: str = "") -> dict:
                 "sql_executed": result.get("sql_executed", ""),
                 "tables_accessed": result.get("tables_accessed", []),
             },
-            tenant_id="",
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
             warnings=warnings or None,
@@ -419,7 +412,6 @@ async def get_materialization_status(run_id: str) -> dict:
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "tenant_id": tenant_id,
             },
-            tenant_id="",
             schema=schema,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -471,7 +463,6 @@ async def cancel_materialization(run_id: str) -> dict:
 
         tc["result"] = success_response(
             {"run_id": run_id, "cancelled": True, "previous_state": previous_state},
-            tenant_id="",
             schema=schema,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -679,7 +670,6 @@ async def run_materialization(
         all_succeeded = all(r["success"] for r in results)
         tc["result"] = success_response(
             {"tenants": results, "all_succeeded": all_succeeded},
-            tenant_id="",
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -885,7 +875,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
 
         tc["result"] = success_response(
             {"schemas_dropped": dropped},
-            tenant_id="",
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )

@@ -3,7 +3,7 @@ Response envelope helpers for the MCP server.
 
 Every tool response is wrapped in a consistent envelope:
 
-    Success: {"success": True, "data": {...}, "tenant_id": "...", ...}
+    Success: {"success": True, "data": {...}, "schema": "...", ...}
     Error:   {"success": False, "error": {"code": "...", "message": "..."}}
 
 Also provides timing, error classification, and structured audit logging.
@@ -34,7 +34,6 @@ AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
 def success_response(
     data: dict[str, Any],
     *,
-    tenant_id: str = "",
     project_id: str = "",
     schema: str,
     timing_ms: int | None = None,
@@ -46,8 +45,6 @@ def success_response(
         "data": data,
         "schema": schema,
     }
-    if tenant_id:
-        envelope["tenant_id"] = tenant_id
     if project_id:
         envelope["project_id"] = project_id
     if warnings:
