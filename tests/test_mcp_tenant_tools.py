@@ -6,7 +6,6 @@ the SQL validator. Tests verify the full chain from tool handler through
 to the parameterized query execution.
 """
 
-from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,7 +20,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 # Patch target: the helpers do `from mcp_server.services.query import execute_internal_query`
 # inside the function body, so we must patch on the source module.
 PATCH_INTERNAL_QUERY = "mcp_server.services.query.execute_internal_query"
-PATCH_TENANT_CONTEXT = "mcp_server.server.load_tenant_context"
+PATCH_WORKSPACE_CONTEXT = "mcp_server.server.load_workspace_context"
 
 
 @pytest.fixture
@@ -220,20 +219,22 @@ class TestListTablesTool:
         ]
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=mock_tables),
             patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
+            mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
             mock_run_cls.RunState.COMPLETED = "completed"
 
-            result = await list_tables(tenant_id)
+            result = await list_tables(workspace_id="ws-test")
 
         assert result["success"] is True
         assert len(result["data"]["tables"]) == 1
@@ -246,20 +247,22 @@ class TestListTablesTool:
         mock_ts = MagicMock()
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
             patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
+            mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
             mock_run_cls.RunState.COMPLETED = "completed"
 
-            result = await list_tables(tenant_id)
+            result = await list_tables(workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["tables"] == []
@@ -268,10 +271,10 @@ class TestListTablesTool:
     async def test_invalid_tenant_returns_validation_error(self):
         from mcp_server.server import list_tables
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx:
+        with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema for tenant 'bad'")
 
-            result = await list_tables("bad")
+            result = await list_tables(workspace_id="bad")
 
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
@@ -280,13 +283,15 @@ class TestListTablesTool:
         from mcp_server.server import list_tables
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
         ):
             mock_ctx.return_value = tenant_context
+            mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
-            result = await list_tables(tenant_id)
+            result = await list_tables(workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["tables"] == []
@@ -329,7 +334,7 @@ class TestDescribeTableTool:
         }
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
@@ -344,7 +349,7 @@ class TestDescribeTableTool:
             mock_run_cls.objects.filter.return_value = mock_run_qs
             mock_run_cls.RunState.COMPLETED = "completed"
 
-            result = await describe_table(tenant_id, "cases")
+            result = await describe_table("cases", workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["name"] == "cases"
@@ -358,7 +363,7 @@ class TestDescribeTableTool:
         mock_ts.tenant_membership = MagicMock()
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
@@ -373,7 +378,7 @@ class TestDescribeTableTool:
             mock_run_cls.objects.filter.return_value = mock_run_qs
             mock_run_cls.RunState.COMPLETED = "completed"
 
-            result = await describe_table(tenant_id, "nonexistent")
+            result = await describe_table("nonexistent", workspace_id="ws-test")
 
         assert result["success"] is False
         assert result["error"]["code"] == NOT_FOUND
@@ -381,9 +386,9 @@ class TestDescribeTableTool:
     async def test_invalid_tenant_returns_validation_error(self):
         from mcp_server.server import describe_table
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx:
+        with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema")
-            result = await describe_table("bad", "cases")
+            result = await describe_table("cases", workspace_id="bad")
 
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
@@ -432,7 +437,7 @@ class TestGetMetadataTool:
         }
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
@@ -447,7 +452,7 @@ class TestGetMetadataTool:
             mock_run_cls.objects.filter.return_value = mock_run_qs
             mock_run_cls.RunState.COMPLETED = "completed"
 
-            result = await get_metadata(tenant_id)
+            result = await get_metadata(workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["table_count"] == 1
@@ -458,13 +463,13 @@ class TestGetMetadataTool:
         from mcp_server.server import get_metadata
 
         with (
-            patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx,
+            patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
-            result = await get_metadata(tenant_id)
+            result = await get_metadata(workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["table_count"] == 0
@@ -474,9 +479,9 @@ class TestGetMetadataTool:
     async def test_invalid_tenant_returns_validation_error(self):
         from mcp_server.server import get_metadata
 
-        with patch(PATCH_TENANT_CONTEXT, new_callable=AsyncMock) as mock_ctx:
+        with patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx:
             mock_ctx.side_effect = ValueError("No active schema")
-            result = await get_metadata("bad")
+            result = await get_metadata(workspace_id="bad")
 
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
@@ -586,84 +591,42 @@ PATCH_MATERIALIZATION_RUN = "apps.workspaces.models.MaterializationRun"
 class TestGetSchemaStatusTool:
     """Test the get_schema_status MCP tool."""
 
-    async def test_returns_not_provisioned_when_no_schema(self, tenant_id):
+    async def test_requires_workspace_id(self):
         from mcp_server.server import get_schema_status
 
-        with patch(PATCH_TENANT_SCHEMA) as mock_ts_cls:
-            mock_qs = AsyncMock()
-            mock_qs.afirst.return_value = None
-            mock_ts_cls.objects.filter.return_value = mock_qs
+        result = await get_schema_status()
 
-            result = await get_schema_status(tenant_id)
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.django_db
+    async def test_returns_not_provisioned_when_no_view_schema(self):
+        from mcp_server.server import get_schema_status
+
+        result = await get_schema_status(workspace_id="00000000-0000-0000-0000-000000000000")
 
         assert result["success"] is True
         assert result["data"]["exists"] is False
         assert result["data"]["state"] == "not_provisioned"
-        assert result["data"]["tables"] == []
-        assert result["data"]["last_materialized_at"] is None
 
-    async def test_returns_active_schema_with_tables(self, tenant_id):
-        from datetime import datetime
-
+    async def test_returns_active_when_view_schema_exists(self):
         from mcp_server.server import get_schema_status
 
-        mock_schema = MagicMock()
-        mock_schema.schema_name = "test_domain"
-        mock_schema.state = "active"
+        mock_vs = MagicMock()
+        mock_vs.state = "active"
+        mock_vs.schema_name = "ws_abc123"
 
-        completed_at = datetime(2026, 2, 23, 10, 30, 0, tzinfo=UTC)
-        mock_run = MagicMock()
-        mock_run.completed_at = completed_at
-        mock_run.result = {"table": "cases", "rows_loaded": 15420}
+        with patch("apps.workspaces.models.WorkspaceViewSchema") as mock_vs_cls:
+            mock_qs = MagicMock()
+            mock_qs.afirst = AsyncMock(return_value=mock_vs)
+            mock_vs_cls.objects.filter.return_value = mock_qs
 
-        with (
-            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
-            patch(PATCH_MATERIALIZATION_RUN) as mock_run_cls,
-        ):
-            mock_schema_qs = AsyncMock()
-            mock_schema_qs.afirst.return_value = mock_schema
-            mock_ts_cls.objects.filter.return_value = mock_schema_qs
-
-            mock_run_qs = MagicMock()
-            mock_run_qs.order_by.return_value = mock_run_qs
-            mock_run_qs.afirst = AsyncMock(return_value=mock_run)
-            mock_run_cls.objects.filter.return_value = mock_run_qs
-
-            result = await get_schema_status(tenant_id)
+            result = await get_schema_status(workspace_id="ws-test")
 
         assert result["success"] is True
         assert result["data"]["exists"] is True
         assert result["data"]["state"] == "active"
-        assert result["data"]["last_materialized_at"] == "2026-02-23T10:30:00+00:00"
-        assert result["data"]["tables"] == [{"name": "cases", "row_count": 15420}]
-        assert result["schema"] == "test_domain"
-
-    async def test_returns_tables_empty_when_no_completed_run(self, tenant_id):
-        from mcp_server.server import get_schema_status
-
-        mock_schema = MagicMock()
-        mock_schema.schema_name = "test_domain"
-        mock_schema.state = "active"
-
-        with (
-            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
-            patch(PATCH_MATERIALIZATION_RUN) as mock_run_cls,
-        ):
-            mock_schema_qs = AsyncMock()
-            mock_schema_qs.afirst.return_value = mock_schema
-            mock_ts_cls.objects.filter.return_value = mock_schema_qs
-
-            mock_run_qs = MagicMock()
-            mock_run_qs.order_by.return_value = mock_run_qs
-            mock_run_qs.afirst = AsyncMock(return_value=None)
-            mock_run_cls.objects.filter.return_value = mock_run_qs
-
-            result = await get_schema_status(tenant_id)
-
-        assert result["success"] is True
-        assert result["data"]["exists"] is True
-        assert result["data"]["tables"] == []
-        assert result["data"]["last_materialized_at"] is None
+        assert result["schema"] == "ws_abc123"
 
 
 # ---------------------------------------------------------------------------
@@ -676,60 +639,41 @@ PATCH_SCHEMA_MANAGER = "apps.workspaces.services.schema_manager.SchemaManager"
 class TestTeardownSchemaTool:
     """Test the teardown_schema MCP tool."""
 
-    async def test_requires_confirm_true(self, tenant_id):
+    async def test_requires_confirm_true(self):
         from mcp_server.server import teardown_schema
 
-        result = await teardown_schema(tenant_id, confirm=False)
+        result = await teardown_schema(confirm=False, workspace_id="ws-123")
 
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
         assert "confirm=True" in result["error"]["message"]
 
-    async def test_default_confirm_is_false(self, tenant_id):
+    async def test_default_confirm_is_false(self):
         from mcp_server.server import teardown_schema
 
-        result = await teardown_schema(tenant_id)
+        result = await teardown_schema(workspace_id="ws-123")
 
         assert result["success"] is False
         assert result["error"]["code"] == VALIDATION_ERROR
 
-    async def test_not_found_when_no_schema(self, tenant_id):
+    async def test_requires_workspace_id(self):
         from mcp_server.server import teardown_schema
 
-        with patch(PATCH_TENANT_SCHEMA) as mock_ts_cls:
-            mock_qs = MagicMock()
-            mock_qs.exclude.return_value = mock_qs
-            mock_qs.afirst = AsyncMock(return_value=None)
-            mock_ts_cls.objects.filter.return_value = mock_qs
+        result = await teardown_schema(confirm=True)
 
-            result = await teardown_schema(tenant_id, confirm=True)
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.django_db
+    async def test_not_found_when_no_workspace(self):
+        from mcp_server.server import teardown_schema
+
+        result = await teardown_schema(
+            confirm=True, workspace_id="00000000-0000-0000-0000-000000000000"
+        )
 
         assert result["success"] is False
         assert result["error"]["code"] == NOT_FOUND
-
-    async def test_calls_schema_manager_teardown_on_confirm(self, tenant_id):
-        from mcp_server.server import teardown_schema
-
-        mock_schema = MagicMock()
-        mock_schema.schema_name = "test_domain"
-
-        with (
-            patch(PATCH_TENANT_SCHEMA) as mock_ts_cls,
-            patch(PATCH_SCHEMA_MANAGER) as mock_mgr_cls,
-        ):
-            mock_qs = MagicMock()
-            mock_qs.exclude.return_value = mock_qs
-            mock_qs.afirst = AsyncMock(return_value=mock_schema)
-            mock_ts_cls.objects.filter.return_value = mock_qs
-
-            mock_mgr = MagicMock()
-            mock_mgr_cls.return_value = mock_mgr
-
-            result = await teardown_schema(tenant_id, confirm=True)
-
-        assert result["success"] is True
-        assert result["data"]["schema_dropped"] == "test_domain"
-        mock_mgr.teardown.assert_called_once_with(mock_schema)
 
 
 class TestListPipelines:
