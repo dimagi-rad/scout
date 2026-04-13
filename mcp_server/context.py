@@ -157,7 +157,6 @@ def _parse_db_url(url: str, schema: str) -> dict:
         # schema has been validated against ^[a-z][a-z0-9_]*$ above — safe to interpolate
         "options": f"-c search_path={schema},public -c statement_timeout=30000",
     }
-    sslmode = qs.get("sslmode", [None])[0]
-    if sslmode:
-        params["sslmode"] = sslmode
+    sslmode = qs.get("sslmode", ["require"])[0]
+    params["sslmode"] = sslmode
     return params
