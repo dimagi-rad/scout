@@ -49,7 +49,6 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
 
     Raises ValueError if the tenant schema is not found or not active.
     """
-    from asgiref.sync import sync_to_async
     from django.conf import settings
 
     from apps.workspaces.models import SchemaState, TenantSchema
@@ -64,13 +63,13 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
             f"No active schema for tenant '{tenant_id}'. Run materialization first to load data."
         )
 
-    await sync_to_async(ts.touch)()
+    await ts.atouch()
 
     url = settings.MANAGED_DATABASE_URL
     if not url:
         raise ValueError("MANAGED_DATABASE_URL is not configured")
 
-    connection_params = await sync_to_async(_parse_db_url)(url, ts.schema_name)
+    connection_params = _parse_db_url(url, ts.schema_name)
 
     return QueryContext(
         tenant_id=tenant_id,
@@ -90,7 +89,6 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
     Raises ValueError if the workspace has no tenants, or if multi-tenant and
     no active WorkspaceViewSchema exists.
     """
-    from asgiref.sync import sync_to_async
     from django.conf import settings
 
     from apps.workspaces.models import SchemaState, Workspace, WorkspaceViewSchema
@@ -121,13 +119,13 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
             "Trigger a rebuild via POST /api/workspaces/<id>/tenants/ or a data refresh."
         ) from None
 
-    await sync_to_async(vs.touch)()
+    await vs.atouch()
 
     url = settings.MANAGED_DATABASE_URL
     if not url:
         raise ValueError("MANAGED_DATABASE_URL is not configured")
 
-    connection_params = await sync_to_async(_parse_db_url)(url, vs.schema_name)
+    connection_params = _parse_db_url(url, vs.schema_name)
 
     return QueryContext(
         tenant_id=workspace_id,
