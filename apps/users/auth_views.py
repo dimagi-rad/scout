@@ -17,11 +17,12 @@ from django.views.decorators.http import require_GET, require_POST
 from apps.users.decorators import login_required_json
 from apps.users.models import TenantMembership
 from apps.users.rate_limiting import check_rate_limit, record_attempt
+from apps.users.services.credential_resolver import get_social_token
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
 )
-from apps.users.views import _get_commcare_token, _get_connect_token
+from apps.users.services.token_refresh import PROVIDER_TOKEN_URLS
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +33,6 @@ PROVIDER_DISPLAY = {
     "github": "GitHub",
     "commcare": "CommCare",
     "commcare_connect": "CommCare Connect",
-}
-
-PROVIDER_TOKEN_URLS = {
-    "commcare": "https://www.commcarehq.org/oauth/token/",
-    "commcare_connect": "https://connect.dimagi.com/o/token/",
 }
 
 
@@ -51,13 +47,13 @@ def _user_response(user, *, onboarding_complete=False):
     }
 
 
-def _try_resolve_provider(user, get_token_fn, resolve_fn, provider_name):
+def _try_resolve_provider(user, provider, resolve_fn, provider_name):
     """Attempt lazy OAuth onboarding resolution for a provider."""
-    token = get_token_fn(user)
-    if not token:
+    token_obj = get_social_token(user, provider)
+    if not token_obj:
         return False
     try:
-        resolve_fn(user, token)
+        resolve_fn(user, token_obj.token)
         return True
     except Exception:
         logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
@@ -87,11 +83,9 @@ def me_view(request):
     # Both providers are tried independently — a successful CommCare
     # resolution must not skip Connect.
     if not onboarding_complete:
-        commcare_ok = _try_resolve_provider(
-            user, _get_commcare_token, resolve_commcare_domains, "CommCare"
-        )
+        commcare_ok = _try_resolve_provider(user, "commcare", resolve_commcare_domains, "CommCare")
         connect_ok = _try_resolve_provider(
-            user, _get_connect_token, resolve_connect_opportunities, "Connect"
+            user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
         onboarding_complete = commcare_ok or connect_ok
 

@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 # Refresh tokens that expire within this window
 REFRESH_BUFFER = timedelta(minutes=5)
 
+PROVIDER_TOKEN_URLS = {
+    "commcare": "https://www.commcarehq.org/oauth/token/",
+    "commcare_connect": "https://connect.dimagi.com/o/token/",
+}
+
 
 class TokenRefreshError(Exception):
     """Raised when token refresh fails."""

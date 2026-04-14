@@ -31,12 +31,7 @@ from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from apps.users.auth_views import PROVIDER_TOKEN_URLS
-from apps.users.services.token_refresh import (
-    TokenRefreshError,
-    refresh_oauth_token,
-    token_needs_refresh,
-)
+from apps.users.services.credential_resolver import aresolve_credential
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -469,23 +464,6 @@ async def cancel_materialization(run_id: str) -> dict:
         return tc["result"]
 
 
-def _resolve_oauth_credential(token_obj, provider: str) -> dict:
-    """Build an OAuth credential dict, refreshing the token if expired."""
-    token_value = token_obj.token
-
-    if token_needs_refresh(token_obj.expires_at):
-        token_url = PROVIDER_TOKEN_URLS.get(provider)
-        if token_url and token_obj.token_secret:
-            try:
-                token_value = refresh_oauth_token(token_obj, token_url)
-            except TokenRefreshError:
-                logger.warning(
-                    "Token refresh failed for provider %s, using existing token", provider
-                )
-
-    return {"type": "oauth", "value": token_value}
-
-
 async def _materialize_tenant(
     tm,
     pipeline_config,
@@ -496,57 +474,15 @@ async def _materialize_tenant(
     Resolves credentials, builds a progress callback, and executes the pipeline.
     Returns the pipeline result dict on success, or raises on failure.
     """
-    from apps.users.models import TenantCredential
     from mcp_server.loaders.commcare_base import CommCareAuthError
     from mcp_server.loaders.connect_base import ConnectAuthError
 
     tenant_id = tm.tenant.external_id
 
     # ── Resolve credential ────────────────────────────────────────────────
-    try:
-        cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
-            tenant_membership=tm
-        )
-    except TenantCredential.DoesNotExist:
+    credential = await aresolve_credential(tm)
+    if credential is None:
         return error_response("AUTH_TOKEN_MISSING", "No credential configured for this tenant")
-
-    if cred_obj.credential_type == TenantCredential.API_KEY:
-        from apps.users.adapters import decrypt_credential
-
-        try:
-            decrypted = decrypt_credential(cred_obj.encrypted_credential)
-        except Exception:
-            logger.exception("Failed to decrypt API key for tenant %s", tenant_id)
-            return error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
-        credential = {"type": "api_key", "value": decrypted}
-    else:
-        from allauth.socialaccount.models import SocialToken
-
-        if tm.tenant.provider == "commcare_connect":
-            token_obj = (
-                await SocialToken.objects.select_related("app")
-                .filter(
-                    account__user=tm.user,
-                    account__provider__startswith="commcare_connect",
-                )
-                .afirst()
-            )
-        else:
-            token_obj = (
-                await SocialToken.objects.select_related("app")
-                .filter(
-                    account__user=tm.user,
-                    account__provider__startswith="commcare",
-                )
-                .exclude(account__provider__startswith="commcare_connect")
-                .afirst()
-            )
-        if not token_obj:
-            return error_response(
-                "AUTH_TOKEN_MISSING",
-                f"No OAuth token found for provider '{tm.tenant.provider}'",
-            )
-        credential = await sync_to_async(_resolve_oauth_credential)(token_obj, tm.tenant.provider)
 
     # ── Build progress callback ───────────────────────────────────────────
     progress_callback = None
