@@ -63,8 +63,6 @@ async def touch_workspace_schemas(workspace) -> None:
     For single-tenant workspaces, touches the TenantSchema of the sole tenant.
     For multi-tenant workspaces, touches the WorkspaceViewSchema.
     """
-    from asgiref.sync import sync_to_async
-
     from apps.workspaces.models import TenantSchema
 
     tenant_count = await workspace.workspace_tenants.acount()
@@ -75,11 +73,11 @@ async def touch_workspace_schemas(workspace) -> None:
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
         ).afirst()
         if ts is not None:
-            await sync_to_async(ts.touch)()
+            await ts.atouch()
     elif tenant_count > 1:
         vs = await WorkspaceViewSchema.objects.filter(
             workspace=workspace,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
         ).afirst()
         if vs is not None:
-            await sync_to_async(vs.touch)()
+            await vs.atouch()
