@@ -2,17 +2,16 @@
 
 from functools import wraps
 
-from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 
 _AUTH_REQUIRED = {"error": "Authentication required"}
 
 
-@sync_to_async
-def get_user_if_authenticated(request):
-    """Access request.user (triggers sync session load) from async context."""
-    if request.user.is_authenticated:
-        return request.user
+async def get_user_if_authenticated(request):
+    """Access request.user from async context using Django's native auser()."""
+    user = await request.auser()
+    if user.is_authenticated:
+        return user
     return None
 
 
