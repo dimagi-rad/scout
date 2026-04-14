@@ -51,6 +51,13 @@ class TenantSchema(models.Model):
         self.last_accessed_at = timezone.now()
         self.save(update_fields=["last_accessed_at"])
 
+    async def atouch(self):
+        """Async version of touch() — reset the inactivity TTL."""
+        from django.utils import timezone
+
+        self.last_accessed_at = timezone.now()
+        await self.asave(update_fields=["last_accessed_at"])
+
 
 class MaterializationRun(models.Model):
     """Records a materialization pipeline execution."""
@@ -216,6 +223,13 @@ class WorkspaceViewSchema(models.Model):
 
         self.last_accessed_at = timezone.now()
         self.save(update_fields=["last_accessed_at"])
+
+    async def atouch(self):
+        """Async version of touch() — reset the inactivity TTL."""
+        from django.utils import timezone
+
+        self.last_accessed_at = timezone.now()
+        await self.asave(update_fields=["last_accessed_at"])
 
 
 class TenantMetadata(models.Model):
