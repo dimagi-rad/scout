@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 
-from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.http import JsonResponse
@@ -14,6 +13,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.credential_resolver import get_social_token
 from apps.users.services.tenant_verification import (
     CommCareVerificationError,
     verify_commcare_credential,
@@ -24,25 +24,9 @@ TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 logger = logging.getLogger(__name__)
 
 
-def _get_commcare_token(user) -> str | None:
-    """Return the user's CommCare OAuth access token, or None."""
-    token = (
-        SocialToken.objects.filter(
-            account__user=user,
-            account__provider__startswith="commcare",
-        )
-        .exclude(account__provider__startswith="commcare_connect")
-        .first()
-    )
-    return token.token if token else None
-
-
-def _get_connect_token(user) -> str | None:
-    """Return the user's Connect OAuth access token, or None."""
-    token = SocialToken.objects.filter(
-        account__user=user,
-        account__provider="commcare_connect",
-    ).first()
+def _get_token_value(user, provider: str) -> str | None:
+    """Return the user's OAuth access token string for *provider*, or None."""
+    token = get_social_token(user, provider)
     return token.token if token else None
 
 
@@ -59,7 +43,7 @@ async def tenant_list_view(request):
     # Refresh domains from CommCare if the user has an OAuth token
     commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
     if not await cache.aget(commcare_cache_key):
-        access_token = await sync_to_async(_get_commcare_token)(user)
+        access_token = await sync_to_async(_get_token_value)(user, "commcare")
         if access_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_commcare_domains
@@ -72,7 +56,7 @@ async def tenant_list_view(request):
     # Refresh opportunities from Connect if the user has a Connect OAuth token
     connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
     if not await cache.aget(connect_cache_key):
-        connect_token = await sync_to_async(_get_connect_token)(user)
+        connect_token = await sync_to_async(_get_token_value)(user, "commcare_connect")
         if connect_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_connect_opportunities
@@ -326,7 +310,7 @@ async def tenant_ensure_view(request):
         )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
-            connect_token = await sync_to_async(_get_connect_token)(user)
+            connect_token = await sync_to_async(_get_token_value)(user, "commcare_connect")
             if not connect_token:
                 return JsonResponse(
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
