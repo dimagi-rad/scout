@@ -455,7 +455,7 @@ async def cancel_materialization(run_id: str) -> dict:
         run.state = MaterializationRun.RunState.FAILED
         run.completed_at = datetime.now(UTC)
         run.result = {**(run.result or {}), "cancelled": True}
-        await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
+        await run.asave(update_fields=["state", "completed_at", "result"])
 
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
@@ -514,7 +514,7 @@ async def _materialize_tenant(
         from apps.users.adapters import decrypt_credential
 
         try:
-            decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
+            decrypted = decrypt_credential(cred_obj.encrypted_credential)
         except Exception:
             logger.exception("Failed to decrypt API key for tenant %s", tenant_id)
             return error_response("AUTH_TOKEN_MISSING", "Failed to decrypt API key")
