@@ -1,7 +1,5 @@
 """Shared helpers for chat views."""
 
-from asgiref.sync import sync_to_async
-
 from apps.users.decorators import (  # noqa: F401 — re-exported for backwards compat
     LoginRequiredJsonMixin,
     async_login_required,
@@ -11,8 +9,7 @@ from apps.users.decorators import (  # noqa: F401 — re-exported for backwards 
 from apps.workspaces.models import WorkspaceMembership
 
 
-@sync_to_async
-def _resolve_workspace_and_membership(user, workspace_id):
+async def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve workspace access for a user.
 
     Returns (workspace, tenant_membership, is_multi_tenant):
@@ -22,7 +19,7 @@ def _resolve_workspace_and_membership(user, workspace_id):
     - (workspace, tm, False): single-tenant workspace with a valid TenantMembership
     """
     try:
-        wm = WorkspaceMembership.objects.select_related("workspace").get(
+        wm = await WorkspaceMembership.objects.select_related("workspace").aget(
             workspace_id=workspace_id, user=user
         )
     except WorkspaceMembership.DoesNotExist:
@@ -30,21 +27,18 @@ def _resolve_workspace_and_membership(user, workspace_id):
 
     workspace = wm.workspace
 
-    # Read tenant count exactly once so callers don't need a second DB query.
-    # Multi-tenant workspaces grant access by WorkspaceMembership alone;
-    # TenantMembership is irrelevant (and must not be checked) for multi-tenant access.
-    is_multi_tenant = workspace.workspace_tenants.count() > 1
+    is_multi_tenant = await workspace.workspace_tenants.acount() > 1
     if is_multi_tenant:
         return workspace, None, True
 
-    tenant = workspace.tenant
+    tenant = await workspace.tenants.afirst()
     if tenant is None:
         return workspace, None, False
 
     from apps.users.models import TenantMembership
 
     try:
-        tm = TenantMembership.objects.get(user=user, tenant=tenant)
+        tm = await TenantMembership.objects.aget(user=user, tenant=tenant)
     except TenantMembership.DoesNotExist:
         return workspace, None, False
     return workspace, tm, False

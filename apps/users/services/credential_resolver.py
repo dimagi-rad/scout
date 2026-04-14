@@ -92,7 +92,7 @@ async def aresolve_credential(membership) -> dict | None:
         from apps.users.adapters import decrypt_credential
 
         try:
-            decrypted = await sync_to_async(decrypt_credential)(cred_obj.encrypted_credential)
+            decrypted = decrypt_credential(cred_obj.encrypted_credential)
             return {"type": "api_key", "value": decrypted}
         except Exception:
             logger.exception("Failed to decrypt API key for membership %s", membership.id)

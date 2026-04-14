@@ -81,3 +81,56 @@ def get_lineage_chain(
         current = TransformationAsset.objects.filter(q, id=next_id).first()
 
     return chain
+
+
+async def aget_terminal_assets(
+    tenant_ids: list,
+    workspace_id=None,
+) -> list[TransformationAsset]:
+    """Async version of get_terminal_assets."""
+    visible = TransformationAsset.objects.filter(tenant_id__in=tenant_ids)
+    if workspace_id:
+        visible = visible | TransformationAsset.objects.filter(workspace_id=workspace_id)
+
+    replaced_ids = visible.filter(replaces__isnull=False).values_list("replaces_id", flat=True)
+
+    return [asset async for asset in visible.exclude(id__in=replaced_ids)]
+
+
+async def aget_lineage_chain(
+    asset_name: str,
+    tenant_ids: list,
+    workspace_id=None,
+) -> list[dict]:
+    """Async version of get_lineage_chain."""
+    q = models.Q(tenant_id__in=tenant_ids)
+    if workspace_id:
+        q = q | models.Q(workspace_id=workspace_id)
+
+    try:
+        asset = await TransformationAsset.objects.aget(q, name=asset_name)
+    except TransformationAsset.DoesNotExist:
+        return []
+    except TransformationAsset.MultipleObjectsReturned:
+        asset = (
+            await TransformationAsset.objects.filter(q, name=asset_name).order_by("-scope").afirst()
+        )
+
+    chain = []
+    current = asset
+    visited = set()
+    while current and current.id not in visited:
+        visited.add(current.id)
+        chain.append(
+            {
+                "name": current.name,
+                "scope": current.scope,
+                "description": current.description,
+            }
+        )
+        next_id = current.replaces_id
+        if next_id is None:
+            break
+        current = await TransformationAsset.objects.filter(q, id=next_id).afirst()
+
+    return chain

@@ -12,7 +12,6 @@ import logging
 import time
 
 from allauth.socialaccount.models import SocialToken
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_mcp_adapters.callbacks import Callbacks, ProgressCallback
 from langchain_mcp_adapters.client import MultiServerMCPClient
@@ -86,16 +85,11 @@ async def get_user_oauth_tokens(user) -> dict[str, str]:
     """Retrieve OAuth tokens for a user's CommCare providers."""
     if user is None or not getattr(user, "pk", None):
         return {}
-    return await sync_to_async(_get_tokens_sync)(user)
-
-
-def _get_tokens_sync(user) -> dict[str, str]:
-    social_tokens = SocialToken.objects.filter(
-        account__user=user,
-        account__provider__in=COMMCARE_PROVIDERS,
-    ).select_related("account")
     return {
         st.account.provider: st.token
-        for st in social_tokens
+        async for st in SocialToken.objects.filter(
+            account__user=user,
+            account__provider__in=COMMCARE_PROVIDERS,
+        ).select_related("account")
         if st.account.provider in COMMCARE_PROVIDERS
     }

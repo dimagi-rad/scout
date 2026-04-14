@@ -76,6 +76,20 @@ class TestCommCareConnectProvider:
         assert "apps.users.providers.commcare_connect" in settings.INSTALLED_APPS
 
 
+class AsyncList:
+    """Wraps a list to support async iteration for mocking Django async querysets."""
+
+    def __init__(self, items):
+        self._items = items
+
+    def __aiter__(self):
+        return self._aiter()
+
+    async def _aiter(self):
+        for item in self._items:
+            yield item
+
+
 class TestGetUserOAuthTokens:
     """Test the get_user_oauth_tokens helper in mcp_client."""
 
@@ -97,10 +111,12 @@ class TestGetUserOAuthTokens:
 
         mock_qs = MagicMock()
         mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = [
-            self._make_social_token("commcare", "hq_token_123"),
-            self._make_social_token("commcare_connect", "connect_token_456"),
-        ]
+        mock_qs.select_related.return_value = AsyncList(
+            [
+                self._make_social_token("commcare", "hq_token_123"),
+                self._make_social_token("commcare_connect", "connect_token_456"),
+            ]
+        )
 
         result = async_to_sync(get_user_oauth_tokens)(user)
         assert result == {
@@ -117,7 +133,7 @@ class TestGetUserOAuthTokens:
 
         mock_qs = MagicMock()
         mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = []
+        mock_qs.select_related.return_value = AsyncList([])
 
         result = async_to_sync(get_user_oauth_tokens)(user)
         assert result == {}
@@ -131,10 +147,12 @@ class TestGetUserOAuthTokens:
 
         mock_qs = MagicMock()
         mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = [
-            self._make_social_token("google", "google_token"),
-            self._make_social_token("commcare", "hq_token"),
-        ]
+        mock_qs.select_related.return_value = AsyncList(
+            [
+                self._make_social_token("google", "google_token"),
+                self._make_social_token("commcare", "hq_token"),
+            ]
+        )
 
         result = async_to_sync(get_user_oauth_tokens)(user)
         assert result == {"commcare": "hq_token"}

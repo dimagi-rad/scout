@@ -710,7 +710,6 @@ class ArtifactQueryDataView(View):
     """
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        from asgiref.sync import sync_to_async
         from django.http import Http404
 
         user = await request.auser()
@@ -734,7 +733,7 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
-        tenant = await sync_to_async(lambda: artifact.workspace.tenant)()
+        tenant = await artifact.workspace.tenants.afirst()
         if tenant is None:
             return JsonResponse({"error": "Workspace has no associated tenant"}, status=400)
 
@@ -753,7 +752,7 @@ class ArtifactQueryDataView(View):
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
         if ts is not None:
-            await sync_to_async(ts.touch)()
+            await ts.atouch()
 
         results = []
         for i, entry in enumerate(artifact.source_queries):

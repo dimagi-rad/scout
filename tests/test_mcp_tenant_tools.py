@@ -744,6 +744,7 @@ class TestCancelMaterialization:
         mock_run.result = {}
         mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
+        mock_run.asave = AsyncMock()
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)

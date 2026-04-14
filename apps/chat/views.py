@@ -14,7 +14,6 @@ import logging
 import time
 import uuid
 
-from asgiref.sync import sync_to_async
 from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_protect
 
@@ -33,8 +32,7 @@ from apps.workspaces.services.workspace_service import touch_workspace_schemas
 logger = logging.getLogger(__name__)
 
 
-@sync_to_async
-def _upsert_thread(thread_id, user, title, *, workspace):
+async def _upsert_thread(thread_id, user, title, *, workspace):
     """Create or update a Thread record.
 
     Explicitly validates ownership before upserting: if the thread_id already
@@ -42,7 +40,7 @@ def _upsert_thread(thread_id, user, title, *, workspace):
     with a warning rather than relying on a PK IntegrityError as a side-effect.
     auto_now on updated_at handles the timestamp on every save.
     """
-    existing = Thread.objects.filter(id=thread_id).first()
+    existing = await Thread.objects.filter(id=thread_id).afirst()
     if existing is not None and (
         existing.user_id != user.pk or existing.workspace_id != workspace.pk
     ):
@@ -53,7 +51,7 @@ def _upsert_thread(thread_id, user, title, *, workspace):
         return
     # On create: set user, workspace, and title.
     # On update: no field changes needed — auto_now on updated_at handles the timestamp.
-    Thread.objects.update_or_create(
+    await Thread.objects.aupdate_or_create(
         id=thread_id,
         create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
     )

@@ -267,7 +267,7 @@ async def get_lineage(model_name: str, workspace_id: str = "") -> dict:
         model_name: Name of the model to trace lineage for.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
     """
-    from apps.transformations.services.lineage import get_lineage_chain
+    from apps.transformations.services.lineage import aget_lineage_chain
     from apps.workspaces.models import Workspace
 
     async with tool_context("get_lineage", workspace_id, model_name=model_name) as tc:
@@ -283,7 +283,7 @@ async def get_lineage(model_name: str, workspace_id: str = "") -> dict:
 
         tenant_ids = [t.id async for t in workspace.tenants.all()]
 
-        chain = await sync_to_async(get_lineage_chain)(
+        chain = await aget_lineage_chain(
             model_name, tenant_ids=tenant_ids, workspace_id=workspace_id
         )
 
@@ -450,7 +450,7 @@ async def cancel_materialization(run_id: str) -> dict:
         run.state = MaterializationRun.RunState.FAILED
         run.completed_at = datetime.now(UTC)
         run.result = {**(run.result or {}), "cancelled": True}
-        await sync_to_async(run.save)(update_fields=["state", "completed_at", "result"])
+        await run.asave(update_fields=["state", "completed_at", "result"])
 
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
