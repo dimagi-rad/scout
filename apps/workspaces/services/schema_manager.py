@@ -32,6 +32,14 @@ def get_managed_db_connection():
     return psycopg.connect(url, autocommit=True)
 
 
+async def aget_managed_db_connection():
+    """Get an async psycopg connection to the managed database."""
+    url = settings.MANAGED_DATABASE_URL
+    if not url:
+        raise RuntimeError("MANAGED_DATABASE_URL is not configured")
+    return await psycopg.AsyncConnection.connect(url, autocommit=True)
+
+
 class SchemaManager:
     """Creates and manages tenant schemas in the managed database."""
 
@@ -365,6 +373,41 @@ class SchemaManager:
             cursor.close()
         finally:
             conn.close()
+
+    async def ateardown(self, tenant_schema: TenantSchema) -> None:
+        """Async version of teardown — drop a tenant's schema from the managed database."""
+        async with await aget_managed_db_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(tenant_schema.schema_name)
+                    )
+                )
+                await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
+
+    async def ateardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
+        """Async version of teardown_view_schema — drop the physical PostgreSQL schema."""
+        async with await aget_managed_db_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg.sql.Identifier(view_schema.schema_name)
+                    )
+                )
+                await self._adrop_readonly_role(cursor, view_schema.schema_name)
+
+    async def _adrop_readonly_role(self, cursor, schema_name: str) -> None:
+        """Async version of _drop_readonly_role."""
+        role_name = readonly_role_name(schema_name)
+        await cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
+        if not await cursor.fetchone():
+            return
+        await cursor.execute(
+            psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
+        )
+        await cursor.execute(
+            psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
+        )
 
     def _drop_readonly_role(self, cursor, schema_name: str) -> None:
         """Drop the read-only PostgreSQL role for a schema.

@@ -60,7 +60,7 @@ def tenant_context(tenant_id, schema_name):
 class TestExecuteInternalQuery:
     """Test that execute_internal_query bypasses validation and passes params."""
 
-    @patch("mcp_server.services.query._execute_sync_parameterized")
+    @patch("mcp_server.services.query._execute_async_parameterized")
     async def test_passes_sql_and_params(self, mock_exec, tenant_context):
         from mcp_server.services.query import execute_internal_query
 
@@ -78,7 +78,7 @@ class TestExecuteInternalQuery:
         assert result["row_count"] == 1
         assert result["rows"] == [["cases"]]
 
-    @patch("mcp_server.services.query._execute_sync_parameterized")
+    @patch("mcp_server.services.query._execute_async_parameterized")
     async def test_does_not_validate_sql(self, mock_exec, tenant_context):
         """Internal queries should NOT go through the SQL validator."""
         from mcp_server.services.query import execute_internal_query
@@ -92,7 +92,7 @@ class TestExecuteInternalQuery:
         assert "error" not in result
         mock_exec.assert_called_once()
 
-    @patch("mcp_server.services.query._execute_sync_parameterized")
+    @patch("mcp_server.services.query._execute_async_parameterized")
     async def test_does_not_inject_limit(self, mock_exec, tenant_context):
         """Internal queries should NOT have LIMIT injected."""
         from mcp_server.services.query import execute_internal_query
@@ -102,11 +102,11 @@ class TestExecuteInternalQuery:
         sql = "SELECT table_name FROM information_schema.tables WHERE table_schema = %s"
         await execute_internal_query(tenant_context, sql, ("test_domain",))
 
-        # The SQL passed to _execute_sync_parameterized should be unchanged
+        # The SQL passed to _execute_async_parameterized should be unchanged
         called_sql = mock_exec.call_args[0][1]
         assert "LIMIT" not in called_sql.upper()
 
-    @patch("mcp_server.services.query._execute_sync_parameterized")
+    @patch("mcp_server.services.query._execute_async_parameterized")
     async def test_returns_error_envelope_on_exception(self, mock_exec, tenant_context):
         from mcp_server.services.query import execute_internal_query
 
@@ -118,27 +118,39 @@ class TestExecuteInternalQuery:
 
 
 # ---------------------------------------------------------------------------
-# _execute_sync_parameterized
+# _execute_async_parameterized
 # ---------------------------------------------------------------------------
 
 
-class TestExecuteSyncParameterized:
-    """Test the low-level sync execution function."""
+def _make_async_conn(mock_cursor):
+    """Build a mock that mimics psycopg.AsyncConnection for async with patterns."""
+    mock_conn = MagicMock()
+    mock_cursor.__aenter__ = AsyncMock(return_value=mock_cursor)
+    mock_cursor.__aexit__ = AsyncMock(return_value=False)
+    mock_conn.cursor.return_value = mock_cursor
+    mock_conn.__aenter__ = AsyncMock(return_value=mock_conn)
+    mock_conn.__aexit__ = AsyncMock(return_value=False)
+    return mock_conn
 
-    def test_sets_search_path_and_executes_with_params(self, tenant_context):
-        from mcp_server.services.query import _execute_sync_parameterized
 
-        mock_cursor = MagicMock()
+class TestExecuteAsyncParameterized:
+    """Test the low-level async execution function."""
+
+    @pytest.mark.asyncio
+    async def test_sets_search_path_and_executes_with_params(self, tenant_context):
+        from mcp_server.services.query import _execute_async_parameterized
+
+        mock_cursor = AsyncMock()
         mock_cursor.description = [("table_name",), ("table_type",)]
         mock_cursor.fetchall.return_value = [("cases", "BASE TABLE")]
 
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn = _make_async_conn(mock_cursor)
 
-        with patch("mcp_server.services.query._get_connection", return_value=mock_conn):
-            result = _execute_sync_parameterized(
+        with patch(
+            "psycopg.AsyncConnection.connect",
+            new=AsyncMock(return_value=mock_conn),
+        ):
+            result = await _execute_async_parameterized(
                 tenant_context,
                 "SELECT table_name, table_type FROM information_schema.tables "
                 "WHERE table_schema = %s",
@@ -161,20 +173,21 @@ class TestExecuteSyncParameterized:
             "row_count": 1,
         }
 
-    def test_returns_empty_rows_when_no_data(self, tenant_context):
-        from mcp_server.services.query import _execute_sync_parameterized
+    @pytest.mark.asyncio
+    async def test_returns_empty_rows_when_no_data(self, tenant_context):
+        from mcp_server.services.query import _execute_async_parameterized
 
-        mock_cursor = MagicMock()
+        mock_cursor = AsyncMock()
         mock_cursor.description = [("table_name",), ("table_type",)]
         mock_cursor.fetchall.return_value = []
 
-        mock_conn = MagicMock()
-        mock_conn.cursor.return_value = mock_cursor
-        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
-        mock_conn.__exit__ = MagicMock(return_value=False)
+        mock_conn = _make_async_conn(mock_cursor)
 
-        with patch("mcp_server.services.query._get_connection", return_value=mock_conn):
-            result = _execute_sync_parameterized(
+        with patch(
+            "psycopg.AsyncConnection.connect",
+            new=AsyncMock(return_value=mock_conn),
+        ):
+            result = await _execute_async_parameterized(
                 tenant_context,
                 "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
                 ("nonexistent_schema",),
@@ -792,9 +805,9 @@ class TestCancelMaterialization:
 # ---------------------------------------------------------------------------
 
 
-class TestExecuteSyncIntegration:
+class TestExecuteAsyncIntegration:
     """
-    End-to-end tests for _execute_sync and _execute_sync_parameterized against
+    End-to-end tests for _execute_async and _execute_async_parameterized against
     a real PostgreSQL server.  These catch driver-level regressions (e.g. SET
     statement_timeout failing with psycopg3's server-side parameters) that
     mock-based tests can't detect.
@@ -843,7 +856,7 @@ class TestExecuteSyncIntegration:
                     VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
                     """
                 )
-                # Create the read-only role required by _execute_sync SET ROLE
+                # Create the read-only role required by _execute_async SET ROLE
                 cur.execute(f'CREATE ROLE "{self.ro_role}"')
                 cur.execute(f'GRANT USAGE ON SCHEMA "{self.schema}" TO "{self.ro_role}"')
                 cur.execute(
@@ -873,36 +886,42 @@ class TestExecuteSyncIntegration:
             connection_params=self.connection_params,
         )
 
-    def test_returns_rows(self):
-        from mcp_server.services.query import _execute_sync
+    @pytest.mark.asyncio
+    async def test_returns_rows(self):
+        from mcp_server.services.query import _execute_async
 
-        result = _execute_sync(self._ctx(), "SELECT name, value FROM items ORDER BY value", 30)
+        result = await _execute_async(
+            self._ctx(), "SELECT name, value FROM items ORDER BY value", 30
+        )
 
         assert result["columns"] == ["name", "value"]
         assert result["rows"] == [["alpha", 1], ["beta", 2], ["gamma", 3]]
         assert result["row_count"] == 3
 
-    def test_statement_timeout_does_not_use_server_side_param(self):
+    @pytest.mark.asyncio
+    async def test_statement_timeout_does_not_use_server_side_param(self):
         """Regression: SET statement_timeout TO $1 raises SyntaxError in psycopg3."""
-        from mcp_server.services.query import _execute_sync
+        from mcp_server.services.query import _execute_async
 
         # Would raise psycopg.errors.SyntaxError before the fix
-        result = _execute_sync(self._ctx(), "SELECT 1 AS n", 30)
+        result = await _execute_async(self._ctx(), "SELECT 1 AS n", 30)
         assert result["row_count"] == 1
 
-    def test_empty_result(self):
-        from mcp_server.services.query import _execute_sync
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        from mcp_server.services.query import _execute_async
 
-        result = _execute_sync(self._ctx(), "SELECT name FROM items WHERE value > 9999", 30)
+        result = await _execute_async(self._ctx(), "SELECT name FROM items WHERE value > 9999", 30)
 
         assert result["columns"] == ["name"]
         assert result["rows"] == []
         assert result["row_count"] == 0
 
-    def test_parameterized_filters_rows(self):
-        from mcp_server.services.query import _execute_sync_parameterized
+    @pytest.mark.asyncio
+    async def test_parameterized_filters_rows(self):
+        from mcp_server.services.query import _execute_async_parameterized
 
-        result = _execute_sync_parameterized(
+        result = await _execute_async_parameterized(
             self._ctx(),
             "SELECT name, value FROM items WHERE value > %s ORDER BY value",
             (1,),
@@ -913,12 +932,13 @@ class TestExecuteSyncIntegration:
         assert result["rows"] == [["beta", 2], ["gamma", 3]]
         assert result["row_count"] == 2
 
-    def test_search_path_is_applied(self):
+    @pytest.mark.asyncio
+    async def test_search_path_is_applied(self):
         """Unqualified table name resolves because search_path is set to the schema."""
-        from mcp_server.services.query import _execute_sync
+        from mcp_server.services.query import _execute_async
 
         # No schema qualifier — relies on SET search_path TO working correctly
-        result = _execute_sync(self._ctx(), "SELECT count(*) AS n FROM items", 30)
+        result = await _execute_async(self._ctx(), "SELECT count(*) AS n FROM items", 30)
 
         assert result["row_count"] == 1
         assert result["rows"][0][0] == 3

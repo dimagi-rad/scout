@@ -80,7 +80,10 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_registry,
-        patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
+        patch(
+            "apps.agents.graph.base.pipeline_list_tables",
+            new=AsyncMock(return_value=mock_tables),
+        ),
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
@@ -89,10 +92,6 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        # sync_to_async calls: 1) pipeline_list_tables
-        mock_s2a.side_effect = [
-            AsyncMock(return_value=mock_tables),  # pipeline_list_tables
-        ]
         mock_full.return_value = big_column_text  # triggers fallback
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
@@ -128,7 +127,14 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_registry,
-        patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
+        patch(
+            "apps.agents.graph.base.pipeline_list_tables",
+            new=AsyncMock(return_value=mock_tables),
+        ),
+        patch(
+            "apps.agents.graph.base.pipeline_describe_table",
+            new=AsyncMock(return_value={"columns": [{"name": "case_id", "type": "text"}]}),
+        ),
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.agents.graph.base.load_tenant_context", new=AsyncMock(return_value=MagicMock())
@@ -141,11 +147,6 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        # sync_to_async calls: 1) pipeline_list_tables, 2) describe_table
-        mock_s2a.side_effect = [
-            AsyncMock(return_value=mock_tables),  # pipeline_list_tables
-            AsyncMock(return_value={"columns": [{"name": "case_id", "type": "text"}]}),
-        ]
         mock_full.return_value = small_column_text
         MockTM.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
@@ -167,7 +168,10 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_registry,
-        patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
+        patch(
+            "apps.agents.graph.base.pipeline_list_tables",
+            new=AsyncMock(return_value=[]),
+        ),
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
@@ -176,9 +180,6 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        mock_s2a.side_effect = [
-            AsyncMock(return_value=[]),  # pipeline_list_tables
-        ]
         mock_full.return_value = ""
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
@@ -211,7 +212,10 @@ async def test_build_system_prompt_no_schema_status_call():
         patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_reg,
-        patch("apps.agents.graph.base.sync_to_async") as mock_s2a,
+        patch(
+            "apps.agents.graph.base.pipeline_list_tables",
+            new=AsyncMock(return_value=[]),
+        ),
         patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
@@ -221,7 +225,6 @@ async def test_build_system_prompt_no_schema_status_call():
         MockKR.return_value.retrieve = AsyncMock(return_value="")
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_reg.return_value.get.return_value = MagicMock()
-        mock_s2a.return_value = AsyncMock(return_value=[])
         mock_full.return_value = ""
 
         prompt = await _build_system_prompt(mock_workspace, MagicMock())

@@ -1,7 +1,9 @@
 """Tests for mcp_server/services/metadata.py."""
 
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
@@ -33,7 +35,8 @@ def _set_dbt_models(config, models):
 
 
 class TestPipelineListTables:
-    def test_returns_empty_when_no_completed_run(self):
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_completed_run(self):
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
@@ -41,13 +44,15 @@ class TestPipelineListTables:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.objects.filter.return_value.order_by.return_value.first.return_value = None
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=None)
 
-            result = pipeline_list_tables(mock_ts, pipeline_config)
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
 
         assert result == []
 
-    def test_returns_table_entries_from_completed_run(self):
+    @pytest.mark.asyncio
+    async def test_returns_table_entries_from_completed_run(self):
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
@@ -67,11 +72,10 @@ class TestPipelineListTables:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.objects.filter.return_value.order_by.return_value.first.return_value = (
-                mock_run
-            )
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
 
-            result = pipeline_list_tables(mock_ts, pipeline_config)
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
 
         assert len(result) == 2
         cases = next(t for t in result if t["name"] == "raw_cases")
@@ -80,7 +84,8 @@ class TestPipelineListTables:
         assert cases["materialized_at"] == completed_at.isoformat()
         assert cases["type"] == "table"
 
-    def test_includes_dbt_models_with_null_row_count(self):
+    @pytest.mark.asyncio
+    async def test_includes_dbt_models_with_null_row_count(self):
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
@@ -94,11 +99,10 @@ class TestPipelineListTables:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.objects.filter.return_value.order_by.return_value.first.return_value = (
-                mock_run
-            )
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
 
-            result = pipeline_list_tables(mock_ts, pipeline_config)
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
 
         names = [t["name"] for t in result]
         assert "stg_cases" in names
@@ -120,34 +124,42 @@ class TestPipelineDescribeTable:
             connection_params={},
         )
 
-    def test_returns_none_when_table_not_found(self):
+    @pytest.mark.asyncio
+    async def test_returns_none_when_table_not_found(self):
         from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config()
 
-        with patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec:
-            mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
-            result = pipeline_describe_table("nonexistent", ctx, None, pipeline_config)
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(return_value={"columns": [], "rows": [], "row_count": 0}),
+        ):
+            result = await pipeline_describe_table("nonexistent", ctx, None, pipeline_config)
 
         assert result is None
 
-    def test_returns_column_structure(self):
+    @pytest.mark.asyncio
+    async def test_returns_column_structure(self):
         from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("cases", "CommCare case records")])
 
-        with patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec:
-            mock_exec.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [
-                    ["case_id", "text", "NO", None],
-                    ["case_type", "text", "YES", None],
-                ],
-                "row_count": 2,
-            }
-            result = pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(
+                return_value={
+                    "columns": ["column_name", "data_type", "is_nullable", "column_default"],
+                    "rows": [
+                        ["case_id", "text", "NO", None],
+                        ["case_type", "text", "YES", None],
+                    ],
+                    "row_count": 2,
+                }
+            ),
+        ):
+            result = await pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
 
         assert result is not None
         assert result["name"] == "raw_cases"
@@ -161,7 +173,8 @@ class TestPipelineDescribeTable:
             "description": "",
         }
 
-    def test_annotates_properties_column_with_case_types(self):
+    @pytest.mark.asyncio
+    async def test_annotates_properties_column_with_case_types(self):
         from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
@@ -175,20 +188,27 @@ class TestPipelineDescribeTable:
             ]
         }
 
-        with patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec:
-            mock_exec.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [["properties", "jsonb", "YES", "'{}'::jsonb"]],
-                "row_count": 1,
-            }
-            result = pipeline_describe_table("raw_cases", ctx, mock_tenant_metadata, pipeline_config)
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(
+                return_value={
+                    "columns": ["column_name", "data_type", "is_nullable", "column_default"],
+                    "rows": [["properties", "jsonb", "YES", "'{}'::jsonb"]],
+                    "row_count": 1,
+                }
+            ),
+        ):
+            result = await pipeline_describe_table(
+                "raw_cases", ctx, mock_tenant_metadata, pipeline_config
+            )
 
         col = result["columns"][0]
         assert "pregnancy" in col["description"]
         assert "child" in col["description"]
         assert col["description"].startswith("Contains case properties")
 
-    def test_annotates_form_data_column_with_form_names(self):
+    @pytest.mark.asyncio
+    async def test_annotates_form_data_column_with_form_names(self):
         from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
@@ -202,32 +222,43 @@ class TestPipelineDescribeTable:
             }
         }
 
-        with patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec:
-            mock_exec.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [["form_data", "jsonb", "YES", "'{}'::jsonb"]],
-                "row_count": 1,
-            }
-            result = pipeline_describe_table("raw_forms", ctx, mock_tenant_metadata, pipeline_config)
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(
+                return_value={
+                    "columns": ["column_name", "data_type", "is_nullable", "column_default"],
+                    "rows": [["form_data", "jsonb", "YES", "'{}'::jsonb"]],
+                    "row_count": 1,
+                }
+            ),
+        ):
+            result = await pipeline_describe_table(
+                "raw_forms", ctx, mock_tenant_metadata, pipeline_config
+            )
 
         col = result["columns"][0]
         assert "ANC Registration" in col["description"]
         assert "Child Visit" in col["description"]
         assert col["description"].startswith("Contains form submission data")
 
-    def test_graceful_when_tenant_metadata_is_none(self):
+    @pytest.mark.asyncio
+    async def test_graceful_when_tenant_metadata_is_none(self):
         from mcp_server.services.metadata import pipeline_describe_table
 
         ctx = self._make_ctx()
         pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
 
-        with patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec:
-            mock_exec.return_value = {
-                "columns": ["column_name", "data_type", "is_nullable", "column_default"],
-                "rows": [["properties", "jsonb", "YES", None]],
-                "row_count": 1,
-            }
-            result = pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(
+                return_value={
+                    "columns": ["column_name", "data_type", "is_nullable", "column_default"],
+                    "rows": [["properties", "jsonb", "YES", None]],
+                    "row_count": 1,
+                }
+            ),
+        ):
+            result = await pipeline_describe_table("raw_cases", ctx, None, pipeline_config)
 
         assert result is not None
         assert result["columns"][0]["description"] == ""
@@ -245,7 +276,8 @@ class TestPipelineGetMetadata:
             connection_params={},
         )
 
-    def test_returns_empty_when_no_completed_run(self):
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_no_completed_run(self):
         from mcp_server.services.metadata import pipeline_get_metadata
 
         ctx = self._make_ctx()
@@ -254,13 +286,15 @@ class TestPipelineGetMetadata:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.objects.filter.return_value.order_by.return_value.first.return_value = None
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=None)
 
-            result = pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
+            result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
 
         assert result == {"tables": {}, "relationships": []}
 
-    def test_includes_relationships_from_pipeline_config(self):
+    @pytest.mark.asyncio
+    async def test_includes_relationships_from_pipeline_config(self):
         from mcp_server.services.metadata import pipeline_get_metadata
 
         ctx = self._make_ctx()
@@ -285,18 +319,21 @@ class TestPipelineGetMetadata:
 
         with (
             patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
-            patch("mcp_server.services.metadata._execute_sync_parameterized") as mock_exec,
+            patch(
+                "mcp_server.services.metadata._execute_async_parameterized",
+                new=AsyncMock(
+                    return_value={
+                        "rows": [["case_id", "text", "NO", None]],
+                        "row_count": 1,
+                    }
+                ),
+            ),
         ):
             mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.objects.filter.return_value.order_by.return_value.first.return_value = (
-                mock_run
-            )
-            mock_exec.return_value = {
-                "rows": [["case_id", "text", "NO", None]],
-                "row_count": 1,
-            }
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
 
-            result = pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
+            result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
 
         assert "raw_cases" in result["tables"]
         assert len(result["relationships"]) == 1

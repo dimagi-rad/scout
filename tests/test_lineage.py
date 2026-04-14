@@ -1,8 +1,9 @@
 """Tests for lineage resolution and transformation-aware metadata (Milestone 6)."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.lineage import get_lineage_chain, get_terminal_assets
@@ -251,17 +252,19 @@ def test_lineage_cycle_guard(tenant):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.django_db
-def test_transformation_aware_no_assets_fallback(tenant):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_transformation_aware_no_assets_fallback(tenant):
     """No transformation assets → falls back to pipeline_list_tables."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
     mock_tables = [{"name": "raw_cases", "type": "table", "description": "", "row_count": 10}]
 
     with patch(
-        "mcp_server.services.metadata.pipeline_list_tables", return_value=mock_tables
+        "mcp_server.services.metadata.pipeline_list_tables",
+        new=AsyncMock(return_value=mock_tables),
     ) as mock_plt:
-        result = transformation_aware_list_tables(
+        result = await transformation_aware_list_tables(
             tenant_schema=None,  # not used when mocked
             pipeline_config=None,
             tenant_ids=[tenant.id],
@@ -270,19 +273,20 @@ def test_transformation_aware_no_assets_fallback(tenant):
     assert result == mock_tables
 
 
-@pytest.mark.django_db
-def test_transformation_aware_terminal_replaces_raw(tenant):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_transformation_aware_terminal_replaces_raw(tenant):
     """Terminal asset replacing a raw table: raw table excluded, terminal included."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    raw_asset = TransformationAsset.objects.create(
+    raw_asset = await sync_to_async(TransformationAsset.objects.create)(
         name="stg_case_patient",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
         sql_content="SELECT * FROM raw_cases",
         description="Staging cases",
     )
-    TransformationAsset.objects.create(
+    await sync_to_async(TransformationAsset.objects.create)(
         name="cases_clean",
         scope=TransformationScope.TENANT,
         tenant=tenant,
@@ -296,8 +300,11 @@ def test_transformation_aware_terminal_replaces_raw(tenant):
         {"name": "raw_forms", "type": "table", "description": "Forms", "row_count": 50},
     ]
 
-    with patch("mcp_server.services.metadata.pipeline_list_tables", return_value=mock_raw_tables):
-        result = transformation_aware_list_tables(
+    with patch(
+        "mcp_server.services.metadata.pipeline_list_tables",
+        new=AsyncMock(return_value=mock_raw_tables),
+    ):
+        result = await transformation_aware_list_tables(
             tenant_schema=None,
             pipeline_config=None,
             tenant_ids=[tenant.id],
@@ -313,12 +320,13 @@ def test_transformation_aware_terminal_replaces_raw(tenant):
     assert "raw_forms" in names
 
 
-@pytest.mark.django_db
-def test_transformation_aware_mixed(tenant):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_transformation_aware_mixed(tenant):
     """Mix: some raw tables have no replacing asset → they appear alongside terminals."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    TransformationAsset.objects.create(
+    await sync_to_async(TransformationAsset.objects.create)(
         name="stg_form_reg",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
@@ -331,8 +339,11 @@ def test_transformation_aware_mixed(tenant):
         {"name": "raw_forms", "type": "table", "description": "Forms", "row_count": 50},
     ]
 
-    with patch("mcp_server.services.metadata.pipeline_list_tables", return_value=mock_raw_tables):
-        result = transformation_aware_list_tables(
+    with patch(
+        "mcp_server.services.metadata.pipeline_list_tables",
+        new=AsyncMock(return_value=mock_raw_tables),
+    ):
+        result = await transformation_aware_list_tables(
             tenant_schema=None,
             pipeline_config=None,
             tenant_ids=[tenant.id],
@@ -345,12 +356,13 @@ def test_transformation_aware_mixed(tenant):
     assert "raw_forms" in names
 
 
-@pytest.mark.django_db
-def test_transformation_aware_no_duplicates(tenant):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_transformation_aware_no_duplicates(tenant):
     """Terminal asset whose name matches a pipeline table should not produce duplicates."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    TransformationAsset.objects.create(
+    await sync_to_async(TransformationAsset.objects.create)(
         name="stg_cases",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
@@ -363,8 +375,11 @@ def test_transformation_aware_no_duplicates(tenant):
         {"name": "stg_cases", "type": "table", "description": "Staged", "row_count": 80},
     ]
 
-    with patch("mcp_server.services.metadata.pipeline_list_tables", return_value=mock_raw_tables):
-        result = transformation_aware_list_tables(
+    with patch(
+        "mcp_server.services.metadata.pipeline_list_tables",
+        new=AsyncMock(return_value=mock_raw_tables),
+    ):
+        result = await transformation_aware_list_tables(
             tenant_schema=None,
             pipeline_config=None,
             tenant_ids=[tenant.id],

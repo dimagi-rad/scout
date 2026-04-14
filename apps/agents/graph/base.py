@@ -25,7 +25,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from asgiref.sync import sync_to_async
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage
 from langgraph.graph import END, StateGraph
@@ -180,11 +179,9 @@ async def _fetch_schema_context(tenant, user) -> str:
     terminal_assets = await aget_terminal_assets(tenant_ids=[tenant.id])
 
     if terminal_assets:
-        tables = await sync_to_async(transformation_aware_list_tables)(
-            ts, pipeline_config, tenant_ids=[tenant.id]
-        )
+        tables = await transformation_aware_list_tables(ts, pipeline_config, tenant_ids=[tenant.id])
     else:
-        tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+        tables = await pipeline_list_tables(ts, pipeline_config)
 
     if not tables:
         return "Data is loaded but no tables are available yet. The materialization may still be completing."
@@ -202,9 +199,7 @@ async def _fetch_schema_context(tenant, user) -> str:
 
         column_map: dict[str, list[dict]] = {}
         for t in tables:
-            detail = await sync_to_async(pipeline_describe_table)(
-                t["name"], ctx, tenant_metadata, pipeline_config
-            )
+            detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
             if detail:
                 column_map[t["name"]] = detail.get("columns", [])
 

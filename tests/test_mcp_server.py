@@ -127,7 +127,7 @@ class TestExecuteQuery:
         assert "not allowed" in result["error"]["message"].lower()
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_successful_query(self, mock_exec, project_context):
         mock_exec.return_value = {
             "columns": ["id", "name"],
@@ -145,7 +145,7 @@ class TestExecuteQuery:
         assert "users" in result["tables_accessed"]
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_truncation_detected(self, mock_exec, project_context):
         """When row_count equals max_limit, truncated should be True."""
         mock_exec.return_value = {
@@ -157,7 +157,7 @@ class TestExecuteQuery:
         assert result["truncated"] is True
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_limit_injected(self, mock_exec, project_context):
         mock_exec.return_value = {
             "columns": ["id"],
@@ -168,7 +168,7 @@ class TestExecuteQuery:
         assert "LIMIT" in result["sql_executed"].upper()
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_timeout_error(self, mock_exec, project_context):
         import psycopg.errors
 
@@ -178,7 +178,7 @@ class TestExecuteQuery:
         assert result["error"]["code"] == QUERY_TIMEOUT
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_connection_error(self, mock_exec, project_context):
         import psycopg
 
@@ -188,7 +188,7 @@ class TestExecuteQuery:
         assert result["error"]["code"] == CONNECTION_ERROR
 
     @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_sync")
+    @patch("mcp_server.services.query._execute_async")
     async def test_unexpected_error(self, mock_exec, project_context):
         mock_exec.side_effect = RuntimeError("boom")
         result = await execute_query(project_context, "SELECT * FROM users")

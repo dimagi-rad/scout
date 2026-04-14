@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from asgiref.sync import sync_to_async
+import psycopg
+from psycopg import sql as psql
 
 from mcp_server.context import QueryContext
 from mcp_server.envelope import (
@@ -33,34 +34,26 @@ def _build_validator(ctx: QueryContext) -> SQLValidator:
     )
 
 
-def _get_connection(ctx: QueryContext):
-    """Create a psycopg connection from context params."""
-    import psycopg
-
-    return psycopg.connect(**ctx.connection_params, autocommit=True)
-
-
-def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
-    """Run a SQL query synchronously under the tenant's read-only role."""
-    from psycopg import sql as psql
-
-    with _get_connection(ctx) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
+async def _execute_async(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
+    """Run a SQL query asynchronously under the tenant's read-only role."""
+    async with await psycopg.AsyncConnection.connect(
+        **ctx.connection_params, autocommit=True
+    ) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
             try:
-                cursor.execute(
+                await cursor.execute(
                     psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
                 )
-                cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-                cursor.execute(sql)
+                await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
+                await cursor.execute(sql)
 
                 columns: list[str] = []
                 rows: list[list[Any]] = []
 
                 if cursor.description:
                     columns = [desc[0] for desc in cursor.description]
-                    rows = [list(row) for row in cursor.fetchall()]
+                    rows = [list(row) for row in await cursor.fetchall()]
 
                 return {
                     "columns": columns,
@@ -68,48 +61,41 @@ def _execute_sync(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str
                     "row_count": len(rows),
                 }
             finally:
-                cursor.execute("RESET ROLE")
-        finally:
-            cursor.close()
+                await cursor.execute("RESET ROLE")
 
 
-def _execute_sync_parameterized(
+async def _execute_async_parameterized(
     ctx: QueryContext, sql: str, params: tuple, timeout_seconds: int
 ) -> dict[str, Any]:
-    """Run a parameterized SQL query synchronously. No validation or LIMIT injection."""
-    from psycopg import sql as psql
-
-    with _get_connection(ctx) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
+    """Run a parameterized SQL query asynchronously. No validation or LIMIT injection."""
+    async with await psycopg.AsyncConnection.connect(
+        **ctx.connection_params, autocommit=True
+    ) as conn:
+        async with conn.cursor() as cursor:
+            await cursor.execute(
                 psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
             )
-            cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-            cursor.execute(sql, params)
+            await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
+            await cursor.execute(sql, params)
 
             columns: list[str] = []
             rows: list[list[Any]] = []
 
             if cursor.description:
                 columns = [desc[0] for desc in cursor.description]
-                rows = [list(row) for row in cursor.fetchall()]
+                rows = [list(row) for row in await cursor.fetchall()]
 
             return {
                 "columns": columns,
                 "rows": rows,
                 "row_count": len(rows),
             }
-        finally:
-            cursor.close()
 
 
 async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:
     """Execute a trusted internal query, bypassing SQL validation."""
     try:
-        return await sync_to_async(_execute_sync_parameterized)(
-            ctx, sql, params, ctx.max_query_timeout_seconds
-        )
+        return await _execute_async_parameterized(ctx, sql, params, ctx.max_query_timeout_seconds)
     except Exception as e:
         code, message = _classify_error(e)
         logger.error("Internal query error: %s", message, exc_info=True)
@@ -139,9 +125,7 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
             truncated = True
 
     try:
-        result = await sync_to_async(_execute_sync)(
-            ctx, sql_executed, ctx.max_query_timeout_seconds
-        )
+        result = await _execute_async(ctx, sql_executed, ctx.max_query_timeout_seconds)
     except Exception as e:
         code, message = _classify_error(e)
         logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)

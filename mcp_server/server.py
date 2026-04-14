@@ -98,7 +98,7 @@ async def list_tables(workspace_id: str = "") -> dict:
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
             ).aexists()
             if is_view_schema:
-                tables = await sync_to_async(workspace_list_tables)(ctx)
+                tables = await workspace_list_tables(ctx)
                 tc["result"] = success_response(
                     {"tables": tables, "note": None},
                     schema=ctx.schema_name,
@@ -126,7 +126,7 @@ async def list_tables(workspace_id: str = "") -> dict:
         pipeline_name = last_run.pipeline if last_run else "commcare_sync"
         pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
 
-        tables = await sync_to_async(pipeline_list_tables)(ts, pipeline_config)
+        tables = await pipeline_list_tables(ts, pipeline_config)
 
         note = (
             "No completed materialization run found. Run run_materialization to load data."
@@ -179,9 +179,7 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
         pipeline_name = last_run.pipeline if last_run else "commcare_sync"
         pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
 
-        table = await sync_to_async(pipeline_describe_table)(
-            table_name, ctx, tenant_metadata, pipeline_config
-        )
+        table = await pipeline_describe_table(table_name, ctx, tenant_metadata, pipeline_config)
         if table is None:
             tc["result"] = error_response(
                 NOT_FOUND, f"Table '{table_name}' not found in schema '{ctx.schema_name}'"
@@ -237,9 +235,7 @@ async def get_metadata(workspace_id: str = "") -> dict:
             tenant_membership__tenant_id=ts.tenant_id
         ).afirst()
 
-        metadata = await sync_to_async(pipeline_get_metadata)(
-            ts, ctx, tenant_metadata, pipeline_config
-        )
+        metadata = await pipeline_get_metadata(ts, ctx, tenant_metadata, pipeline_config)
 
         tc["result"] = success_response(
             {
@@ -729,7 +725,7 @@ async def get_schema_status(workspace_id: str = "") -> dict:
 
         # List tables from the view schema via information_schema
         ctx = await _resolve_mcp_context(workspace_id)
-        tables = await sync_to_async(workspace_list_tables)(ctx)
+        tables = await workspace_list_tables(ctx)
 
         tc["result"] = success_response(
             {
@@ -760,8 +756,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
         confirm: Must be True to execute. Defaults to False as a safety guard.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
     """
-    from asgiref.sync import sync_to_async
-
     from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
     from apps.workspaces.services.schema_manager import SchemaManager
 
@@ -797,7 +791,7 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             .afirst()
         )
         if vs:
-            await sync_to_async(mgr.teardown_view_schema)(vs)
+            await mgr.ateardown_view_schema(vs)
             dropped.append(vs.schema_name)
 
         # Tear down all tenant schemas for this workspace
@@ -806,7 +800,7 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             tenant_id__in=tenant_ids,
         ).exclude(state=SchemaState.TEARDOWN):
             schema_name = ts.schema_name
-            await sync_to_async(mgr.teardown)(ts)
+            await mgr.ateardown(ts)
             dropped.append(schema_name)
 
         tc["result"] = success_response(

@@ -14,7 +14,7 @@ from django.db import models
 
 from apps.workspaces.models import MaterializationRun
 from mcp_server.pipeline_registry import PipelineConfig
-from mcp_server.services.query import _execute_sync_parameterized
+from mcp_server.services.query import _execute_async_parameterized
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def pipeline_list_tables(
+async def pipeline_list_tables(
     tenant_schema: TenantSchema,
     pipeline_config: PipelineConfig,
 ) -> list[dict]:
@@ -33,12 +33,12 @@ def pipeline_list_tables(
     Each entry includes name, type, description, row_count, and materialized_at.
     """
     run = (
-        MaterializationRun.objects.filter(
+        await MaterializationRun.objects.filter(
             tenant_schema=tenant_schema,
             state=MaterializationRun.RunState.COMPLETED,
         )
         .order_by("-completed_at")
-        .first()
+        .afirst()
     )
     if run is None:
         return []
@@ -74,13 +74,13 @@ def pipeline_list_tables(
     return tables
 
 
-def workspace_list_tables(ctx: QueryContext) -> list[dict]:
+async def workspace_list_tables(ctx: QueryContext) -> list[dict]:
     """Return table list for a workspace view schema by querying information_schema directly.
 
     Used when the schema is a WorkspaceViewSchema (namespaced views) rather than a
     TenantSchema backed by a MaterializationRun. Returns one entry per view found.
     """
-    result = _execute_sync_parameterized(
+    result = await _execute_async_parameterized(
         ctx,
         "SELECT table_name FROM information_schema.tables "
         "WHERE table_schema = %s AND table_type = 'VIEW' "
@@ -100,7 +100,7 @@ def workspace_list_tables(ctx: QueryContext) -> list[dict]:
     ]
 
 
-def pipeline_describe_table(
+async def pipeline_describe_table(
     table_name: str,
     ctx: QueryContext,
     tenant_metadata: TenantMetadata | None,
@@ -111,7 +111,7 @@ def pipeline_describe_table(
     Returns None if the table does not exist in information_schema.
     JSONB columns (properties, form_data) receive descriptions derived from TenantMetadata.
     """
-    result = _execute_sync_parameterized(
+    result = await _execute_async_parameterized(
         ctx,
         "SELECT column_name, data_type, is_nullable, column_default "
         "FROM information_schema.columns "
@@ -181,7 +181,7 @@ def _build_jsonb_annotations(
     return {}
 
 
-def transformation_aware_list_tables(
+async def transformation_aware_list_tables(
     tenant_schema: TenantSchema,
     pipeline_config: PipelineConfig,
     tenant_ids: list,
@@ -193,13 +193,13 @@ def transformation_aware_list_tables(
     replace their upstream tables in the listing. Otherwise falls back
     to the standard pipeline_list_tables behavior.
     """
-    from apps.transformations.services.lineage import get_terminal_assets
+    from apps.transformations.services.lineage import aget_terminal_assets
 
-    terminal_assets = get_terminal_assets(tenant_ids, workspace_id)
+    terminal_assets = await aget_terminal_assets(tenant_ids, workspace_id)
 
     if not terminal_assets:
         # No transformation assets — use existing pipeline-based listing
-        return pipeline_list_tables(tenant_schema, pipeline_config)
+        return await pipeline_list_tables(tenant_schema, pipeline_config)
 
     # Build set of replaced table names (walk replaces chains, scoped to
     # visible assets to prevent cross-tenant information disclosure).
@@ -215,14 +215,14 @@ def transformation_aware_list_tables(
         visited = set()
         while next_id and next_id not in visited:
             visited.add(next_id)
-            upstream = _TA.objects.filter(visible_q, id=next_id).first()
+            upstream = await _TA.objects.filter(visible_q, id=next_id).afirst()
             if upstream is None:
                 break
             replaced_names.add(upstream.name)
             next_id = upstream.replaces_id
 
     # Start with raw tables, excluding replaced ones and terminal asset names
-    raw_tables = pipeline_list_tables(tenant_schema, pipeline_config)
+    raw_tables = await pipeline_list_tables(tenant_schema, pipeline_config)
     terminal_names = {asset.name for asset in terminal_assets}
     result = [
         t for t in raw_tables if t["name"] not in replaced_names and t["name"] not in terminal_names
@@ -243,7 +243,7 @@ def transformation_aware_list_tables(
     return result
 
 
-def pipeline_get_metadata(
+async def pipeline_get_metadata(
     tenant_schema: TenantSchema,
     ctx: QueryContext,
     tenant_metadata: TenantMetadata | None,
@@ -253,13 +253,13 @@ def pipeline_get_metadata(
 
     Returns {"tables": {}, "relationships": []} if no completed run exists.
     """
-    tables_list = pipeline_list_tables(tenant_schema, pipeline_config)
+    tables_list = await pipeline_list_tables(tenant_schema, pipeline_config)
     if not tables_list:
         return {"tables": {}, "relationships": []}
 
     tables = {}
     for t in tables_list:
-        detail = pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
+        detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
         if detail:
             tables[t["name"]] = detail
 
