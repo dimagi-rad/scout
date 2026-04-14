@@ -24,25 +24,25 @@ TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 logger = logging.getLogger(__name__)
 
 
-def _get_commcare_token(user) -> str | None:
+async def _get_commcare_token(user) -> str | None:
     """Return the user's CommCare OAuth access token, or None."""
     token = (
-        SocialToken.objects.filter(
+        await SocialToken.objects.filter(
             account__user=user,
             account__provider__startswith="commcare",
         )
         .exclude(account__provider__startswith="commcare_connect")
-        .first()
+        .afirst()
     )
     return token.token if token else None
 
 
-def _get_connect_token(user) -> str | None:
+async def _get_connect_token(user) -> str | None:
     """Return the user's Connect OAuth access token, or None."""
-    token = SocialToken.objects.filter(
+    token = await SocialToken.objects.filter(
         account__user=user,
         account__provider="commcare_connect",
-    ).first()
+    ).afirst()
     return token.token if token else None
 
 
@@ -59,7 +59,7 @@ async def tenant_list_view(request):
     # Refresh domains from CommCare if the user has an OAuth token
     commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
     if not await cache.aget(commcare_cache_key):
-        access_token = await sync_to_async(_get_commcare_token)(user)
+        access_token = await _get_commcare_token(user)
         if access_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_commcare_domains
@@ -72,7 +72,7 @@ async def tenant_list_view(request):
     # Refresh opportunities from Connect if the user has a Connect OAuth token
     connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
     if not await cache.aget(connect_cache_key):
-        connect_token = await sync_to_async(_get_connect_token)(user)
+        connect_token = await _get_connect_token(user)
         if connect_token:
             try:
                 from apps.users.services.tenant_resolution import resolve_connect_opportunities
@@ -196,7 +196,7 @@ async def tenant_credential_list_view(request):
     from apps.users.models import TenantCredential
 
     try:
-        encrypted = await sync_to_async(encrypt_credential)(credential)
+        encrypted = encrypt_credential(credential)
     except ValueError as e:
         return JsonResponse({"error": str(e)}, status=500)
 
@@ -231,18 +231,11 @@ async def tenant_credential_detail_view(request, membership_id):
     user = request._authenticated_user
 
     if request.method == "DELETE":
-
-        def _delete():
-            try:
-                tm = TenantMembership.objects.get(id=membership_id, user=user)
-                tm.delete()  # cascades to TenantCredential
-                return True
-            except TenantMembership.DoesNotExist:
-                return False
-
-        deleted = await sync_to_async(_delete)()
-        if not deleted:
+        try:
+            tm = await TenantMembership.objects.aget(id=membership_id, user=user)
+        except TenantMembership.DoesNotExist:
             return JsonResponse({"error": "Not found"}, status=404)
+        await tm.adelete()  # cascades to TenantCredential
         return JsonResponse({"status": "deleted"})
 
     # PATCH
@@ -284,16 +277,12 @@ async def tenant_credential_detail_view(request, membership_id):
     from apps.users.adapters import encrypt_credential
 
     try:
-        encrypted = await sync_to_async(encrypt_credential)(credential)
+        encrypted = encrypt_credential(credential)
     except ValueError as e:
         return JsonResponse({"error": str(e)}, status=500)
 
-    def _save_credential(tm):
-        tm.credential.encrypted_credential = encrypted
-        tm.credential.save(update_fields=["encrypted_credential"])
-        return tm
-
-    tm = await sync_to_async(_save_credential)(tm)
+    tm.credential.encrypted_credential = encrypted
+    await tm.credential.asave(update_fields=["encrypted_credential"])
     return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant.canonical_name})
 
 
@@ -326,7 +315,7 @@ async def tenant_ensure_view(request):
         )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
-            connect_token = await sync_to_async(_get_connect_token)(user)
+            connect_token = await _get_connect_token(user)
             if not connect_token:
                 return JsonResponse(
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
