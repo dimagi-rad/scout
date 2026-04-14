@@ -169,9 +169,7 @@ async def tenant_credential_list_view(request):
     cc_username, cc_api_key = credential.split(":", 1)
 
     try:
-        await sync_to_async(verify_commcare_credential)(
-            domain=tenant_id, username=cc_username, api_key=cc_api_key
-        )
+        await verify_commcare_credential(domain=tenant_id, username=cc_username, api_key=cc_api_key)
     except CommCareVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -253,7 +251,7 @@ async def tenant_credential_detail_view(request, membership_id):
         return JsonResponse({"error": "Not found"}, status=404)
 
     try:
-        await sync_to_async(verify_commcare_credential)(
+        await verify_commcare_credential(
             domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
         )
     except CommCareVerificationError as e:
