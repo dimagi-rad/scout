@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 
-from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.utils import timezone
@@ -173,8 +172,6 @@ async def tenant_credential_list_view(request):
     except CommCareVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    from django.db import transaction
-
     from apps.users.adapters import encrypt_credential
     from apps.users.models import TenantCredential
 
@@ -183,26 +180,21 @@ async def tenant_credential_list_view(request):
     except ValueError as e:
         return JsonResponse({"error": str(e)}, status=500)
 
-    def _create():
-        with transaction.atomic():
-            # Use get_or_create so that an existing Tenant's canonical_name is never
-            # overwritten by a user-supplied string (which feeds into the LLM system prompt).
-            tenant, _ = Tenant.objects.get_or_create(
-                provider=provider,
-                external_id=tenant_id,
-                defaults={"canonical_name": tenant_name},
-            )
-            tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
-            TenantCredential.objects.update_or_create(
-                tenant_membership=tm,
-                defaults={
-                    "credential_type": TenantCredential.API_KEY,
-                    "encrypted_credential": encrypted,
-                },
-            )
-            return tm
-
-    tm = await sync_to_async(_create)()
+    # Use aget_or_create so that an existing Tenant's canonical_name is never
+    # overwritten by a user-supplied string (which feeds into the LLM system prompt).
+    tenant, _ = await Tenant.objects.aget_or_create(
+        provider=provider,
+        external_id=tenant_id,
+        defaults={"canonical_name": tenant_name},
+    )
+    tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
+    await TenantCredential.objects.aupdate_or_create(
+        tenant_membership=tm,
+        defaults={
+            "credential_type": TenantCredential.API_KEY,
+            "encrypted_credential": encrypted,
+        },
+    )
     return JsonResponse({"membership_id": str(tm.id)}, status=201)
 
 
