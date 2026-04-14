@@ -3,7 +3,6 @@
 import json
 import logging
 
-from asgiref.sync import sync_to_async
 from django.http import JsonResponse
 
 from apps.chat.checkpointer import ensure_checkpointer
@@ -17,32 +16,31 @@ from apps.chat.models import Thread
 logger = logging.getLogger(__name__)
 
 
-@sync_to_async
-def _get_thread(thread_id, user, *, workspace_id=None):
+async def _get_thread(thread_id, user, *, workspace_id=None):
     """Load a thread ensuring ownership, optionally scoped to a workspace."""
     try:
         if workspace_id is not None:
-            return Thread.objects.get(id=thread_id, user=user, workspace_id=workspace_id)
-        return Thread.objects.get(id=thread_id, user=user)
+            return await Thread.objects.aget(id=thread_id, user=user, workspace_id=workspace_id)
+        return await Thread.objects.aget(id=thread_id, user=user)
     except Thread.DoesNotExist:
         return None
 
 
-@sync_to_async
-def _get_public_thread(share_token):
+async def _get_public_thread(share_token):
     """Load a shared thread by share token."""
     try:
-        return Thread.objects.select_related("user").get(share_token=share_token, is_shared=True)
+        return await Thread.objects.select_related("user").aget(
+            share_token=share_token, is_shared=True
+        )
     except Thread.DoesNotExist:
         return None
 
 
-@sync_to_async
-def _update_thread_sharing(thread, is_shared=None):
+async def _update_thread_sharing(thread, is_shared=None):
     """Update sharing settings on a thread."""
     if is_shared is not None:
         thread.is_shared = is_shared
-    thread.save()
+    await thread.asave()
     return {
         "id": str(thread.id),
         "is_shared": thread.is_shared,
@@ -50,12 +48,10 @@ def _update_thread_sharing(thread, is_shared=None):
     }
 
 
-@sync_to_async
-def _get_thread_artifacts(thread_id):
+async def _get_thread_artifacts(thread_id):
     """Load artifacts associated with a thread."""
     from apps.artifacts.models import Artifact
 
-    qs = Artifact.objects.filter(conversation_id=str(thread_id)).order_by("created_at")
     return [
         {
             "id": str(a.id),
@@ -65,20 +61,20 @@ def _get_thread_artifacts(thread_id):
             "data": a.data,
             "version": a.version,
         }
-        for a in qs
+        async for a in Artifact.objects.filter(conversation_id=str(thread_id)).order_by(
+            "created_at"
+        )
     ]
 
 
-@sync_to_async
-def _list_threads(user, *, workspace_id):
+async def _list_threads(user, *, workspace_id):
     """Return recent threads for a workspace/user."""
-    from apps.workspaces.workspace_resolver import resolve_workspace
+    from apps.workspaces.workspace_resolver import aresolve_workspace
 
-    workspace, err = resolve_workspace(user, workspace_id)
+    workspace, err = await aresolve_workspace(user, workspace_id)
     if workspace is None:
         return None
 
-    qs = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     return [
         {
             "id": str(t.id),
@@ -87,7 +83,9 @@ def _list_threads(user, *, workspace_id):
             "updated_at": t.updated_at.isoformat(),
             "is_shared": t.is_shared,
         }
-        for t in qs
+        async for t in Thread.objects.filter(user=user, workspace=workspace).order_by(
+            "-updated_at"
+        )[:50]
     ]
 
 
