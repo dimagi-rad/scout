@@ -175,9 +175,9 @@ async def _fetch_schema_context(tenant, user) -> str:
     pipeline_config = registry.get(pipeline_name) or registry.get("commcare_sync")
 
     # Try transformation-aware listing (prefers terminal models over replaced ones)
-    from apps.transformations.services.lineage import get_terminal_assets
+    from apps.transformations.services.lineage import aget_terminal_assets
 
-    terminal_assets = await sync_to_async(get_terminal_assets)(tenant_ids=[tenant.id])
+    terminal_assets = await aget_terminal_assets(tenant_ids=[tenant.id])
 
     if terminal_assets:
         tables = await sync_to_async(transformation_aware_list_tables)(
