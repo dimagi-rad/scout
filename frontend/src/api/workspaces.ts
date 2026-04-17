@@ -14,6 +14,7 @@ export interface WorkspaceListTenant {
 export interface WorkspaceListItem {
   id: string
   name: string
+  display_name: string
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
@@ -24,6 +25,7 @@ export interface WorkspaceListItem {
 export interface WorkspaceDetail {
   id: string
   name: string
+  display_name: string
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   system_prompt: string
@@ -65,7 +67,10 @@ export const workspaceApi = {
     }),
 
   update: (workspaceId: string, body: { name?: string; system_prompt?: string }) =>
-    api.patch<{ id: string; name: string }>(`/api/workspaces/${workspaceId}/`, body),
+    api.patch<{ id: string; name: string; display_name: string }>(
+      `/api/workspaces/${workspaceId}/`,
+      body,
+    ),
 
   delete: (workspaceId: string) =>
     api.delete<void>(`/api/workspaces/${workspaceId}/`),

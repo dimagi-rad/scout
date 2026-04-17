@@ -58,6 +58,7 @@ class WorkspaceListView(APIView):
                 {
                     "id": str(m.workspace.id),
                     "name": m.workspace.name,
+                    "display_name": m.workspace.display_name,
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
@@ -94,8 +95,11 @@ class WorkspaceListView(APIView):
             created_by=request.user,
         )
         tenants = []
+        first_tenant = None
         for tenant in Tenant.objects.filter(id__in=tenant_ids):
             WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
+            if first_tenant is None:
+                first_tenant = tenant
             tenants.append(
                 {
                     "id": str(tenant.id),
@@ -110,10 +114,14 @@ class WorkspaceListView(APIView):
             role=WorkspaceRole.MANAGE,
         )
 
+        display_name = (
+            first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
+        )
         return Response(
             {
                 "id": str(workspace.id),
                 "name": workspace.name,
+                "display_name": display_name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": WorkspaceRole.MANAGE,
                 "tenants": tenants,
@@ -162,10 +170,15 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 schema_status = "provisioning"
 
+        first_tenant = tenants[0] if tenants else None
+        display_name = (
+            first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
+        )
         return Response(
             {
                 "id": str(workspace.id),
                 "name": workspace.name,
+                "display_name": display_name,
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
                 "system_prompt": workspace.system_prompt,
@@ -200,7 +213,13 @@ class WorkspaceDetailView(APIView):
             workspace.system_prompt = system_prompt
 
         workspace.save(update_fields=["name", "system_prompt", "updated_at"])
-        return Response({"id": str(workspace.id), "name": workspace.name})
+        return Response(
+            {
+                "id": str(workspace.id),
+                "name": workspace.name,
+                "display_name": workspace.display_name,
+            }
+        )
 
     def delete(self, request, workspace_id):
         workspace, membership, err = resolve_workspace(request, workspace_id)

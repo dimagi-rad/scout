@@ -75,7 +75,7 @@ export function Sidebar() {
               data-testid="domain-selector"
             >
               <span className="truncate">
-                {domains.find((d) => d.id === activeDomainId)?.name ?? "Select workspace"}
+                {domains.find((d) => d.id === activeDomainId)?.display_name ?? "Select workspace"}
               </span>
               <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </Button>
@@ -97,7 +97,7 @@ export function Sidebar() {
             {/* Scrollable workspace list */}
             <div className="max-h-60 overflow-y-auto p-1">
               {domains
-                .filter((d) => !wsSearch || d.name.toLowerCase().includes(wsSearch.toLowerCase()))
+                .filter((d) => !wsSearch || d.display_name.toLowerCase().includes(wsSearch.toLowerCase()))
                 .map((d) => (
                   <button
                     key={d.id}
@@ -107,12 +107,12 @@ export function Sidebar() {
                       d.id === activeDomainId ? "font-medium bg-accent" : ""
                     }`}
                   >
-                    {d.name}
+                    {d.display_name}
                   </button>
                 ))}
               {domains.length > 0 &&
                 wsSearch &&
-                !domains.some((d) => d.name.toLowerCase().includes(wsSearch.toLowerCase())) && (
+                !domains.some((d) => d.display_name.toLowerCase().includes(wsSearch.toLowerCase())) && (
                   <p className="px-2 py-4 text-center text-sm text-muted-foreground">
                     No workspaces match.
                   </p>

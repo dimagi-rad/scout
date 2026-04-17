@@ -536,7 +536,7 @@ export function WorkspaceDetailPage() {
         </Link>
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold" data-testid="workspace-name">
-            {workspace.name}
+            {workspace.display_name}
           </h1>
           <RoleBadge role={workspace.role} />
         </div>
