@@ -46,26 +46,19 @@ class WorkspaceListView(APIView):
         )
         results = []
         for m in memberships:
-            workspace_tenants = list(m.workspace.workspace_tenants.all())
             tenants = [
                 {
                     "id": str(wt.tenant.id),
                     "tenant_name": wt.tenant.canonical_name,
                     "provider": wt.tenant.provider,
                 }
-                for wt in workspace_tenants
+                for wt in m.workspace.workspace_tenants.all()
             ]
-            first_tenant = workspace_tenants[0].tenant if workspace_tenants else None
-            display_name = (
-                first_tenant.format_display_name(m.workspace.name)
-                if first_tenant
-                else m.workspace.name
-            )
             results.append(
                 {
                     "id": str(m.workspace.id),
                     "name": m.workspace.name,
-                    "display_name": display_name,
+                    "display_name": m.workspace.display_name,
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
