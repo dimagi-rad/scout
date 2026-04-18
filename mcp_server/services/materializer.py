@@ -40,6 +40,11 @@ from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
 from mcp_server.loaders.connect_payments import ConnectPaymentLoader
 from mcp_server.loaders.connect_users import ConnectUserLoader
 from mcp_server.loaders.connect_visits import ConnectVisitLoader
+from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
+from mcp_server.loaders.ocs_messages import OCSMessageLoader
+from mcp_server.loaders.ocs_metadata import OCSMetadataLoader
+from mcp_server.loaders.ocs_participants import OCSParticipantLoader
+from mcp_server.loaders.ocs_sessions import OCSSessionLoader
 from mcp_server.pipeline_registry import PipelineConfig, get_registry
 
 logger = logging.getLogger(__name__)
@@ -233,6 +238,11 @@ def _run_discover_phase(
             opportunity_id=int(tenant_membership.tenant.external_id),
             credential=credential,
         )
+    elif pipeline.provider == "ocs":
+        loader = OCSMetadataLoader(
+            experiment_id=tenant_membership.tenant.external_id,
+            credential=credential,
+        )
     else:
         loader = CommCareMetadataLoader(
             domain=tenant_membership.tenant.external_id, credential=credential
@@ -256,6 +266,8 @@ def _load_source(
 ) -> int:
     if provider == "commcare_connect":
         return _load_connect_source(source_name, tenant_membership, credential, schema_name, conn)
+    if provider == "ocs":
+        return _load_ocs_source(source_name, tenant_membership, credential, schema_name, conn)
     # Existing CommCare dispatch
     domain = tenant_membership.tenant.external_id
     if source_name == "cases":
@@ -291,6 +303,45 @@ def _load_connect_source(
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
     return writer_fn(loader.load_pages(), schema_name, conn)
+
+
+def _load_ocs_source(
+    source_name: str,
+    tenant_membership: Any,
+    credential: dict[str, str],
+    schema_name: str,
+    conn: Any,
+) -> int:
+    experiment_id = tenant_membership.tenant.external_id
+    loader_map = {
+        "experiments": (OCSExperimentLoader, _write_ocs_experiments),
+        "sessions": (OCSSessionLoader, _write_ocs_sessions),
+        "messages": (OCSMessageLoader, _write_ocs_messages),
+        "participants": (OCSParticipantLoader, _write_ocs_participants),
+    }
+    if source_name not in loader_map:
+        known = ", ".join(loader_map.keys())
+        raise ValueError(f"Unknown OCS source '{source_name}'. Known: {known}")
+
+    loader_cls, writer_fn = loader_map[source_name]
+    loader = loader_cls(experiment_id=experiment_id, credential=credential)
+    return writer_fn(loader.load_pages(), schema_name, conn)
+
+
+def _write_ocs_experiments(pages, schema_name, conn):
+    raise NotImplementedError("filled in Task 11")
+
+
+def _write_ocs_sessions(pages, schema_name, conn):
+    raise NotImplementedError("filled in Task 11")
+
+
+def _write_ocs_messages(pages, schema_name, conn):
+    raise NotImplementedError("filled in Task 11")
+
+
+def _write_ocs_participants(pages, schema_name, conn):
+    raise NotImplementedError("filled in Task 11")
 
 
 def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
