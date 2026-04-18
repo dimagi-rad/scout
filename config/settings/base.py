@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     # Custom OAuth providers (example implementation)
     "apps.users.providers.commcare",
     "apps.users.providers.commcare_connect",
+    "apps.users.providers.ocs",
     # Local apps
     "apps.users",
     "apps.workspaces",
@@ -219,6 +220,9 @@ SOCIALACCOUNT_PROVIDERS = {
         "OAUTH_PKCE_ENABLED": True,
     },
     "commcare": {
+        "OAUTH_PKCE_ENABLED": True,
+    },
+    "ocs": {
         "OAUTH_PKCE_ENABLED": True,
     },
 }
