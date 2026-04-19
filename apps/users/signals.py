@@ -6,6 +6,12 @@ from asgiref.sync import async_to_sync
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from apps.users.services.tenant_resolution import (
+    resolve_commcare_domains,
+    resolve_connect_opportunities,
+    resolve_ocs_chatbots,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,22 +60,16 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
 
     if provider == "commcare_connect":
         try:
-            from apps.users.services.tenant_resolution import resolve_connect_opportunities
-
             async_to_sync(resolve_connect_opportunities)(sociallogin.user, token.token)
         except Exception:
             logger.warning("Failed to resolve Connect opportunities after OAuth", exc_info=True)
     elif provider == "ocs":
         try:
-            from apps.users.services.tenant_resolution import resolve_ocs_chatbots
-
             async_to_sync(resolve_ocs_chatbots)(sociallogin.user, token.token)
         except Exception:
             logger.warning("Failed to resolve OCS chatbots after OAuth", exc_info=True)
     elif provider.startswith("commcare"):
         try:
-            from apps.users.services.tenant_resolution import resolve_commcare_domains
-
             async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
         except Exception:
             logger.warning("Failed to resolve CommCare domains after OAuth", exc_info=True)

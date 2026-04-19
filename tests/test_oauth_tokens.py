@@ -6,10 +6,14 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync
 from cryptography.fernet import Fernet
 from django.conf import settings
+from django.contrib.sites.models import Site
 from django.utils import timezone
+
+from apps.users.services.credential_resolver import _social_token_qs
 
 
 class TestTokenStorageSettings:
@@ -266,11 +270,6 @@ class TestGraphOAuthConfig:
 
 @pytest.mark.django_db
 def test_social_token_qs_ocs_matches_only_ocs_tokens(user):
-    from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-    from django.contrib.sites.models import Site
-
-    from apps.users.services.credential_resolver import _social_token_qs
-
     site = Site.objects.get_current()
     ocs_app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
     ocs_app.sites.add(site)
