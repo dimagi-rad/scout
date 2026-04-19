@@ -84,15 +84,24 @@ async def _resolve_pipeline_config(ts, last_run):
     Prefers the pipeline of the last completed materialization run; falls back
     to the pipeline registered for the tenant's provider; falls back to
     ``commcare_sync`` as a last resort to preserve historical behavior.
+
+    ``ts`` may be ``None`` when the workspace is multi-tenant and the caller is
+    looking at a workspace view schema (``ws_*``) rather than a tenant schema.
+    In that case we can't infer a tenant-specific pipeline, so just fall back
+    to commcare_sync for pipeline-derived metadata (per-tenant routing happens
+    at load time, not at metadata-describe time).
     """
     registry = get_registry()
     if last_run:
         cfg = registry.get(last_run.pipeline)
         if cfg:
             return cfg
-    tenant = await Tenant.objects.aget(id=ts.tenant_id)
-    cfg = registry.get_by_provider(tenant.provider)
-    return cfg or registry.get("commcare_sync")
+    if ts is not None:
+        tenant = await Tenant.objects.aget(id=ts.tenant_id)
+        cfg = registry.get_by_provider(tenant.provider)
+        if cfg:
+            return cfg
+    return registry.get("commcare_sync")
 
 
 # --- Tools ---
