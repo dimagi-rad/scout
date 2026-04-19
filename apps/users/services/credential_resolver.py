@@ -9,8 +9,8 @@ from allauth.socialaccount.models import SocialToken
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantCredential
 from apps.users.services.token_refresh import (
-    PROVIDER_TOKEN_URLS,
     TokenRefreshError,
+    get_token_url,
     refresh_oauth_token,
     token_needs_refresh,
 )
@@ -23,6 +23,7 @@ def _social_token_qs(user, provider: str):
 
     - ``"commcare_connect"`` matches tokens whose provider starts with
       ``"commcare_connect"``.
+    - ``"ocs"`` matches tokens whose provider equals ``"ocs"``.
     - Any other provider matches tokens starting with ``"commcare"`` but
       excludes ``"commcare_connect"``.
     """
@@ -30,6 +31,11 @@ def _social_token_qs(user, provider: str):
         return SocialToken.objects.filter(
             account__user=user,
             account__provider__startswith="commcare_connect",
+        )
+    if provider == "ocs":
+        return SocialToken.objects.filter(
+            account__user=user,
+            account__provider="ocs",
         )
 
     return SocialToken.objects.filter(
@@ -109,7 +115,7 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     token_value = token_obj.token
 
     if token_needs_refresh(token_obj.expires_at):
-        token_url = PROVIDER_TOKEN_URLS.get(provider)
+        token_url = get_token_url(provider)
         if token_url and token_obj.token_secret:
             try:
                 token_value = await refresh_oauth_token(token_obj, token_url)

@@ -16,6 +16,7 @@ from django.core.management.base import BaseCommand
 PROVIDERS = [
     ("commcare", "CommCare HQ", "COMMCARE"),
     ("commcare_connect", "CommCare Connect", "CONNECT"),
+    ("ocs", "Open Chat Studio", "OCS"),
     ("google", "Google", "GOOGLE_OAUTH"),
     ("github", "GitHub", "GITHUB_OAUTH"),
 ]

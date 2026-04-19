@@ -258,8 +258,13 @@ class DataDictionaryView(APIView):
             .first()
         )
 
-        pipeline_name = last_run.pipeline if last_run else "commcare_sync"
-        pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
+        registry = get_registry()
+        if last_run:
+            pipeline_config = registry.get(last_run.pipeline)
+        else:
+            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
+        if pipeline_config is None:
+            pipeline_config = registry.get("commcare_sync")
 
         tables_list = [
             t
@@ -430,8 +435,13 @@ class TableDetailView(APIView):
             .order_by("-completed_at")
             .first()
         )
-        pipeline_name = last_run.pipeline if last_run else "commcare_sync"
-        pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
+        registry = get_registry()
+        if last_run:
+            pipeline_config = registry.get(last_run.pipeline)
+        else:
+            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
+        if pipeline_config is None:
+            pipeline_config = registry.get("commcare_sync")
 
         known = {t["name"] for t in pipeline_list_tables(tenant_schema, pipeline_config)}
         if table_name not in known:

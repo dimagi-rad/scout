@@ -1,0 +1,34 @@
+pipeline: ocs_sync
+description: "Sync data from Open Chat Studio"
+version: "1.0"
+provider: ocs
+
+sources:
+  - name: experiments
+    description: "Chatbot definitions and versions"
+  - name: sessions
+    description: "Chat sessions with timestamps, tags, and participant info"
+  - name: messages
+    description: "Individual messages within sessions"
+  - name: participants
+    description: "Unique participants extracted from sessions"
+
+metadata_discovery:
+  description: "Fetch experiment detail from OCS API"
+
+relationships:
+  - from_table: raw_sessions
+    from_column: experiment_id
+    to_table: raw_experiments
+    to_column: experiment_id
+    description: "Sessions belong to a chatbot"
+  - from_table: raw_messages
+    from_column: session_id
+    to_table: raw_sessions
+    to_column: session_id
+    description: "Messages belong to a session"
+  - from_table: raw_sessions
+    from_column: participant_identifier
+    to_table: raw_participants
+    to_column: identifier
+    description: "Sessions reference the participant"

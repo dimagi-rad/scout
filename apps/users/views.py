@@ -16,6 +16,7 @@ from apps.users.models import Tenant, TenantCredential, TenantMembership
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
+    resolve_ocs_chatbots,
 )
 from apps.users.services.tenant_verification import (
     CommCareVerificationError,
@@ -67,6 +68,17 @@ async def tenant_list_view(request):
                 await cache.aset(connect_cache_key, True, TENANT_REFRESH_TTL)
             except Exception:
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
+
+    # Refresh chatbots from OCS if the user has an OCS OAuth token
+    ocs_cache_key = f"tenant_refresh:{user.id}:ocs"
+    if not await cache.aget(ocs_cache_key):
+        ocs_token = await _aget_token_value(user, "ocs")
+        if ocs_token:
+            try:
+                await resolve_ocs_chatbots(user, ocs_token)
+                await cache.aset(ocs_cache_key, True, TENANT_REFRESH_TTL)
+            except Exception:
+                logger.warning("Failed to refresh OCS chatbots", exc_info=True)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(user=user).select_related("tenant"):

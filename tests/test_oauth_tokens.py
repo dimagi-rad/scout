@@ -6,10 +6,14 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync
 from cryptography.fernet import Fernet
 from django.conf import settings
+from django.contrib.sites.models import Site
 from django.utils import timezone
+
+from apps.users.services.credential_resolver import _social_token_qs
 
 
 class TestTokenStorageSettings:
@@ -262,3 +266,21 @@ class TestGraphOAuthConfig:
             oauth_tokens={"commcare": "test_token"},
         )
         assert graph is not None
+
+
+@pytest.mark.django_db
+def test_social_token_qs_ocs_matches_only_ocs_tokens(user):
+    site = Site.objects.get_current()
+    ocs_app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    ocs_app.sites.add(site)
+    ocs_account = SocialAccount.objects.create(user=user, provider="ocs", uid="u-1")
+    ocs_token = SocialToken.objects.create(app=ocs_app, account=ocs_account, token="ocs-tok")
+
+    cc_app = SocialApp.objects.create(provider="commcare", name="CC", client_id="c", secret="s")
+    cc_app.sites.add(site)
+    cc_account = SocialAccount.objects.create(user=user, provider="commcare", uid="u-2")
+    SocialToken.objects.create(app=cc_app, account=cc_account, token="cc-tok")
+
+    result = list(_social_token_qs(user, "ocs"))
+    assert len(result) == 1
+    assert result[0].id == ocs_token.id

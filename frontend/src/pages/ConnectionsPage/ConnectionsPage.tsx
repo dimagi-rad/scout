@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { api } from "@/api/client"
+import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -286,7 +287,7 @@ export function ConnectionsPage() {
                   </Button>
                 ) : (
                   <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
-                    <a href={`${provider.login_url}?process=connect&next=/settings/connections`}>
+                    <a href={`${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`}>
                       {provider.status === "expired" ? "Reconnect" : "Connect"}
                     </a>
                   </Button>

@@ -40,6 +40,11 @@ from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
 from mcp_server.loaders.connect_payments import ConnectPaymentLoader
 from mcp_server.loaders.connect_users import ConnectUserLoader
 from mcp_server.loaders.connect_visits import ConnectVisitLoader
+from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
+from mcp_server.loaders.ocs_messages import OCSMessageLoader
+from mcp_server.loaders.ocs_metadata import OCSMetadataLoader
+from mcp_server.loaders.ocs_participants import OCSParticipantLoader
+from mcp_server.loaders.ocs_sessions import OCSSessionLoader
 from mcp_server.pipeline_registry import PipelineConfig, get_registry
 
 logger = logging.getLogger(__name__)
@@ -233,6 +238,11 @@ def _run_discover_phase(
             opportunity_id=int(tenant_membership.tenant.external_id),
             credential=credential,
         )
+    elif pipeline.provider == "ocs":
+        loader = OCSMetadataLoader(
+            experiment_id=tenant_membership.tenant.external_id,
+            credential=credential,
+        )
     else:
         loader = CommCareMetadataLoader(
             domain=tenant_membership.tenant.external_id, credential=credential
@@ -256,6 +266,8 @@ def _load_source(
 ) -> int:
     if provider == "commcare_connect":
         return _load_connect_source(source_name, tenant_membership, credential, schema_name, conn)
+    if provider == "ocs":
+        return _load_ocs_source(source_name, tenant_membership, credential, schema_name, conn)
     # Existing CommCare dispatch
     domain = tenant_membership.tenant.external_id
     if source_name == "cases":
@@ -291,6 +303,197 @@ def _load_connect_source(
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
     return writer_fn(loader.load_pages(), schema_name, conn)
+
+
+def _load_ocs_source(
+    source_name: str,
+    tenant_membership: Any,
+    credential: dict[str, str],
+    schema_name: str,
+    conn: Any,
+) -> int:
+    experiment_id = tenant_membership.tenant.external_id
+    loader_map = {
+        "experiments": (OCSExperimentLoader, _write_ocs_experiments),
+        "sessions": (OCSSessionLoader, _write_ocs_sessions),
+        "messages": (OCSMessageLoader, _write_ocs_messages),
+        "participants": (OCSParticipantLoader, _write_ocs_participants),
+    }
+    if source_name not in loader_map:
+        known = ", ".join(loader_map.keys())
+        raise ValueError(f"Unknown OCS source '{source_name}'. Known: {known}")
+
+    loader_cls, writer_fn = loader_map[source_name]
+    loader = loader_cls(experiment_id=experiment_id, credential=credential)
+    return writer_fn(loader.load_pages(), schema_name, conn)
+
+
+def _write_ocs_experiments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the experiments table and bulk-insert all pages."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_experiments CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.raw_experiments (
+            experiment_id TEXT PRIMARY KEY,
+            name TEXT,
+            url TEXT,
+            version_number INTEGER
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _OCS_EXPERIMENTS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("experiment_id", ""),
+                r.get("name", ""),
+                r.get("url", ""),
+                r.get("version_number"),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_ocs_sessions(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the sessions table and bulk-insert all pages."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_sessions CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.raw_sessions (
+            session_id TEXT PRIMARY KEY,
+            experiment_id TEXT,
+            participant_identifier TEXT,
+            participant_platform TEXT,
+            created_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ,
+            tags JSONB
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _OCS_SESSIONS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("session_id", ""),
+                r.get("experiment_id", ""),
+                r.get("participant_identifier", ""),
+                r.get("participant_platform", ""),
+                r.get("created_at"),
+                r.get("updated_at"),
+                json.dumps(r.get("tags") or []),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_ocs_messages(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the messages table and bulk-insert all pages."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_messages CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.raw_messages (
+            message_id TEXT PRIMARY KEY,
+            session_id TEXT,
+            message_index INTEGER,
+            role TEXT,
+            content TEXT,
+            created_at TIMESTAMPTZ,
+            metadata JSONB,
+            tags JSONB
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _OCS_MESSAGES_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("message_id", ""),
+                r.get("session_id", ""),
+                r.get("message_index", 0),
+                r.get("role", ""),
+                r.get("content", ""),
+                r.get("created_at"),
+                json.dumps(r.get("metadata") or {}),
+                json.dumps(r.get("tags") or []),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
+
+
+def _write_ocs_participants(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+    """Create the participants table and bulk-insert all pages."""
+    sid = psql.Identifier(schema_name)
+    cur = conn.cursor()
+
+    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_participants CASCADE").format(sid))
+    cur.execute(
+        psql.SQL(
+            """
+        CREATE TABLE {schema}.raw_participants (
+            identifier TEXT PRIMARY KEY,
+            platform TEXT,
+            remote_id TEXT
+        )
+        """
+        ).format(schema=sid)
+    )
+
+    ins_sql = _OCS_PARTICIPANTS_INSERT.format(schema=sid)
+    total = 0
+    for page in pages:
+        if not page:
+            continue
+        rows = [
+            (
+                r.get("identifier", ""),
+                r.get("platform", ""),
+                r.get("remote_id", ""),
+            )
+            for r in page
+        ]
+        cur.executemany(ins_sql, rows)
+        total += len(page)
+
+    return total
 
 
 def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
@@ -534,6 +737,53 @@ _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
     INSERT INTO {schema}.raw_completed_modules
         (username, module, opportunity_id, date, duration)
     VALUES (%s, %s, %s, %s, %s)
+    """
+)
+
+_OCS_EXPERIMENTS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.raw_experiments
+        (experiment_id, name, url, version_number)
+    VALUES (%s, %s, %s, %s)
+    ON CONFLICT (experiment_id) DO UPDATE SET
+        name=EXCLUDED.name, url=EXCLUDED.url,
+        version_number=EXCLUDED.version_number
+    """
+)
+
+_OCS_SESSIONS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.raw_sessions
+        (session_id, experiment_id, participant_identifier, participant_platform,
+         created_at, updated_at, tags)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (session_id) DO UPDATE SET
+        experiment_id=EXCLUDED.experiment_id,
+        participant_identifier=EXCLUDED.participant_identifier,
+        participant_platform=EXCLUDED.participant_platform,
+        updated_at=EXCLUDED.updated_at, tags=EXCLUDED.tags
+    """
+)
+
+_OCS_MESSAGES_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.raw_messages
+        (message_id, session_id, message_index, role, content,
+         created_at, metadata, tags)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (message_id) DO UPDATE SET
+        role=EXCLUDED.role, content=EXCLUDED.content,
+        metadata=EXCLUDED.metadata, tags=EXCLUDED.tags
+    """
+)
+
+_OCS_PARTICIPANTS_INSERT = psql.SQL(
+    """
+    INSERT INTO {schema}.raw_participants
+        (identifier, platform, remote_id)
+    VALUES (%s, %s, %s)
+    ON CONFLICT (identifier) DO UPDATE SET
+        platform=EXCLUDED.platform, remote_id=EXCLUDED.remote_id
     """
 )
 

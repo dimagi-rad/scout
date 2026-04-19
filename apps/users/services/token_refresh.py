@@ -10,6 +10,7 @@ import logging
 from datetime import timedelta
 
 import httpx
+from django.conf import settings
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -17,10 +18,22 @@ logger = logging.getLogger(__name__)
 # Refresh tokens that expire within this window
 REFRESH_BUFFER = timedelta(minutes=5)
 
+
+def _ocs_token_url() -> str:
+    return f"{settings.OCS_URL.rstrip('/')}/o/token/"
+
+
 PROVIDER_TOKEN_URLS = {
     "commcare": "https://www.commcarehq.org/oauth/token/",
     "commcare_connect": "https://connect.dimagi.com/o/token/",
 }
+
+
+def get_token_url(provider: str) -> str | None:
+    """Return the OAuth token endpoint for a provider, or None if unknown."""
+    if provider == "ocs":
+        return _ocs_token_url()
+    return PROVIDER_TOKEN_URLS.get(provider)
 
 
 class TokenRefreshError(Exception):

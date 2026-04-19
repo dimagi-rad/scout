@@ -90,6 +90,18 @@ class PipelineRegistry:
     def get(self, name: str) -> PipelineConfig | None:
         return self._load_all().get(name)
 
+    def get_by_provider(self, provider: str) -> PipelineConfig | None:
+        """Return the pipeline registered for the given provider, or None.
+
+        Pipelines declare which provider they sync (e.g. ``ocs_sync`` syncs the
+        ``ocs`` provider). This is the canonical way to map a tenant's provider
+        to the pipeline that should run for it.
+        """
+        for config in self._load_all().values():
+            if config.provider == provider:
+                return config
+        return None
+
     def list(self) -> list[PipelineConfig]:
         return list(self._load_all().values())
 

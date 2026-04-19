@@ -155,7 +155,9 @@ async def _fetch_schema_context(tenant, user) -> str:
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 
-    pipeline_name = "connect_sync" if tenant.provider == "commcare_connect" else "commcare_sync"
+    registry = get_registry()
+    pipeline_config = registry.get_by_provider(tenant.provider)
+    pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
 
     if ts is None:
         return (
@@ -170,8 +172,8 @@ async def _fetch_schema_context(tenant, user) -> str:
         )
 
     # Schema is active: fetch table list
-    registry = get_registry()
-    pipeline_config = registry.get(pipeline_name) or registry.get("commcare_sync")
+    if pipeline_config is None:
+        pipeline_config = registry.get("commcare_sync")
 
     # Try transformation-aware listing (prefers terminal models over replaced ones)
     from apps.transformations.services.lineage import aget_terminal_assets
@@ -495,13 +497,14 @@ async def _build_system_prompt(workspace: Workspace, user) -> str:
 
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        pipeline_name = "connect_sync" if tenant.provider == "commcare_connect" else "commcare_sync"
+        pipeline_config = get_registry().get_by_provider(tenant.provider)
+        pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
 
         sections.append(f"""
 ## Tenant Context
 
 - Tenant: {tenant.canonical_name} ({tenant.external_id})
-- Provider: {tenant.provider}
+- Provider: {tenant.get_provider_display()}
 - Pipeline: {pipeline_name}
 
 ## Query Configuration

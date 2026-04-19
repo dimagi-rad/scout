@@ -23,6 +23,7 @@ env:
   ECS_CLUSTER: labs-jj-cluster
   ECS_WEB_SERVICE: labs-jj-scout-web
   ECS_MCP_SERVICE: labs-jj-scout-mcp
+  ECS_WORKER_SERVICE: labs-jj-scout-worker
   ECR_REGISTRY: 858923557655.dkr.ecr.us-east-1.amazonaws.com
   ECR_BACKEND: labs-jj-scout
   ECR_FRONTEND: labs-jj-scout-frontend
@@ -279,6 +280,16 @@ jobs:
             --force-new-deployment \
             --output text
 
+      - name: Deploy worker service
+        if: needs.detect.outputs.backend == 'true'
+        run: |
+          echo "::notice::Deploying worker service (shares backend image)"
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_WORKER_SERVICE }} \
+            --force-new-deployment \
+            --output text
+
       - name: Wait for web service to stabilize
         if: needs.detect.outputs.backend == 'true' || needs.detect.outputs.frontend == 'true'
         run: |
@@ -293,6 +304,13 @@ jobs:
             --cluster ${{ env.ECS_CLUSTER }} \
             --services ${{ env.ECS_MCP_SERVICE }}
 
+      - name: Wait for worker service to stabilize
+        if: needs.detect.outputs.backend == 'true'
+        run: |
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --services ${{ env.ECS_WORKER_SERVICE }}
+
       - name: Deployment summary
         run: |
           echo "## Deployment Summary" >> "$GITHUB_STEP_SUMMARY"
@@ -302,4 +320,5 @@ jobs:
           echo "| Backend   | ${{ needs.detect.outputs.backend }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Frontend  | ${{ needs.detect.outputs.frontend }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| MCP       | ${{ needs.detect.outputs.mcp }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Worker    | ${{ needs.detect.outputs.backend }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| Migrations| ${{ inputs.run_migrations }} |" >> "$GITHUB_STEP_SUMMARY"
