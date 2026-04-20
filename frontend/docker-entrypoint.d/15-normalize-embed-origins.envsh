@@ -1,0 +1,13 @@
+#!/bin/sh
+# Normalize EMBED_ALLOWED_ORIGINS to a space-separated list so CSP
+# frame-ancestors (populated via envsubst in the nginx template) accepts it.
+# Scout's Django config uses django-environ's comma-separated list convention
+# (e.g. "https://host1,https://host2"); CSP wants spaces between origins.
+#
+# Always export (even when empty) so envsubst substitutes the placeholder —
+# otherwise nginx sees the literal `${EMBED_ALLOWED_ORIGINS}` and treats it
+# as an unknown nginx variable at config load.
+set -e
+
+EMBED_ALLOWED_ORIGINS="$(echo "${EMBED_ALLOWED_ORIGINS:-}" | tr ',' ' ' | tr -s ' ')"
+export EMBED_ALLOWED_ORIGINS

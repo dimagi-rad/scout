@@ -24,8 +24,21 @@ ARG NGINX_CONF=frontend/nginx.conf
 # Copy built assets
 COPY --from=build /app/dist /usr/share/nginx/html
 
-# Copy nginx config
-COPY ${NGINX_CONF} /etc/nginx/conf.d/default.conf
+# Copy nginx config as a template so the image's built-in envsubst entrypoint
+# renders runtime env vars (currently just EMBED_ALLOWED_ORIGINS, for the
+# /embed/ route's CSP frame-ancestors header). Configs without placeholders
+# pass through unchanged.
+COPY ${NGINX_CONF} /etc/nginx/templates/default.conf.template
+
+# Only substitute EMBED_ALLOWED_ORIGINS — leave nginx's own $variables alone.
+ENV NGINX_ENVSUBST_FILTER=EMBED_ALLOWED_ORIGINS
+
+# Normalize EMBED_ALLOWED_ORIGINS before envsubst runs so the same Django-style
+# comma-separated value can feed CSP (which expects space-separated origins).
+# Uses the .envsh extension so the nginx entrypoint sources it — exported vars
+# must propagate into the envsubst step that follows.
+COPY frontend/docker-entrypoint.d/15-normalize-embed-origins.envsh /docker-entrypoint.d/15-normalize-embed-origins.envsh
+RUN chmod +x /docker-entrypoint.d/15-normalize-embed-origins.envsh
 
 EXPOSE 3000
 

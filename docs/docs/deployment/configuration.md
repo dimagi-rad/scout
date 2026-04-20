@@ -26,6 +26,7 @@ Scout is configured via environment variables, typically set in a `.env` file in
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CSRF_TRUSTED_ORIGINS` | `http://localhost:5173` | Comma-separated list of trusted origins for CSRF. Set to your frontend's URL in production. |
+| `EMBED_ALLOWED_ORIGINS` | (empty) | Comma-separated list of origins allowed to embed Scout's `/embed/` route in an iframe (e.g. `https://labs.example.com`). See [Embedding Scout](#embedding-scout) below. |
 
 ### Cache
 
@@ -65,3 +66,24 @@ The default LLM model (`claude-sonnet-4-5-20250929`) can be overridden per-proje
 ## Frontend environment
 
 The frontend uses Vite and proxies API requests to the backend in development. No frontend-specific environment variables are required for development. For production builds, the frontend is served as static files and API requests are routed by the reverse proxy.
+
+## Embedding Scout
+
+Scout exposes an `/embed/` route that renders a trimmed-down SPA shell designed for cross-origin iframe embedding. Any site can embed Scout by dropping in the widget script and pointing it at a Scout deployment:
+
+```html
+<script src="https://scout.example.com/widget.js"></script>
+<div id="scout-container" style="height: 100vh;"></div>
+<script>
+  ScoutWidget.init({
+    container: "#scout-container",
+    mode: "full",
+    theme: "light",
+    tenant: "<opportunity-or-tenant-id>",
+  });
+</script>
+```
+
+To allow your host site to embed Scout, set `EMBED_ALLOWED_ORIGINS` to a comma-separated list of host origins on **both** the API and frontend containers (e.g. `https://host.example.com,https://staging.example.com`). The frontend container renders the list into the `/embed/` route's `Content-Security-Policy: frame-ancestors` header at startup; the API container switches session + CSRF cookies to `SameSite=None` so they flow on iframe requests.
+
+With `EMBED_ALLOWED_ORIGINS` unset, `/embed/` collapses to same-origin-only framing — a safe default for deployments that don't need cross-origin embedding.
