@@ -46,7 +46,8 @@ interface ApiKeyDomain {
 
 const providerBadgeStyles: Record<string, string> = {
   commcare: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
-  "commcare-connect": "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  commcare_connect: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
+  ocs: "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400",
 }
 
 function ProviderBadge({ provider }: { provider: string }) {
