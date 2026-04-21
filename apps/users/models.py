@@ -86,6 +86,15 @@ PROVIDER_CHOICES = [
     ("ocs", "Open Chat Studio"),
 ]
 
+# Per-provider templates applied to a workspace's stored name to produce a display name.
+# Fields available: {name} (workspace name), plus any field on the source Tenant
+# (e.g. {canonical_name}, {external_id}, {provider}).
+PROVIDER_DISPLAY_TEMPLATES: dict[str, str] = {
+    "commcare": "[CC] {name}",
+    "commcare_connect": "[CCC] {name} (Opp {external_id})",
+    "ocs": "[OCS] {name} (Bot {external_id})",
+}
+
 
 class Tenant(models.Model):
     """Canonical tenant identity record, created only after provider verification."""
@@ -106,6 +115,25 @@ class Tenant(models.Model):
 
     def __str__(self):
         return f"{self.provider}:{self.external_id} ({self.canonical_name})"
+
+    def format_display_name(self, workspace_name: str) -> str:
+        """Apply this tenant's provider template to ``workspace_name``.
+
+        Falls back to ``workspace_name`` unchanged if the provider has no
+        template or the template references a field we can't resolve.
+        """
+        template = PROVIDER_DISPLAY_TEMPLATES.get(self.provider)
+        if not template:
+            return workspace_name
+        try:
+            return template.format(
+                name=workspace_name,
+                canonical_name=self.canonical_name,
+                external_id=self.external_id,
+                provider=self.provider,
+            )
+        except (KeyError, IndexError):
+            return workspace_name
 
 
 class TenantMembership(models.Model):

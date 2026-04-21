@@ -53,7 +53,7 @@ function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onC
       className="flex w-full items-center justify-between rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent"
     >
       <div className="min-w-0 flex-1">
-        <div className="font-medium">{workspace.name}</div>
+        <div className="font-medium">{workspace.display_name}</div>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
             <Users className="h-3 w-3" />
@@ -142,7 +142,7 @@ export function WorkspacesPage() {
   const filtered = useMemo(() => {
     const lowerSearch = search.toLowerCase()
     return domains.filter((ws) => {
-      if (lowerSearch && !ws.name.toLowerCase().includes(lowerSearch)) return false
+      if (lowerSearch && !ws.display_name.toLowerCase().includes(lowerSearch)) return false
       if (activeFilters.role && ws.role !== activeFilters.role) return false
       if (activeFilters.provider) {
         const tenants = ws.tenants ?? []

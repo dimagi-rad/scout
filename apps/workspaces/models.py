@@ -132,6 +132,14 @@ class Workspace(models.Model):
         return self.tenants.first()
 
     @property
+    def display_name(self) -> str:
+        """Human-facing label: the stored name formatted by the tenant's provider template."""
+        t = self.tenant
+        if t is None:
+            return self.name
+        return t.format_display_name(self.name)
+
+    @property
     def external_tenant_id(self):
         """Compatibility shim: returns the external_id of the first tenant."""
         t = self.tenant
