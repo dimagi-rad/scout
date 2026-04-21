@@ -4,6 +4,7 @@ API views for data dictionary and workspace schema management.
 
 import logging
 
+from asgiref.sync import async_to_sync
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -263,7 +264,7 @@ class DataDictionaryView(APIView):
 
         tables_list = [
             t
-            for t in pipeline_list_tables(tenant_schema, pipeline_config)
+            for t in async_to_sync(pipeline_list_tables)(tenant_schema, pipeline_config)
             if not t["name"].startswith("stg_")
         ]
         if not tables_list:
@@ -433,7 +434,9 @@ class TableDetailView(APIView):
         pipeline_name = last_run.pipeline if last_run else "commcare_sync"
         pipeline_config = get_registry().get(pipeline_name) or get_registry().get("commcare_sync")
 
-        known = {t["name"] for t in pipeline_list_tables(tenant_schema, pipeline_config)}
+        known = {
+            t["name"] for t in async_to_sync(pipeline_list_tables)(tenant_schema, pipeline_config)
+        }
         if table_name not in known:
             return None
 
