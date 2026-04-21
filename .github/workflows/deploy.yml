@@ -47,10 +47,18 @@ jobs:
           docker push $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG
 
       - name: Build and push Frontend image
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SCOUT_SENTRY_AUTH_TOKEN }}
         run: |
           docker build -t $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG \
             -f Dockerfile.frontend \
             --build-arg NGINX_CONF=frontend/nginx.prod-kamal.conf \
+            --build-arg VITE_SENTRY_DSN=${{ secrets.SCOUT_VITE_SENTRY_DSN }} \
+            --build-arg VITE_SENTRY_ENVIRONMENT=production \
+            --build-arg VITE_SENTRY_RELEASE=$IMAGE_TAG \
+            --build-arg SENTRY_ORG=${{ vars.SCOUT_SENTRY_ORG }} \
+            --build-arg SENTRY_PROJECT=${{ vars.SCOUT_SENTRY_FRONTEND_PROJECT }} \
+            --secret id=sentry_auth_token,env=SENTRY_AUTH_TOKEN \
             .
           docker push $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG
 

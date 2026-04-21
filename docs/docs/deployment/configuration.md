@@ -63,6 +63,24 @@ The managed database stores materialized CommCare case data. Each CommCare domai
 
 The default LLM model (`claude-sonnet-4-5-20250929`) can be overridden per-project in the project settings.
 
+### Error monitoring (Sentry)
+
+Sentry is off by default. Setting `SENTRY_DSN` activates it for the API, Celery worker, and MCP server (they all load Django settings). For the frontend, source maps can optionally be uploaded at build time so minified stack traces resolve back to TypeScript source.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SENTRY_DSN` | (empty) | Backend Sentry DSN. Leave blank to disable. |
+| `SENTRY_ENVIRONMENT` | `development` / `production` (from `DJANGO_DEBUG`) | Event environment tag. |
+| `SENTRY_RELEASE` | (empty) | Release identifier; set to a git SHA or version string to match stack frames to builds. |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.0` | Fraction of transactions to trace (0–1). `0.0` means errors only. |
+| `SENTRY_SEND_DEFAULT_PII` | `False` | Whether sentry-sdk captures request headers, user info, etc. |
+| `VITE_SENTRY_DSN` | (empty) | Frontend DSN. Baked into the bundle at build time; must be set at `bun run build` (not runtime). |
+| `VITE_SENTRY_ENVIRONMENT` | Vite's `MODE` | Environment tag for browser events. |
+| `VITE_SENTRY_RELEASE` | (empty) | Release tag for browser events. Should match `SENTRY_RELEASE` server-side. |
+| `VITE_SENTRY_TRACES_SAMPLE_RATE` | `0` | Browser performance sampling. |
+
+For frontend source map upload (recommended — otherwise stack traces show minified code): set `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` in the build environment. All three must be set for the Vite plugin to activate. `@sentry/vite-plugin` generates hidden source maps, uploads them, then deletes them so they don't ship to browsers.
+
 ## Frontend environment
 
 The frontend uses Vite and proxies API requests to the backend in development. No frontend-specific environment variables are required for development. For production builds, the frontend is served as static files and API requests are routed by the reverse proxy.
