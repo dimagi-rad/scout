@@ -89,8 +89,9 @@ PROVIDER_CHOICES = [
 # Fields available: {name} (workspace name), plus any field on the source Tenant
 # (e.g. {canonical_name}, {external_id}, {provider}).
 PROVIDER_DISPLAY_TEMPLATES: dict[str, str] = {
-    "commcare": "{name}",
-    "commcare_connect": "{name} (Opp {external_id})",
+    "commcare": "[CC] {name}",
+    "commcare_connect": "[CCC] {name} (Opp {external_id})",
+    "ocs": "[OCS] {name} (Bot {external_id})",
 }
 
 
