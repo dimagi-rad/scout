@@ -49,6 +49,18 @@ transforms:
         registry = PipelineRegistry(pipelines_dir=str(tmp_path))
         assert registry.get("nonexistent") is None
 
+    def test_get_by_provider_returns_matching_pipeline(self, tmp_path):
+        (tmp_path / "a.yml").write_text(
+            "pipeline: a\ndescription: A\nversion: '1.0'\nprovider: commcare\nsources: []\n"
+        )
+        (tmp_path / "b.yml").write_text(
+            "pipeline: b\ndescription: B\nversion: '1.0'\nprovider: ocs\nsources: []\n"
+        )
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        assert registry.get_by_provider("commcare").name == "a"
+        assert registry.get_by_provider("ocs").name == "b"
+        assert registry.get_by_provider("unknown") is None
+
     def test_parses_relationships(self, tmp_path):
         yml = tmp_path / "rel.yml"
         yml.write_text("""

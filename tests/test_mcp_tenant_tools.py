@@ -258,11 +258,14 @@ class TestListTablesTool:
         from mcp_server.server import list_tables
 
         mock_ts = MagicMock()
+        mock_tenant = MagicMock()
+        mock_tenant.provider = "commcare"
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.Tenant") as mock_tenant_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
             patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
@@ -270,6 +273,7 @@ class TestListTablesTool:
             mock_ctx.return_value = tenant_context
             mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_tenant_cls.objects.aget = AsyncMock(return_value=mock_tenant)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -374,10 +378,13 @@ class TestDescribeTableTool:
 
         mock_ts = MagicMock()
         mock_ts.tenant_membership = MagicMock()
+        mock_tenant = MagicMock()
+        mock_tenant.provider = "commcare"
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch("mcp_server.server.Tenant") as mock_tenant_cls,
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),
@@ -385,6 +392,7 @@ class TestDescribeTableTool:
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
+            mock_tenant_cls.objects.aget = AsyncMock(return_value=mock_tenant)
             mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)

@@ -1,8 +1,8 @@
 """Verify PROVIDER_TOKEN_URLS match actual OAuth adapter endpoints."""
 
-from apps.users.auth_views import PROVIDER_TOKEN_URLS
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.providers.commcare_connect.views import CommCareConnectOAuth2Adapter
+from apps.users.services.token_refresh import PROVIDER_TOKEN_URLS
 
 
 class TestProviderTokenUrls:

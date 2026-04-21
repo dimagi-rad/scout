@@ -83,6 +83,7 @@ class User(AbstractUser):
 PROVIDER_CHOICES = [
     ("commcare", "CommCare HQ"),
     ("commcare_connect", "CommCare Connect"),
+    ("ocs", "Open Chat Studio"),
 ]
 
 
