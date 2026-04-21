@@ -29,6 +29,14 @@ builder:
   args:
     NGINX_CONF: frontend/nginx.prod-kamal.conf
 
+env:
+  clear:
+    # Populates the CSP frame-ancestors header on /embed/ responses so
+    # approved hosts can iframe Scout. Comma-separated; normalized to spaces
+    # for CSP by the frontend container's entrypoint. Keep in sync with
+    # EMBED_ALLOWED_ORIGINS on the API side.
+    EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
+
 proxy:
   host: scout.dimagi.com
   app_port: 3000

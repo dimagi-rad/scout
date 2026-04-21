@@ -25,9 +25,10 @@ class EmbedFrameOptionsMiddleware:
         origins = " ".join(allowed_origins)
         response["Content-Security-Policy"] = f"frame-ancestors 'self' {origins}"
 
-        # Patch cookies for cross-origin iframe usage
-        for cookie_name in response.cookies:
-            response.cookies[cookie_name]["samesite"] = "None"
-            response.cookies[cookie_name]["secure"] = True
+        # Cross-origin cookie handling lives in the settings module
+        # (production.py flips SESSION_COOKIE_SAMESITE + CSRF_COOKIE_SAMESITE
+        # to "None" when EMBED_ALLOWED_ORIGINS is set). That's necessary
+        # because cookies set during the OAuth callback — outside /embed/ —
+        # would otherwise default to SameSite=Lax and never reach the iframe.
 
         return response
