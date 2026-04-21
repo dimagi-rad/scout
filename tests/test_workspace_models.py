@@ -60,9 +60,9 @@ def test_display_name_for_connect_workspace_includes_opp_id(user):
 
 
 @pytest.mark.django_db
-def test_display_name_for_commcare_workspace_is_plain_name(workspace):
-    """CommCare provider template is just "{name}" — no added context."""
-    assert workspace.display_name == workspace.name
+def test_display_name_for_commcare_workspace_includes_prefix(workspace):
+    """CommCare provider template renders."""
+    assert workspace.display_name == f"[CC] {workspace.name}"
 
 
 @pytest.mark.django_db
