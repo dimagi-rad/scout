@@ -46,12 +46,16 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push 
 | `SCOUT_REDIS_ENDPOINT` | CloudFormation output `RedisEndpoint` |
 | `SCOUT_RDS_SECRET_ARN` | CloudFormation output `RDSSecretArn` |
 | `SCOUT_RDS_ENDPOINT` | CloudFormation output `RDSEndpoint` |
+| `SCOUT_VITE_SENTRY_DSN` | Sentry → frontend project → Client Keys (DSN). Baked into the frontend bundle at build time; safe to expose. |
+| `SCOUT_SENTRY_AUTH_TOKEN` | Sentry auth token with `project:releases` + `project:write` scopes. Used only at build time to upload source maps. |
 
 **Variables** (Settings > Variables > Actions):
 
 | Variable | Source |
 |----------|--------|
 | `SCOUT_ECR_REGISTRY` | CloudFormation output `ECRRegistry` |
+| `SCOUT_SENTRY_ORG` | Sentry org slug (e.g. `dimagi`). |
+| `SCOUT_SENTRY_FRONTEND_PROJECT` | Sentry project slug for the React app (e.g. `scout-frontend`). |
 
 ### AWS Secrets Manager
 
@@ -69,9 +73,42 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 | `SCOUT_DJANGO_SECRET_KEY` | Django secret key |
 | `SCOUT_DB_CREDENTIAL_KEY` | Fernet key for DB credential encryption |
 | `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
+| `SCOUT_SENTRY_DSN` | Sentry DSN for the backend Django project (API, worker, MCP all share it) |
 
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
+
+## Error monitoring (Sentry)
+
+Sentry is wired in for both the backend (API + worker + MCP via `config/settings/base.py`)
+and the frontend (`frontend/src/main.tsx`), but it's fully opt-in: with no DSN set, the
+SDKs never initialize. To turn it on:
+
+1. Create two Sentry projects — `python-django` for the backend and `react` for the frontend.
+2. Add the backend DSN to AWS Secrets Manager as `SCOUT_SENTRY_DSN`.
+3. Add the frontend DSN and a source-map auth token to GitHub Actions secrets
+   (`SCOUT_VITE_SENTRY_DSN`, `SCOUT_SENTRY_AUTH_TOKEN`). Frontend DSNs are public by
+   design — they ship in the browser bundle — so a GH variable would also work; the
+   auth token must be a secret.
+4. Set `SCOUT_SENTRY_ORG` and `SCOUT_SENTRY_FRONTEND_PROJECT` as GH Actions variables.
+
+Once the secrets exist, the next push to `main` turns Sentry on for all four services.
+To disable without a redeploy, blank the `SCOUT_SENTRY_DSN` secret in AWS.
+
+Tunable via the `env.clear` block in each Kamal config (or by editing and redeploying):
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `SENTRY_ENVIRONMENT` | `production` | Shows up as the event's environment tag. |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0.1` | Fraction of requests to trace for performance. `0.0` = errors only. |
+| `SENTRY_RELEASE` | `$IMAGE_TAG` | Set automatically to the commit SHA by CI so stack frames match the right build. |
+| `SENTRY_SEND_DEFAULT_PII` | `False` | Leave off unless you've reviewed what sentry-sdk captures. |
+
+**Source maps.** The frontend Docker build runs `@sentry/vite-plugin` when all three of
+`SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` are present at build time. It emits
+hidden source maps, uploads them to Sentry tagged with the release (git SHA), then
+deletes them from `dist/` so they don't ship to browsers. The auth token is passed as a
+BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image layer.
 
 ## Manual Deployment
 
