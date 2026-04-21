@@ -8,6 +8,11 @@ ARG VITE_SENTRY_DSN=
 ARG VITE_SENTRY_ENVIRONMENT=production
 ARG VITE_SENTRY_RELEASE=
 ARG VITE_SENTRY_TRACES_SAMPLE_RATE=0
+# Sentry source map upload — all three must be set to activate the plugin.
+# SENTRY_AUTH_TOKEN is passed as a BuildKit secret (see --secret below) to
+# avoid leaking into image layers.
+ARG SENTRY_ORG=
+ARG SENTRY_PROJECT=
 
 WORKDIR /app
 
@@ -21,8 +26,12 @@ ENV VITE_BASE_PATH=$VITE_BASE_PATH \
     VITE_SENTRY_DSN=$VITE_SENTRY_DSN \
     VITE_SENTRY_ENVIRONMENT=$VITE_SENTRY_ENVIRONMENT \
     VITE_SENTRY_RELEASE=$VITE_SENTRY_RELEASE \
-    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE
-RUN bun run build
+    VITE_SENTRY_TRACES_SAMPLE_RATE=$VITE_SENTRY_TRACES_SAMPLE_RATE \
+    SENTRY_ORG=$SENTRY_ORG \
+    SENTRY_PROJECT=$SENTRY_PROJECT \
+    SENTRY_RELEASE=$VITE_SENTRY_RELEASE
+RUN --mount=type=secret,id=sentry_auth_token,env=SENTRY_AUTH_TOKEN \
+    bun run build
 
 # --- Production stage ---
 FROM nginx:alpine
