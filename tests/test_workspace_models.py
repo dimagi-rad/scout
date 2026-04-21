@@ -47,7 +47,7 @@ def test_workspace_tenant_str_uniqueness(workspace, tenant, user):
 
 @pytest.mark.django_db
 def test_display_name_for_connect_workspace_includes_opp_id(user):
-    """Connect provider template renders "{name} (Opp {external_id})"."""
+    """Connect provider template renders."""
     connect_tenant = Tenant.objects.create(
         provider="commcare_connect",
         external_id="opp-42",
@@ -56,7 +56,7 @@ def test_display_name_for_connect_workspace_includes_opp_id(user):
     ws = Workspace.objects.create(name="Malaria Campaign", created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=connect_tenant)
 
-    assert ws.display_name == "Malaria Campaign (Opp opp-42)"
+    assert ws.display_name == "[CCC] Malaria Campaign (Opp opp-42)"
 
 
 @pytest.mark.django_db
