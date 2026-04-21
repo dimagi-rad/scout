@@ -34,6 +34,9 @@ env:
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    SENTRY_ENVIRONMENT: "production"
+    SENTRY_TRACES_SAMPLE_RATE: "0.1"
+    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
@@ -48,6 +51,7 @@ env:
     - CONNECT_OAUTH_CLIENT_SECRET
     - OCS_OAUTH_CLIENT_ID
     - OCS_OAUTH_CLIENT_SECRET
+    - SENTRY_DSN
 
 ssh:
   user: scout

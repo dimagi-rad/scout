@@ -25,11 +25,15 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    SENTRY_ENVIRONMENT: "production"
+    SENTRY_TRACES_SAMPLE_RATE: "0.1"
+    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
     - DB_CREDENTIAL_KEY
     - DJANGO_SECRET_KEY
+    - SENTRY_DSN
 
 ssh:
   user: scout

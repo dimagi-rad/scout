@@ -51,6 +51,9 @@ jobs:
           docker build -t $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG \
             -f Dockerfile.frontend \
             --build-arg NGINX_CONF=frontend/nginx.prod-kamal.conf \
+            --build-arg VITE_SENTRY_DSN=${{ secrets.SCOUT_VITE_SENTRY_DSN }} \
+            --build-arg VITE_SENTRY_ENVIRONMENT=production \
+            --build-arg VITE_SENTRY_RELEASE=$IMAGE_TAG \
             .
           docker push $SCOUT_ECR_REGISTRY/scout/frontend:$IMAGE_TAG
 
