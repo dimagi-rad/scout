@@ -51,6 +51,7 @@ dependencies = [
     "dbt-core>=1.11.6",
     "dbt-postgres>=1.10.0",
     "whitenoise>=6.12.0",
+    "sentry-sdk[django]>=2.0",
 ]
 
 [project.optional-dependencies]

@@ -8,6 +8,7 @@ override these in development.py, production.py, and test.py.
 from pathlib import Path
 
 import environ
+import sentry_sdk
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -260,6 +261,20 @@ DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
 LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")
 LANGFUSE_BASE_URL = env("LANGFUSE_BASE_URL", default="")
+
+# Sentry error monitoring (optional — leave SENTRY_DSN blank to disable)
+SENTRY_DSN = env("SENTRY_DSN", default="")
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=env(
+            "SENTRY_ENVIRONMENT",
+            default="development" if DEBUG else "production",
+        ),
+        release=env("SENTRY_RELEASE", default="") or None,
+        traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
+        send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
+    )
 
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
