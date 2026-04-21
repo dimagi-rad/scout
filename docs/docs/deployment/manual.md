@@ -37,7 +37,8 @@ DJANGO_SETTINGS_MODULE=config.settings.production \
   uv run uvicorn config.asgi:application \
   --host 0.0.0.0 \
   --port 8000 \
-  --workers 4
+  --workers 4 \
+  --lifespan off
 ```
 
 For production, consider running uvicorn behind a process manager like systemd or supervisord.

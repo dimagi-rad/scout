@@ -57,7 +57,7 @@ uv run manage.py createsuperuser
 Start the ASGI development server:
 
 ```bash
-uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload
+uv run uvicorn config.asgi:application --host 127.0.0.1 --port 8000 --reload --lifespan off
 ```
 
 ## Frontend setup

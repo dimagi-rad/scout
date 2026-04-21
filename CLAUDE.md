@@ -8,7 +8,7 @@ Self-hosted data agent platform for AI-powered database querying.
 # Backend
 docker compose up platform-db redis mcp-server  # Start dependencies
 uv run python manage.py runserver         # Django dev server (or use uvicorn below)
-uv run uvicorn config.asgi:application --reload --port 8000  # ASGI dev server
+uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off  # ASGI dev server
 uv run python manage.py migrate           # Run migrations
 
 # Frontend

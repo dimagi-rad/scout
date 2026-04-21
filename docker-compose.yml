@@ -56,7 +56,7 @@ services:
       dockerfile: Dockerfile
     command: >
       sh -c "python manage.py migrate &&
-             uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 4 --timeout-keep-alive 120"
+             uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 4 --timeout-keep-alive 120 --lifespan off"
     environment:
       - DATABASE_URL=postgresql://platform:${PLATFORM_DB_PASSWORD:-devpassword}@platform-db:5432/agent_platform
       - DJANGO_SETTINGS_MODULE=config.settings.development
