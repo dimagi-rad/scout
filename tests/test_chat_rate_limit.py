@@ -59,7 +59,7 @@ class TestCheckAndRecord:
         old_ts = time.time() - CHAT_RATE_WINDOW - 1
         cache.set(cache_key, [old_ts] * CHAT_RATE_LIMIT, timeout=CHAT_RATE_WINDOW)
 
-        is_limited, info = await check_and_record(user_id=1)
+        is_limited, _info = await check_and_record(user_id=1)
         assert is_limited is False
 
     async def test_info_contains_reset_timestamp(self):

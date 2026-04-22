@@ -16,10 +16,8 @@ class UserManager(BaseUserManager):
 
     def create_user(self, email=None, password=None, **extra_fields):
         """Create and save a regular user with the given email and password."""
-        if email:
-            email = self.normalize_email(email)
-        else:
-            email = None  # store NULL, not empty string, to avoid unique constraint collisions
+        # store NULL, not empty string, to avoid unique constraint collisions
+        email = self.normalize_email(email) if email else None
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save(using=self._db)

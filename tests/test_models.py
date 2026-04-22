@@ -113,7 +113,7 @@ class TestTenantMetadata:
         from apps.workspaces.models import TenantMetadata
 
         TenantMetadata.objects.create(tenant_membership=tenant_membership)
-        with pytest.raises(Exception, match="unique constraint"):  # noqa: B017
+        with pytest.raises(Exception, match="unique constraint"):
             TenantMetadata.objects.create(tenant_membership=tenant_membership)
 
     def test_metadata_defaults_to_empty_dict(self, tenant_membership):

@@ -98,11 +98,10 @@ class TestCommCareFormLoader:
         mock_resp = MagicMock()
         mock_resp.status_code = 403
 
-        with _mock_session(mock_resp):
-            with pytest.raises(CommCareAuthError):
-                CommCareFormLoader(
-                    domain="dimagi", credential={"type": "api_key", "value": "bad"}
-                ).load()
+        with _mock_session(mock_resp), pytest.raises(CommCareAuthError):
+            CommCareFormLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "bad"}
+            ).load()
 
 
 class TestExtractCaseRefs:

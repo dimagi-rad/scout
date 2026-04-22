@@ -71,7 +71,7 @@ async def _list_threads(user, *, workspace_id):
     """Return recent threads for a workspace/user."""
     from apps.workspaces.workspace_resolver import aresolve_workspace
 
-    workspace, err = await aresolve_workspace(user, workspace_id)
+    workspace, _err = await aresolve_workspace(user, workspace_id)
     if workspace is None:
         return None
 

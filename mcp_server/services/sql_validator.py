@@ -373,12 +373,11 @@ class SQLValidator:
 
     def _get_limit_value(self, limit_expr: exp.Limit) -> int | None:
         """Extract the numeric value from a LIMIT expression."""
-        if limit_expr.expression:
-            if isinstance(limit_expr.expression, exp.Literal):
-                try:
-                    return int(limit_expr.expression.this)
-                except (ValueError, TypeError):
-                    return None
+        if limit_expr.expression and isinstance(limit_expr.expression, exp.Literal):
+            try:
+                return int(limit_expr.expression.this)
+            except (ValueError, TypeError):
+                return None
         return None
 
     def get_tables_accessed(self, statement: exp.Expression) -> list[str]:

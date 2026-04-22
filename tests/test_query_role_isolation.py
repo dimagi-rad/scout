@@ -1,3 +1,4 @@
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import psycopg.errors
@@ -86,10 +87,8 @@ class TestSetRoleIsolation:
             new=AsyncMock(return_value=mock_conn),
         ):
             ctx = self._make_ctx()
-            try:
+            with contextlib.suppress(Exception):
                 await _execute_async(ctx, "SELECT bad", 30)
-            except Exception:
-                pass
 
         # RESET ROLE should still have been called
         last_call_str = str(mock_cursor.execute.call_args_list[-1])

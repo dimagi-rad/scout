@@ -115,10 +115,7 @@ def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
                 continue
             case_props = module.get("case_properties", [])
             for prop in case_props:
-                if isinstance(prop, dict):
-                    key = prop.get("key", "")
-                else:
-                    key = str(prop)
+                key = prop.get("key", "") if isinstance(prop, dict) else str(prop)
                 if key:
                     props.add(key)
     return sorted(props)

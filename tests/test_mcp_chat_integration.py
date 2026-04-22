@@ -11,6 +11,7 @@ Mocking strategy:
 - Django ORM: real test DB with fixtures
 """
 
+import contextlib
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -95,10 +96,8 @@ async def _collect_sse_events(response):
         for line in text.strip().split("\n"):
             line = line.strip()
             if line.startswith("data: "):
-                try:
+                with contextlib.suppress(json.JSONDecodeError):
                     events.append(json.loads(line[6:]))
-                except json.JSONDecodeError:
-                    pass
     return events
 
 

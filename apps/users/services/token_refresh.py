@@ -78,7 +78,7 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
             )
             response.raise_for_status()
     except Exception as e:
-        logger.error("Token refresh failed for app %s: %s", social_token.app.client_id, e)
+        logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
     data = response.json()

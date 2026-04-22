@@ -65,7 +65,7 @@ async def get_mcp_tools(on_progress: ProgressCallback | None = None) -> list:
     except Exception:
         _consecutive_failures += 1
         _last_failure_time = time.monotonic()
-        logger.error("MCP tool loading failed (attempt %d)", _consecutive_failures)
+        logger.exception("MCP tool loading failed (attempt %d)", _consecutive_failures)
         raise
 
 

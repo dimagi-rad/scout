@@ -42,7 +42,9 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         try:
             return f.decrypt(ciphertext.encode()).decode()
         except InvalidToken:
-            logger.error("Failed to decrypt OAuth token — possible key rotation or data corruption")
+            logger.exception(
+                "Failed to decrypt OAuth token — possible key rotation or data corruption"
+            )
             return ""
 
     def serialize_instance(self, instance):

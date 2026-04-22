@@ -171,7 +171,7 @@ def run_pipeline(
                 pipeline, schema_name, tenant=tenant_membership.tenant
             )
         except Exception as e:
-            logger.error("Transform phase failed for schema %s: %s", schema_name, e)
+            logger.exception("Transform phase failed for schema %s", schema_name)
             transform_result = {"error": str(e)}
     else:
         report("No transforms configured — skipping")

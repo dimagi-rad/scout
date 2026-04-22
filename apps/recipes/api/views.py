@@ -32,7 +32,7 @@ class RecipeListView(APIView):
     """
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         recipes = Recipe.objects.filter(workspace=workspace)
@@ -48,7 +48,7 @@ class RecipeDetailView(APIView):
     """
 
     def _get_recipe(self, request, workspace_id, recipe_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return None, err
         try:
@@ -87,7 +87,7 @@ class RecipeRunView(APIView):
     """
 
     def post(self, request, workspace_id, recipe_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:
@@ -130,7 +130,7 @@ class RecipeRunListView(APIView):
     """
 
     def get(self, request, workspace_id, recipe_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:
@@ -147,7 +147,7 @@ class RecipeRunDetailView(APIView):
     """
 
     def patch(self, request, workspace_id, recipe_id, run_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
         try:

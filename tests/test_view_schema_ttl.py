@@ -32,7 +32,7 @@ def workspace_with_view_schema(transactional_db):
 def test_expire_inactive_schemas_also_expires_stale_view_schemas(workspace_with_view_schema):
     from apps.workspaces.tasks import expire_inactive_schemas
 
-    ws, vs = workspace_with_view_schema
+    _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=25)
     vs.save()
 
@@ -47,7 +47,7 @@ def test_expire_inactive_schemas_also_expires_stale_view_schemas(workspace_with_
 def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):
     from apps.workspaces.tasks import expire_inactive_schemas
 
-    ws, vs = workspace_with_view_schema
+    _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=1)
     vs.save()
 
@@ -60,7 +60,7 @@ def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):
 def test_view_schema_with_null_last_accessed_not_expired(workspace_with_view_schema):
     from apps.workspaces.tasks import expire_inactive_schemas
 
-    ws, vs = workspace_with_view_schema
+    _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = None
     vs.save()
 

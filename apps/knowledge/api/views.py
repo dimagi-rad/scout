@@ -46,7 +46,7 @@ class KnowledgeListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -113,7 +113,7 @@ class KnowledgeListCreateView(APIView):
         )
 
     def post(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -173,11 +173,11 @@ class KnowledgeDetailView(APIView):
         return None, None, None
 
     def get(self, request, workspace_id, item_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
-        item, type_name, serializer_class = self._find_item(workspace, item_id)
+        item, _type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
                 {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
@@ -187,11 +187,11 @@ class KnowledgeDetailView(APIView):
         return Response(serializer.data)
 
     def put(self, request, workspace_id, item_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
-        item, type_name, serializer_class = self._find_item(workspace, item_id)
+        item, _type_name, serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
                 {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
@@ -210,11 +210,11 @@ class KnowledgeDetailView(APIView):
         return Response(serializer.data)
 
     def delete(self, request, workspace_id, item_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
-        item, type_name, serializer_class = self._find_item(workspace, item_id)
+        item, _type_name, _serializer_class = self._find_item(workspace, item_id)
         if not item:
             return Response(
                 {"error": "Knowledge item not found."}, status=status.HTTP_404_NOT_FOUND
@@ -234,7 +234,7 @@ class KnowledgeExportView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -269,7 +269,7 @@ class KnowledgeImportView(APIView):
     parser_classes = [MultiPartParser]
 
     def post(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 

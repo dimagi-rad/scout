@@ -28,7 +28,6 @@ def deduplicate_memberships(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("users", "0003_convert_empty_emails_to_null"),
     ]

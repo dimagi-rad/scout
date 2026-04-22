@@ -93,9 +93,8 @@ class RecipeRunner:
         # Apply defaults for optional variables not provided
         for var_def in self.recipe.variables:
             var_name = var_def.get("name")
-            if var_name and var_name not in self.variable_values:
-                if "default" in var_def:
-                    self.variable_values[var_name] = var_def["default"]
+            if var_name and var_name not in self.variable_values and "default" in var_def:
+                self.variable_values[var_name] = var_def["default"]
 
     async def _build_graph(self) -> CompiledStateGraph:
         """Build or return the agent graph for execution."""
@@ -171,16 +170,15 @@ class RecipeRunner:
         artifact_ids = []
 
         for msg in messages:
-            if isinstance(msg, ToolMessage):
-                if msg.name in ("create_artifact", "update_artifact"):
-                    try:
-                        content = msg.content
-                        if isinstance(content, str):
-                            result = json.loads(content)
-                            if isinstance(result, dict) and "artifact_id" in result:
-                                artifact_ids.append(result["artifact_id"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            if isinstance(msg, ToolMessage) and msg.name in ("create_artifact", "update_artifact"):
+                try:
+                    content = msg.content
+                    if isinstance(content, str):
+                        result = json.loads(content)
+                        if isinstance(result, dict) and "artifact_id" in result:
+                            artifact_ids.append(result["artifact_id"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         return artifact_ids
 
@@ -234,11 +232,7 @@ class RecipeRunner:
             result["success"] = True
 
         except Exception as e:
-            logger.exception(
-                "Error executing recipe %s: %s",
-                self.recipe.name,
-                str(e),
-            )
+            logger.exception("Error executing recipe %s", self.recipe.name)
             result["error"] = str(e)
             result["success"] = False
 
@@ -325,11 +319,7 @@ class RecipeRunner:
             result["success"] = True
 
         except Exception as e:
-            logger.exception(
-                "Error executing recipe %s (async): %s",
-                self.recipe.name,
-                str(e),
-            )
+            logger.exception("Error executing recipe %s (async)", self.recipe.name)
             result["error"] = str(e)
             result["success"] = False
 
@@ -348,6 +338,6 @@ class RecipeRunner:
 __all__ = [
     "RecipeRunner",
     "RecipeRunnerError",
-    "VariableValidationError",
     "StepExecutionError",
+    "VariableValidationError",
 ]
