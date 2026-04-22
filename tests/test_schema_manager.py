@@ -4,7 +4,7 @@ import psycopg.errors
 import psycopg.sql
 import pytest
 
-from apps.workspaces.models import TenantSchema
+from apps.workspaces.models import TenantSchema, WorkspaceViewSchema
 from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
 
@@ -88,8 +88,6 @@ class TestSchemaManagerRoleCreation:
         mock_conn.cursor.return_value = mock_cursor
         mock_cursor.fetchone.return_value = None  # role doesn't exist yet
 
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain_r1a2b3c4",
@@ -111,8 +109,6 @@ class TestSchemaManagerRoleCreation:
 @pytest.mark.django_db
 class TestSchemaManagerRoleTeardown:
     def test_teardown_drops_readonly_role(self, tenant_membership):
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -137,8 +133,6 @@ class TestSchemaManagerRoleTeardown:
         assert any("DROP ROLE IF EXISTS" in c and role_name in c for c in calls)
 
     def test_teardown_view_schema_drops_readonly_role(self, workspace):
-        from apps.workspaces.models import WorkspaceViewSchema
-
         vs = WorkspaceViewSchema.objects.create(
             workspace=workspace,
             schema_name="ws_abc1234def56789",
@@ -165,8 +159,6 @@ class TestSchemaManagerRoleTeardown:
     def test_drop_readonly_role_does_not_use_drop_owned_by(self, tenant_membership):
         """DROP OWNED BY requires membership in the target role, which a non-superuser
         creator may not have. Use explicit REVOKE instead."""
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -193,8 +185,6 @@ class TestSchemaManagerRoleTeardown:
     def test_drop_readonly_role_revokes_cross_schema_grants(self, workspace):
         """View-schema _ro roles hold USAGE/SELECT on constituent tenant schemas that
         survive DROP SCHEMA CASCADE. _drop_readonly_role must revoke those explicitly."""
-        from apps.workspaces.models import WorkspaceViewSchema
-
         vs = WorkspaceViewSchema.objects.create(
             workspace=workspace,
             schema_name="ws_abc1234def56789",
@@ -226,8 +216,6 @@ class TestSchemaManagerRoleTeardown:
             ), f"Expected REVOKE ALL TABLES in {schema} from {role_name}"
 
     def test_drop_readonly_role_is_noop_when_role_missing(self, tenant_membership):
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -256,8 +244,6 @@ class TestSchemaManagerRoleTeardown:
         """If DROP SCHEMA succeeds but role cleanup raises, teardown() should log and
         return successfully — the physical schema is already gone, so failing here
         would make callers incorrectly flip state back to ACTIVE."""
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -292,8 +278,6 @@ class TestSchemaManagerRoleTeardown:
     def test_teardown_reraises_when_drop_schema_fails(self, tenant_membership):
         """If DROP SCHEMA itself fails, teardown() must re-raise so the caller can
         roll the record state back to ACTIVE."""
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -318,8 +302,6 @@ class TestViewSchemaRoleCreation:
     def test_build_view_schema_creates_readonly_role_with_tenant_grants(
         self, workspace, tenant_membership
     ):
-        from apps.workspaces.models import TenantSchema
-
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="test_domain",
@@ -404,8 +386,6 @@ class _AsyncConn:
 class TestSchemaManagerAsyncTeardown:
     @pytest.mark.asyncio
     async def test_ateardown_does_not_use_drop_owned_by(self, tenant_membership):
-        from apps.workspaces.models import TenantSchema
-
         ts = await TenantSchema.objects.acreate(
             tenant=tenant_membership.tenant,
             schema_name="test_async_schema",
@@ -429,8 +409,6 @@ class TestSchemaManagerAsyncTeardown:
 
     @pytest.mark.asyncio
     async def test_ateardown_revokes_cross_schema_grants(self, workspace):
-        from apps.workspaces.models import WorkspaceViewSchema
-
         vs = await WorkspaceViewSchema.objects.acreate(
             workspace=workspace,
             schema_name="ws_aaaa1111bbbb2222",
