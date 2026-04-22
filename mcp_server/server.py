@@ -892,14 +892,14 @@ def _run_with_reload(args: argparse.Namespace) -> None:
     _configure_logging(args.verbose)
     logger.info("Watching %s for changes (reload enabled)", ", ".join(watch_dirs))
 
-    process = subprocess.Popen(cmd)
+    process = subprocess.Popen(cmd)  # noqa: S603 — cmd list built from argparse, no shell
     try:
         for changes in watch(*watch_dirs, watch_filter=lambda _, path: path.endswith(".py")):
             changed = [str(c[1]) for c in changes]
             logger.info("Detected changes in %s — restarting", ", ".join(changed))
             process.terminate()
             process.wait()
-            process = subprocess.Popen(cmd)
+            process = subprocess.Popen(cmd)  # noqa: S603 — cmd list built from argparse, no shell
     except KeyboardInterrupt:
         pass
     finally:

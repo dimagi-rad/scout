@@ -218,18 +218,14 @@ def create_artifact_tools(
             }
 
         except Exception as e:
-            logger.exception(
-                "Failed to create artifact for workspace %s: %s",
-                workspace.id,
-                str(e),
-            )
+            logger.exception("Failed to create artifact for workspace %s", workspace.id)
             return {
                 "artifact_id": None,
                 "status": "error",
                 "title": title,
                 "type": artifact_type,
                 "render_url": None,
-                "message": f"Failed to create artifact: {str(e)}",
+                "message": f"Failed to create artifact: {e!s}",
             }
 
     @tool(args_schema=UpdateArtifactInput)
@@ -337,10 +333,7 @@ def create_artifact_tools(
 
         except Exception as e:
             logger.exception(
-                "Failed to update artifact %s for workspace %s: %s",
-                artifact_id,
-                workspace.id,
-                str(e),
+                "Failed to update artifact %s for workspace %s", artifact_id, workspace.id
             )
             return {
                 "artifact_id": None,
@@ -349,7 +342,7 @@ def create_artifact_tools(
                 "version": None,
                 "title": None,
                 "render_url": None,
-                "message": f"Failed to update artifact: {str(e)}",
+                "message": f"Failed to update artifact: {e!s}",
             }
 
     # Set tool names explicitly
@@ -360,6 +353,6 @@ def create_artifact_tools(
 
 
 __all__ = [
-    "create_artifact_tools",
     "VALID_ARTIFACT_TYPES",
+    "create_artifact_tools",
 ]

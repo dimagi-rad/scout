@@ -52,10 +52,7 @@ def _sse(chunk: dict) -> str:
 
 def _tool_content_to_str(output: Any) -> str:
     """Convert tool output to a readable string for frontend display."""
-    if isinstance(output, ToolMessage):
-        content = output.content
-    else:
-        content = output
+    content = output.content if isinstance(output, ToolMessage) else output
     if isinstance(content, str):
         return _try_pretty_json(content)
     if isinstance(content, list):

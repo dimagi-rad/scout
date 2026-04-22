@@ -238,14 +238,10 @@ def create_save_learning_tool(workspace: Workspace, user: User):
             }
 
         except Exception as e:
-            logger.exception(
-                "Failed to save learning for workspace %s: %s",
-                workspace.id,
-                str(e),
-            )
+            logger.exception("Failed to save learning for workspace %s", workspace.id)
             return {
                 "status": "error",
-                "message": f"Failed to save learning: {str(e)}",
+                "message": f"Failed to save learning: {e!s}",
                 "learning_id": None,
                 "tables_affected": [],
             }
@@ -257,6 +253,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
 
 
 __all__ = [
-    "create_save_learning_tool",
     "VALID_CATEGORIES",
+    "create_save_learning_tool",
 ]

@@ -13,7 +13,7 @@ class CommCareConnectOAuth2Adapter(OAuth2Adapter):
 
     provider_id = "commcare_connect"
 
-    access_token_url = "https://connect.dimagi.com/o/token/"
+    access_token_url = "https://connect.dimagi.com/o/token/"  # noqa: S105 — OAuth endpoint URL, not a credential
     authorize_url = "https://connect.dimagi.com/o/authorize/"
     profile_url = "https://connect.dimagi.com/api/users/me/"
 

@@ -83,7 +83,7 @@ def run_transformation_pipeline(
         run.save(update_fields=["status", "completed_at"])
 
     except Exception as e:
-        logger.error("Transformation pipeline failed: %s", e)
+        logger.exception("Transformation pipeline failed")
         run.status = TransformationRunStatus.FAILED
         run.completed_at = datetime.now(UTC)
         run.error_message = str(e)

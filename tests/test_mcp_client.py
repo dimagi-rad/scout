@@ -47,13 +47,15 @@ class TestMCPClient:
         mock_client = AsyncMock()
         mock_client.get_tools.return_value = []
 
-        with patch(
-            "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
-        ) as MockCls:
-            with patch.object(mod, "settings") as mock_settings:
-                mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
-                await mod.get_mcp_tools()
-                await mod.get_mcp_tools()
+        with (
+            patch(
+                "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
+            ) as MockCls,
+            patch.object(mod, "settings") as mock_settings,
+        ):
+            mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
+            await mod.get_mcp_tools()
+            await mod.get_mcp_tools()
 
         assert MockCls.call_count == 2
         mod.reset_circuit_breaker()
@@ -73,12 +75,14 @@ class TestMCPClient:
         async def my_callback(progress, total, message, context):
             pass
 
-        with patch(
-            "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
-        ) as MockCls:
-            with patch.object(mod, "settings") as mock_settings:
-                mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
-                await mod.get_mcp_tools(on_progress=my_callback)
+        with (
+            patch(
+                "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
+            ) as MockCls,
+            patch.object(mod, "settings") as mock_settings,
+        ):
+            mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
+            await mod.get_mcp_tools(on_progress=my_callback)
 
         _, kwargs = MockCls.call_args
         assert isinstance(kwargs.get("callbacks"), Callbacks)
@@ -95,12 +99,14 @@ class TestMCPClient:
         mock_client = AsyncMock()
         mock_client.get_tools.return_value = []
 
-        with patch(
-            "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
-        ) as MockCls:
-            with patch.object(mod, "settings") as mock_settings:
-                mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
-                await mod.get_mcp_tools()
+        with (
+            patch(
+                "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
+            ) as MockCls,
+            patch.object(mod, "settings") as mock_settings,
+        ):
+            mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
+            await mod.get_mcp_tools()
 
         _, kwargs = MockCls.call_args
         assert kwargs.get("callbacks") is None

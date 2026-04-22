@@ -259,7 +259,7 @@ class WorkspaceMemberListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -310,12 +310,15 @@ class WorkspaceMemberDetailView(APIView):
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Prevent demoting the last manager
-        if target.role == WorkspaceRole.MANAGE and new_role != WorkspaceRole.MANAGE:
-            if _is_last_manager(workspace, target):
-                return Response(
-                    {"error": "Cannot demote the last manager of the workspace."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        if (
+            target.role == WorkspaceRole.MANAGE
+            and new_role != WorkspaceRole.MANAGE
+            and _is_last_manager(workspace, target)
+        ):
+            return Response(
+                {"error": "Cannot demote the last manager of the workspace."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         target.role = new_role
         target.save(update_fields=["role"])
@@ -347,7 +350,7 @@ class WorkspaceMemberDetailView(APIView):
 
         # Delete the member's threads in this workspace
         from apps.chat.models import (
-            Thread,  # noqa: PLC0415 — avoids circular import at module level
+            Thread,
         )
 
         Thread.objects.filter(workspace=workspace, user=target.user).delete()
@@ -365,7 +368,7 @@ class WorkspaceTenantView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 

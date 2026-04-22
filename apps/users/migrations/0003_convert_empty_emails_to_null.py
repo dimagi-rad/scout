@@ -7,7 +7,6 @@ def convert_empty_emails_to_null(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("users", "0002_allow_null_email"),
     ]

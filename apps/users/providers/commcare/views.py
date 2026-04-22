@@ -34,7 +34,7 @@ class CommCareOAuth2Adapter(OAuth2Adapter):
 
     # CommCare OAuth endpoints
     # See: https://confluence.dimagi.com/display/commcarepublic/CommCare+HQ+APIs
-    access_token_url = "https://www.commcarehq.org/oauth/token/"
+    access_token_url = "https://www.commcarehq.org/oauth/token/"  # noqa: S105 — OAuth endpoint URL, not a credential
     authorize_url = "https://www.commcarehq.org/oauth/authorize/"
     profile_url = "https://www.commcarehq.org/api/v0.5/identity/"
 

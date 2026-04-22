@@ -234,7 +234,7 @@ class DataDictionaryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -377,7 +377,7 @@ class RefreshStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 
@@ -466,7 +466,7 @@ class TableDetailView(APIView):
         return entry
 
     def get(self, request, workspace_id, qualified_name):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+        workspace, _membership, err = resolve_workspace(request, workspace_id)
         if err:
             return err
 

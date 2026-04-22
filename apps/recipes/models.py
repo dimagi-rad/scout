@@ -101,7 +101,7 @@ class Recipe(models.Model):
     )
 
     objects = RecipeSoftDeleteManager()
-    all_objects = models.Manager()
+    all_objects = models.Manager()  # noqa: DJ012 — ruff misclassifies Manager() as a field
 
     class Meta:
         ordering = ["-updated_at"]
@@ -110,15 +110,15 @@ class Recipe(models.Model):
             models.Index(fields=["workspace", "created_by"]),
         ]
 
+    def __str__(self):
+        return f"{self.name} ({self.workspace})"
+
     def save(self, *args, **kwargs):
         if self.is_public and not self.share_token:
             self.share_token = secrets.token_urlsafe(32)
         elif not self.is_public:
             self.share_token = None
         super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.name} ({self.workspace})"
 
     def soft_delete(self, deleted_by) -> None:
         from django.utils import timezone
@@ -165,9 +165,8 @@ class Recipe(models.Model):
         # Check for missing required variables (those without defaults)
         for var_def in self.variables:
             var_name = var_def.get("name")
-            if var_name and var_name not in provided_vars:
-                if "default" not in var_def:
-                    errors.append(f"Missing required variable: {var_name}")
+            if var_name and var_name not in provided_vars and "default" not in var_def:
+                errors.append(f"Missing required variable: {var_name}")
 
         # Check for unknown variables
         unknown = provided_vars - required_vars
@@ -382,15 +381,15 @@ class RecipeRun(models.Model):
             models.Index(fields=["status"]),
         ]
 
+    def __str__(self):
+        return f"Run of {self.recipe.name} ({self.status})"
+
     def save(self, *args, **kwargs):
         if self.is_public and not self.share_token:
             self.share_token = secrets.token_urlsafe(32)
         elif not self.is_public:
             self.share_token = None
         super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"Run of {self.recipe.name} ({self.status})"
 
     @property
     def duration_seconds(self) -> float | None:

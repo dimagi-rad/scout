@@ -31,9 +31,8 @@ def test_base_loader_strips_trailing_slash_from_base_url():
 def test_get_raises_auth_error_on_401():
     loader = _make_loader()
     resp = MagicMock(status_code=401)
-    with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(OCSAuthError):
-            loader._get("https://ocs.example/api/experiments/")
+    with patch.object(loader._session, "get", return_value=resp), pytest.raises(OCSAuthError):
+        loader._get("https://ocs.example/api/experiments/")
 
 
 def test_paginate_follows_next_cursor():
@@ -55,6 +54,5 @@ def test_paginate_follows_next_cursor():
 def test_paginate_raises_auth_error_on_403():
     loader = _make_loader()
     resp = MagicMock(status_code=403)
-    with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(OCSAuthError):
-            list(loader._paginate("https://ocs.example/api/sessions/"))
+    with patch.object(loader._session, "get", return_value=resp), pytest.raises(OCSAuthError):
+        list(loader._paginate("https://ocs.example/api/sessions/"))

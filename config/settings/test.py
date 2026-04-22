@@ -2,7 +2,7 @@
 Django test settings for Scout data agent platform.
 """
 
-from .base import *  # noqa: F401, F403
+from .base import *
 
 DEBUG = False
 

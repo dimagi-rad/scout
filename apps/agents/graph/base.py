@@ -86,7 +86,9 @@ def _system_prompt_cache_key(workspace, user) -> str:
     lookup to the specific user. Includes workspace.system_prompt hash
     so edits invalidate immediately.
     """
-    prompt_hash = hashlib.md5((workspace.system_prompt or "").encode()).hexdigest()[:8]
+    prompt_hash = hashlib.md5(
+        (workspace.system_prompt or "").encode(), usedforsecurity=False
+    ).hexdigest()[:8]
     user_id = getattr(user, "id", "anon")
     return f"{workspace.id}:{user_id}:{prompt_hash}"
 
@@ -300,7 +302,7 @@ def _make_injecting_tool_node(
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
-            messages = messages[:-1] + [modified_msg]
+            messages = [*messages[:-1], modified_msg]
 
         return await base_tool_node.ainvoke({"messages": messages})
 
@@ -367,7 +369,7 @@ async def build_agent_graph(
         state_messages = list(state["messages"])
         # Filter out any prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
-        messages = [SystemMessage(content=system_prompt)] + state_messages
+        messages = [SystemMessage(content=system_prompt), *state_messages]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 

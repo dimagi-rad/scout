@@ -130,7 +130,7 @@ class Artifact(models.Model):
     )
 
     objects = SoftDeleteManager()
-    all_objects = models.Manager()
+    all_objects = models.Manager()  # noqa: DJ012 — ruff misclassifies Manager() as a field
 
     class Meta:
         ordering = ["-created_at"]

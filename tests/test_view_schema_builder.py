@@ -130,13 +130,9 @@ def test_build_view_schema_no_union_all_no_tenant_column(
     c = conn.cursor()
     try:
         c.execute("CREATE SCHEMA IF NOT EXISTS build_domain_a_no_union")
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS build_domain_a_no_union.forms (id TEXT, data TEXT)"
-        )
+        c.execute("CREATE TABLE IF NOT EXISTS build_domain_a_no_union.forms (id TEXT, data TEXT)")
         c.execute("CREATE SCHEMA IF NOT EXISTS build_domain_b_no_union")
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS build_domain_b_no_union.forms (id TEXT, data TEXT)"
-        )
+        c.execute("CREATE TABLE IF NOT EXISTS build_domain_b_no_union.forms (id TEXT, data TEXT)")
     finally:
         c.close()
 
@@ -366,20 +362,22 @@ def test_build_view_schema_bulk_fetches_tenant_schemas(workspace, tenant):
         tenant=tenant, schema_name="test_domain_bulk", state=SchemaState.ACTIVE
     )
     try:
-        with CaptureQueriesContext(connection) as ctx:
-            with patch(
+        with (
+            CaptureQueriesContext(connection) as ctx,
+            patch(
                 "apps.workspaces.services.schema_manager.get_managed_db_connection"
-            ) as mock_conn_fn:
-                mock_cursor = MagicMock()
-                mock_cursor.fetchall.return_value = []
-                mock_conn = MagicMock()
-                mock_conn.closed = False
-                mock_conn.cursor.return_value = mock_cursor
-                mock_conn_fn.return_value = mock_conn
-                try:
-                    SchemaManager().build_view_schema(workspace)
-                except Exception:
-                    pass  # may raise if no DB — we only care about query count
+            ) as mock_conn_fn,
+        ):
+            mock_cursor = MagicMock()
+            mock_cursor.fetchall.return_value = []
+            mock_conn = MagicMock()
+            mock_conn.closed = False
+            mock_conn.cursor.return_value = mock_cursor
+            mock_conn_fn.return_value = mock_conn
+            try:
+                SchemaManager().build_view_schema(workspace)
+            except Exception:
+                pass  # may raise if no DB — we only care about query count
 
         tenant_schema_queries = [
             q

@@ -110,11 +110,10 @@ class TestCommCareMetadataLoader:
         mock_resp = MagicMock()
         mock_resp.status_code = 401
 
-        with self._mock_session(mock_resp):
-            with pytest.raises(CommCareAuthError):
-                CommCareMetadataLoader(
-                    domain="dimagi", credential={"type": "api_key", "value": "bad"}
-                ).load()
+        with self._mock_session(mock_resp), pytest.raises(CommCareAuthError):
+            CommCareMetadataLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "bad"}
+            ).load()
 
     def test_paginates_apps(self):
         from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader

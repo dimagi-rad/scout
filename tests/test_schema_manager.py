@@ -289,12 +289,14 @@ class TestSchemaManagerRoleTeardown:
         mock_conn.cursor.return_value = mock_cursor
         mock_cursor.execute.side_effect = RuntimeError("boom")
 
-        with patch(
-            "apps.workspaces.services.schema_manager.get_managed_db_connection",
-            return_value=mock_conn,
+        with (
+            patch(
+                "apps.workspaces.services.schema_manager.get_managed_db_connection",
+                return_value=mock_conn,
+            ),
+            pytest.raises(RuntimeError),
         ):
-            with pytest.raises(RuntimeError):
-                SchemaManager().teardown(ts)
+            SchemaManager().teardown(ts)
 
 
 @pytest.mark.django_db

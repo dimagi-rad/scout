@@ -77,6 +77,7 @@ class TestFrontendAssets:
         assert "<script" in html, "No <script> tags in index.html"
 
         from urllib.parse import urlparse
+
         path = urlparse(frontend_url).path
         if path and path != "/":
             assert f'src="{path}' in html or f"src='{path}" in html or f'href="{path}' in html, (
@@ -93,6 +94,7 @@ class TestFrontendAssets:
         for js_url in js_urls:
             if js_url.startswith("/"):
                 from urllib.parse import urlparse
+
                 parsed = urlparse(frontend_url)
                 asset_url = f"{parsed.scheme}://{parsed.netloc}{js_url}"
             elif js_url.startswith("http"):
@@ -100,7 +102,9 @@ class TestFrontendAssets:
             else:
                 asset_url = f"{frontend_url}/{js_url}"
             asset_resp = session.get(asset_url, timeout=10)
-            assert asset_resp.status_code == 200, f"JS asset {js_url} returned {asset_resp.status_code}"
+            assert asset_resp.status_code == 200, (
+                f"JS asset {js_url} returned {asset_resp.status_code}"
+            )
 
     def test_css_assets_load(self, frontend_url, session):
         resp = session.get(f"{frontend_url}/", timeout=10)
@@ -111,12 +115,15 @@ class TestFrontendAssets:
         for css_url in css_urls:
             if css_url.startswith("/"):
                 from urllib.parse import urlparse
+
                 parsed = urlparse(frontend_url)
                 asset_url = f"{parsed.scheme}://{parsed.netloc}{css_url}"
             else:
                 asset_url = css_url
             asset_resp = session.get(asset_url, timeout=10)
-            assert asset_resp.status_code == 200, f"CSS asset {css_url} returned {asset_resp.status_code}"
+            assert asset_resp.status_code == 200, (
+                f"CSS asset {css_url} returned {asset_resp.status_code}"
+            )
 
 
 # ── SPA Routing ──────────────────────────────────────────────────────────────
@@ -124,8 +131,16 @@ class TestFrontendAssets:
 
 @pytest.mark.smoke
 class TestSPARouting:
-    SPA_ROUTES = ["/", "/chat", "/artifacts", "/knowledge", "/recipes",
-                  "/data-dictionary", "/settings/connections", "/workspaces"]
+    SPA_ROUTES = [
+        "/",
+        "/chat",
+        "/artifacts",
+        "/knowledge",
+        "/recipes",
+        "/data-dictionary",
+        "/settings/connections",
+        "/workspaces",
+    ]
 
     @pytest.mark.parametrize("route", SPA_ROUTES)
     def test_spa_route_returns_index_html(self, frontend_url, session, route):
@@ -165,6 +180,7 @@ class TestAPIEndpoints:
         resp = session.get(f"{api_url}/api/auth/providers/", timeout=10)
         assert resp.status_code == 200
         from urllib.parse import urlparse
+
         base_path = urlparse(api_url).path
         if not base_path or base_path == "/":
             pytest.skip("No sub-path deployment to test")

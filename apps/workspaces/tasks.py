@@ -27,7 +27,7 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     try:
         new_schema = TenantSchema.objects.select_related("tenant").get(id=schema_id)
     except TenantSchema.DoesNotExist:
-        logger.error("refresh_tenant_schema: schema %s not found", schema_id)
+        logger.exception("refresh_tenant_schema: schema %s not found", schema_id)
         return {"error": "Schema not found"}
 
     try:
@@ -135,7 +135,7 @@ def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         workspace = Workspace.objects.prefetch_related("tenants").get(id=workspace_id)
     except Workspace.DoesNotExist:
-        logger.error("rebuild_workspace_view_schema: workspace %s not found", workspace_id)
+        logger.exception("rebuild_workspace_view_schema: workspace %s not found", workspace_id)
         return {"error": "Workspace not found"}
 
     try:
@@ -161,7 +161,7 @@ def teardown_view_schema_task(view_schema_id: str) -> None:
     try:
         vs = WorkspaceViewSchema.objects.get(id=view_schema_id)
     except WorkspaceViewSchema.DoesNotExist:
-        logger.error("teardown_view_schema_task: view schema %s not found", view_schema_id)
+        logger.exception("teardown_view_schema_task: view schema %s not found", view_schema_id)
         return
 
     try:
@@ -182,7 +182,7 @@ def teardown_schema(schema_id: str) -> None:
     try:
         schema = TenantSchema.objects.get(id=schema_id)
     except TenantSchema.DoesNotExist:
-        logger.error("teardown_schema: schema %s not found", schema_id)
+        logger.exception("teardown_schema: schema %s not found", schema_id)
         return
 
     try:

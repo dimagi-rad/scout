@@ -234,17 +234,13 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
             }
 
         except Exception as e:
-            logger.exception(
-                "Failed to create recipe for workspace %s: %s",
-                workspace.id,
-                str(e),
-            )
+            logger.exception("Failed to create recipe for workspace %s", workspace.id)
             return {
                 "recipe_id": None,
                 "name": name,
                 "status": "error",
                 "variable_names": [],
-                "message": f"Failed to create recipe: {str(e)}",
+                "message": f"Failed to create recipe: {e!s}",
             }
 
     # Set tool name explicitly
@@ -254,6 +250,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
 
 
 __all__ = [
-    "create_recipe_tool",
     "VALID_VARIABLE_TYPES",
+    "create_recipe_tool",
 ]

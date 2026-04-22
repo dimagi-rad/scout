@@ -11,7 +11,7 @@ import environ
 
 env = environ.Env()
 
-from .production import *  # noqa: F401, F403
+from .production import *
 
 # ALB terminates TLS, so don't redirect HTTP → HTTPS at Django level
 SECURE_SSL_REDIRECT = False

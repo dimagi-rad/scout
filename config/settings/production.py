@@ -6,7 +6,7 @@ import environ
 
 env = environ.Env()
 
-from .base import *  # noqa: F401, F403
+from .base import *
 
 DEBUG = False
 
@@ -20,12 +20,12 @@ SESSION_COOKIE_SECURE = True
 # When Scout is embedded in a cross-origin host (EMBED_ALLOWED_ORIGINS is set),
 # the session + CSRF cookies must use SameSite=None so they're sent on iframe
 # requests. Safe because Secure=True is already enforced above.
-if EMBED_ALLOWED_ORIGINS:  # noqa: F405
+if EMBED_ALLOWED_ORIGINS:
     SESSION_COOKIE_SAMESITE = "None"
     CSRF_COOKIE_SAMESITE = "None"
 
 # HTTPS
-SECURE_SSL_REDIRECT = env("SECURE_SSL_REDIRECT", default=True)  # noqa: F405
+SECURE_SSL_REDIRECT = env("SECURE_SSL_REDIRECT", default=True)
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # HSTS

@@ -166,6 +166,9 @@ class WorkspaceTenant(models.Model):
     class Meta:
         unique_together = [["workspace", "tenant"]]
 
+    def __str__(self):
+        return f"{self.workspace} ↔ {self.tenant}"
+
 
 class WorkspaceMembership(models.Model):
     """A user's membership of a workspace with an assigned role."""

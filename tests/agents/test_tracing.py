@@ -1,4 +1,5 @@
 """Tests for Langfuse tracing helper."""
+
 import pytest
 
 

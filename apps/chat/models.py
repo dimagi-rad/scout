@@ -34,6 +34,9 @@ class Thread(models.Model):
         ]
         ordering = ["-updated_at"]
 
+    def __str__(self):
+        return f"{self.title} ({self.id})"
+
     def save(self, *args, **kwargs):
         # Maintain the is_shared ↔ share_token invariant.
         # Always call save() (not update()) to toggle is_shared so this runs.
@@ -42,6 +45,3 @@ class Thread(models.Model):
         elif not self.is_shared:
             self.share_token = None
         super().save(*args, **kwargs)
-
-    def __str__(self):
-        return f"{self.title} ({self.id})"

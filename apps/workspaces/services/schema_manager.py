@@ -6,6 +6,7 @@ Creates and tears down tenant-scoped PostgreSQL schemas.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import uuid
@@ -401,42 +402,40 @@ class SchemaManager:
 
         Role cleanup is best-effort — see ``teardown`` for rationale.
         """
-        async with await aget_managed_db_connection() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(
-                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                        psycopg.sql.Identifier(tenant_schema.schema_name)
-                    )
+        async with await aget_managed_db_connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
-                try:
-                    await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
-                except Exception:
-                    logger.exception(
-                        "ateardown: dropping readonly role for schema '%s' failed; "
-                        "physical schema was dropped, role may be dangling",
-                        tenant_schema.schema_name,
-                    )
+            )
+            try:
+                await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
+            except Exception:
+                logger.exception(
+                    "ateardown: dropping readonly role for schema '%s' failed; "
+                    "physical schema was dropped, role may be dangling",
+                    tenant_schema.schema_name,
+                )
 
     async def ateardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
         """Async version of teardown_view_schema — drop the physical PostgreSQL schema.
 
         Role cleanup is best-effort — see ``teardown`` for rationale.
         """
-        async with await aget_managed_db_connection() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(
-                    psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
-                        psycopg.sql.Identifier(view_schema.schema_name)
-                    )
+        async with await aget_managed_db_connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(view_schema.schema_name)
                 )
-                try:
-                    await self._adrop_readonly_role(cursor, view_schema.schema_name)
-                except Exception:
-                    logger.exception(
-                        "ateardown_view_schema: dropping readonly role for '%s' failed; "
-                        "physical schema was dropped, role may be dangling",
-                        view_schema.schema_name,
-                    )
+            )
+            try:
+                await self._adrop_readonly_role(cursor, view_schema.schema_name)
+            except Exception:
+                logger.exception(
+                    "ateardown_view_schema: dropping readonly role for '%s' failed; "
+                    "physical schema was dropped, role may be dangling",
+                    view_schema.schema_name,
+                )
 
     # SQL used by both sync and async role-teardown paths. Finds schemas on
     # which the role holds direct ACL entries — schema-level grants (e.g.
@@ -526,14 +525,13 @@ class SchemaManager:
             (role_name,),
         )
         if not cursor.fetchone():
-            try:
+            # Race condition: another process may create the role between check and create
+            with contextlib.suppress(psycopg.errors.DuplicateObject):
                 cursor.execute(
                     psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
                         psycopg.sql.Identifier(role_name)
                     )
                 )
-            except psycopg.errors.DuplicateObject:
-                pass  # Race condition: another process created it between check and create
         cursor.execute(
             psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
                 psycopg.sql.Identifier(schema_name),
