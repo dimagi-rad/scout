@@ -167,6 +167,11 @@ class SchemaManager:
 
         Only performs the physical DROP SCHEMA — callers are responsible for
         updating the model state (EXPIRED or FAILED) after this returns.
+
+        Role cleanup is best-effort: once DROP SCHEMA has succeeded the schema
+        is gone, so a later failure in ``_drop_readonly_role`` must not surface
+        as an exception (callers would otherwise incorrectly flip the record
+        back to ACTIVE). A dangling role is logged for operator follow-up.
         """
         conn = get_managed_db_connection()
         try:
@@ -176,7 +181,14 @@ class SchemaManager:
                     psycopg.sql.Identifier(tenant_schema.schema_name)
                 )
             )
-            self._drop_readonly_role(cursor, tenant_schema.schema_name)
+            try:
+                self._drop_readonly_role(cursor, tenant_schema.schema_name)
+            except Exception:
+                logger.exception(
+                    "teardown: dropping readonly role for schema '%s' failed; "
+                    "physical schema was dropped, role may be dangling",
+                    tenant_schema.schema_name,
+                )
             cursor.close()
         finally:
             conn.close()
@@ -360,7 +372,10 @@ class SchemaManager:
         return vs
 
     def teardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
-        """Drop the physical PostgreSQL schema for a WorkspaceViewSchema."""
+        """Drop the physical PostgreSQL schema for a WorkspaceViewSchema.
+
+        Role cleanup is best-effort — see ``teardown`` for rationale.
+        """
         conn = get_managed_db_connection()
         try:
             cursor = conn.cursor()
@@ -369,13 +384,23 @@ class SchemaManager:
                     psycopg.sql.Identifier(view_schema.schema_name)
                 )
             )
-            self._drop_readonly_role(cursor, view_schema.schema_name)
+            try:
+                self._drop_readonly_role(cursor, view_schema.schema_name)
+            except Exception:
+                logger.exception(
+                    "teardown_view_schema: dropping readonly role for '%s' failed; "
+                    "physical schema was dropped, role may be dangling",
+                    view_schema.schema_name,
+                )
             cursor.close()
         finally:
             conn.close()
 
     async def ateardown(self, tenant_schema: TenantSchema) -> None:
-        """Async version of teardown — drop a tenant's schema from the managed database."""
+        """Async version of teardown — drop a tenant's schema from the managed database.
+
+        Role cleanup is best-effort — see ``teardown`` for rationale.
+        """
         async with await aget_managed_db_connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -383,10 +408,20 @@ class SchemaManager:
                         psycopg.sql.Identifier(tenant_schema.schema_name)
                     )
                 )
-                await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
+                try:
+                    await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
+                except Exception:
+                    logger.exception(
+                        "ateardown: dropping readonly role for schema '%s' failed; "
+                        "physical schema was dropped, role may be dangling",
+                        tenant_schema.schema_name,
+                    )
 
     async def ateardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
-        """Async version of teardown_view_schema — drop the physical PostgreSQL schema."""
+        """Async version of teardown_view_schema — drop the physical PostgreSQL schema.
+
+        Role cleanup is best-effort — see ``teardown`` for rationale.
+        """
         async with await aget_managed_db_connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -394,7 +429,25 @@ class SchemaManager:
                         psycopg.sql.Identifier(view_schema.schema_name)
                     )
                 )
-                await self._adrop_readonly_role(cursor, view_schema.schema_name)
+                try:
+                    await self._adrop_readonly_role(cursor, view_schema.schema_name)
+                except Exception:
+                    logger.exception(
+                        "ateardown_view_schema: dropping readonly role for '%s' failed; "
+                        "physical schema was dropped, role may be dangling",
+                        view_schema.schema_name,
+                    )
+
+    # SQL used by both sync and async role-teardown paths. Finds schemas on
+    # which the role holds direct ACL entries — schema-level grants (e.g.
+    # USAGE on constituent tenant schemas for view-schema _ro roles) are the
+    # only ones that survive DROP SCHEMA CASCADE and block DROP ROLE.
+    _SCHEMAS_WITH_ROLE_GRANTS_SQL = """
+        SELECT DISTINCT n.nspname
+        FROM pg_namespace n, aclexplode(n.nspacl) AS acl
+        JOIN pg_roles r ON r.oid = acl.grantee
+        WHERE r.rolname = %s
+    """
 
     async def _adrop_readonly_role(self, cursor, schema_name: str) -> None:
         """Async version of _drop_readonly_role."""
@@ -402,9 +455,21 @@ class SchemaManager:
         await cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not await cursor.fetchone():
             return
-        await cursor.execute(
-            psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
-        )
+        await cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        schemas_with_grants = [row[0] for row in await cursor.fetchall()]
+        for schema in schemas_with_grants:
+            await cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+            await cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
         await cursor.execute(
             psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
         )
@@ -412,24 +477,37 @@ class SchemaManager:
     def _drop_readonly_role(self, cursor, schema_name: str) -> None:
         """Drop the read-only PostgreSQL role for a schema.
 
-        Issues DROP OWNED BY first to revoke all privileges the role holds
-        (including cross-schema grants from view schema roles), then drops
-        the role itself.
+        Explicitly revokes grants the role still holds (schema-scoped ACLs on
+        other schemas — e.g. view-schema roles' USAGE/SELECT on constituent
+        tenant schemas) and then drops the role.
+
+        We avoid ``DROP OWNED BY`` because it requires the executing role to
+        have privileges of the target role (inheritable grant or SET ROLE
+        capability) — a prerequisite Scout's managed-DB user does not reliably
+        hold for roles created earlier or by a different operator. Explicit
+        REVOKE works as long as the current user is the grantor (which it is,
+        since it issued the original GRANTs in ``_create_readonly_role`` and
+        ``build_view_schema``).
         """
         role_name = readonly_role_name(schema_name)
-        # Check if role exists before DROP OWNED BY (which errors on missing roles)
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not cursor.fetchone():
             return
-        # DROP OWNED BY revokes all privileges granted TO this role (e.g. USAGE
-        # and SELECT on constituent tenant schemas for view schema roles). It does
-        # NOT drop or modify the tenant schemas themselves — only the grants that
-        # this specific role holds. Tenant schemas and their own _ro roles are
-        # unaffected. This is required because PostgreSQL refuses to DROP ROLE
-        # while the role still holds any privileges.
-        cursor.execute(
-            psycopg.sql.SQL("DROP OWNED BY {}").format(psycopg.sql.Identifier(role_name))
-        )
+        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        schemas_with_grants = [row[0] for row in cursor.fetchall()]
+        for schema in schemas_with_grants:
+            cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+            cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
         cursor.execute(
             psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
         )

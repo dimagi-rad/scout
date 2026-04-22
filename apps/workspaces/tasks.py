@@ -188,7 +188,11 @@ def teardown_schema(schema_id: str) -> None:
     try:
         SchemaManager().teardown(schema)
     except Exception:
-        schema.state = SchemaState.ACTIVE  # rollback: physical schema still exists
+        # teardown() only raises when DROP SCHEMA itself fails — role-cleanup
+        # failures are logged and swallowed there — so reaching this branch
+        # means the physical schema is still present and the record should go
+        # back to ACTIVE rather than being stranded in TEARDOWN.
+        schema.state = SchemaState.ACTIVE
         schema.save(update_fields=["state"])
         raise
     try:
