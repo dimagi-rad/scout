@@ -25,7 +25,7 @@ export default defineConfig({
         : {
             webServer: [
               {
-                command: "cd .. && uv run uvicorn config.asgi:application --port 8000",
+                command: "cd .. && uv run uvicorn config.asgi:application --port 8000 --lifespan off",
                 port: 8000,
                 reuseExistingServer: true,
                 timeout: 30_000,

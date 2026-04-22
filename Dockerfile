@@ -41,4 +41,4 @@ USER appuser
 ENTRYPOINT ["./docker-entrypoint.sh"]
 
 # Default command
-CMD ["uvicorn", "config.asgi:application", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "config.asgi:application", "--host", "0.0.0.0", "--port", "8000", "--lifespan", "off"]
