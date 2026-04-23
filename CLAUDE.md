@@ -84,7 +84,7 @@ Optional:
 
 ## Code style
 
-- **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B)
+- **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B/ASYNC/DJ/S/SIM/TRY/RUF/PTH)
 - **Imports**: Always at module level, never inside function bodies. Exceptions: optional dependencies guarded by `try/except ImportError`, and code that must run before `django.setup()`. When moving inline imports to module level, update any `mock.patch()` targets in tests to point at the consuming module (where the name is used), not the source module.
 - **Frontend**: ESLint with typescript-eslint + react-hooks plugin
 - **No Prettier** configured for frontend

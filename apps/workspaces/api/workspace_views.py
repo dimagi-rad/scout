@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     SchemaState,
@@ -349,10 +350,6 @@ class WorkspaceMemberDetailView(APIView):
             )
 
         # Delete the member's threads in this workspace
-        from apps.chat.models import (
-            Thread,
-        )
-
         Thread.objects.filter(workspace=workspace, user=target.user).delete()
 
         target.delete()
