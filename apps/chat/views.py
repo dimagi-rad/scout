@@ -23,6 +23,7 @@ from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
     _resolve_workspace_and_membership,
     async_login_required,
+    repair_dangling_tool_calls,
 )
 from apps.chat.models import Thread
 from apps.chat.rate_limiting import chat_rate_limit
@@ -184,19 +185,27 @@ async def chat_view(request):
                 {"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500
             )
 
-    # Build LangGraph input state
-    from langchain_core.messages import HumanMessage
-
-    input_state = {
-        "messages": [HumanMessage(content=user_content)],
-        "workspace_id": str(workspace.id),
-        "user_id": str(user.id),
-        "user_role": "analyst",
-    }
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 50,
         "oauth_tokens": oauth_tokens,
+    }
+
+    # Repair any dangling tool_use calls from a previous interrupted turn.
+    # If the user sent a new message while a tool was still in-flight, the
+    # checkpoint will have an AIMessage with tool_calls but no matching
+    # ToolMessages. Anthropic rejects such sequences with HTTP 400, so we
+    # inject synthetic ToolMessages before appending the new HumanMessage.
+    dangling_tool_results = await repair_dangling_tool_calls(agent, config)
+
+    # Build LangGraph input state
+    from langchain_core.messages import HumanMessage
+
+    input_state = {
+        "messages": [*dangling_tool_results, HumanMessage(content=user_content)],
+        "workspace_id": str(workspace.id),
+        "user_id": str(user.id),
+        "user_role": "analyst",
     }
 
     # Attach Langfuse tracing callback if configured
