@@ -185,6 +185,12 @@ async def chat_view(request):
                 {"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500
             )
 
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 50,
+        "oauth_tokens": oauth_tokens,
+    }
+
     # Repair any dangling tool_use calls from a previous interrupted turn.
     # If the user sent a new message while a tool was still in-flight, the
     # checkpoint will have an AIMessage with tool_calls but no matching
@@ -195,17 +201,11 @@ async def chat_view(request):
     # Build LangGraph input state
     from langchain_core.messages import HumanMessage
 
-    new_messages = dangling_tool_results + [HumanMessage(content=user_content)]
     input_state = {
-        "messages": new_messages,
+        "messages": [*dangling_tool_results, HumanMessage(content=user_content)],
         "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "user_role": "analyst",
-    }
-    config = {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": 50,
-        "oauth_tokens": oauth_tokens,
     }
 
     # Attach Langfuse tracing callback if configured

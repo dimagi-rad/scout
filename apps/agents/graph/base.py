@@ -26,7 +26,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -366,8 +366,6 @@ async def build_agent_graph(
         This node prepends the system prompt to the messages and invokes
         the LLM. The LLM may respond with text, tool calls, or both.
         """
-        from langchain_core.messages import ToolMessage as _ToolMessage
-
         state_messages = list(state["messages"])
         # Filter out any prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
@@ -376,9 +374,7 @@ async def build_agent_graph(
         # by matching ToolMessages. If not, inject synthetic error ToolMessages
         # so Anthropic never receives an invalid tool_use/tool_result sequence.
         answered_ids: set[str] = {
-            m.tool_call_id
-            for m in state_messages
-            if isinstance(m, _ToolMessage) and m.tool_call_id
+            m.tool_call_id for m in state_messages if isinstance(m, ToolMessage) and m.tool_call_id
         }
         repaired: list = []
         for msg in state_messages:
@@ -394,7 +390,7 @@ async def build_agent_graph(
                             tc.get("name", "unknown"),
                         )
                         repaired.append(
-                            _ToolMessage(
+                            ToolMessage(
                                 content=(
                                     "Tool call was interrupted — the user sent a new message "
                                     "before this tool completed."
