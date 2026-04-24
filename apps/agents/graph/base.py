@@ -366,10 +366,46 @@ async def build_agent_graph(
         This node prepends the system prompt to the messages and invokes
         the LLM. The LLM may respond with text, tool calls, or both.
         """
+        from langchain_core.messages import ToolMessage as _ToolMessage
+
         state_messages = list(state["messages"])
         # Filter out any prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
-        messages = [SystemMessage(content=system_prompt), *state_messages]
+
+        # Defensive guard: ensure every AIMessage with tool_calls is followed
+        # by matching ToolMessages. If not, inject synthetic error ToolMessages
+        # so Anthropic never receives an invalid tool_use/tool_result sequence.
+        answered_ids: set[str] = {
+            m.tool_call_id
+            for m in state_messages
+            if isinstance(m, _ToolMessage) and m.tool_call_id
+        }
+        repaired: list = []
+        for msg in state_messages:
+            repaired.append(msg)
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id")
+                    if tc_id and tc_id not in answered_ids:
+                        logger.warning(
+                            "agent_node: found dangling tool_call_id=%s tool_name=%s — "
+                            "injecting synthetic tool_result to satisfy Anthropic protocol",
+                            tc_id,
+                            tc.get("name", "unknown"),
+                        )
+                        repaired.append(
+                            _ToolMessage(
+                                content=(
+                                    "Tool call was interrupted — the user sent a new message "
+                                    "before this tool completed."
+                                ),
+                                tool_call_id=tc_id,
+                                name=tc.get("name", "unknown"),
+                            )
+                        )
+                        answered_ids.add(tc_id)
+
+        messages = [SystemMessage(content=system_prompt), *repaired]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
