@@ -115,6 +115,14 @@ class TestRepairDanglingToolCalls:
         agent.aget_state = AsyncMock(side_effect=RuntimeError("db down"))
         assert await repair_dangling_tool_calls(agent, CONFIG) == []
 
+    @pytest.mark.asyncio
+    async def test_non_dict_state_values_returns_empty(self):
+        """Guard against unexpected state shapes — real LangGraph returns a
+        StateSnapshot with .values as a dict, but defensive tests may pass a
+        fully-AsyncMock'd agent where every attribute is itself a mock."""
+        agent = AsyncMock()  # children auto-expand to AsyncMock ⇒ .get returns coroutines
+        assert await repair_dangling_tool_calls(agent, CONFIG) == []
+
 
 class TestAgentNodeGuard:
     """Verify ``agent_node``'s in-memory defense against dangling tool_calls.
