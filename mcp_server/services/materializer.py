@@ -52,11 +52,33 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int, str], None]
 
 
+def provision_run(
+    tenant_membership: Any,
+    pipeline: PipelineConfig,
+) -> tuple["MaterializationRun", str]:
+    """Provision the tenant schema and create a MaterializationRun record.
+
+    Separates the synchronous "start" step from the long-running pipeline so
+    callers can obtain a run_id immediately and launch the rest in the background.
+
+    Returns:
+        (run, schema_name) tuple.
+    """
+    tenant_schema = SchemaManager().provision(tenant_membership.tenant)
+    run = MaterializationRun.objects.create(
+        tenant_schema=tenant_schema,
+        pipeline=pipeline.name,
+        state=MaterializationRun.RunState.DISCOVERING,
+    )
+    return run, tenant_schema.schema_name
+
+
 def run_pipeline(
     tenant_membership: Any,
     credential: dict[str, str],
     pipeline: PipelineConfig,
     progress_callback: ProgressCallback | None = None,
+    existing_run: "MaterializationRun | None" = None,
 ) -> dict:
     """Run a three-phase materialization pipeline.
 
@@ -88,11 +110,17 @@ def run_pipeline(
     tenant_schema = SchemaManager().provision(tenant_membership.tenant)
     schema_name = tenant_schema.schema_name
 
-    run = MaterializationRun.objects.create(
-        tenant_schema=tenant_schema,
-        pipeline=pipeline.name,
-        state=MaterializationRun.RunState.DISCOVERING,
-    )
+    if existing_run is not None:
+        # Caller pre-created the run (e.g. to obtain a run_id before launching
+        # this function in a background task). Reuse it instead of creating a
+        # duplicate record.
+        run = existing_run
+    else:
+        run = MaterializationRun.objects.create(
+            tenant_schema=tenant_schema,
+            pipeline=pipeline.name,
+            state=MaterializationRun.RunState.DISCOVERING,
+        )
 
     source_results: dict[str, dict] = {}
 

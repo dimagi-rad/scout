@@ -57,7 +57,7 @@ from mcp_server.envelope import (
 from mcp_server.loaders.commcare_base import CommCareAuthError
 from mcp_server.loaders.connect_base import ConnectAuthError
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.materializer import run_pipeline
+from mcp_server.services.materializer import provision_run, run_pipeline
 from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_get_metadata,
@@ -492,10 +492,13 @@ async def _materialize_tenant(
     pipeline_config,
     ctx: Context | None,
 ) -> dict:
-    """Run a materialization pipeline for a single TenantMembership.
+    """Start a materialization pipeline for a single TenantMembership.
 
-    Resolves credentials, builds a progress callback, and executes the pipeline.
-    Returns the pipeline result dict on success, or raises on failure.
+    Provisions the schema and creates a MaterializationRun record synchronously so
+    a run_id is available immediately, then launches the pipeline in a background
+    asyncio task so the MCP HTTP connection is not held open for the full duration.
+
+    Returns a dict with run_id and status "started" on success, or an error envelope.
     """
     tenant_id = tm.tenant.external_id
 
@@ -503,6 +506,15 @@ async def _materialize_tenant(
     credential = await aresolve_credential(tm)
     if credential is None:
         return error_response("AUTH_TOKEN_MISSING", "No credential configured for this tenant")
+
+    # ── Provision schema + create run record upfront ──────────────────────
+    # This gives us a run_id we can return immediately without waiting for the
+    # full pipeline (~60-90 s) to complete.
+    try:
+        run, schema_name = await sync_to_async(provision_run)(tm, pipeline_config)
+    except Exception:
+        logger.exception("Failed to provision run for tenant %s", tenant_id)
+        return error_response(INTERNAL_ERROR, "Failed to provision materialization run")
 
     # ── Build progress callback ───────────────────────────────────────────
     progress_callback = None
@@ -521,15 +533,33 @@ async def _materialize_tenant(
             )
             fut.add_done_callback(_on_progress_done)
 
-    # ── Run pipeline ──────────────────────────────────────────────────────
-    try:
-        return await sync_to_async(run_pipeline)(tm, credential, pipeline_config, progress_callback)
-    except (CommCareAuthError, ConnectAuthError) as e:
-        logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
-        return error_response(AUTH_TOKEN_EXPIRED, str(e))
-    except Exception:
-        logger.exception("Pipeline '%s' failed for tenant %s", pipeline_config.name, tenant_id)
-        return error_response(INTERNAL_ERROR, f"Pipeline '{pipeline_config.name}' failed")
+    # ── Launch pipeline as a fire-and-forget background task ─────────────
+    # Passing existing_run skips duplicate provisioning/run-creation inside
+    # run_pipeline. The task outlives the MCP HTTP session intentionally.
+    async def _run_in_background() -> None:
+        try:
+            await sync_to_async(run_pipeline)(
+                tm, credential, pipeline_config, progress_callback, existing_run=run
+            )
+        except (CommCareAuthError, ConnectAuthError) as e:
+            logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
+        except Exception:
+            logger.exception(
+                "Background pipeline '%s' failed for tenant %s", pipeline_config.name, tenant_id
+            )
+
+    def _log_task_result(fut: asyncio.Future) -> None:
+        if not fut.cancelled() and fut.exception() is not None:
+            logger.error(
+                "Unhandled exception in background pipeline task for tenant %s: %s",
+                tenant_id,
+                fut.exception(),
+            )
+
+    task = asyncio.create_task(_run_in_background())
+    task.add_done_callback(_log_task_result)
+
+    return {"run_id": str(run.id), "status": "started", "schema": schema_name}
 
 
 async def _resolve_workspace_memberships(workspace_id, user_id):
@@ -562,12 +592,14 @@ async def run_materialization(
     user_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
-    """Materialize data for all tenants in the workspace.
+    """Start data materialization for all tenants in the workspace.
 
-    Resolves all tenants linked to the workspace and runs the appropriate
-    materialization pipeline for each one. Creates schemas automatically
-    if they don't exist. Streams progress via MCP notifications/progress
-    when the caller provides a progressToken.
+    Resolves all tenants linked to the workspace and launches the appropriate
+    materialization pipeline for each one in the background. Creates schemas
+    automatically if they don't exist.
+
+    Returns immediately with a run_id for each tenant. Use get_materialization_status
+    with the run_id to poll for completion — pipelines typically take 30-120 seconds.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -600,10 +632,12 @@ async def run_materialization(
                 continue
 
             pipeline_config = registry.get(pipeline_name)
+            # _materialize_tenant now returns immediately with a run_id; the
+            # pipeline runs in a background asyncio task.
             result = await _materialize_tenant(tm, pipeline_config, ctx)
 
-            # _materialize_tenant returns an error envelope dict or a pipeline result dict
             if isinstance(result, dict) and not result.get("success", True):
+                # error_response envelope — provisioning failed before launch
                 results.append(
                     {
                         "tenant": tm.tenant.external_id,
@@ -616,13 +650,18 @@ async def run_materialization(
                     {
                         "tenant": tm.tenant.external_id,
                         "success": True,
-                        "result": result,
+                        "result": result,  # {"run_id": ..., "status": "started", "schema": ...}
                     }
                 )
 
-        all_succeeded = all(r["success"] for r in results)
         tc["result"] = success_response(
-            {"tenants": results, "all_succeeded": all_succeeded},
+            {
+                "tenants": results,
+                "note": (
+                    "Pipelines are running in the background. "
+                    "Call get_materialization_status with each run_id to track progress."
+                ),
+            },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )

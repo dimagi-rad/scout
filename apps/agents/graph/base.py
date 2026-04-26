@@ -164,7 +164,9 @@ async def _fetch_schema_context(tenant, user) -> str:
     if ts is None:
         return (
             "No data has been loaded yet. "
-            f'Call `run_materialization` with `pipeline="{pipeline_name}"` to load data.'
+            f'Call `run_materialization` to start loading data (pipeline: "{pipeline_name}"). '
+            "run_materialization returns immediately with a run_id — then poll "
+            "`get_materialization_status` with that run_id until the status is 'completed'."
         )
 
     if ts.state == SchemaState.MATERIALIZING:
