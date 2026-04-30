@@ -12,10 +12,13 @@ from apps.users.services.api_key_providers.base import (
     FormField,
     TenantDescriptor,
 )
+from apps.users.services.api_key_providers.registry import STRATEGIES, get_strategy
 
 __all__ = [
+    "STRATEGIES",
     "CredentialProviderStrategy",
     "CredentialVerificationError",
     "FormField",
     "TenantDescriptor",
+    "get_strategy",
 ]
