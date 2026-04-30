@@ -1,9 +1,13 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.test import Client
 
 from apps.users.models import TenantMembership
+from apps.users.services.api_key_providers import (
+    CredentialVerificationError,
+    TenantDescriptor,
+)
 from apps.users.services.tenant_verification import CommCareVerificationError
 
 
@@ -172,16 +176,19 @@ class TestTenantCredentialCreateAPI:
         client.force_login(user)
 
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            return_value={"domain": "dimagi", "username": "user@dimagi.org"},
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            return_value=[TenantDescriptor("dimagi", "dimagi")],
         ):
             response = client.post(
                 "/api/auth/tenant-credentials/",
                 data={
                     "provider": "commcare",
-                    "tenant_id": "dimagi",
-                    "tenant_name": "Dimagi",
-                    "credential": "user@dimagi.org:apikey123",
+                    "fields": {
+                        "domain": "dimagi",
+                        "username": "user@dimagi.org",
+                        "api_key": "apikey123",
+                    },
                 },
                 content_type="application/json",
             )
@@ -198,16 +205,19 @@ class TestTenantCredentialCreateAPI:
         client.force_login(user)
 
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            side_effect=CommCareVerificationError("Invalid"),
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            side_effect=CredentialVerificationError("Invalid"),
         ):
             response = client.post(
                 "/api/auth/tenant-credentials/",
                 data={
                     "provider": "commcare",
-                    "tenant_id": "victim-domain",
-                    "tenant_name": "Victim",
-                    "credential": "attacker@evil.com:badkey",
+                    "fields": {
+                        "domain": "victim-domain",
+                        "username": "attacker@evil.com",
+                        "api_key": "badkey",
+                    },
                 },
                 content_type="application/json",
             )
@@ -248,16 +258,19 @@ class TestTenantCrossAccessAPI:
         client.force_login(user)
 
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            side_effect=CommCareVerificationError("Invalid"),
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            side_effect=CredentialVerificationError("Invalid"),
         ):
             response = client.post(
                 "/api/auth/tenant-credentials/",
                 data={
                     "provider": "commcare",
-                    "tenant_id": "victim-domain",
-                    "tenant_name": "Victim",
-                    "credential": "attacker@evil.com:wrongkey",
+                    "fields": {
+                        "domain": "victim-domain",
+                        "username": "attacker@evil.com",
+                        "api_key": "wrongkey",
+                    },
                 },
                 content_type="application/json",
             )
