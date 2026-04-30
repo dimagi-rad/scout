@@ -8,7 +8,6 @@ from apps.users.services.api_key_providers import (
     CredentialVerificationError,
     TenantDescriptor,
 )
-from apps.users.services.tenant_verification import CommCareVerificationError
 
 
 def _make_membership(user, external_id="dimagi", canonical_name="Dimagi", provider="commcare"):
@@ -105,12 +104,13 @@ class TestTenantCredentialUpdateAPI:
         client = Client()
         client.force_login(user)
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            return_value={},
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_for_tenant",
+            new_callable=AsyncMock,
+            return_value=None,
         ):
             response = client.patch(
                 f"/api/auth/tenant-credentials/{tm.id}/",
-                data={"credential": "new@example.com:newkey"},
+                data={"fields": {"username": "new@example.com", "api_key": "newkey"}},
                 content_type="application/json",
             )
         assert response.status_code == 200
@@ -121,7 +121,7 @@ class TestTenantCredentialUpdateAPI:
         assert tm.credential.encrypted_credential != old_encrypted
 
     def test_patch_rejects_unverified_credential(self, user):
-        """PATCH must call verify_commcare_credential; invalid key is rejected."""
+        """PATCH must verify the new credential; invalid key is rejected."""
         from apps.users.models import TenantCredential
 
         tm = _make_membership(user)
@@ -134,12 +134,13 @@ class TestTenantCredentialUpdateAPI:
         client = Client()
         client.force_login(user)
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            side_effect=CommCareVerificationError("Bad key"),
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_for_tenant",
+            new_callable=AsyncMock,
+            side_effect=CredentialVerificationError("Bad key"),
         ):
             response = client.patch(
                 f"/api/auth/tenant-credentials/{tm.id}/",
-                data={"credential": "bad@evil.com:badkey"},
+                data={"fields": {"username": "bad@evil.com", "api_key": "badkey"}},
                 content_type="application/json",
             )
         assert response.status_code == 400
@@ -148,7 +149,7 @@ class TestTenantCredentialUpdateAPI:
         client = Client()
         response = client.patch(
             "/api/auth/tenant-credentials/00000000-0000-0000-0000-000000000000/",
-            data={"credential": "x:y"},
+            data={"fields": {"username": "x", "api_key": "y"}},
             content_type="application/json",
         )
         assert response.status_code == 401
@@ -157,10 +158,14 @@ class TestTenantCredentialUpdateAPI:
         tm = _make_membership(other_user)
         client = Client()
         client.force_login(user)
-        with patch("apps.users.views.verify_commcare_credential", return_value={}):
+        with patch(
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_for_tenant",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
             response = client.patch(
                 f"/api/auth/tenant-credentials/{tm.id}/",
-                data={"credential": "a:b"},
+                data={"fields": {"username": "a", "api_key": "b"}},
                 content_type="application/json",
             )
         assert response.status_code == 404

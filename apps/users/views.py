@@ -24,10 +24,6 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.users.services.tenant_verification import (
-    CommCareVerificationError,
-    verify_commcare_credential,
-)
 from apps.workspaces.models import Workspace
 
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
@@ -264,50 +260,60 @@ async def tenant_credential_detail_view(request, membership_id):
         await tm.adelete()  # cascades to TenantCredential
         return JsonResponse({"status": "deleted"})
 
-    # PATCH
+    # PATCH — rotate API key via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    credential = body.get("credential", "").strip()
+    fields = body.get("fields") or {}
 
-    if not credential:
-        return JsonResponse({"error": "credential is required"}, status=400)
-
-    if ":" not in credential:
-        return JsonResponse(
-            {"error": "credential must be in the format 'username:apikey'"},
-            status=400,
-        )
-    cc_username, cc_api_key = credential.split(":", 1)
-
-    # Fetch membership to get tenant domain for verification
     try:
         tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
             id=membership_id, user=user
         )
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Not found"}, status=404)
-
     if not hasattr(tm, "credential"):
         return JsonResponse({"error": "Not found"}, status=404)
 
-    try:
-        await verify_commcare_credential(
-            domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
+    strategy = STRATEGIES.get(tm.tenant.provider)
+    if strategy is None:
+        return JsonResponse(
+            {"error": f"Provider '{tm.tenant.provider}' has no API-key strategy"},
+            status=400,
         )
-    except CommCareVerificationError as e:
+
+    editable = [f for f in strategy.form_fields if f["editable_on_rotate"]]
+    missing = [
+        f["key"] for f in editable if f["required"] and not (fields.get(f["key"]) or "").strip()
+    ]
+    if missing:
+        return JsonResponse(
+            {"error": f"Missing required field(s): {', '.join(missing)}"},
+            status=400,
+        )
+
+    try:
+        await strategy.verify_for_tenant(fields, external_id=tm.tenant.external_id)
+    except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
     try:
-        encrypted = encrypt_credential(credential)
-    except ValueError as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        packed = strategy.pack_credential(fields)
+        encrypted = encrypt_credential(packed)
+    except (KeyError, ValueError) as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
     tm.credential.encrypted_credential = encrypted
     await tm.credential.asave(update_fields=["encrypted_credential"])
-    return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant.canonical_name})
+    return JsonResponse(
+        {
+            "membership_id": str(tm.id),
+            "tenant_id": tm.tenant.external_id,
+            "tenant_name": tm.tenant.canonical_name,
+        }
+    )
 
 
 @require_http_methods(["POST"])
