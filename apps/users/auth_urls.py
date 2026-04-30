@@ -12,6 +12,7 @@ from apps.users.auth_views import (
     signup_view,
 )
 from apps.users.views import (
+    api_key_providers_view,
     tenant_credential_detail_view,
     tenant_credential_list_view,
     tenant_ensure_view,
@@ -42,4 +43,5 @@ urlpatterns = [
         tenant_credential_detail_view,
         name="tenant-credential-detail",
     ),
+    path("api-key-providers/", api_key_providers_view, name="api-key-providers"),
 ]

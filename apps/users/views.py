@@ -13,6 +13,7 @@ from django.views.decorators.http import require_http_methods
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.services.api_key_providers import STRATEGIES
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -124,6 +125,22 @@ async def tenant_select_view(request):
     await tm.asave(update_fields=["last_selected_at"])
 
     return JsonResponse({"status": "ok", "tenant_id": tm.tenant.external_id})
+
+
+@require_http_methods(["GET"])
+@async_login_required
+async def api_key_providers_view(request):
+    """GET /api/auth/api-key-providers/ — list registered API-key strategies
+    so the frontend can render the Add/Edit dialog dynamically."""
+    payload = [
+        {
+            "id": strategy.provider_id,
+            "display_name": strategy.display_name,
+            "fields": list(strategy.form_fields),
+        }
+        for strategy in STRATEGIES.values()
+    ]
+    return JsonResponse(payload, safe=False)
 
 
 @require_http_methods(["GET", "POST"])
