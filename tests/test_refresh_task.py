@@ -1,6 +1,6 @@
-"""Direct tests for the refresh_tenant_schema Celery task."""
+"""Direct tests for the refresh_tenant_schema task."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -50,8 +50,11 @@ def _mock_registry(provider="commcare"):
     return registry
 
 
-@pytest.mark.django_db
-def test_refresh_task_marks_schema_active_on_success(provisioning_schema, tenant_membership_obj):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_marks_schema_active_on_success(
+    provisioning_schema, tenant_membership_obj
+):
     with (
         patch(
             "apps.workspaces.services.schema_manager.get_managed_db_connection",
@@ -69,18 +72,25 @@ def test_refresh_task_marks_schema_active_on_success(provisioning_schema, tenant
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
-        result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
+        result = await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
 
-    provisioning_schema.refresh_from_db()
+    await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.ACTIVE
     assert result["status"] == "active"
 
 
-@pytest.mark.django_db
-def test_refresh_task_schedules_old_schema_teardown(
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_schedules_old_schema_teardown(
     provisioning_schema, old_active_schema, tenant_membership_obj
 ):
-    """Old ACTIVE schemas are moved to TEARDOWN and a delayed task is scheduled."""
+    """Old ACTIVE schemas are moved to TEARDOWN and a delayed teardown is scheduled."""
+    deferrer = MagicMock()
+    deferrer.defer_async = AsyncMock(return_value=1)
+
     with (
         patch(
             "apps.workspaces.services.schema_manager.get_managed_db_connection",
@@ -95,19 +105,27 @@ def test_refresh_task_schedules_old_schema_teardown(
             return_value=_mock_registry(),
         ),
         patch("apps.workspaces.tasks.run_pipeline"),
-        patch("apps.workspaces.tasks.teardown_schema.apply_async") as mock_apply_async,
+        patch(
+            "apps.workspaces.tasks.teardown_schema.configure",
+            return_value=deferrer,
+        ) as mock_configure,
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
-        refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
+        await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
 
-    old_active_schema.refresh_from_db()
+    await old_active_schema.arefresh_from_db()
     assert old_active_schema.state == SchemaState.TEARDOWN
-    mock_apply_async.assert_called_once_with((str(old_active_schema.id),), countdown=30 * 60)
+    mock_configure.assert_called_once_with(schedule_in={"seconds": 30 * 60})
+    deferrer.defer_async.assert_awaited_once_with(schema_id=str(old_active_schema.id))
 
 
-@pytest.mark.django_db
-def test_refresh_task_marks_failed_on_schema_creation_error(
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_marks_failed_on_schema_creation_error(
     provisioning_schema, tenant_membership_obj
 ):
     with patch(
@@ -116,15 +134,21 @@ def test_refresh_task_marks_failed_on_schema_creation_error(
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
-        result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
+        result = await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
 
-    provisioning_schema.refresh_from_db()
+    await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
     assert "error" in result
 
 
-@pytest.mark.django_db
-def test_refresh_task_marks_failed_on_no_credential(provisioning_schema, tenant_membership_obj):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_marks_failed_on_no_credential(
+    provisioning_schema, tenant_membership_obj
+):
     with (
         patch(
             "apps.workspaces.services.schema_manager.get_managed_db_connection",
@@ -135,15 +159,19 @@ def test_refresh_task_marks_failed_on_no_credential(provisioning_schema, tenant_
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
-        result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
+        result = await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
 
-    provisioning_schema.refresh_from_db()
+    await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
     assert "error" in result
 
 
-@pytest.mark.django_db
-def test_refresh_task_marks_failed_on_materialization_error(
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_marks_failed_on_materialization_error(
     provisioning_schema, tenant_membership_obj
 ):
     with (
@@ -167,18 +195,23 @@ def test_refresh_task_marks_failed_on_materialization_error(
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
-        result = refresh_tenant_schema(str(provisioning_schema.id), str(tenant_membership_obj.id))
+        result = await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
 
-    provisioning_schema.refresh_from_db()
+    await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
     assert "error" in result
 
 
-@pytest.mark.django_db
-def test_refresh_task_returns_error_for_unknown_schema(tenant_membership_obj):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_returns_error_for_unknown_schema(tenant_membership_obj):
     from apps.workspaces.tasks import refresh_tenant_schema
 
-    result = refresh_tenant_schema(
-        "00000000-0000-0000-0000-000000000000", str(tenant_membership_obj.id)
+    result = await refresh_tenant_schema(
+        schema_id="00000000-0000-0000-0000-000000000000",
+        membership_id=str(tenant_membership_obj.id),
     )
     assert "error" in result
