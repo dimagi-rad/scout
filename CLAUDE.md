@@ -6,10 +6,11 @@ Self-hosted data agent platform for AI-powered database querying.
 
 ```bash
 # Backend
-docker compose up platform-db redis mcp-server  # Start dependencies
+docker compose up platform-db mcp-server  # Start dependencies
 uv run python manage.py runserver         # Django dev server (or use uvicorn below)
 uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off  # ASGI dev server
 uv run python manage.py migrate           # Run migrations
+uv run python manage.py procrastinate worker  # Run background task worker
 
 # Frontend
 cd frontend && bun install && bun dev     # Dev server on :5173
@@ -38,6 +39,7 @@ uv run ruff format .                      # Python format
 - **Frontend**: React 19 + Vite + Tailwind CSS 4 + TypeScript in `frontend/`
 - **AI**: LangGraph agent with langchain-anthropic, PostgreSQL checkpointer for conversation persistence
 - **MCP Server**: Standalone FastMCP server (`mcp_server/`) for tool-based data access (SQL execution, table metadata)
+- **Task Queue**: Procrastinate with PostgreSQL backend (no Redis required); async tasks in `apps/workspaces/tasks.py`. Run worker via `manage.py procrastinate worker`.
 - **Auth**: Session cookies (no JWT), CSRF token from `GET /api/auth/csrf/`
 - **DB encryption**: Project database credentials encrypted with Fernet (`DB_CREDENTIAL_KEY` env var)
 
@@ -80,7 +82,6 @@ Required (see `.env.example`):
 
 Optional:
 - `MCP_SERVER_URL` - MCP server URL (default: `http://localhost:8100/mcp`)
-- `REDIS_URL` - Redis connection URL for caching and Celery
 
 ## Code style
 

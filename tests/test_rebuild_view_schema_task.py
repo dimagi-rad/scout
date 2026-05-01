@@ -61,9 +61,9 @@ async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):
     from apps.workspaces.models import TenantSchema
     from apps.workspaces.tasks import rebuild_workspace_view_schema
 
-    await TenantSchema.objects.filter(
-        tenant__workspace_tenants__workspace=workspace
-    ).aupdate(state=SchemaState.EXPIRED)
+    await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=workspace).aupdate(
+        state=SchemaState.EXPIRED
+    )
 
     result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
     assert "error" in result
