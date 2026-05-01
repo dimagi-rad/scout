@@ -29,7 +29,6 @@ env:
     CSRF_TRUSTED_ORIGINS: "https://scout.dimagi.com"
     SECURE_SSL_REDIRECT: "False"
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
-    REDIS_URL: "redis://<%= ENV.fetch('SCOUT_REDIS_ENDPOINT') %>:6379/0"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60
