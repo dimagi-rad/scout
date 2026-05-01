@@ -1,9 +1,9 @@
-"""Background Celery tasks for schema lifecycle management."""
+"""Background tasks for schema lifecycle management."""
 
+import asyncio
 import logging
 from datetime import timedelta
 
-from celery import shared_task
 from django.conf import settings
 from django.utils import timezone
 
@@ -11,45 +11,49 @@ from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import resolve_credential
 from apps.workspaces.models import SchemaState, TenantSchema, Workspace, WorkspaceViewSchema
 from apps.workspaces.services.schema_manager import SchemaManager
+from config.procrastinate import app
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import run_pipeline
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task
-def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
+@app.task
+async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
 
     On success: marks state=ACTIVE, schedules teardown of old active schemas.
     On failure: drops the new schema, marks state=FAILED.
     """
     try:
-        new_schema = TenantSchema.objects.select_related("tenant").get(id=schema_id)
+        new_schema = await TenantSchema.objects.select_related("tenant").aget(id=schema_id)
     except TenantSchema.DoesNotExist:
         logger.exception("refresh_tenant_schema: schema %s not found", schema_id)
         return {"error": "Schema not found"}
 
     try:
-        membership = TenantMembership.objects.select_related("tenant", "user").get(id=membership_id)
+        membership = await TenantMembership.objects.select_related("tenant", "user").aget(
+            id=membership_id
+        )
     except TenantMembership.DoesNotExist:
         new_schema.state = SchemaState.FAILED
-        new_schema.save(update_fields=["state"])
+        await new_schema.asave(update_fields=["state"])
         return {"error": "Membership not found"}
 
     # Step 1: Create the physical schema in the managed database
+    manager = SchemaManager()
     try:
-        SchemaManager().create_physical_schema(new_schema)
+        await asyncio.to_thread(manager.create_physical_schema, new_schema)
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
         new_schema.state = SchemaState.FAILED
-        new_schema.save(update_fields=["state"])
+        await new_schema.asave(update_fields=["state"])
         return {"error": "Failed to create schema"}
 
     # Step 2: Resolve credential and run materialization pipeline
     credential = resolve_credential(membership)
     if credential is None:
-        _drop_schema_and_fail(new_schema)
+        await _drop_schema_and_fail(new_schema)
         return {"error": "No credential available"}
 
     try:
@@ -57,18 +61,18 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         provider_pipeline_map = {p.provider: p.name for p in registry.list()}
         pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
         if pipeline_name is None:
-            _drop_schema_and_fail(new_schema)
+            await _drop_schema_and_fail(new_schema)
             return {"error": f"No pipeline configured for provider '{membership.tenant.provider}'"}
         pipeline_config = registry.get(pipeline_name)
-        run_pipeline(membership, credential, pipeline_config)
+        await asyncio.to_thread(run_pipeline, membership, credential, pipeline_config)
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
-        _drop_schema_and_fail(new_schema)
+        await _drop_schema_and_fail(new_schema)
         return {"error": "Materialization failed"}
 
     # Step 3: Mark new schema as active
     new_schema.state = SchemaState.ACTIVE
-    new_schema.save(update_fields=["state"])
+    await new_schema.asave(update_fields=["state"])
 
     # Step 4: Schedule teardown of previously active schemas with a delay to allow
     # in-flight queries against the old schema to complete before it is dropped.
@@ -76,70 +80,76 @@ def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         tenant=new_schema.tenant,
         state=SchemaState.ACTIVE,
     ).exclude(id=new_schema.id)
-    for old_schema in old_schemas:
+    async for old_schema in old_schemas:
         old_schema.state = SchemaState.TEARDOWN
-        old_schema.save(update_fields=["state"])
-        teardown_schema.apply_async((str(old_schema.id),), countdown=30 * 60)
+        await old_schema.asave(update_fields=["state"])
+        await teardown_schema.configure(
+            schedule_in={"seconds": int(timedelta(minutes=30).total_seconds())},
+        ).defer_async(schema_id=str(old_schema.id))
 
     logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
     return {"status": "active", "schema_id": schema_id}
 
 
-def _drop_schema_and_fail(schema) -> None:
+async def _drop_schema_and_fail(schema) -> None:
     """Drop the physical schema and mark the record as FAILED."""
+    manager = SchemaManager()
     try:
-        SchemaManager().teardown(schema)
+        await asyncio.to_thread(manager.teardown, schema)
     except Exception:
         logger.exception("Failed to drop schema '%s' during cleanup", schema.schema_name)
     schema.state = SchemaState.FAILED
-    schema.save(update_fields=["state"])
+    await schema.asave(update_fields=["state"])
 
 
-@shared_task
-def expire_inactive_schemas() -> None:
+@app.periodic(cron="*/30 * * * *")
+@app.task
+async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """Mark stale schemas for teardown and dispatch teardown tasks.
 
     Handles both TenantSchema and WorkspaceViewSchema records.
     Schemas with null last_accessed_at are never auto-expired.
+
+    `timestamp` is supplied by the procrastinate periodic deferrer; the default
+    lets tests invoke this task directly.
     """
     cutoff = timezone.now() - timedelta(hours=settings.SCHEMA_TTL_HOURS)
 
     # Expire stale tenant schemas
-    stale_tenant = TenantSchema.objects.filter(
+    async for schema in TenantSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
-    )
-    for schema in stale_tenant:
+    ):
         schema.state = SchemaState.TEARDOWN
-        schema.save(update_fields=["state"])
-        teardown_schema.delay_on_commit(str(schema.id))
+        await schema.asave(update_fields=["state"])
+        await teardown_schema.defer_async(schema_id=str(schema.id))
 
     # Expire stale view schemas
-    stale_views = WorkspaceViewSchema.objects.filter(
+    async for vs in WorkspaceViewSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
-    )
-    for vs in stale_views:
+    ):
         vs.state = SchemaState.TEARDOWN
-        vs.save(update_fields=["state"])
-        teardown_view_schema_task.delay_on_commit(str(vs.id))
+        await vs.asave(update_fields=["state"])
+        await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
 
 
-@shared_task
-def rebuild_workspace_view_schema(workspace_id: str) -> dict:
+@app.task
+async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
 
     On success: marks WorkspaceViewSchema.state = ACTIVE.
     On failure: marks state = FAILED and returns an error dict.
     """
     try:
-        workspace = Workspace.objects.prefetch_related("tenants").get(id=workspace_id)
+        workspace = await Workspace.objects.prefetch_related("tenants").aget(id=workspace_id)
     except Workspace.DoesNotExist:
         logger.exception("rebuild_workspace_view_schema: workspace %s not found", workspace_id)
         return {"error": "Workspace not found"}
 
+    manager = SchemaManager()
     try:
-        vs = SchemaManager().build_view_schema(workspace)
+        vs = await asyncio.to_thread(manager.build_view_schema, workspace)
     except Exception:
         # build_view_schema already saves state=FAILED before re-raising;
         # no need to write it again here (doing so risks overwriting a
@@ -155,49 +165,52 @@ def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     return {"status": "active", "schema_name": vs.schema_name}
 
 
-@shared_task
-def teardown_view_schema_task(view_schema_id: str) -> None:
+@app.task
+async def teardown_view_schema_task(view_schema_id: str) -> None:
     """Drop the physical PostgreSQL schema for a WorkspaceViewSchema and mark EXPIRED."""
     try:
-        vs = WorkspaceViewSchema.objects.get(id=view_schema_id)
+        vs = await WorkspaceViewSchema.objects.aget(id=view_schema_id)
     except WorkspaceViewSchema.DoesNotExist:
         logger.exception("teardown_view_schema_task: view schema %s not found", view_schema_id)
         return
 
+    manager = SchemaManager()
     try:
-        SchemaManager().teardown_view_schema(vs)
+        await asyncio.to_thread(manager.teardown_view_schema, vs)
     except Exception:
         logger.exception("Failed to drop view schema '%s'", vs.schema_name)
         vs.state = SchemaState.ACTIVE
-        vs.save(update_fields=["state"])
+        await vs.asave(update_fields=["state"])
         raise
 
     vs.state = SchemaState.EXPIRED
-    vs.save(update_fields=["state"])
+    await vs.asave(update_fields=["state"])
 
 
-@shared_task
-def teardown_schema(schema_id: str) -> None:
+@app.task
+async def teardown_schema(schema_id: str) -> None:
     """Drop a tenant schema in the managed database and mark it EXPIRED."""
     try:
-        schema = TenantSchema.objects.get(id=schema_id)
+        schema = await TenantSchema.objects.aget(id=schema_id)
     except TenantSchema.DoesNotExist:
         logger.exception("teardown_schema: schema %s not found", schema_id)
         return
 
+    manager = SchemaManager()
     try:
-        SchemaManager().teardown(schema)
+        await asyncio.to_thread(manager.teardown, schema)
     except Exception:
         # teardown() only raises when DROP SCHEMA itself fails — role-cleanup
         # failures are logged and swallowed there — so reaching this branch
         # means the physical schema is still present and the record should go
         # back to ACTIVE rather than being stranded in TEARDOWN.
         schema.state = SchemaState.ACTIVE
-        schema.save(update_fields=["state"])
+        await schema.asave(update_fields=["state"])
         raise
+
     try:
         schema.state = SchemaState.EXPIRED
-        schema.save(update_fields=["state"])
+        await schema.asave(update_fields=["state"])
     except Exception:
         # Physical schema is already dropped; don't pretend it's ACTIVE.
         logger.exception(

@@ -1,4 +1,4 @@
-# Import celery app so it's available when Django starts
-from .celery import app as celery_app
+# Import procrastinate app so it's available when Django starts
+from .procrastinate import app as procrastinate_app
 
-__all__ = ("celery_app",)
+__all__ = ("procrastinate_app",)

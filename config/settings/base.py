@@ -47,7 +47,7 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     # Third-party apps
     "rest_framework",
-    "django_celery_beat",
+    "procrastinate.contrib.django",
     "allauth",
     "allauth.account",
     "allauth.socialaccount",
@@ -285,25 +285,14 @@ OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
 # Cache configuration
-# Use Redis if available, otherwise fall back to local memory cache
-REDIS_URL = env("REDIS_URL", default="")
-if REDIS_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": REDIS_URL,
-        }
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
-else:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        }
-    }
-
+}
 
 # NOTE: LocMemCache is per-process — rate limiting won't work across
-# multiple workers. Set REDIS_URL for production deployments.
+# multiple workers. Set up a shared cache for production deployments.
 
 
 # Rate limiting
@@ -323,24 +312,4 @@ SESSION_COOKIE_NAME = "sessionid_scout"
 EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 
-# Celery configuration
-CELERY_BROKER_URL = env("CELERY_BROKER_URL", default=REDIS_URL or "redis://localhost:6379/0")
-CELERY_RESULT_BACKEND = env(
-    "CELERY_RESULT_BACKEND", default=REDIS_URL or "redis://localhost:6379/0"
-)
-CELERY_ACCEPT_CONTENT = ["json"]
-CELERY_TASK_SERIALIZER = "json"
-CELERY_RESULT_SERIALIZER = "json"
-CELERY_TIMEZONE = "UTC"
-CELERY_TASK_TRACK_STARTED = True
-CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes max per task
-CELERY_WORKER_PREFETCH_MULTIPLIER = 1  # Don't prefetch tasks (better for long-running tasks)
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 SCHEMA_TTL_HOURS = 24  # schemas inactive longer than this are expired
-
-CELERY_BEAT_SCHEDULE = {
-    "expire-inactive-schemas": {
-        "task": "apps.workspaces.tasks.expire_inactive_schemas",
-        "schedule": 30 * 60,  # every 30 minutes
-    },
-}
