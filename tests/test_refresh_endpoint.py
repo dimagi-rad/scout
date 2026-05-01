@@ -30,7 +30,7 @@ def tenant_membership_for_user(db, user, tenant):
 
 @pytest.mark.django_db
 def test_refresh_returns_202(manage_client, workspace, tenant_membership_for_user):
-    with patch("apps.workspaces.api.views.transaction.on_commit"):
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer"):
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
     assert resp.status_code == 202
     assert resp.data["status"] == "provisioning"
@@ -41,21 +41,20 @@ def test_refresh_returns_202(manage_client, workspace, tenant_membership_for_use
 def test_refresh_creates_provisioning_schema(
     manage_client, workspace, tenant, tenant_membership_for_user
 ):
-    with patch("apps.workspaces.api.views.transaction.on_commit"):
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer"):
         manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
     assert TenantSchema.objects.filter(tenant=tenant, state=SchemaState.PROVISIONING).exists()
 
 
 @pytest.mark.django_db
-def test_refresh_dispatches_celery_task(manage_client, workspace, tenant_membership_for_user):
-    # transaction.on_commit doesn't fire inside test transactions; patch it to invoke immediately
-    with (
-        patch("apps.workspaces.tasks.refresh_tenant_schema.delay") as mock_delay,
-        patch("apps.workspaces.api.views.transaction.on_commit", side_effect=lambda cb: cb()),
-    ):
+def test_refresh_dispatches_task(manage_client, workspace, tenant_membership_for_user):
+    with patch("apps.workspaces.api.views.refresh_tenant_schema.defer") as mock_defer:
         resp = manage_client.post(f"/api/workspaces/{workspace.id}/refresh/")
     schema_id = resp.data["schema_id"]
-    mock_delay.assert_called_once_with(schema_id, str(tenant_membership_for_user.id))
+    mock_defer.assert_called_once_with(
+        schema_id=schema_id,
+        membership_id=str(tenant_membership_for_user.id),
+    )
 
 
 @pytest.mark.django_db

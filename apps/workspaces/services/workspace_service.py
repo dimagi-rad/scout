@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
+from apps.workspaces.tasks import rebuild_workspace_view_schema
 
 
 def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
@@ -17,15 +18,13 @@ def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
     Returns (WorkspaceTenant, created) where created is False if the tenant
     was already in the workspace.
     """
-    from apps.workspaces.tasks import rebuild_workspace_view_schema
-
     with transaction.atomic():
         wt, created = WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
         if created:
             WorkspaceViewSchema.objects.filter(workspace=workspace).update(
                 state=SchemaState.PROVISIONING
             )
-            rebuild_workspace_view_schema.delay_on_commit(str(workspace.id))
+            rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
 
     return wt, created
 
@@ -34,12 +33,12 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
     """Remove a tenant from a workspace and mark the view schema for rebuild.
 
     Deletes the WorkspaceTenant record and marks any existing WorkspaceViewSchema
-    as PROVISIONING, then dispatches a rebuild task after the transaction commits.
+    as PROVISIONING, then dispatches a rebuild task as part of the transaction
+    (procrastinate's defer is transaction-safe — the row is only visible to
+    workers after commit).
 
     Raises ValidationError if wt is the last tenant in the workspace.
     """
-    from apps.workspaces.tasks import rebuild_workspace_view_schema
-
     with transaction.atomic():
         # Lock all tenant rows for this workspace before counting to prevent
         # concurrent removals from both passing the last-tenant guard.
@@ -54,7 +53,7 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         WorkspaceViewSchema.objects.filter(workspace=workspace).update(
             state=SchemaState.PROVISIONING
         )
-        rebuild_workspace_view_schema.delay_on_commit(str(workspace.id))
+        rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
 
 
 async def touch_workspace_schemas(workspace) -> None:

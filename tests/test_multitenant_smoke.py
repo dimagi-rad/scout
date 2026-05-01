@@ -32,7 +32,9 @@ def setup(transactional_db):
 def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
     user, ws, t2 = setup
 
-    with patch("apps.workspaces.tasks.rebuild_workspace_view_schema") as mock_task:
+    with patch(
+        "apps.workspaces.services.workspace_service.rebuild_workspace_view_schema.defer"
+    ) as mock_defer:
         api_client.force_login(user)
         resp = api_client.post(
             f"/api/workspaces/{ws.id}/tenants/",
@@ -42,4 +44,4 @@ def test_adding_tenant_dispatches_rebuild_task(api_client, setup):
 
     assert resp.status_code == 202
     assert WorkspaceTenant.objects.filter(workspace=ws, tenant=t2).exists()
-    mock_task.delay_on_commit.assert_called_once_with(str(ws.id))
+    mock_defer.assert_called_once_with(workspace_id=str(ws.id))

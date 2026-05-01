@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.utils import timezone
@@ -29,42 +29,53 @@ def workspace_with_view_schema(transactional_db):
     return ws, vs
 
 
-def test_expire_inactive_schemas_also_expires_stale_view_schemas(workspace_with_view_schema):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_expire_inactive_schemas_also_expires_stale_view_schemas(
+    workspace_with_view_schema,
+):
     from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=25)
-    vs.save()
+    await vs.asave(update_fields=["last_accessed_at"])
 
-    with patch("apps.workspaces.tasks.teardown_view_schema_task") as mock_teardown:
-        expire_inactive_schemas()
+    with patch(
+        "apps.workspaces.tasks.teardown_view_schema_task.defer_async",
+        new_callable=AsyncMock,
+    ) as mock_defer:
+        await expire_inactive_schemas()
 
-    vs.refresh_from_db()
+    await vs.arefresh_from_db()
     assert vs.state == SchemaState.TEARDOWN
-    mock_teardown.delay_on_commit.assert_called_once_with(str(vs.id))
+    mock_defer.assert_called_once_with(view_schema_id=str(vs.id))
 
 
-def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recently_accessed_view_schema_not_expired(workspace_with_view_schema):
     from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = timezone.now() - timedelta(hours=1)
-    vs.save()
+    await vs.asave(update_fields=["last_accessed_at"])
 
-    expire_inactive_schemas()
+    await expire_inactive_schemas()
 
-    vs.refresh_from_db()
+    await vs.arefresh_from_db()
     assert vs.state == SchemaState.ACTIVE
 
 
-def test_view_schema_with_null_last_accessed_not_expired(workspace_with_view_schema):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_view_schema_with_null_last_accessed_not_expired(workspace_with_view_schema):
     from apps.workspaces.tasks import expire_inactive_schemas
 
     _ws, vs = workspace_with_view_schema
     vs.last_accessed_at = None
-    vs.save()
+    await vs.asave(update_fields=["last_accessed_at"])
 
-    expire_inactive_schemas()
+    await expire_inactive_schemas()
 
-    vs.refresh_from_db()
+    await vs.arefresh_from_db()
     assert vs.state == SchemaState.ACTIVE
