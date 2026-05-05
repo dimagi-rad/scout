@@ -14,6 +14,6 @@ class WorkspacesConfig(AppConfig):
         cache_backend = settings.CACHES.get("default", {}).get("BACKEND", "")
         if "LocMemCache" in cache_backend:
             logging.getLogger("scout.config").warning(
-                "REDIS_URL not set — using LocMemCache. "
+                "Using LocMemCache. "
                 "Rate limiting and caching will not work across multiple workers."
             )

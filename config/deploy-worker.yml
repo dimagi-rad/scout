@@ -1,4 +1,4 @@
-# Scout Celery Worker + Beat
+# Scout Procrastinate Worker
 # No HTTP interface — runs background tasks and periodic scheduling
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
@@ -13,7 +13,7 @@ servers:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
       network: "scout_shared"
-    cmd: "celery -A config worker --beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
+    cmd: "python manage.py procrastinate worker"
     proxy: false
 
 registry:
@@ -24,7 +24,6 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
-    REDIS_URL: "redis://<%= ENV.fetch('SCOUT_REDIS_ENDPOINT') %>:6379/0"
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>

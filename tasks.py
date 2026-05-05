@@ -11,8 +11,14 @@ def dev(c: Context) -> None:
 
 @task
 def deps(c: Context) -> None:
-    """Start Docker dependencies: platform-db and redis (alternative to native installs)."""
-    c.run("docker compose up platform-db redis mcp-server", pty=True)
+    """Start Docker dependencies: platform-db and mcp-server."""
+    c.run("docker compose up platform-db mcp-server", pty=True)
+
+
+@task
+def worker(c: Context) -> None:
+    """Start the Procrastinate worker (standalone, without honcho)."""
+    c.run("uv run python manage.py procrastinate worker", pty=True)
 
 
 @task

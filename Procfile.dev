@@ -1,4 +1,4 @@
 web: uv run uvicorn config.asgi:application --reload --port 8000 --lifespan off
 mcp: DJANGO_SETTINGS_MODULE=config.settings.development uv run python -m mcp_server --transport streamable-http --reload
-worker: watchfiles --filter python 'uv run celery -A config worker -l info' apps config mcp_server
+worker: watchfiles --filter python 'uv run python manage.py procrastinate worker' apps config mcp_server
 frontend: bash -c "cd frontend && bun dev"

@@ -38,7 +38,9 @@ def workspace(db, user, tenant):
     return ws
 
 
-def test_rebuild_view_schema_calls_build_view_schema(workspace):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_rebuild_view_schema_calls_build_view_schema(workspace):
     from apps.workspaces.tasks import rebuild_workspace_view_schema
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
@@ -46,37 +48,41 @@ def test_rebuild_view_schema_calls_build_view_schema(workspace):
         mock_vs.schema_name = "ws_abc123"
         MockSM.return_value.build_view_schema.return_value = mock_vs
 
-        result = rebuild_workspace_view_schema(str(workspace.id))
+        result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
 
     # The service (build_view_schema) now owns the ACTIVE transition; the task does not write state
     assert result["status"] == "active"
     mock_vs.save.assert_not_called()
 
 
-def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_rebuild_view_schema_fails_if_no_active_tenant_schema(workspace):
     from apps.workspaces.models import TenantSchema
     from apps.workspaces.tasks import rebuild_workspace_view_schema
 
-    TenantSchema.objects.filter(tenant__workspace_tenants__workspace=workspace).update(
+    await TenantSchema.objects.filter(tenant__workspace_tenants__workspace=workspace).aupdate(
         state=SchemaState.EXPIRED
     )
 
-    result = rebuild_workspace_view_schema(str(workspace.id))
+    result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
     assert "error" in result
 
 
-def test_rebuild_view_schema_marks_failed_on_exception(workspace):
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_rebuild_view_schema_marks_failed_on_exception(workspace):
     from apps.workspaces.tasks import rebuild_workspace_view_schema
 
     with patch("apps.workspaces.tasks.SchemaManager") as MockSM:
         MockSM.return_value.build_view_schema.side_effect = Exception("boom")
 
-        result = rebuild_workspace_view_schema(str(workspace.id))
+        result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
 
     assert "error" in result
     # WorkspaceViewSchema state should be FAILED (if it exists)
     try:
-        vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+        vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
         assert vs.state == SchemaState.FAILED
     except WorkspaceViewSchema.DoesNotExist:
         pass  # acceptable — was never created

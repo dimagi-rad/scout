@@ -17,20 +17,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # Redis for caching and rate limiting
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   # MCP data server (Scout agent data access layer)
   mcp-server:
     build:
@@ -63,7 +49,6 @@ services:
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
-      - REDIS_URL=redis://redis:6379/0
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
       - MAX_CONNECTIONS_PER_PROJECT=5
     volumes:
@@ -74,8 +59,6 @@ services:
       - "8000:8000"
     depends_on:
       platform-db:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       mcp-server:
         condition: service_started
@@ -104,5 +87,4 @@ services:
 
 volumes:
   platform_data:
-  redis_data:
   static_files:
