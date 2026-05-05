@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
+from asgiref.sync import sync_to_async
 from django.core.cache import cache
+from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods
@@ -13,14 +15,14 @@ from django.views.decorators.http import require_http_methods
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
 from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.services.api_key_providers import (
+    STRATEGIES,
+    CredentialVerificationError,
+)
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
-)
-from apps.users.services.tenant_verification import (
-    CommCareVerificationError,
-    verify_commcare_credential,
 )
 from apps.workspaces.models import Workspace
 
@@ -35,6 +37,37 @@ async def _aget_token_value(user, provider: str) -> str | None:
 
     token = await _social_token_qs(user, provider).afirst()
     return token.token if token else None
+
+
+# Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
+# Django doesn't yet expose async-native transaction support, so this is the
+# sanctioned bridge for transactional ORM writes from async views.
+@sync_to_async
+def _persist_api_key_memberships(user, provider, descriptors, encrypted):
+    rows = []
+    with transaction.atomic():
+        for desc in descriptors:
+            tenant, _ = Tenant.objects.get_or_create(
+                provider=provider,
+                external_id=desc.external_id,
+                defaults={"canonical_name": desc.canonical_name},
+            )
+            tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+            TenantCredential.objects.update_or_create(
+                tenant_membership=tm,
+                defaults={
+                    "credential_type": TenantCredential.API_KEY,
+                    "encrypted_credential": encrypted,
+                },
+            )
+            rows.append(
+                {
+                    "membership_id": str(tm.id),
+                    "tenant_id": tenant.external_id,
+                    "tenant_name": tenant.canonical_name,
+                }
+            )
+    return rows
 
 
 @require_http_methods(["GET"])
@@ -126,6 +159,22 @@ async def tenant_select_view(request):
     return JsonResponse({"status": "ok", "tenant_id": tm.tenant.external_id})
 
 
+@require_http_methods(["GET"])
+@async_login_required
+async def api_key_providers_view(request):
+    """GET /api/auth/api-key-providers/ — list registered API-key strategies
+    so the frontend can render the Add/Edit dialog dynamically."""
+    payload = [
+        {
+            "id": strategy.provider_id,
+            "display_name": strategy.display_name,
+            "fields": list(strategy.form_fields),
+        }
+        for strategy in STRATEGIES.values()
+    ]
+    return JsonResponse(payload, safe=False)
+
+
 @require_http_methods(["GET", "POST"])
 @async_login_required
 async def tenant_credential_list_view(request):
@@ -150,63 +199,50 @@ async def tenant_credential_list_view(request):
             )
         return JsonResponse(results, safe=False)
 
-    # POST — create API-key-backed membership with provider verification
+    # POST — create API-key-backed membership(s) via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
     provider = body.get("provider", "").strip()
-    tenant_id = body.get("tenant_id", "").strip()
-    tenant_name = body.get("tenant_name", "").strip()
-    credential = body.get("credential", "").strip()
+    fields = body.get("fields") or {}
 
-    if not all([provider, tenant_id, tenant_name, credential]):
+    strategy = STRATEGIES.get(provider)
+    if strategy is None:
+        return JsonResponse({"error": f"Unknown provider '{provider}'"}, status=400)
+
+    missing = [
+        f["key"]
+        for f in strategy.form_fields
+        if f["required"] and not (fields.get(f["key"]) or "").strip()
+    ]
+    if missing:
         return JsonResponse(
-            {"error": "provider, tenant_id, tenant_name, and credential are required"},
+            {"error": f"Missing required field(s): {', '.join(missing)}"},
             status=400,
         )
-
-    if provider != "commcare":
-        return JsonResponse(
-            {"error": f"API-key credentials are not supported for provider '{provider}'"},
-            status=400,
-        )
-
-    # credential must be "username:apikey"
-    if ":" not in credential:
-        return JsonResponse(
-            {"error": "credential must be in the format 'username:apikey'"},
-            status=400,
-        )
-    cc_username, cc_api_key = credential.split(":", 1)
 
     try:
-        await verify_commcare_credential(domain=tenant_id, username=cc_username, api_key=cc_api_key)
-    except CommCareVerificationError as e:
+        descriptors = await strategy.verify_and_discover(fields)
+    except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
     try:
-        encrypted = encrypt_credential(credential)
-    except ValueError as e:
+        packed = strategy.pack_credential(fields)
+        encrypted = encrypt_credential(packed)
+    except (KeyError, ValueError) as e:
         return JsonResponse({"error": str(e)}, status=500)
 
-    # Use aget_or_create so that an existing Tenant's canonical_name is never
-    # overwritten by a user-supplied string (which feeds into the LLM system prompt).
-    tenant, _ = await Tenant.objects.aget_or_create(
-        provider=provider,
-        external_id=tenant_id,
-        defaults={"canonical_name": tenant_name},
-    )
-    tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-    await TenantCredential.objects.aupdate_or_create(
-        tenant_membership=tm,
-        defaults={
-            "credential_type": TenantCredential.API_KEY,
-            "encrypted_credential": encrypted,
-        },
-    )
-    return JsonResponse({"membership_id": str(tm.id)}, status=201)
+    try:
+        memberships_payload = await _persist_api_key_memberships(
+            user, provider, descriptors, encrypted
+        )
+    except Exception as e:
+        logger.exception("Failed to persist memberships for provider %s", provider)
+        return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"memberships": memberships_payload}, status=201)
 
 
 @require_http_methods(["DELETE", "PATCH"])
@@ -224,50 +260,60 @@ async def tenant_credential_detail_view(request, membership_id):
         await tm.adelete()  # cascades to TenantCredential
         return JsonResponse({"status": "deleted"})
 
-    # PATCH
+    # PATCH — rotate API key via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
         return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-    credential = body.get("credential", "").strip()
+    fields = body.get("fields") or {}
 
-    if not credential:
-        return JsonResponse({"error": "credential is required"}, status=400)
-
-    if ":" not in credential:
-        return JsonResponse(
-            {"error": "credential must be in the format 'username:apikey'"},
-            status=400,
-        )
-    cc_username, cc_api_key = credential.split(":", 1)
-
-    # Fetch membership to get tenant domain for verification
     try:
         tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
             id=membership_id, user=user
         )
     except TenantMembership.DoesNotExist:
         return JsonResponse({"error": "Not found"}, status=404)
-
     if not hasattr(tm, "credential"):
         return JsonResponse({"error": "Not found"}, status=404)
 
-    try:
-        await verify_commcare_credential(
-            domain=tm.tenant.external_id, username=cc_username, api_key=cc_api_key
+    strategy = STRATEGIES.get(tm.tenant.provider)
+    if strategy is None:
+        return JsonResponse(
+            {"error": f"Provider '{tm.tenant.provider}' has no API-key strategy"},
+            status=400,
         )
-    except CommCareVerificationError as e:
+
+    editable = [f for f in strategy.form_fields if f["editable_on_rotate"]]
+    missing = [
+        f["key"] for f in editable if f["required"] and not (fields.get(f["key"]) or "").strip()
+    ]
+    if missing:
+        return JsonResponse(
+            {"error": f"Missing required field(s): {', '.join(missing)}"},
+            status=400,
+        )
+
+    try:
+        await strategy.verify_for_tenant(fields, external_id=tm.tenant.external_id)
+    except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
     try:
-        encrypted = encrypt_credential(credential)
-    except ValueError as e:
-        return JsonResponse({"error": str(e)}, status=500)
+        packed = strategy.pack_credential(fields)
+        encrypted = encrypt_credential(packed)
+    except (KeyError, ValueError) as e:
+        return JsonResponse({"error": str(e)}, status=400)
 
     tm.credential.encrypted_credential = encrypted
     await tm.credential.asave(update_fields=["encrypted_credential"])
-    return JsonResponse({"membership_id": str(tm.id), "tenant_name": tm.tenant.canonical_name})
+    return JsonResponse(
+        {
+            "membership_id": str(tm.id),
+            "tenant_id": tm.tenant.external_id,
+            "tenant_name": tm.tenant.canonical_name,
+        }
+    )
 
 
 @require_http_methods(["POST"])

@@ -68,7 +68,7 @@ The codebase is async-first. New views should be `async def` using native Django
 - **ORM**: Use async methods (`.aget()`, `.afirst()`, `.afilter()`, `.acreate()`, `.aupdate_or_create()`, `async for`) — never call sync ORM from async views
 - **Auth**: Use `await request.auser()` (Django 5 native), not `sync_to_async(get_user)`
 - **DB connections**: `AsyncConnectionPool` (psycopg_pool) for LangGraph checkpointer; `psycopg.AsyncConnection.connect()` for direct queries in MCP server
-- **`sync_to_async`**: Only for wrapping external API calls (OAuth token refresh, CommCare API) and inherently sync operations (dbt). Do not use for ORM calls.
+- **`sync_to_async`**: Only for wrapping external API calls (OAuth token refresh, CommCare API) and inherently sync operations (dbt). Do not use for ORM calls. Exception: a transactional write block (`with transaction.atomic(): ...`) may be wrapped in `@sync_to_async` because Django 5 does not yet expose async-native transactions; prefer this over individual async ORM calls when atomicity across multiple writes is required.
 
 ## Environment variables
 

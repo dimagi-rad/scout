@@ -37,7 +37,10 @@ class OCSBaseLoader:
             base_url = getattr(settings, "OCS_URL", self.DEFAULT_BASE_URL)
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
-        self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
+        if credential.get("type") == "api_key":
+            self._session.headers.update({"X-api-key": credential["value"]})
+        else:
+            self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)

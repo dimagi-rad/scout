@@ -6,16 +6,6 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import {
   Table,
   TableBody,
   TableCell,
@@ -27,6 +17,10 @@ import {
   SearchFilterBar,
   type FilterGroup,
 } from "@/components/SearchFilterBar/SearchFilterBar"
+import {
+  ApiConnectionDialog,
+  type ApiKeyConnection,
+} from "@/components/ApiConnectionDialog"
 
 interface OAuthProvider {
   id: string
@@ -34,14 +28,6 @@ interface OAuthProvider {
   login_url: string
   connected: boolean
   status?: "connected" | "expired" | "disconnected" | null
-}
-
-interface ApiKeyDomain {
-  membership_id: string
-  provider: string
-  tenant_id: string
-  tenant_name: string
-  credential_type: string
 }
 
 const providerBadgeStyles: Record<string, string> = {
@@ -54,12 +40,20 @@ function ProviderBadge({ provider }: { provider: string }) {
   return (
     <Badge
       variant="secondary"
-      className={providerBadgeStyles[provider] ?? "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"}
+      className={
+        providerBadgeStyles[provider] ??
+        "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
+      }
     >
       {provider}
     </Badge>
   )
 }
+
+type DialogState =
+  | { mode: "add" }
+  | { mode: "edit"; editing: ApiKeyConnection }
+  | null
 
 export function ConnectionsPage() {
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
@@ -67,9 +61,9 @@ export function ConnectionsPage() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const storeDomains = useAppStore((s) => s.domains)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
-  const [domains, setDomains] = useState<ApiKeyDomain[]>([])
+  const [connections, setConnections] = useState<ApiKeyConnection[]>([])
   const [loadingProviders, setLoadingProviders] = useState(true)
-  const [loadingDomains, setLoadingDomains] = useState(true)
+  const [loadingConnections, setLoadingConnections] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
@@ -81,16 +75,7 @@ export function ConnectionsPage() {
     provider: null,
   })
 
-  // Dialog state
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [editingDomain, setEditingDomain] = useState<ApiKeyDomain | null>(null)
-
-  // Form state
-  const [formDomain, setFormDomain] = useState("")
-  const [formUsername, setFormUsername] = useState("")
-  const [formApiKey, setFormApiKey] = useState("")
-  const [formLoading, setFormLoading] = useState(false)
-  const [formError, setFormError] = useState<string | null>(null)
+  const [dialogState, setDialogState] = useState<DialogState>(null)
 
   const fetchProviders = useCallback(async () => {
     setLoadingProviders(true)
@@ -104,28 +89,27 @@ export function ConnectionsPage() {
     }
   }, [])
 
-  const fetchDomains = useCallback(async () => {
-    setLoadingDomains(true)
+  const fetchConnections = useCallback(async () => {
+    setLoadingConnections(true)
     try {
-      const data = await api.get<ApiKeyDomain[]>("/api/auth/tenant-credentials/")
-      setDomains(data)
+      const data = await api.get<ApiKeyConnection[]>("/api/auth/tenant-credentials/")
+      setConnections(data)
     } catch {
-      setError("Failed to load connected domains.")
+      setError("Failed to load API key connections.")
     } finally {
-      setLoadingDomains(false)
+      setLoadingConnections(false)
     }
   }, [])
 
   useEffect(() => {
     fetchProviders()
-    fetchDomains()
-  }, [fetchProviders, fetchDomains])
+    fetchConnections()
+  }, [fetchProviders, fetchConnections])
 
-  // Derived filter options from domain list
   const providerFilterGroup = useMemo((): FilterGroup => {
     const counts = new Map<string, number>()
-    for (const d of domains) {
-      counts.set(d.provider, (counts.get(d.provider) ?? 0) + 1)
+    for (const c of connections) {
+      counts.set(c.provider, (counts.get(c.provider) ?? 0) + 1)
     }
     return {
       name: "provider",
@@ -133,79 +117,25 @@ export function ConnectionsPage() {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([value, count]) => ({ value, label: value, count })),
     }
-  }, [domains])
+  }, [connections])
 
-  // Filtered domains
-  const filteredDomains = useMemo(() => {
+  const filteredConnections = useMemo(() => {
     const lowerSearch = search.toLowerCase()
-    return domains.filter((d) => {
-      if (activeFilters.provider && d.provider !== activeFilters.provider) return false
+    return connections.filter((c) => {
+      if (activeFilters.provider && c.provider !== activeFilters.provider) return false
       if (
         lowerSearch &&
-        !d.tenant_name.toLowerCase().includes(lowerSearch) &&
-        !d.tenant_id.toLowerCase().includes(lowerSearch)
+        !c.tenant_name.toLowerCase().includes(lowerSearch) &&
+        !c.tenant_id.toLowerCase().includes(lowerSearch)
       ) {
         return false
       }
       return true
     })
-  }, [domains, search, activeFilters])
+  }, [connections, search, activeFilters])
 
   function handleFilterChange(group: string, value: string | null) {
     setActiveFilters((prev) => ({ ...prev, [group]: value }))
-  }
-
-  function openAddDialog() {
-    setEditingDomain(null)
-    setFormDomain("")
-    setFormUsername("")
-    setFormApiKey("")
-    setFormError(null)
-    setDialogOpen(true)
-  }
-
-  function openEditDialog(domain: ApiKeyDomain) {
-    setEditingDomain(domain)
-    setFormDomain(domain.tenant_id)
-    setFormUsername("")
-    setFormApiKey("")
-    setFormError(null)
-    setDialogOpen(true)
-  }
-
-  function closeDialog() {
-    setDialogOpen(false)
-    setEditingDomain(null)
-    setFormError(null)
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setFormLoading(true)
-    setFormError(null)
-    try {
-      if (editingDomain) {
-        const body: Record<string, string> = { tenant_name: formDomain }
-        if (formUsername && formApiKey) {
-          body.credential = `${formUsername}:${formApiKey}`
-        }
-        await api.patch(`/api/auth/tenant-credentials/${editingDomain.membership_id}/`, body)
-      } else {
-        await api.post("/api/auth/tenant-credentials/", {
-          provider: "commcare",
-          tenant_id: formDomain,
-          tenant_name: formDomain,
-          credential: `${formUsername}:${formApiKey}`,
-        })
-      }
-      await fetchDomains()
-      void fetchStoreDomains()
-      closeDialog()
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : "Failed to save domain.")
-    } finally {
-      setFormLoading(false)
-    }
   }
 
   async function confirmRemove(membershipId: string) {
@@ -214,14 +144,14 @@ export function ConnectionsPage() {
     setError(null)
     try {
       await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
-      await fetchDomains()
+      await fetchConnections()
       await fetchStoreDomains()
       if (activeDomainId === membershipId) {
         const next = storeDomains.find((d) => d.id !== membershipId)
         if (next) setActiveDomain(next.id)
       }
     } catch {
-      setError("Failed to remove domain.")
+      setError("Failed to remove connection.")
     } finally {
       setRemoving(null)
     }
@@ -268,7 +198,13 @@ export function ConnectionsPage() {
               <CardContent className="flex items-center justify-between p-4">
                 <div>
                   <p className="font-medium">{provider.name}</p>
-                  <p className={`text-sm ${provider.status === "expired" ? "text-amber-600" : "text-muted-foreground"}`}>
+                  <p
+                    className={`text-sm ${
+                      provider.status === "expired"
+                        ? "text-amber-600"
+                        : "text-muted-foreground"
+                    }`}
+                  >
                     {provider.status === "connected"
                       ? "Connected"
                       : provider.status === "expired"
@@ -287,8 +223,15 @@ export function ConnectionsPage() {
                     {disconnecting === provider.id ? "Disconnecting..." : "Disconnect"}
                   </Button>
                 ) : (
-                  <Button variant="outline" size="sm" asChild data-testid={`connect-${provider.id}`}>
-                    <a href={`${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    asChild
+                    data-testid={`connect-${provider.id}`}
+                  >
+                    <a
+                      href={`${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`}
+                    >
                       {provider.status === "expired" ? "Reconnect" : "Connect"}
                     </a>
                   </Button>
@@ -299,40 +242,42 @@ export function ConnectionsPage() {
         )}
       </section>
 
-      {/* API Key Domains section */}
+      {/* API Key Connections section */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">API Key Domains</h2>
+          <h2 className="text-lg font-medium">API Key Connections</h2>
           <Button
             size="sm"
             variant="outline"
-            onClick={openAddDialog}
-            data-testid="add-domain-button"
+            onClick={() => setDialogState({ mode: "add" })}
+            data-testid="add-connection-button"
           >
-            Add Domain
+            Add API Connection
           </Button>
         </div>
 
-        {loadingDomains ? (
-          <p className="text-sm text-muted-foreground">Loading domains...</p>
+        {loadingConnections ? (
+          <p className="text-sm text-muted-foreground">Loading connections...</p>
         ) : (
           <>
-            {domains.length > 0 && (
+            {connections.length > 0 && (
               <SearchFilterBar
                 search={search}
                 onSearchChange={setSearch}
                 placeholder="Search tenants..."
-                filters={providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []}
+                filters={
+                  providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
+                }
                 activeFilters={activeFilters}
                 onFilterChange={handleFilterChange}
               />
             )}
 
-            {filteredDomains.length === 0 ? (
+            {filteredConnections.length === 0 ? (
               <div className="rounded-lg border border-dashed p-8 text-center">
                 <p className="text-muted-foreground">
-                  {domains.length === 0
-                    ? "No API key domains connected."
+                  {connections.length === 0
+                    ? "No API key connections."
                     : "No tenants match your search."}
                 </p>
               </div>
@@ -347,34 +292,40 @@ export function ConnectionsPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredDomains.map((domain) => {
-                    const isConfirming = confirmRemoveId === domain.membership_id
+                  {filteredConnections.map((row) => {
+                    const isConfirming = confirmRemoveId === row.membership_id
 
                     if (isConfirming) {
                       return (
-                        <TableRow key={domain.membership_id}>
+                        <TableRow key={row.membership_id}>
                           <TableCell colSpan={4}>
                             <div className="flex items-center justify-between">
                               <p className="text-sm font-medium">
-                                Remove <span className="font-semibold">{domain.tenant_name || domain.tenant_id}</span>? This cannot be undone.
+                                Remove{" "}
+                                <span className="font-semibold">
+                                  {row.tenant_name || row.tenant_id}
+                                </span>
+                                ? This cannot be undone.
                               </p>
                               <div className="flex gap-2">
                                 <Button
                                   variant="outline"
                                   size="sm"
                                   onClick={() => setConfirmRemoveId(null)}
-                                  data-testid={`cancel-remove-${domain.tenant_id}`}
+                                  data-testid={`cancel-remove-${row.tenant_id}`}
                                 >
                                   Cancel
                                 </Button>
                                 <Button
                                   variant="destructive"
                                   size="sm"
-                                  onClick={() => confirmRemove(domain.membership_id)}
-                                  disabled={removing === domain.membership_id}
-                                  data-testid={`confirm-remove-${domain.tenant_id}`}
+                                  onClick={() => confirmRemove(row.membership_id)}
+                                  disabled={removing === row.membership_id}
+                                  data-testid={`confirm-remove-${row.tenant_id}`}
                                 >
-                                  {removing === domain.membership_id ? "Removing..." : "Confirm Remove"}
+                                  {removing === row.membership_id
+                                    ? "Removing..."
+                                    : "Confirm Remove"}
                                 </Button>
                               </div>
                             </div>
@@ -384,23 +335,28 @@ export function ConnectionsPage() {
                     }
 
                     return (
-                      <TableRow key={domain.membership_id}>
-                        <TableCell className="font-medium" data-testid={`domain-name-${domain.tenant_id}`}>
-                          {domain.tenant_name || domain.tenant_id}
+                      <TableRow key={row.membership_id}>
+                        <TableCell
+                          className="font-medium"
+                          data-testid={`connection-name-${row.tenant_id}`}
+                        >
+                          {row.tenant_name || row.tenant_id}
                         </TableCell>
                         <TableCell>
-                          <ProviderBadge provider={domain.provider} />
+                          <ProviderBadge provider={row.provider} />
                         </TableCell>
                         <TableCell className="text-muted-foreground">
-                          {domain.tenant_id}
+                          {row.tenant_id}
                         </TableCell>
                         <TableCell className="text-right">
                           <div className="flex justify-end gap-2">
                             <Button
                               variant="ghost"
                               size="sm"
-                              onClick={() => openEditDialog(domain)}
-                              data-testid={`edit-domain-${domain.tenant_id}`}
+                              onClick={() =>
+                                setDialogState({ mode: "edit", editing: row })
+                              }
+                              data-testid={`edit-connection-${row.tenant_id}`}
                             >
                               Edit
                             </Button>
@@ -408,8 +364,8 @@ export function ConnectionsPage() {
                               variant="ghost"
                               size="sm"
                               className="text-destructive hover:text-destructive"
-                              onClick={() => setConfirmRemoveId(domain.membership_id)}
-                              data-testid={`remove-domain-${domain.tenant_id}`}
+                              onClick={() => setConfirmRemoveId(row.membership_id)}
+                              data-testid={`remove-connection-${row.tenant_id}`}
                             >
                               Remove
                             </Button>
@@ -425,123 +381,16 @@ export function ConnectionsPage() {
         )}
       </section>
 
-      {/* Add/Edit Domain Dialog */}
-      <DomainDialog
-        open={dialogOpen}
-        editing={editingDomain}
-        formDomain={formDomain}
-        formUsername={formUsername}
-        formApiKey={formApiKey}
-        formLoading={formLoading}
-        formError={formError}
-        onDomainChange={setFormDomain}
-        onUsernameChange={setFormUsername}
-        onApiKeyChange={setFormApiKey}
-        onSubmit={handleSubmit}
-        onClose={closeDialog}
+      <ApiConnectionDialog
+        open={dialogState !== null}
+        mode={dialogState?.mode ?? "add"}
+        editing={dialogState?.mode === "edit" ? dialogState.editing : null}
+        onClose={() => setDialogState(null)}
+        onSaved={async () => {
+          await fetchConnections()
+          void fetchStoreDomains()
+        }}
       />
     </div>
-  )
-}
-
-// -- Dialog sub-component (kept in same file since it's tightly coupled) --
-
-interface DomainDialogProps {
-  open: boolean
-  editing: ApiKeyDomain | null
-  formDomain: string
-  formUsername: string
-  formApiKey: string
-  formLoading: boolean
-  formError: string | null
-  onDomainChange: (v: string) => void
-  onUsernameChange: (v: string) => void
-  onApiKeyChange: (v: string) => void
-  onSubmit: (e: React.FormEvent) => void
-  onClose: () => void
-}
-
-function DomainDialog({
-  open,
-  editing,
-  formDomain,
-  formUsername,
-  formApiKey,
-  formLoading,
-  formError,
-  onDomainChange,
-  onUsernameChange,
-  onApiKeyChange,
-  onSubmit,
-  onClose,
-}: DomainDialogProps) {
-  const isEdit = editing !== null
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose() }}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit Domain" : "Add Domain"}</DialogTitle>
-          <DialogDescription>
-            {isEdit
-              ? "Update the domain name or credentials."
-              : "Connect a new CommCare domain with API key credentials."}
-          </DialogDescription>
-        </DialogHeader>
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="dialog-domain">CommCare Domain</Label>
-            <Input
-              id="dialog-domain"
-              data-testid="domain-form-domain"
-              required
-              placeholder="my-project"
-              value={formDomain}
-              onChange={(e) => onDomainChange(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="dialog-username">
-              CommCare Username{isEdit ? " (leave blank to keep existing)" : ""}
-            </Label>
-            <Input
-              id="dialog-username"
-              data-testid="domain-form-username"
-              type="email"
-              required={!isEdit}
-              placeholder="you@example.com"
-              value={formUsername}
-              onChange={(e) => onUsernameChange(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="dialog-api-key">
-              API Key{isEdit ? " (leave blank to keep existing)" : ""}
-            </Label>
-            <Input
-              id="dialog-api-key"
-              data-testid="domain-form-api-key"
-              type="password"
-              required={!isEdit}
-              value={formApiKey}
-              onChange={(e) => onApiKeyChange(e.target.value)}
-            />
-          </div>
-          {formError && (
-            <p className="text-sm text-destructive" data-testid="domain-form-error">
-              {formError}
-            </p>
-          )}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={formLoading}>
-              {formLoading ? "Saving..." : isEdit ? "Save Changes" : "Add Domain"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   )
 }

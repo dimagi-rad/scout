@@ -98,28 +98,35 @@ class TestResolveCommcareDomains:
 
 class TestTenantCredentialEndpoints:
     def test_post_creates_membership_and_credential(self, client, db, user):
+        from apps.users.services.api_key_providers import TenantDescriptor
+
         client.force_login(user)
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            return_value={"domain": "my-domain"},
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            return_value=[TenantDescriptor("my-domain", "my-domain")],
         ):
             resp = client.post(
                 "/api/auth/tenant-credentials/",
                 data={
                     "provider": "commcare",
-                    "tenant_id": "my-domain",
-                    "tenant_name": "My Domain",
-                    "credential": "user@example.com:abc123",
+                    "fields": {
+                        "domain": "my-domain",
+                        "username": "user@example.com",
+                        "api_key": "abc123",
+                    },
                 },
                 content_type="application/json",
             )
         assert resp.status_code == 201
-        data = resp.json()
-        assert "membership_id" in data
+        body = resp.json()
+        assert "memberships" in body
+        membership = body["memberships"][0]
+        membership_id = membership["membership_id"]
 
         from apps.users.models import TenantCredential, TenantMembership
 
-        tm = TenantMembership.objects.get(id=data["membership_id"])
+        tm = TenantMembership.objects.get(id=membership_id)
         assert tm.tenant.provider == "commcare"
         assert tm.tenant.external_id == "my-domain"
         cred = TenantCredential.objects.get(tenant_membership=tm)
@@ -127,19 +134,24 @@ class TestTenantCredentialEndpoints:
 
     def test_api_key_stored_encrypted(self, client, db, user):
         """The raw DB value must not contain the plaintext credential."""
+        from apps.users.services.api_key_providers import TenantDescriptor
+
         client.force_login(user)
         plaintext = "user@example.com:supersecretkey"
         with patch(
-            "apps.users.views.verify_commcare_credential",
-            return_value={"domain": "secure-domain"},
+            "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            return_value=[TenantDescriptor("secure-domain", "secure-domain")],
         ):
             client.post(
                 "/api/auth/tenant-credentials/",
                 data={
                     "provider": "commcare",
-                    "tenant_id": "secure-domain",
-                    "tenant_name": "Secure Domain",
-                    "credential": plaintext,
+                    "fields": {
+                        "domain": "secure-domain",
+                        "username": "user@example.com",
+                        "api_key": "supersecretkey",
+                    },
                 },
                 content_type="application/json",
             )

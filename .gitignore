@@ -39,6 +39,7 @@ staticfiles/
 
 # Secrets
 .env
+.env.langfuse
 .env.deploy
 tests/smoke/.env
 *.pem
