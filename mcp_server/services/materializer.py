@@ -11,8 +11,10 @@ Design notes:
   may raise ``MaterializationCancelled`` (e.g. when the worker observes
   ``MaterializationRun.state == CANCELLED``); the open psycopg transaction
   rolls back, leaving no partial data.
-- The final COMPLETED state is written via a conditional UPDATE (filter on
-  TRANSFORMING) so a concurrent cancel during the TRANSFORM phase is preserved.
+- Phase transitions (DISCOVERING→LOADING, LOADING→TRANSFORMING, TRANSFORMING→
+  COMPLETED) are written via conditional UPDATEs that filter on the prior
+  state, so a concurrent CANCELLED set by the cancel endpoint is preserved
+  (an unconditional ``run.save`` would silently clobber it).
 - A step count check at the end guards against total_steps / report() drift.
 """
 
@@ -182,8 +184,15 @@ def run_pipeline(
                 )
 
         # ── 3. LOAD ───────────────────────────────────────────────────────────
+        # Compare-and-swap: an unconditional save() would silently overwrite a
+        # CANCELLED state set by the cancel endpoint while DISCOVER (which has
+        # no progress checkpoint) was running, and the run would continue.
+        rows = MaterializationRun.objects.filter(
+            id=run.id, state=MaterializationRun.RunState.DISCOVERING
+        ).update(state=MaterializationRun.RunState.LOADING)
+        if not rows:
+            raise MaterializationCancelled()
         run.state = MaterializationRun.RunState.LOADING
-        run.save(update_fields=["state"])
 
         conn = get_managed_db_connection()
         conn.autocommit = False
@@ -231,8 +240,19 @@ def run_pipeline(
 
     # ── 4. TRANSFORM ──────────────────────────────────────────────────────────
     # Transform errors are isolated — failure here does NOT mark the run FAILED.
+    # Compare-and-swap, same reasoning as the LOADING transition: a cancel that
+    # lands between LOAD commit and here must not be overwritten. On miss,
+    # stamp result so the row matches the shape of a LOAD-phase cancel.
+    rows = MaterializationRun.objects.filter(
+        id=run.id, state=MaterializationRun.RunState.LOADING
+    ).update(state=MaterializationRun.RunState.TRANSFORMING)
+    if not rows:
+        MaterializationRun.objects.filter(id=run.id).update(
+            result={"cancelled": True, "sources": source_results},
+        )
+        logger.info("Run %s cancelled before transform; partial data committed", run.id)
+        raise MaterializationCancelled()
     run.state = MaterializationRun.RunState.TRANSFORMING
-    run.save(update_fields=["state"])
     transform_result: dict = {}
 
     # Check if there are any TransformationAssets to execute
