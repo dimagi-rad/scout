@@ -4,6 +4,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 
@@ -13,6 +14,8 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
 )
+from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
+from mcp_server.services.materializer import MaterializationCancelled
 
 
 def _mock_pipeline(provider="commcare", name="commcare_sync"):
@@ -55,8 +58,6 @@ async def test_materialize_workspace_dispatches_per_tenant(
     workspace, tenant_membership_obj, context_with_job_id
 ):
     """The task resolves memberships and runs the pipeline once per tenant."""
-    from apps.workspaces.tasks import materialize_workspace
-
     captured = {"calls": 0}
 
     def fake_pipeline_run(*args, **kwargs):
@@ -85,8 +86,6 @@ async def test_materialize_workspace_dispatches_per_tenant(
 async def test_materialize_workspace_records_failure(
     workspace, tenant_membership_obj, context_with_job_id
 ):
-    from apps.workspaces.tasks import materialize_workspace
-
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
@@ -113,9 +112,6 @@ async def test_materialize_workspace_breaks_on_cancel(
     workspace, tenant_membership_obj, context_with_job_id
 ):
     """When the pipeline raises MaterializationCancelled, processing stops."""
-    from apps.workspaces.tasks import materialize_workspace
-    from mcp_server.services.materializer import MaterializationCancelled
-
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
@@ -145,9 +141,6 @@ def test_run_pipeline_with_progress_writes_progress_and_raises_on_cancel(
     db, tenant, tenant_membership_obj
 ):
     """The closure mirrors progress to the run row and raises when state==CANCELLED."""
-    from apps.workspaces.tasks import _run_pipeline_with_progress
-    from mcp_server.services.materializer import MaterializationCancelled
-
     schema = TenantSchema.objects.create(
         tenant=tenant, schema_name="test_progress", state=SchemaState.ACTIVE
     )
@@ -221,12 +214,10 @@ def test_run_pipeline_with_progress_writes_progress_and_raises_on_cancel(
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_endpoint_marks_runs_cancelled(workspace, user, tenant):
     """POSTing cancels every active run for the workspace and aborts the job."""
-    from asgiref.sync import sync_to_async
-
-    schema = await sync_to_async(TenantSchema.objects.create)(
+    schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="test_cancel", state=SchemaState.ACTIVE
     )
-    active_run = await sync_to_async(MaterializationRun.objects.create)(
+    active_run = await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
@@ -254,13 +245,11 @@ async def test_cancel_endpoint_marks_runs_cancelled(workspace, user, tenant):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_endpoint_returns_no_active_run_when_idle(workspace, user, tenant):
-    from asgiref.sync import sync_to_async
-
-    schema = await sync_to_async(TenantSchema.objects.create)(
+    schema = await TenantSchema.objects.acreate(
         tenant=tenant, schema_name="test_cancel_idle", state=SchemaState.ACTIVE
     )
     # A completed run shouldn't be touched.
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
@@ -281,8 +270,6 @@ async def test_cancel_endpoint_returns_no_active_run_when_idle(workspace, user, 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_endpoint_requires_workspace_membership(workspace, other_user):
-    from asgiref.sync import sync_to_async
-
     client = AsyncClient()
     await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
 

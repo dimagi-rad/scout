@@ -30,6 +30,8 @@ from datetime import UTC, datetime
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
+from procrastinate.jobs import Status as _ProcrastinateStatus
 
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import Tenant, TenantMembership
@@ -542,6 +544,32 @@ def _format_progress_message(progress: dict, multi_tenant: bool) -> str:
     return base
 
 
+_PROCRASTINATE_TERMINAL_STATUSES = frozenset(
+    {
+        _ProcrastinateStatus.SUCCEEDED,
+        _ProcrastinateStatus.FAILED,
+        _ProcrastinateStatus.CANCELLED,
+        _ProcrastinateStatus.ABORTED,
+    }
+)
+
+
+async def _is_procrastinate_job_finished(job_id: int) -> bool:
+    """True if the procrastinate job has reached a terminal state.
+
+    Used by the workspace-progress poller as a backstop: the worker can
+    legitimately skip a membership (no pipeline / no credential) without
+    creating a MaterializationRun row, which would otherwise leave the
+    poller waiting for runs that never appear.
+    """
+    try:
+        status = await _procrastinate_app.job_manager.get_job_status_async(job_id)
+    except Exception:
+        logger.warning("Failed to fetch procrastinate job %s status", job_id, exc_info=True)
+        return False
+    return status in _PROCRASTINATE_TERMINAL_STATUSES
+
+
 async def _query_workspace_progress(workspace_id: str, job_id: int, expected_count: int) -> dict:
     """Aggregate progress across all MaterializationRuns for this dispatched job.
 
@@ -560,13 +588,18 @@ async def _query_workspace_progress(workspace_id: str, job_id: int, expected_cou
             procrastinate_job_id=job_id
         ).select_related("tenant_schema__tenant")
     ]
+    job_finished = await _is_procrastinate_job_finished(job_id)
     if not runs:
+        # No rows yet — but if the procrastinate job has finished, it means
+        # every membership was skipped (e.g. all lacked pipelines or
+        # credentials). Treat that as done so the poll loop exits.
         return {
-            "all_done": False,
+            "all_done": job_finished,
             "any_cancelled": False,
             "active_progress": None,
             "tenants": [],
-            "queued": True,
+            "queued": not job_finished,
+            "multi_tenant": expected_count > 1,
         }
 
     terminal_states = {
@@ -601,7 +634,11 @@ async def _query_workspace_progress(workspace_id: str, job_id: int, expected_cou
             progress.setdefault("tenant_id", tenant_id)
             active_progress = progress
 
-    all_done = completed_runs >= expected_count
+    # Fall back to the procrastinate job state when fewer rows exist than
+    # expected: the worker skips memberships without creating a run row, so
+    # ``completed_runs >= expected_count`` would otherwise never hold and
+    # the poll loop would time out.
+    all_done = completed_runs >= expected_count or job_finished
 
     return {
         "all_done": all_done,
