@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 class OCSMessageLoader(OCSBaseLoader):
     """Fetch messages for every session in an experiment."""
 
-    def load_pages(self) -> Iterator[list[dict]]:
+    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         list_url = f"{self.base_url}/api/sessions/"
         params = {"experiment": self.experiment_id}
         total_sessions = 0
         total_messages = 0
-        for session_page in self._paginate(list_url, params=params):
+        # No reliable total for messages — they're nested per-session.
+        for session_page, _session_total in self._paginate(list_url, params=params):
             for session in session_page:
                 session_id = str(session.get("id") or "")
                 if not session_id:
@@ -36,7 +37,7 @@ class OCSMessageLoader(OCSBaseLoader):
                 rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
                 if rows:
                     total_messages += len(rows)
-                    yield rows
+                    yield rows, None
         logger.info(
             "Fetched %d messages across %d sessions for experiment %s",
             total_messages,
@@ -45,7 +46,7 @@ class OCSMessageLoader(OCSBaseLoader):
         )
 
     def load(self) -> list[dict]:
-        return [row for page in self.load_pages() for row in page]
+        return [row for page, _ in self.load_pages() for row in page]
 
 
 def _map_message(session_id: str, index: int, raw: dict) -> dict:

@@ -13,20 +13,20 @@ logger = logging.getLogger(__name__)
 class OCSSessionLoader(OCSBaseLoader):
     """Fetch chat sessions for this experiment (paginated)."""
 
-    def load_pages(self) -> Iterator[list[dict]]:
+    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/sessions/"
         params = {"experiment": self.experiment_id}
         total = 0
-        for raw_page in self._paginate(url, params=params):
+        for raw_page, page_total in self._paginate(url, params=params):
             rows = [_map_session(item) for item in raw_page]
             if not rows:
                 continue
             total += len(rows)
-            yield rows
+            yield rows, page_total
         logger.info("Fetched %d sessions for experiment %s", total, self.experiment_id)
 
     def load(self) -> list[dict]:
-        return [row for page in self.load_pages() for row in page]
+        return [row for page, _ in self.load_pages() for row in page]
 
 
 def _map_session(raw: dict) -> dict:

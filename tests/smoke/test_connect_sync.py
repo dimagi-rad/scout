@@ -165,10 +165,17 @@ class TestConnectSync:
         assert pipeline_config is not None, "connect_sync pipeline not found in registry"
 
         # ── Run pipeline ──────────────────────────────────────────────────
-        def on_progress(current: int, total: int, message: str) -> None:
-            logger.info("[%d/%d] %s", current, total, message)
+        def on_progress(progress: dict) -> None:
+            logger.info(
+                "[%s/%s] %s rows=%s/%s",
+                progress.get("step"),
+                progress.get("total_steps"),
+                progress.get("message"),
+                progress.get("rows_loaded"),
+                progress.get("rows_total"),
+            )
 
-        result = run_pipeline(tm, credential, pipeline_config, on_progress)
+        result = run_pipeline(tm, credential, pipeline_config, progress_updater=on_progress)
 
         # ── Report results ────────────────────────────────────────────────
         assert result["status"] == "completed", f"Pipeline failed: {result}"

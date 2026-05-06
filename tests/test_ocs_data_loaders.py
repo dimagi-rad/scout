@@ -25,14 +25,17 @@ def test_experiment_loader_fetches_single_detail():
     with patch.object(loader._session, "get", return_value=resp):
         pages = list(loader.load_pages())
         assert pages == [
-            [
-                {
-                    "experiment_id": "exp-1",
-                    "name": "Onboarding Bot",
-                    "url": "https://ocs.example/api/experiments/exp-1/",
-                    "version_number": 3,
-                }
-            ]
+            (
+                [
+                    {
+                        "experiment_id": "exp-1",
+                        "name": "Onboarding Bot",
+                        "url": "https://ocs.example/api/experiments/exp-1/",
+                        "version_number": 3,
+                    }
+                ],
+                1,
+            )
         ]
 
 
@@ -53,7 +56,7 @@ def test_session_loader_paginates_and_filters_by_experiment():
         "next": None,
     }
     with patch.object(loader._session, "get", return_value=page):
-        rows = [r for pg in loader.load_pages() for r in pg]
+        rows = [r for pg, _ in loader.load_pages() for r in pg]
         assert rows == [
             {
                 "session_id": "sess-1",
@@ -90,7 +93,7 @@ def test_session_loader_extracts_experiment_id_from_nested_object():
         "next": None,
     }
     with patch.object(loader._session, "get", return_value=page):
-        rows = [r for pg in loader.load_pages() for r in pg]
+        rows = [r for pg, _ in loader.load_pages() for r in pg]
         assert rows[0]["experiment_id"] == "exp-1"
 
 
@@ -122,7 +125,7 @@ def test_message_loader_flattens_messages_with_composite_pk():
         ],
     }
     with patch.object(loader._session, "get", side_effect=[sessions_page, detail]):
-        rows = [r for pg in loader.load_pages() for r in pg]
+        rows = [r for pg, _ in loader.load_pages() for r in pg]
         assert rows == [
             {
                 "message_id": "sess-1:0",
@@ -168,7 +171,7 @@ def test_participant_loader_dedupes_by_identifier():
         "next": None,
     }
     with patch.object(loader._session, "get", return_value=page):
-        rows = [r for pg in loader.load_pages() for r in pg]
+        rows = [r for pg, _ in loader.load_pages() for r in pg]
         assert sorted(rows, key=lambda r: r["identifier"]) == [
             {"identifier": "p1", "platform": "web", "remote_id": "r1"},
             {"identifier": "p2", "platform": "whatsapp", "remote_id": "r2"},

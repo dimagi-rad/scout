@@ -3,13 +3,16 @@
 Design notes:
 - All source writes share a single psycopg connection, committed in one
   transaction. A mid-run failure rolls back all sources atomically.
-- Loaders expose load_pages() iterators; rows are written page-by-page so the
-  full dataset is never held in memory. Inserts use executemany for efficiency.
+- Loaders expose ``load_pages()`` iterators yielding ``(page, total_count|None)``
+  tuples; rows are written page-by-page so the full dataset is never held in
+  memory. Inserts use ``executemany`` for efficiency.
 - Transform failures are isolated — run is marked COMPLETED; error stored in result.
-- The final COMPLETED state is written via a conditional UPDATE (filter on TRANSFORMING)
-  so that a concurrent cancel_materialization call is not overwritten. Note: cancellation
-  during DISCOVER/LOAD phases will be overwritten by subsequent state transitions;
-  full cancellation support requires Celery workers (see TODO.md).
+- ``progress_updater`` is also the cancellation checkpoint. Between pages it
+  may raise ``MaterializationCancelled`` (e.g. when the worker observes
+  ``MaterializationRun.state == CANCELLED``); the open psycopg transaction
+  rolls back, leaving no partial data.
+- The final COMPLETED state is written via a conditional UPDATE (filter on
+  TRANSFORMING) so a concurrent cancel during the TRANSFORM phase is preserved.
 - A step count check at the end guards against total_steps / report() drift.
 """
 
@@ -49,14 +52,24 @@ from mcp_server.pipeline_registry import PipelineConfig, get_registry
 
 logger = logging.getLogger(__name__)
 
-ProgressCallback = Callable[[int, int, str], None]
+ProgressUpdater = Callable[[dict], None]
+OnPage = Callable[[int, int | None], None]
+
+
+class MaterializationCancelled(Exception):
+    """Raised by ``progress_updater`` when a cancellation is detected.
+
+    Propagates out through the LOAD phase so the open psycopg transaction
+    rolls back (no partial data is written).
+    """
 
 
 def run_pipeline(
     tenant_membership: Any,
     credential: dict[str, str],
     pipeline: PipelineConfig,
-    progress_callback: ProgressCallback | None = None,
+    progress_updater: ProgressUpdater | None = None,
+    procrastinate_job_id: int | None = None,
 ) -> dict:
     """Run a three-phase materialization pipeline.
 
@@ -69,22 +82,61 @@ def run_pipeline(
         tenant_membership: The TenantMembership to sync.
         credential: {"type": "oauth"|"api_key", "value": str}
         pipeline: Pipeline configuration from the registry.
-        progress_callback: Optional callable(current, total, message).
+        progress_updater: Optional callable receiving a progress dict
+            ``{step, total_steps, source, message, rows_loaded, rows_total}``.
+            The updater also acts as the cancellation checkpoint; it may raise
+            ``MaterializationCancelled`` to abort the LOAD phase between pages,
+            triggering a transaction rollback.
+        procrastinate_job_id: When set, written to ``MaterializationRun`` so
+            the cancel endpoint can target the underlying procrastinate job.
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
     # total steps: provision + discover + N sources + transform/skip
     total_steps = 2 + len(pipeline.sources) + 1
     step = 0
+    current_source: str | None = None
+    # Holds the run id once the MaterializationRun is created so the
+    # progress dict carries it. Captured by closures below.
+    run_id_holder: dict[str, Any] = {"id": None}
 
     def report(message: str) -> None:
         nonlocal step
         step += 1
-        if progress_callback:
-            progress_callback(step, total_steps, message)
+        if progress_updater is not None:
+            progress_updater(
+                {
+                    "run_id": run_id_holder["id"],
+                    "step": step,
+                    "total_steps": total_steps,
+                    "source": current_source,
+                    "message": message,
+                    "rows_loaded": 0,
+                    "rows_total": None,
+                }
+            )
+
+    def make_on_page(source_name: str, message: str) -> OnPage:
+        def _on_page(rows_loaded: int, rows_total: int | None) -> None:
+            if progress_updater is None:
+                return
+            progress_updater(
+                {
+                    "run_id": run_id_holder["id"],
+                    "step": step,
+                    "total_steps": total_steps,
+                    "source": source_name,
+                    "message": message,
+                    "rows_loaded": rows_loaded,
+                    "rows_total": rows_total,
+                }
+            )
+
+        return _on_page
 
     # ── 1. PROVISION ──────────────────────────────────────────────────────────
-    report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
+    # Create the schema and run row up-front so progress_updater always has a
+    # valid run_id to target. Progress reporting starts immediately after.
     tenant_schema = SchemaManager().provision(tenant_membership.tenant)
     schema_name = tenant_schema.schema_name
 
@@ -92,7 +144,13 @@ def run_pipeline(
         tenant_schema=tenant_schema,
         pipeline=pipeline.name,
         state=MaterializationRun.RunState.DISCOVERING,
+        procrastinate_job_id=procrastinate_job_id,
     )
+    # Stringify the UUID so the dict is JSON-serializable (it is written to
+    # ``MaterializationRun.progress``, a JSONField).
+    run_id_holder["id"] = str(run.id)
+
+    report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
 
     source_results: dict[str, dict] = {}
 
@@ -131,7 +189,9 @@ def run_pipeline(
         conn.autocommit = False
         try:
             for source in pipeline.sources:
-                report(f"Loading {source.name} from {pipeline.provider} API...")
+                current_source = source.name
+                load_message = f"Loading {source.name} from {pipeline.provider} API..."
+                report(load_message)
                 rows = _load_source(
                     source.name,
                     tenant_membership,
@@ -139,9 +199,11 @@ def run_pipeline(
                     schema_name,
                     conn,
                     provider=pipeline.provider,
+                    on_page=make_on_page(source.name, load_message),
                 )
                 source_results[source.name] = {"state": "loaded", "rows": rows}
                 logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
+            current_source = None
             conn.commit()
         except Exception:
             conn.rollback()
@@ -149,6 +211,17 @@ def run_pipeline(
         finally:
             conn.close()
 
+    except MaterializationCancelled:
+        # Run state is already CANCELLED (set by the canceller before raising
+        # via progress_updater). Stamp completed_at and exit cleanly so the
+        # caller can distinguish cancellation from failure.
+        now = datetime.now(UTC)
+        MaterializationRun.objects.filter(id=run.id).update(
+            completed_at=now,
+            result={"cancelled": True, "sources": source_results},
+        )
+        logger.info("Run %s cancelled; partial data rolled back", run.id)
+        raise
     except Exception:
         run.state = MaterializationRun.RunState.FAILED
         run.completed_at = datetime.now(UTC)
@@ -178,8 +251,8 @@ def run_pipeline(
 
     # ── 5. COMPLETE ───────────────────────────────────────────────────────────
     # Conditional UPDATE: only transition to COMPLETED if still in TRANSFORMING
-    # state. This preserves a FAILED state written by cancel_materialization
-    # while the transform phase was running.
+    # state. Preserves a CANCELLED (or FAILED) state written externally during
+    # the transform phase.
     final_result = {
         "sources": source_results,
         "pipeline": pipeline.name,
@@ -263,19 +336,24 @@ def _load_source(
     schema_name: str,
     conn: Any,
     provider: str = "commcare",
+    on_page: OnPage | None = None,
 ) -> int:
     if provider == "commcare_connect":
-        return _load_connect_source(source_name, tenant_membership, credential, schema_name, conn)
+        return _load_connect_source(
+            source_name, tenant_membership, credential, schema_name, conn, on_page
+        )
     if provider == "ocs":
-        return _load_ocs_source(source_name, tenant_membership, credential, schema_name, conn)
+        return _load_ocs_source(
+            source_name, tenant_membership, credential, schema_name, conn, on_page
+        )
     # Existing CommCare dispatch
     domain = tenant_membership.tenant.external_id
     if source_name == "cases":
         loader = CommCareCaseLoader(domain=domain, credential=credential)
-        return _write_cases(loader.load_pages(), schema_name, conn)
+        return _write_cases(loader.load_pages(), schema_name, conn, on_page=on_page)
     if source_name == "forms":
         loader = CommCareFormLoader(domain=domain, credential=credential)
-        return _write_forms(loader.load_pages(), schema_name, conn)
+        return _write_forms(loader.load_pages(), schema_name, conn, on_page=on_page)
     raise ValueError(f"Unknown source '{source_name}'. Known sources: cases, forms")
 
 
@@ -285,6 +363,7 @@ def _load_connect_source(
     credential: dict[str, str],
     schema_name: str,
     conn: Any,
+    on_page: OnPage | None = None,
 ) -> int:
     opp_id = int(tenant_membership.tenant.external_id)
     loader_map = {
@@ -302,7 +381,7 @@ def _load_connect_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
-    return writer_fn(loader.load_pages(), schema_name, conn)
+    return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
 
 
 def _load_ocs_source(
@@ -311,6 +390,7 @@ def _load_ocs_source(
     credential: dict[str, str],
     schema_name: str,
     conn: Any,
+    on_page: OnPage | None = None,
 ) -> int:
     experiment_id = tenant_membership.tenant.external_id
     loader_map = {
@@ -325,10 +405,15 @@ def _load_ocs_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(experiment_id=experiment_id, credential=credential)
-    return writer_fn(loader.load_pages(), schema_name, conn)
+    return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
 
 
-def _write_ocs_experiments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_ocs_experiments(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the experiments table and bulk-insert all pages."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -349,9 +434,12 @@ def _write_ocs_experiments(pages: Iterator[list[dict]], schema_name: str, conn: 
 
     ins_sql = _OCS_EXPERIMENTS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("experiment_id", ""),
@@ -363,11 +451,18 @@ def _write_ocs_experiments(pages: Iterator[list[dict]], schema_name: str, conn: 
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_ocs_sessions(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_ocs_sessions(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the sessions table and bulk-insert all pages."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -391,9 +486,12 @@ def _write_ocs_sessions(pages: Iterator[list[dict]], schema_name: str, conn: Any
 
     ins_sql = _OCS_SESSIONS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("session_id", ""),
@@ -408,11 +506,18 @@ def _write_ocs_sessions(pages: Iterator[list[dict]], schema_name: str, conn: Any
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_ocs_messages(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_ocs_messages(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the messages table and bulk-insert all pages."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -437,9 +542,12 @@ def _write_ocs_messages(pages: Iterator[list[dict]], schema_name: str, conn: Any
 
     ins_sql = _OCS_MESSAGES_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("message_id", ""),
@@ -455,11 +563,18 @@ def _write_ocs_messages(pages: Iterator[list[dict]], schema_name: str, conn: Any
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_ocs_participants(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_ocs_participants(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the participants table and bulk-insert all pages."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -479,9 +594,12 @@ def _write_ocs_participants(pages: Iterator[list[dict]], schema_name: str, conn:
 
     ins_sql = _OCS_PARTICIPANTS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("identifier", ""),
@@ -492,6 +610,8 @@ def _write_ocs_participants(pages: Iterator[list[dict]], schema_name: str, conn:
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
@@ -548,7 +668,12 @@ _FORMS_INSERT = psql.SQL(
 )
 
 
-def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_cases(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the cases table and bulk-insert all pages. Returns total row count."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -578,9 +703,12 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
 
     ins_sql = _CASES_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 c.get("case_id"),
@@ -601,11 +729,18 @@ def _write_cases(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_forms(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the forms table and bulk-insert all pages. Returns total row count."""
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
@@ -629,9 +764,12 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
 
     ins_sql = _FORMS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 f.get("form_id", ""),
@@ -646,6 +784,8 @@ def _write_forms(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> in
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
@@ -788,7 +928,12 @@ _OCS_PARTICIPANTS_INSERT = psql.SQL(
 )
 
 
-def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_visits(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the visits table and bulk-insert all pages. Returns total row count.
 
     Column types mirror the Django model + DRF serializer output:
@@ -836,9 +981,12 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
 
     ins_sql = _CONNECT_VISITS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("visit_id"),
@@ -868,11 +1016,18 @@ def _write_connect_visits(pages: Iterator[list[dict]], schema_name: str, conn: A
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_users(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the users table and bulk-insert all pages. Returns total row count.
 
     ``payment_accrued`` is NUMERIC money, ``suspended`` is BOOLEAN, all
@@ -908,9 +1063,12 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
 
     ins_sql = _CONNECT_USERS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("username", ""),
@@ -932,11 +1090,18 @@ def _write_connect_users(pages: Iterator[list[dict]], schema_name: str, conn: An
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_completed_works(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the completed_works table and bulk-insert all pages. Returns total row count.
 
     Counts become INTEGER, accrued amounts become NUMERIC money, all
@@ -974,9 +1139,12 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
 
     ins_sql = _CONNECT_COMPLETED_WORKS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("username", ""),
@@ -1001,11 +1169,18 @@ def _write_connect_completed_works(pages: Iterator[list[dict]], schema_name: str
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_payments(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the payments table and bulk-insert all pages. Returns total row count.
 
     ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
@@ -1040,9 +1215,12 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
 
     ins_sql = _CONNECT_PAYMENTS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("username", ""),
@@ -1063,11 +1241,18 @@ def _write_connect_payments(pages: Iterator[list[dict]], schema_name: str, conn:
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_invoices(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
 
     Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
@@ -1097,9 +1282,12 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
 
     ins_sql = _CONNECT_INVOICES_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("opportunity_id"),
@@ -1114,11 +1302,18 @@ def _write_connect_invoices(pages: Iterator[list[dict]], schema_name: str, conn:
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
-def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, conn: Any) -> int:
+def _write_connect_assessments(
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
+) -> int:
     """Create the assessments table and bulk-insert all pages. Returns total row count.
 
     Scores become INTEGER, ``passed`` becomes BOOLEAN, ``date`` becomes
@@ -1146,9 +1341,12 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
 
     ins_sql = _CONNECT_ASSESSMENTS_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("username", ""),
@@ -1163,12 +1361,17 @@ def _write_connect_assessments(pages: Iterator[list[dict]], schema_name: str, co
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 
 
 def _write_connect_completed_modules(
-    pages: Iterator[list[dict]], schema_name: str, conn: Any
+    pages: Iterator[tuple[list[dict], int | None]],
+    schema_name: str,
+    conn: Any,
+    on_page: OnPage | None = None,
 ) -> int:
     """Create the completed_modules table and bulk-insert all pages. Returns total row count.
 
@@ -1195,9 +1398,12 @@ def _write_connect_completed_modules(
 
     ins_sql = _CONNECT_COMPLETED_MODULES_INSERT.format(schema=sid)
     total = 0
-    for page in pages:
+    rows_total: int | None = None
+    for page, page_total in pages:
         if not page:
             continue
+        if rows_total is None and page_total is not None:
+            rows_total = page_total
         rows = [
             (
                 r.get("username", ""),
@@ -1210,6 +1416,8 @@ def _write_connect_completed_modules(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        if on_page is not None:
+            on_page(total, rows_total)
 
     return total
 

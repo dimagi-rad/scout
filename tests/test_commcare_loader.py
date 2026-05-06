@@ -99,8 +99,12 @@ class TestCaseLoaderLoadPages:
             pages = list(loader.load_pages())
 
         assert len(pages) == 2
-        assert len(pages[0]) == 2
-        assert len(pages[1]) == 1
+        # load_pages now yields (page, total_count) tuples; total is None
+        # because the test mock omits ``meta.total_count``.
+        assert len(pages[0][0]) == 2
+        assert len(pages[1][0]) == 1
+        assert pages[0][1] is None
+        assert pages[1][1] is None
 
     def test_load_is_flat_list(self):
         mock_resp = MagicMock()

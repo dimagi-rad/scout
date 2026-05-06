@@ -35,18 +35,26 @@ class CommCareCaseLoader(CommCareBaseLoader):
         super().__init__(domain=domain, credential=credential)
         self.page_size = min(page_size, _DEFAULT_PAGE_SIZE)
 
-    def load_pages(self) -> Iterator[list[dict]]:
-        """Yield one page of cases at a time.
+    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
+        """Yield ``(page, total_count)`` one page at a time.
 
-        Each page is a list of normalised case dicts. Prefer this over
-        ``load()`` when writing to the DB to avoid holding all cases in memory.
+        Each ``page`` is a list of normalised case dicts. ``total_count`` is
+        the API's ``meta.total_count`` from the first response only;
+        subsequent pages yield ``None``.
         """
         url = f"{_BASE_URL}/a/{self.domain}/api/case/v2/"
         params: dict = {"limit": self.page_size}
         total_loaded = 0
+        first_page = True
         while url:
             data = self._get(url, params=params).json()
             cases = [_normalize_case(c) for c in data.get("cases", [])]
+            page_total: int | None = None
+            if first_page:
+                meta_total = data.get("meta", {}).get("total_count")
+                if isinstance(meta_total, int):
+                    page_total = meta_total
+                first_page = False
             if cases:
                 total_loaded += len(cases)
                 logger.info(
@@ -55,13 +63,13 @@ class CommCareCaseLoader(CommCareBaseLoader):
                     total_loaded,
                     self.domain,
                 )
-                yield cases
+                yield cases, page_total
             url = data.get("next")
             params = {}
 
     def load(self) -> list[dict]:
         """Return all cases as a flat list (loads all pages into memory)."""
-        return [case for page in self.load_pages() for case in page]
+        return [case for page, _ in self.load_pages() for case in page]
 
 
 def _normalize_case(raw: dict) -> dict:

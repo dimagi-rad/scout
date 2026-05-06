@@ -88,8 +88,11 @@ class TestCommCareFormLoader:
             )
 
         assert len(pages) == 2
-        assert len(pages[0]) == 2
-        assert len(pages[1]) == 1
+        # load_pages now yields (page, total_count) tuples; total is None
+        # because the mocked response doesn't include ``meta.total_count``.
+        assert len(pages[0][0]) == 2
+        assert len(pages[1][0]) == 1
+        assert pages[0][1] is None and pages[1][1] is None
 
     def test_raises_on_auth_failure(self):
         from mcp_server.loaders.commcare_base import CommCareAuthError

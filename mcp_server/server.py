@@ -24,16 +24,15 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import UTC, datetime
 
-from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import Tenant, TenantMembership
-from apps.users.services.credential_resolver import aresolve_credential
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -44,9 +43,9 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.tasks import materialize_workspace
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
-    AUTH_TOKEN_EXPIRED,
     INTERNAL_ERROR,
     NOT_FOUND,
     VALIDATION_ERROR,
@@ -54,10 +53,7 @@ from mcp_server.envelope import (
     success_response,
     tool_context,
 )
-from mcp_server.loaders.commcare_base import CommCareAuthError
-from mcp_server.loaders.connect_base import ConnectAuthError
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.materializer import run_pipeline
 from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_get_metadata,
@@ -487,51 +483,6 @@ async def cancel_materialization(run_id: str) -> dict:
         return tc["result"]
 
 
-async def _materialize_tenant(
-    tm,
-    pipeline_config,
-    ctx: Context | None,
-) -> dict:
-    """Run a materialization pipeline for a single TenantMembership.
-
-    Resolves credentials, builds a progress callback, and executes the pipeline.
-    Returns the pipeline result dict on success, or raises on failure.
-    """
-    tenant_id = tm.tenant.external_id
-
-    # ── Resolve credential ────────────────────────────────────────────────
-    credential = await aresolve_credential(tm)
-    if credential is None:
-        return error_response("AUTH_TOKEN_MISSING", "No credential configured for this tenant")
-
-    # ── Build progress callback ───────────────────────────────────────────
-    progress_callback = None
-    if ctx is not None:
-        loop = asyncio.get_running_loop()
-
-        def _on_progress_done(fut):
-            exc = fut.exception()
-            if exc is not None:
-                logger.warning("Progress notification delivery failed: %s", exc)
-
-        def progress_callback(current: int, total: int, message: str) -> None:
-            fut = asyncio.run_coroutine_threadsafe(
-                ctx.report_progress(current, total, message),
-                loop,
-            )
-            fut.add_done_callback(_on_progress_done)
-
-    # ── Run pipeline ──────────────────────────────────────────────────────
-    try:
-        return await sync_to_async(run_pipeline)(tm, credential, pipeline_config, progress_callback)
-    except (CommCareAuthError, ConnectAuthError) as e:
-        logger.warning("Auth failed for tenant %s: %s", tenant_id, e)
-        return error_response(AUTH_TOKEN_EXPIRED, str(e))
-    except Exception:
-        logger.exception("Pipeline '%s' failed for tenant %s", pipeline_config.name, tenant_id)
-        return error_response(INTERNAL_ERROR, f"Pipeline '{pipeline_config.name}' failed")
-
-
 async def _resolve_workspace_memberships(workspace_id, user_id):
     """Resolve TenantMemberships for all tenants in a workspace."""
     workspace = await Workspace.objects.filter(id=workspace_id).afirst()
@@ -556,6 +507,112 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     return memberships, None
 
 
+_MATERIALIZATION_POLL_INTERVAL_S = 3
+_MATERIALIZATION_POLL_DEADLINE_S = 600
+
+
+def _format_progress_message(progress: dict, multi_tenant: bool) -> str:
+    """Render a user-facing progress string from a MaterializationRun.progress dict.
+
+    Examples (single-tenant):
+        Provisioning schema for my-experiment...
+        Loading sessions from OCS API... 4.6% (500 / 13,028 rows)
+        Loading sessions from OCS API... 500 rows loaded
+
+    For multi-tenant workspaces the message is prefixed with ``[tenant-id]``.
+    """
+    base = progress.get("message") or "Working..."
+    rows_loaded = progress.get("rows_loaded") or 0
+    rows_total = progress.get("rows_total")
+    source = progress.get("source")
+
+    if rows_loaded:
+        if rows_total:
+            pct = (rows_loaded / rows_total) * 100 if rows_total else 0
+            base = f"{base} {pct:.1f}% ({rows_loaded:,} / {rows_total:,} rows)"
+        else:
+            base = f"{base} {rows_loaded:,} rows loaded"
+    elif source and not progress.get("message"):
+        base = f"Working on {source}..."
+
+    if multi_tenant:
+        tenant_id = progress.get("tenant_id")
+        if tenant_id:
+            base = f"[{tenant_id}] {base}"
+    return base
+
+
+async def _query_workspace_progress(workspace_id: str, job_id: int, expected_count: int) -> dict:
+    """Aggregate progress across all MaterializationRuns for this dispatched job.
+
+    Returns:
+        ``{
+            "all_done": bool,            # every expected run reached a terminal state
+            "any_cancelled": bool,
+            "active_progress": dict | None,   # the latest active run's progress dict
+            "tenants": list[dict],            # per-tenant completed/failed/cancelled summaries
+            "queued": bool,                   # True if the worker hasn't created any rows yet
+        }``
+    """
+    runs = [
+        r
+        async for r in MaterializationRun.objects.filter(
+            procrastinate_job_id=job_id
+        ).select_related("tenant_schema__tenant")
+    ]
+    if not runs:
+        return {
+            "all_done": False,
+            "any_cancelled": False,
+            "active_progress": None,
+            "tenants": [],
+            "queued": True,
+        }
+
+    terminal_states = {
+        MaterializationRun.RunState.COMPLETED,
+        MaterializationRun.RunState.FAILED,
+        MaterializationRun.RunState.CANCELLED,
+    }
+    active_progress: dict | None = None
+    any_cancelled = False
+    completed_runs = 0
+    tenants: list[dict] = []
+    multi_tenant = expected_count > 1
+
+    # Sort by started_at ascending so the most-recent active run wins active_progress.
+    runs.sort(key=lambda r: r.started_at)
+    for run in runs:
+        tenant_id = run.tenant_schema.tenant.external_id
+        if run.state in terminal_states:
+            completed_runs += 1
+            tenants.append(
+                {
+                    "tenant": tenant_id,
+                    "state": run.state,
+                    "result": run.result,
+                }
+            )
+            if run.state == MaterializationRun.RunState.CANCELLED:
+                any_cancelled = True
+        else:
+            # The latest in-progress run drives the live message.
+            progress = dict(run.progress or {})
+            progress.setdefault("tenant_id", tenant_id)
+            active_progress = progress
+
+    all_done = completed_runs >= expected_count
+
+    return {
+        "all_done": all_done,
+        "any_cancelled": any_cancelled,
+        "active_progress": active_progress,
+        "tenants": tenants,
+        "queued": False,
+        "multi_tenant": multi_tenant,
+    }
+
+
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -564,10 +621,10 @@ async def run_materialization(
 ) -> dict:
     """Materialize data for all tenants in the workspace.
 
-    Resolves all tenants linked to the workspace and runs the appropriate
-    materialization pipeline for each one. Creates schemas automatically
-    if they don't exist. Streams progress via MCP notifications/progress
-    when the caller provides a progressToken.
+    Defers the work to the procrastinate ``materialize_workspace`` task, then
+    polls ``MaterializationRun.progress`` every few seconds and emits MCP
+    progress notifications so the chat UI can show live updates without
+    holding open a long-running HTTP request to the loaders.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
@@ -583,46 +640,82 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, err)
             return tc["result"]
 
-        registry = get_registry()
-        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+        expected_count = len(memberships)
+        try:
+            job = await materialize_workspace.defer_async(
+                workspace_id=str(workspace_id),
+                user_id=str(user_id) if user_id else "",
+            )
+        except Exception:
+            logger.exception("Failed to dispatch materialize_workspace task")
+            tc["result"] = error_response(INTERNAL_ERROR, "Failed to dispatch materialization task")
+            return tc["result"]
+        # ``defer_async`` returns a JobDeferResult-like object exposing the
+        # job id; some procrastinate versions return the integer directly.
+        job_id = getattr(job, "id", job) if not isinstance(job, int) else job
+
+        deadline = time.monotonic() + _MATERIALIZATION_POLL_DEADLINE_S
+        last_message: str | None = None
+        progress_summary: dict | None = None
+        while time.monotonic() < deadline:
+            await asyncio.sleep(_MATERIALIZATION_POLL_INTERVAL_S)
+            progress_summary = await _query_workspace_progress(workspace_id, job_id, expected_count)
+
+            if ctx is not None and progress_summary["active_progress"]:
+                p = progress_summary["active_progress"]
+                step = p.get("step") or 0
+                total_steps = p.get("total_steps") or 1
+                message = _format_progress_message(p, progress_summary["multi_tenant"])
+                if message != last_message:
+                    try:
+                        await ctx.report_progress(step, total_steps, message)
+                    except Exception:
+                        logger.warning("Progress notification delivery failed", exc_info=True)
+                    last_message = message
+
+            if progress_summary["all_done"] or progress_summary["any_cancelled"]:
+                break
+        else:
+            # Polling deadline reached without reaching a terminal state.
+            tc["result"] = success_response(
+                {
+                    "status": "timeout",
+                    "tenants": progress_summary["tenants"] if progress_summary else [],
+                    "all_succeeded": False,
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
+        if progress_summary is None:
+            progress_summary = await _query_workspace_progress(workspace_id, job_id, expected_count)
 
         results = []
-        for tm in memberships:
-            pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
-            if pipeline_name is None:
-                results.append(
-                    {
-                        "tenant": tm.tenant.external_id,
-                        "success": False,
-                        "error": f"No pipeline for provider '{tm.tenant.provider}'",
-                    }
-                )
-                continue
+        for t in progress_summary["tenants"]:
+            state = t["state"]
+            if state == MaterializationRun.RunState.COMPLETED:
+                results.append({"tenant": t["tenant"], "success": True, "result": t["result"]})
+            elif state == MaterializationRun.RunState.CANCELLED:
+                results.append({"tenant": t["tenant"], "success": False, "cancelled": True})
+            else:  # FAILED
+                err_msg = "Pipeline failed"
+                if isinstance(t.get("result"), dict):
+                    err_msg = t["result"].get("error") or err_msg
+                results.append({"tenant": t["tenant"], "success": False, "error": err_msg})
 
-            pipeline_config = registry.get(pipeline_name)
-            result = await _materialize_tenant(tm, pipeline_config, ctx)
-
-            # _materialize_tenant returns an error envelope dict or a pipeline result dict
-            if isinstance(result, dict) and not result.get("success", True):
-                results.append(
-                    {
-                        "tenant": tm.tenant.external_id,
-                        "success": False,
-                        "error": result.get("error", {}).get("message", "Unknown error"),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "tenant": tm.tenant.external_id,
-                        "success": True,
-                        "result": result,
-                    }
-                )
-
-        all_succeeded = all(r["success"] for r in results)
+        all_succeeded = bool(results) and all(r.get("success") for r in results)
+        status = (
+            "cancelled"
+            if progress_summary["any_cancelled"]
+            else ("completed" if all_succeeded else "failed")
+        )
         tc["result"] = success_response(
-            {"tenants": results, "all_succeeded": all_succeeded},
+            {
+                "status": status,
+                "tenants": results,
+                "all_succeeded": all_succeeded,
+            },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
         )

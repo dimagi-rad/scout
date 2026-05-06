@@ -8,12 +8,22 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.users.models import TenantMembership
-from apps.users.services.credential_resolver import resolve_credential
-from apps.workspaces.models import SchemaState, TenantSchema, Workspace, WorkspaceViewSchema
+from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    Workspace,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.materializer import run_pipeline
+from mcp_server.services.materializer import (
+    MaterializationCancelled,
+    run_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +99,133 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
 
     logger.info("Refresh complete: schema '%s' is now active", new_schema.schema_name)
     return {"status": "active", "schema_id": schema_id}
+
+
+@app.task(pass_context=True)
+async def materialize_workspace(
+    context,
+    workspace_id: str,
+    user_id: str = "",
+) -> dict:
+    """Run materialization for all tenants in a workspace.
+
+    Writes progress to ``MaterializationRun.progress`` after each page so
+    the MCP polling loop can surface real-time status to the user. The
+    ``progress_updater`` closure also acts as the cancellation checkpoint:
+    it re-reads ``MaterializationRun.state`` and raises
+    ``MaterializationCancelled`` when the run has been marked CANCELLED
+    by the cancel endpoint, triggering a transaction rollback.
+
+    Returns a per-tenant summary so the polling loop can build a final
+    aggregated result for the agent.
+    """
+    job_id = context.job.id
+
+    try:
+        workspace = await Workspace.objects.aget(id=workspace_id)
+    except Workspace.DoesNotExist:
+        logger.exception("materialize_workspace: workspace %s not found", workspace_id)
+        return {"error": "Workspace not found"}
+
+    qs = TenantMembership.objects.select_related("user", "tenant").filter(
+        tenant_id__in=[
+            wt.tenant_id
+            async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
+                "tenant"
+            )
+        ]
+    )
+    if user_id:
+        qs = qs.filter(user_id=user_id)
+
+    memberships = [tm async for tm in qs]
+    if not memberships:
+        logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
+        return {"error": "No tenant memberships found", "tenants": []}
+
+    registry = get_registry()
+    provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+    tenant_results: list[dict] = []
+
+    for tm in memberships:
+        tenant_id = tm.tenant.external_id
+        pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
+        if pipeline_name is None:
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "success": False,
+                    "error": f"No pipeline for provider '{tm.tenant.provider}'",
+                }
+            )
+            continue
+
+        credential = await aresolve_credential(tm)
+        if credential is None:
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "success": False,
+                    "error": "No credential configured",
+                }
+            )
+            continue
+
+        pipeline_config = registry.get(pipeline_name)
+        try:
+            result = await asyncio.to_thread(
+                _run_pipeline_with_progress,
+                tm,
+                credential,
+                pipeline_config,
+                job_id,
+            )
+            tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
+        except MaterializationCancelled:
+            tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
+            # Stop processing remaining tenants — the user has cancelled.
+            break
+        except Exception as e:
+            logger.exception("Materialization failed for tenant %s", tenant_id)
+            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
+
+    return {
+        "tenants": tenant_results,
+        "all_succeeded": all(r.get("success") for r in tenant_results),
+    }
+
+
+def _run_pipeline_with_progress(
+    tenant_membership,
+    credential: dict,
+    pipeline_config,
+    job_id: int,
+) -> dict:
+    """Synchronous entry point invoked under ``asyncio.to_thread``.
+
+    Builds the ``progress_updater`` closure that mirrors progress to the DB
+    and surfaces cancellation, then runs the pipeline. Exceptions propagate
+    to the caller.
+    """
+
+    def updater(progress: dict) -> None:
+        run_id = progress.get("run_id")
+        if run_id is None:
+            return
+        MaterializationRun.objects.filter(id=run_id).update(progress=progress)
+        current_state = (
+            MaterializationRun.objects.filter(id=run_id).values_list("state", flat=True).first()
+        )
+        if current_state == MaterializationRun.RunState.CANCELLED:
+            raise MaterializationCancelled()
+
+    return run_pipeline(
+        tenant_membership,
+        credential,
+        pipeline_config,
+        progress_updater=updater,
+        procrastinate_job_id=job_id,
+    )
 
 
 async def _drop_schema_and_fail(schema) -> None:

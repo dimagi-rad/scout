@@ -237,7 +237,6 @@ class TestListTablesTool:
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=mock_tables),
-            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
             mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
@@ -268,7 +267,6 @@ class TestListTablesTool:
             patch("mcp_server.server.Tenant") as mock_tenant_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
-            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
             mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
@@ -356,7 +354,6 @@ class TestDescribeTableTool:
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=mock_table),
-            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
@@ -388,7 +385,6 @@ class TestDescribeTableTool:
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),
-            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
@@ -463,7 +459,6 @@ class TestGetMetadataTool:
             patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_GET_METADATA, return_value=mock_result),
-            patch("mcp_server.server.sync_to_async", side_effect=_fake_sync_to_async),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)

@@ -35,30 +35,43 @@ class CommCareFormLoader(CommCareBaseLoader):
         super().__init__(domain=domain, credential=credential)
         self.page_size = min(page_size, 1000)
 
-    def load_pages(self) -> Iterator[list[dict]]:
-        """Yield one page of normalised form records at a time."""
+    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
+        """Yield ``(page, total_count)`` one page at a time.
+
+        ``total_count`` is read from the first response's ``meta.total_count``;
+        subsequent pages yield ``None``.
+        """
         url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/form/"
         params: dict = {"limit": self.page_size}
         total_loaded = 0
+        first_page = True
+        first_meta_total: int | None = None
         while url:
             data = self._get(url, params=params).json()
             forms = [_normalize_form(raw) for raw in data.get("objects", [])]
+            page_total: int | None = None
+            if first_page:
+                meta_total = data.get("meta", {}).get("total_count")
+                if isinstance(meta_total, int):
+                    page_total = meta_total
+                    first_meta_total = meta_total
+                first_page = False
             if forms:
                 total_loaded += len(forms)
                 logger.info(
                     "Fetched %d forms (total so far: %d/%s) for domain %s",
                     len(forms),
                     total_loaded,
-                    data.get("meta", {}).get("total_count", "?"),
+                    first_meta_total if first_meta_total is not None else "?",
                     self.domain,
                 )
-                yield forms
+                yield forms, page_total
             url = data.get("next")
             params = {}
 
     def load(self) -> list[dict]:
         """Return all forms as a flat list (loads all pages into memory)."""
-        return [form for page in self.load_pages() for form in page]
+        return [form for page, _ in self.load_pages() for form in page]
 
 
 def _normalize_form(raw: dict) -> dict:

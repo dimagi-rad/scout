@@ -79,8 +79,9 @@ class TestConnectVisitLoader:
             )
             pages = list(loader.load_pages())
             assert len(pages) == 1
-            assert len(pages[0]) == 1
-            row = pages[0][0]
+            page, _total = pages[0]
+            assert len(page) == 1
+            row = page[0]
             assert row["visit_id"] == 1
             assert row["username"] == "alice"
             assert "id" not in row

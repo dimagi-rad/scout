@@ -4,7 +4,8 @@ import { isToolUIPart, getToolName } from "ai"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
-import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight } from "lucide-react"
+import { api } from "@/api/client"
+import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
 import {
   QueryToolOutput,
   DescribeTableOutput as DescribeTableOutputComponent,
@@ -70,6 +71,7 @@ function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode
 interface ChatMessageProps {
   message: UIMessage
   isActiveMessage: boolean
+  workspaceId?: string
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -133,9 +135,10 @@ interface ToolCallPartProps {
   index: number
   isLatest: boolean
   isActiveMessage: boolean
+  workspaceId?: string
 }
 
-function ToolCallPart({ part, index, isLatest, isActiveMessage }: ToolCallPartProps) {
+function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
@@ -152,25 +155,66 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage }: ToolCallPartPr
   const fallbackText =
     hasOutput && part.output != null && !richOutput ? formatToolOutput(part.output) : null
 
+  const showCancelButton =
+    toolName === "run_materialization" && isLoading && isActiveMessage && !!workspaceId
+  const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
+  const handleCancel = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!workspaceId || cancelState === "pending") return
+    setCancelState("pending")
+    try {
+      await api.post(`/api/workspaces/${workspaceId}/materialization/cancel/`, {})
+      // The button stays in pending state until the tool transitions out of
+      // the loading state (the agent will receive cancelled status on its
+      // next poll and respond in the conversation).
+    } catch {
+      setCancelState("error")
+      setTimeout(() => setCancelState("idle"), 3000)
+    }
+  }
+
   return (
     <div key={index} className="rounded border bg-muted/30 my-1 text-xs">
-      <button
-        type="button"
-        onClick={toggleExpanded}
-        className="flex w-full items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
-        data-testid={`tool-call-${toolName}`}
-      >
-        {expanded ? (
-          <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
-        ) : (
-          <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
+      <div className="flex w-full items-center">
+        <button
+          type="button"
+          onClick={toggleExpanded}
+          className="flex flex-1 items-center gap-2 px-3 py-1.5 hover:bg-muted/50 transition-colors"
+          data-testid={`tool-call-${toolName}`}
+        >
+          {expanded ? (
+            <ChevronDown className="w-3 h-3 text-muted-foreground shrink-0" />
+          ) : (
+            <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
+          )}
+          <Wrench className="w-3 h-3 text-muted-foreground shrink-0" />
+          <span className="text-muted-foreground">
+            {toolName}
+            {isLoading && "..."}
+          </span>
+        </button>
+        {showCancelButton && (
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={cancelState === "pending"}
+            className={`flex items-center gap-1 px-2 py-1 mr-1 rounded text-xs transition-colors ${
+              cancelState === "error"
+                ? "text-red-500"
+                : "text-red-500/70 hover:text-red-500 hover:bg-red-500/10"
+            }`}
+            data-testid="materialization-cancel-btn"
+            title={
+              cancelState === "error"
+                ? "Cancel failed — try again"
+                : "Stop materialization"
+            }
+          >
+            <Square className="w-3 h-3" />
+            <span>{cancelState === "pending" ? "Cancelling..." : "Stop"}</span>
+          </button>
         )}
-        <Wrench className="w-3 h-3 text-muted-foreground shrink-0" />
-        <span className="text-muted-foreground">
-          {toolName}
-          {isLoading && "..."}
-        </span>
-      </button>
+      </div>
       {expanded && (richOutput ?? fallbackText) && (
         <div className="border-t px-3 py-2.5">
           {richOutput ?? (
@@ -224,7 +268,7 @@ function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; 
   )
 }
 
-export function ChatMessage({ message, isActiveMessage }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage, workspaceId }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -284,7 +328,7 @@ export function ChatMessage({ message, isActiveMessage }: ChatMessageProps) {
               }
             }
 
-            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
+            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} />
           }
 
           return null
