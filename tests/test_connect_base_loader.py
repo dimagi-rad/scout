@@ -68,25 +68,36 @@ class TestPaginateExportPages:
         with rm.Mocker() as m:
             m.get(
                 "https://connect.example.com/export/opportunity/814/user_visits/",
-                json={"next": None, "previous": None, "results": [{"id": 1}, {"id": 2}]},
+                json={
+                    "next": None,
+                    "previous": None,
+                    "results": [{"id": 1}, {"id": 2}],
+                    "count": 2,
+                },
             )
             pages = list(loader._paginate_export_pages("user_visits/"))
             assert len(pages) == 1
-            assert pages[0] == [{"id": 1}, {"id": 2}]
+            assert pages[0] == ([{"id": 1}, {"id": 2}], 2)
 
     def test_multi_page_follows_next(self, loader):
         first = "https://connect.example.com/export/opportunity/814/user_visits/"
         second = f"{first}?last_id=1"
         third = f"{first}?last_id=2"
         with rm.Mocker() as m:
-            m.get(first, json={"next": second, "previous": None, "results": [{"id": 1}]})
+            m.get(
+                first,
+                json={"next": second, "previous": None, "results": [{"id": 1}], "count": 3},
+            )
             m.get(second, json={"next": third, "previous": None, "results": [{"id": 2}]})
             m.get(third, json={"next": None, "previous": None, "results": [{"id": 3}]})
 
-            all_records = [
-                r for page in loader._paginate_export_pages("user_visits/") for r in page
-            ]
+            pages = list(loader._paginate_export_pages("user_visits/"))
+            all_records = [r for page, _ in pages for r in page]
             assert [r["id"] for r in all_records] == [1, 2, 3]
+            # count is exposed only on the first page.
+            assert pages[0][1] == 3
+            assert pages[1][1] is None
+            assert pages[2][1] is None
 
     def test_sends_versioned_accept_header(self, loader):
         with rm.Mocker() as m:
@@ -171,7 +182,7 @@ class TestPaginateExportPages:
             m.get(next_https, json={"next": None, "results": [{"id": 2}]})
 
             all_records = [
-                r for page in loader._paginate_export_pages("user_visits/") for r in page
+                r for page, _ in loader._paginate_export_pages("user_visits/") for r in page
             ]
             assert [r["id"] for r in all_records] == [1, 2]
 

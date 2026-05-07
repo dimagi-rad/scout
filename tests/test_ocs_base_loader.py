@@ -41,14 +41,28 @@ def test_paginate_follows_next_cursor():
     page1.json.return_value = {
         "results": [{"id": "s1"}, {"id": "s2"}],
         "next": "https://ocs.example/api/sessions/?cursor=abc",
+        "count": 3,
     }
     page2 = MagicMock(status_code=200)
     page2.json.return_value = {"results": [{"id": "s3"}], "next": None}
 
     with patch.object(loader._session, "get", side_effect=[page1, page2]) as mock_get:
         results = list(loader._paginate("https://ocs.example/api/sessions/"))
-        assert results == [[{"id": "s1"}, {"id": "s2"}], [{"id": "s3"}]]
+        # Tuple shape: (page, total_count). count is exposed only on page 1.
+        assert results == [
+            ([{"id": "s1"}, {"id": "s2"}], 3),
+            ([{"id": "s3"}], None),
+        ]
         assert mock_get.call_count == 2
+
+
+def test_paginate_total_is_none_when_count_field_missing():
+    loader = _make_loader()
+    page1 = MagicMock(status_code=200)
+    page1.json.return_value = {"results": [{"id": "s1"}], "next": None}
+    with patch.object(loader._session, "get", return_value=page1):
+        results = list(loader._paginate("https://ocs.example/api/sessions/"))
+    assert results == [([{"id": "s1"}], None)]
 
 
 def test_paginate_raises_auth_error_on_403():

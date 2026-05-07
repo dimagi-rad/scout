@@ -60,14 +60,17 @@ def test_write_ocs_experiments_creates_table_and_rows(tenant_schema):
         n = _write_ocs_experiments(
             iter(
                 [
-                    [
-                        {
-                            "experiment_id": "exp-1",
-                            "name": "Bot",
-                            "url": "https://x",
-                            "version_number": 1,
-                        }
-                    ]
+                    (
+                        [
+                            {
+                                "experiment_id": "exp-1",
+                                "name": "Bot",
+                                "url": "https://x",
+                                "version_number": 1,
+                            }
+                        ],
+                        1,
+                    )
                 ]
             ),
             tenant_schema.schema_name,
@@ -87,17 +90,20 @@ def test_write_ocs_sessions_creates_table_and_rows(tenant_schema):
         n = _write_ocs_sessions(
             iter(
                 [
-                    [
-                        {
-                            "session_id": "s1",
-                            "experiment_id": "exp-1",
-                            "participant_identifier": "p1",
-                            "participant_platform": "web",
-                            "created_at": "2026-04-01T00:00:00Z",
-                            "updated_at": "2026-04-01T01:00:00Z",
-                            "tags": ["a"],
-                        }
-                    ]
+                    (
+                        [
+                            {
+                                "session_id": "s1",
+                                "experiment_id": "exp-1",
+                                "participant_identifier": "p1",
+                                "participant_platform": "web",
+                                "created_at": "2026-04-01T00:00:00Z",
+                                "updated_at": "2026-04-01T01:00:00Z",
+                                "tags": ["a"],
+                            }
+                        ],
+                        1,
+                    )
                 ]
             ),
             tenant_schema.schema_name,
@@ -117,18 +123,21 @@ def test_write_ocs_messages_creates_table_and_rows(tenant_schema):
         n = _write_ocs_messages(
             iter(
                 [
-                    [
-                        {
-                            "message_id": "s1:0",
-                            "session_id": "s1",
-                            "message_index": 0,
-                            "role": "user",
-                            "content": "hi",
-                            "created_at": "2026-04-01T00:00:00Z",
-                            "metadata": {"k": "v"},
-                            "tags": [],
-                        }
-                    ]
+                    (
+                        [
+                            {
+                                "message_id": "s1:0",
+                                "session_id": "s1",
+                                "message_index": 0,
+                                "role": "user",
+                                "content": "hi",
+                                "created_at": "2026-04-01T00:00:00Z",
+                                "metadata": {"k": "v"},
+                                "tags": [],
+                            }
+                        ],
+                        None,
+                    )
                 ]
             ),
             tenant_schema.schema_name,
@@ -146,7 +155,7 @@ def test_write_ocs_participants_creates_table_and_rows(tenant_schema):
     conn.autocommit = False
     try:
         n = _write_ocs_participants(
-            iter([[{"identifier": "p1", "platform": "web", "remote_id": "r1"}]]),
+            iter([([{"identifier": "p1", "platform": "web", "remote_id": "r1"}], None)]),
             tenant_schema.schema_name,
             conn,
         )

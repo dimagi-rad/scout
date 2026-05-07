@@ -18,8 +18,12 @@ class TestRunPipeline:
         run = MagicMock()
         run.id = "run-1"
         mock_run_cls.objects.create.return_value = run
-        for attr in ("DISCOVERING", "LOADING", "TRANSFORMING", "COMPLETED", "FAILED"):
+        for attr in ("DISCOVERING", "LOADING", "TRANSFORMING", "COMPLETED", "FAILED", "CANCELLED"):
             setattr(mock_run_cls.RunState, attr, attr.lower())
+        # ACTIVE_STATES is a real frozenset on the model; replicate it on the mock
+        mock_run_cls.ACTIVE_STATES = frozenset(
+            {"started", "discovering", "loading", "transforming"}
+        )
         return run
 
     def test_returns_completed_result(self):
@@ -67,8 +71,9 @@ class TestRunPipeline:
         assert result["run_id"] == "run-1"
         assert "cases" in result["sources"]
 
-    def test_progress_callback_called_full_sequence(self):
-        """Progress callback must be called exactly total_steps times in order."""
+    def test_progress_updater_called_full_sequence(self):
+        """Progress updater must be called for each phase transition with a
+        well-formed dict, in step order."""
         from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
         from mcp_server.services.materializer import run_pipeline
 
@@ -109,23 +114,185 @@ class TestRunPipeline:
             mock_conn.return_value = conn
             conn.cursor.return_value = MagicMock()
 
-            calls: list[tuple] = []
+            calls: list[dict] = []
             run_pipeline(
                 self._make_tm(),
                 {"type": "api_key", "value": "x"},
                 pipeline,
-                progress_callback=lambda cur, tot, msg: calls.append((cur, tot, msg)),
+                progress_updater=calls.append,
             )
 
-        total = calls[0][1]  # total_steps from first call
-        assert len(calls) == total  # exactly total_steps calls
-        # Steps increment sequentially from 1 to total
-        for i, (cur, tot, _msg) in enumerate(calls, start=1):
-            assert cur == i
-            assert tot == total
-        # First step is provisioning, last step is transform/skip
-        assert "provision" in calls[0][2].lower() or "schema" in calls[0][2].lower()
-        assert "transform" in calls[-1][2].lower() or "skip" in calls[-1][2].lower()
+        total = calls[0]["total_steps"]
+        assert len(calls) == total  # one report() per phase
+        for i, c in enumerate(calls, start=1):
+            assert c["step"] == i
+            assert c["total_steps"] == total
+            assert "message" in c
+            assert "rows_loaded" in c
+            assert "rows_total" in c
+            assert "run_id" in c
+        # First step is provisioning; last is transform/skip.
+        assert "provision" in calls[0]["message"].lower() or "schema" in calls[0]["message"].lower()
+        assert "transform" in calls[-1]["message"].lower() or "skip" in calls[-1]["message"].lower()
+
+    def test_progress_updater_cancellation_rolls_back(self):
+        """When the updater raises ``MaterializationCancelled`` mid-load, the
+        psycopg transaction is rolled back and the exception propagates."""
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import (
+            MaterializationCancelled,
+            run_pipeline,
+        )
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            # Yield one page so the writer's on_page fires.
+            mock_cases.return_value.load_pages.return_value = iter([([{"case_id": "c1"}], 100)])
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            seen_messages: list[str] = []
+
+            def raising_updater(progress: dict) -> None:
+                seen_messages.append(progress["message"])
+                # Raise once we're inside the LOAD phase (after the page write).
+                if progress.get("rows_loaded"):
+                    raise MaterializationCancelled()
+
+            with pytest.raises(MaterializationCancelled):
+                run_pipeline(
+                    self._make_tm(),
+                    {"type": "api_key", "value": "x"},
+                    pipeline,
+                    progress_updater=raising_updater,
+                )
+
+        # Transaction should have been rolled back.
+        conn.rollback.assert_called_once()
+        # No commit should have happened.
+        conn.commit.assert_not_called()
+
+    def test_loading_transition_preserves_external_cancel(self):
+        """If the cancel endpoint flips state to CANCELLED while DISCOVER is
+        running (no progress checkpoint there), the DISCOVERING→LOADING
+        transition must use a conditional UPDATE so it does not silently
+        overwrite the cancel and let the run continue."""
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import (
+            MaterializationCancelled,
+            run_pipeline,
+        )
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            # Simulate the conditional UPDATE finding no DISCOVERING row
+            # (because the cancel endpoint already wrote CANCELLED).
+            mock_run_cls.objects.filter.return_value.update.return_value = 0
+
+            with pytest.raises(MaterializationCancelled):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+            # We must not have advanced past DISCOVER: no DB connection acquired.
+            mock_conn.assert_not_called()
+
+    def test_transforming_transition_preserves_external_cancel(self):
+        """A cancel that lands between LOAD commit and the TRANSFORM phase
+        must not be overwritten by the LOADING→TRANSFORMING transition;
+        transform must be skipped."""
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import (
+            MaterializationCancelled,
+            run_pipeline,
+        )
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch(
+                "mcp_server.services.materializer._run_transform_phase"
+            ) as mock_transform,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            mock_cases.return_value.load_pages.return_value = iter([])
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            # 1st conditional UPDATE (DISCOVERING→LOADING) succeeds; the 2nd
+            # (LOADING→TRANSFORMING) finds no row, simulating cancel landing
+            # between LOAD commit and the transform start. The 3rd is the
+            # result-stamping write inside the cancel branch.
+            mock_run_cls.objects.filter.return_value.update.side_effect = [1, 0, 1]
+
+            with pytest.raises(MaterializationCancelled):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+            # LOAD ran (commit was called), but transform must be skipped.
+            conn.commit.assert_called_once()
+            mock_transform.assert_not_called()
 
     def test_no_metadata_discovery_skips_discover_phase(self):
         """Pipeline without metadata_discovery should not create TenantMetadata."""
@@ -293,7 +460,7 @@ class TestWriteCases:
                     "indices": {},
                 },
             ]
-            count = _write_cases(iter([cases]), test_schema, conn)
+            count = _write_cases(iter([(cases, len(cases))]), test_schema, conn)
             conn.commit()
             assert count == 1
             with conn.cursor() as cur:
@@ -338,7 +505,7 @@ class TestWriteForms:
                     "case_ids": ["c1"],
                 },
             ]
-            count = _write_forms(iter([forms]), test_schema, conn)
+            count = _write_forms(iter([(forms, len(forms))]), test_schema, conn)
             conn.commit()
             assert count == 1
         finally:

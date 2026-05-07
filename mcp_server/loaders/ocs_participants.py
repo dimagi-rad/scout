@@ -17,11 +17,12 @@ logger = logging.getLogger(__name__)
 class OCSParticipantLoader(OCSBaseLoader):
     """Deduplicate participants from session list data."""
 
-    def load_pages(self) -> Iterator[list[dict]]:
+    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/sessions/"
         params = {"experiment": self.experiment_id}
         seen: set[str] = set()
-        for session_page in self._paginate(url, params=params):
+        # Participants are derived from sessions — no upstream count is meaningful.
+        for session_page, _session_total in self._paginate(url, params=params):
             rows: list[dict] = []
             for session in session_page:
                 participant = session.get("participant") or {}
@@ -37,7 +38,7 @@ class OCSParticipantLoader(OCSBaseLoader):
                     }
                 )
             if rows:
-                yield rows
+                yield rows, None
         logger.info(
             "Fetched %d unique participants for experiment %s",
             len(seen),
@@ -45,4 +46,4 @@ class OCSParticipantLoader(OCSBaseLoader):
         )
 
     def load(self) -> list[dict]:
-        return [row for page in self.load_pages() for row in page]
+        return [row for page, _ in self.load_pages() for row in page]

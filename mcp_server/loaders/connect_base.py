@@ -80,16 +80,18 @@ class ConnectBaseLoader:
         self,
         suffix: str,
         params: dict | None = None,
-    ) -> Iterator[list[dict]]:
-        """Yield pages of records from a v2 paginated JSON export endpoint.
+    ) -> Iterator[tuple[list[dict], int | None]]:
+        """Yield ``(page, total_count)`` from a v2 paginated JSON export endpoint.
 
         Calls ``_opp_url(suffix)`` first, then follows the server-provided
         ``next`` URL until it is null. ``params`` are sent only on the first
         request — the ``next`` URL already includes preserved query params.
 
-        Each yielded page is the ``results`` list from one response (bounded
-        server-side, default ~1000 records). Empty result lists are yielded
-        as ``[]`` so callers can rely on the loop terminating naturally.
+        Each yielded ``page`` is the ``results`` list from one response
+        (bounded server-side, default ~1000 records). ``total_count`` is the
+        ``count`` field from the first response only; subsequent pages yield
+        ``None`` to avoid re-reading it. Empty result lists are yielded as
+        ``[]`` so callers can rely on the loop terminating naturally.
 
         Raises:
             ConnectAuthError: on 401/403.
@@ -100,6 +102,7 @@ class ConnectBaseLoader:
         url: str | None = self._opp_url(suffix)
         request_params: dict | None = params
         headers = {"Accept": EXPORT_ACCEPT_HEADER}
+        first_page = True
 
         while url is not None:
             # NOTE: relies on requests' default ``allow_redirects=True``.
@@ -128,7 +131,14 @@ class ConnectBaseLoader:
             if "results" not in payload:
                 raise ConnectExportError(f"Export API response missing 'results' key for {url}")
 
-            yield payload["results"]
+            if first_page:
+                total = payload.get("count")
+                if not isinstance(total, int):
+                    total = None
+                yield payload["results"], total
+                first_page = False
+            else:
+                yield payload["results"], None
 
             url = payload.get("next")
             # The server's `next` URL already preserves all original params

@@ -296,6 +296,7 @@ export function ChatPanel() {
             key={msg.id}
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
+            workspaceId={activeDomainId ?? undefined}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}

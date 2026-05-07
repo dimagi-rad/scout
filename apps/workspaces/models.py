@@ -66,6 +66,16 @@ class MaterializationRun(models.Model):
         TRANSFORMING = "transforming"
         COMPLETED = "completed"
         FAILED = "failed"
+        CANCELLED = "cancelled"
+
+    ACTIVE_STATES = frozenset(
+        {
+            "started",
+            "discovering",
+            "loading",
+            "transforming",
+        }
+    )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant_schema = models.ForeignKey(
@@ -76,6 +86,8 @@ class MaterializationRun(models.Model):
     pipeline = models.CharField(max_length=255)
     state = models.CharField(max_length=20, choices=RunState.choices, default=RunState.STARTED)
     result = models.JSONField(null=True, blank=True)
+    progress = models.JSONField(null=True, blank=True)
+    procrastinate_job_id = models.BigIntegerField(null=True, blank=True, db_index=True)
     started_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 

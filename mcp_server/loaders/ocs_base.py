@@ -51,14 +51,19 @@ class OCSBaseLoader:
         resp.raise_for_status()
         return resp
 
-    def _paginate(self, url: str, params: dict | None = None) -> Iterator[list[dict]]:
-        """Yield pages of records from a cursor-paginated endpoint.
+    def _paginate(
+        self, url: str, params: dict | None = None
+    ) -> Iterator[tuple[list[dict], int | None]]:
+        """Yield ``(page, total_count)`` from a cursor-paginated endpoint.
 
-        Follows the absolute ``next`` URL as-is. Params are only applied on
-        the first request — subsequent requests use the cursor-embedded URL.
+        ``total_count`` is read from the ``count`` field in the first
+        response's envelope (when present) and yielded only with the first
+        page; subsequent pages yield ``(page, None)``. OCS' cursor-based
+        pagination may omit ``count`` — callers must tolerate ``None``.
         """
         current_url: str | None = url
         current_params: dict | None = params
+        first_page = True
         while current_url:
             resp = self._session.get(current_url, params=current_params, timeout=HTTP_TIMEOUT)
             if resp.status_code in (401, 403):
@@ -67,6 +72,14 @@ class OCSBaseLoader:
                 )
             resp.raise_for_status()
             payload = resp.json()
-            yield payload.get("results", [])
+            page = payload.get("results", [])
+            if first_page:
+                total = payload.get("count")
+                if not isinstance(total, int):
+                    total = None
+                yield page, total
+                first_page = False
+            else:
+                yield page, None
             current_url = payload.get("next")
             current_params = None
