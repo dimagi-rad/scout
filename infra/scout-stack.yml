@@ -169,6 +169,21 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: scout-cloudwatch-logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource:
+                  - !Sub '${ApiLogGroup.Arn}:*'
+                  - !Sub '${McpLogGroup.Arn}:*'
+                  - !Sub '${WorkerLogGroup.Arn}:*'
+                  - !Sub '${FrontendLogGroup.Arn}:*'
 
   EC2Instance:
     Type: AWS::EC2::Instance
