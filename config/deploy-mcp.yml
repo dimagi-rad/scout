@@ -41,4 +41,12 @@ ssh:
 builder:
   arch: amd64
 
+logging:
+  driver: awslogs
+  options:
+    awslogs-region: us-east-1
+    awslogs-group: /scout/mcp
+    awslogs-create-group: "false"
+    tag: "{{.Name}}"
+
 # No proxy — MCP is internal only, reached by API via Docker network
