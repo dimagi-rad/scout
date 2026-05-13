@@ -161,9 +161,24 @@ kamal deploy -c config/deploy-worker.yml
 ## Useful Commands
 
 ```bash
-# View logs
-kamal app logs                    # API logs
-kamal app logs -c config/deploy-mcp.yml  # MCP logs
+# View logs (CloudWatch)
+#
+# Container stdout/stderr ships to CloudWatch Logs in us-east-1. There is
+# one log group per service; each container instance is its own stream.
+#
+# Log groups: /scout/api, /scout/mcp, /scout/worker, /scout/frontend
+#
+# Tail live:
+aws logs tail /scout/api --follow --profile scout --region us-east-1
+
+# Last 15 minutes:
+aws logs tail /scout/api --since 15m --profile scout --region us-east-1
+#
+# CloudWatch Logs Insights queries: https://console.aws.amazon.com/cloudwatch/
+#
+# Note: `kamal app logs` shows nothing under the awslogs driver — Docker's
+# `logs` command only works for the json-file/journald drivers. Use the
+# `aws logs tail` commands above instead.
 
 # SSH into a container
 kamal app exec -i -- bash
