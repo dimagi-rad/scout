@@ -58,4 +58,12 @@ ssh:
 builder:
   arch: amd64
 
+logging:
+  driver: awslogs
+  options:
+    awslogs-region: us-east-1
+    awslogs-group: /scout/api
+    awslogs-create-group: "false"
+    tag: "{{.Name}}"
+
 # No proxy — API is internal only, reached via nginx in frontend container

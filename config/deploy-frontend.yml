@@ -46,3 +46,11 @@ proxy:
     interval: 5
     path: /
     timeout: 3
+
+logging:
+  driver: awslogs
+  options:
+    awslogs-region: us-east-1
+    awslogs-group: /scout/frontend
+    awslogs-create-group: "false"
+    tag: "{{.Name}}"
