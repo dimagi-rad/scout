@@ -169,10 +169,13 @@ kamal deploy -c config/deploy-worker.yml
 # Log groups: /scout/api, /scout/mcp, /scout/worker, /scout/frontend
 #
 # Tail live:
-aws logs tail /scout/api --follow --profile scout --region us-east-1
+aws logs tail /scout/api     --follow --profile scout --region us-east-1
+aws logs tail /scout/worker  --follow --profile scout --region us-east-1
+aws logs tail /scout/mcp     --follow --profile scout --region us-east-1
 
 # Last 15 minutes:
-aws logs tail /scout/api --since 15m --profile scout --region us-east-1
+aws logs tail /scout/api    --since 15m --profile scout --region us-east-1
+aws logs tail /scout/worker --since 15m --profile scout --region us-east-1
 #
 # CloudWatch Logs Insights queries: https://console.aws.amazon.com/cloudwatch/
 #
@@ -202,6 +205,24 @@ kamal app exec -- python manage.py setup_oauth_apps --domain scout.dimagi.com
 kamal secrets print
 ```
 
+### Rolling back the CloudWatch logging driver
+
+If you need to revert a service to Docker's default `json-file` log driver (e.g., the
+`awslogs` driver is preventing containers from starting):
+
+1. Remove the `logging:` block from the relevant `config/deploy*.yml`.
+2. Redeploy the affected service(s):
+   ```bash
+   kamal deploy -c config/deploy.yml
+   kamal deploy -c config/deploy-worker.yml
+   # repeat for any other affected service
+   ```
+3. Containers restart under the `json-file` driver; `kamal app logs` and
+   `docker logs` work again immediately.
+
+Existing CloudWatch log groups (`/scout/api`, `/scout/worker`, etc.) and all
+historical streams are preserved with their 30-day retention — no data is lost.
+
 ## Infrastructure Changes
 
 The CloudFormation stack is at `infra/scout-stack.yml`. To update:
@@ -218,3 +239,11 @@ aws cloudformation update-stack \
 
 After infra changes, re-run `./scripts/fetch-deploy-env.sh` and update GitHub secrets
 if any outputs changed.
+
+**CloudWatch log groups must exist before deploying containers.** The Kamal
+`logging:` blocks set `awslogs-create-group: "false"`, so Docker will not create
+the groups automatically. When a commit bundles both CFN changes (new/updated log
+groups) and Kamal `logging:` block changes, always run `aws cloudformation
+update-stack` (and wait for it to complete) before running `kamal deploy`. If
+the stack update is skipped, containers will fail to start because the log driver
+cannot find its target group.
