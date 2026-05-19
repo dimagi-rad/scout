@@ -51,7 +51,9 @@ class CommCareMetadataLoader(CommCareBaseLoader):
         while url:
             data = self._get(url, params=params).json()
             apps.extend(data.get("objects", []))
-            url = data.get("next")
+            url = data.get("meta", {}).get("next")
+            if url and url.startswith("/"):
+                url = f"{_BASE_URL}{url}"
             params = {}
         return apps
 

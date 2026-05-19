@@ -36,7 +36,7 @@ def _make_app_response():
                 ],
             }
         ],
-        "next": None,
+        "meta": {"next": None},
     }
 
 
@@ -116,25 +116,37 @@ class TestCommCareMetadataLoader:
             ).load()
 
     def test_paginates_apps(self):
+        """Pagination must follow ``meta.next`` (TastyPie envelope), not a
+        top-level ``next`` field. A top-level ``next`` is intentionally
+        included to ensure it is IGNORED.
+        """
         from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
 
         page1 = MagicMock()
         page1.status_code = 200
         page1.json.return_value = {
             "objects": [{"id": "app1", "name": "App 1", "modules": []}],
-            "next": "https://www.commcarehq.org/a/dimagi/api/v0.5/application/?offset=1",
+            # Top-level next must be ignored.
+            "next": None,
+            "meta": {"next": "/a/dimagi/api/v0.5/application/?offset=1&limit=100"},
         }
         page2 = MagicMock()
         page2.status_code = 200
         page2.json.return_value = {
             "objects": [{"id": "app2", "name": "App 2", "modules": []}],
-            "next": None,
+            "meta": {"next": None},
         }
 
-        with self._mock_session([page1, page2]):
+        with self._mock_session([page1, page2]) as mock_session_cls:
             loader = CommCareMetadataLoader(
                 domain="dimagi", credential={"type": "api_key", "value": "user:key"}
             )
             result = loader.load()
 
         assert len(result["app_definitions"]) == 2
+        session = mock_session_cls.return_value
+        assert session.get.call_count == 2
+        second_call_url = session.get.call_args_list[1].args[0]
+        assert second_call_url == (
+            "https://www.commcarehq.org/a/dimagi/api/v0.5/application/?offset=1&limit=100"
+        )
