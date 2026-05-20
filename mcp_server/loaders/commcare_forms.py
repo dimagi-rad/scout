@@ -66,7 +66,9 @@ class CommCareFormLoader(CommCareBaseLoader):
                     self.domain,
                 )
                 yield forms, page_total
-            url = data.get("next")
+            url = data.get("meta", {}).get("next")
+            if url and url.startswith("/"):
+                url = f"{_BASE_URL}{url}"
             params = {}
 
     def load(self) -> list[dict]:

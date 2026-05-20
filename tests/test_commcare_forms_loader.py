@@ -21,8 +21,7 @@ class TestCommCareFormLoader:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
-            "next": None,
-            "meta": {"total_count": 2},
+            "meta": {"total_count": 2, "next": None},
             "objects": [
                 {
                     "id": "f1",
@@ -48,15 +47,16 @@ class TestCommCareFormLoader:
         page1 = MagicMock()
         page1.status_code = 200
         page1.json.return_value = {
-            "next": "https://www.commcarehq.org/a/dimagi/api/v0.5/form/?cursor=x",
-            "meta": {"total_count": 3},
+            "meta": {
+                "total_count": 3,
+                "next": "/a/dimagi/api/v0.5/form/?offset=2&limit=2",
+            },
             "objects": [{"id": "f1", "form": {}}, {"id": "f2", "form": {}}],
         }
         page2 = MagicMock()
         page2.status_code = 200
         page2.json.return_value = {
-            "next": None,
-            "meta": {"total_count": 3},
+            "meta": {"total_count": 3, "next": None},
             "objects": [{"id": "f3", "form": {}}],
         }
 
@@ -73,12 +73,15 @@ class TestCommCareFormLoader:
         page1 = MagicMock()
         page1.status_code = 200
         page1.json.return_value = {
-            "next": "https://www.commcarehq.org/a/dimagi/api/v0.5/form/?cursor=x",
+            "meta": {"next": "/a/dimagi/api/v0.5/form/?offset=2&limit=2"},
             "objects": [{"id": "f1", "form": {}}, {"id": "f2", "form": {}}],
         }
         page2 = MagicMock()
         page2.status_code = 200
-        page2.json.return_value = {"next": None, "objects": [{"id": "f3", "form": {}}]}
+        page2.json.return_value = {
+            "meta": {"next": None},
+            "objects": [{"id": "f3", "form": {}}],
+        }
 
         with _mock_session([page1, page2]):
             pages = list(
@@ -93,6 +96,49 @@ class TestCommCareFormLoader:
         assert len(pages[0][0]) == 2
         assert len(pages[1][0]) == 1
         assert pages[0][1] is None and pages[1][1] is None
+
+    def test_follows_meta_next_url_across_pages(self):
+        """Regression test: pagination must follow ``meta.next``, not a top-level
+        ``next`` key. The CommCare HQ v0.5 form API uses TastyPie envelope
+        format which nests pagination links inside ``meta``. Reading
+        ``data["next"]`` always returns ``None`` and silently truncates the
+        result set to the first page (1000 records).
+        """
+        from mcp_server.loaders.commcare_forms import CommCareFormLoader
+
+        page1 = MagicMock()
+        page1.status_code = 200
+        page1.json.return_value = {
+            # A top-level ``next`` should be IGNORED — TastyPie never puts it
+            # here. Older code read this field and incorrectly returned None.
+            "next": None,
+            "meta": {
+                "total_count": 4,
+                "next": "/a/dimagi/api/v0.5/form/?offset=2&limit=2",
+            },
+            "objects": [{"id": "f1", "form": {}}, {"id": "f2", "form": {}}],
+        }
+        page2 = MagicMock()
+        page2.status_code = 200
+        page2.json.return_value = {
+            "meta": {"total_count": 4, "next": None},
+            "objects": [{"id": "f3", "form": {}}, {"id": "f4", "form": {}}],
+        }
+
+        with _mock_session([page1, page2]) as mock_session_cls:
+            forms = CommCareFormLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "user:key"}
+            ).load()
+
+        assert len(forms) == 4
+        session = mock_session_cls.return_value
+        assert session.get.call_count == 2
+        # Second call must resolve the relative meta.next path against the
+        # API base URL.
+        second_call_url = session.get.call_args_list[1].args[0]
+        assert second_call_url == (
+            "https://www.commcarehq.org/a/dimagi/api/v0.5/form/?offset=2&limit=2"
+        )
 
     def test_raises_on_auth_failure(self):
         from mcp_server.loaders.commcare_base import CommCareAuthError
