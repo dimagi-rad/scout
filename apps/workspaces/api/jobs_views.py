@@ -57,7 +57,7 @@ async def active_jobs_view(request, workspace_id):
     # ThreadJobs for this user's threads in this workspace, in active states.
     jobs = [
         j
-        async for j in ThreadJob.objects.select_related("thread").filter(
+        async for j in ThreadJob.objects.filter(
             thread__workspace=workspace,
             thread__user=user,
             state__in=list(ThreadJob.ACTIVE_STATES),

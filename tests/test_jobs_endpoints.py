@@ -74,3 +74,25 @@ async def test_active_jobs_empty_when_none_running():
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     assert resp.json() == {"jobs": []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_unauthenticated_returns_401_or_403():
+    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    client = AsyncClient()
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_non_member_blocked():
+    owner = await sync_to_async(User.objects.create_user)(email="o@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=owner)
+    await sync_to_async(User.objects.create_user)(email="out@b.c", password="x")
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="out@b.c", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 403
