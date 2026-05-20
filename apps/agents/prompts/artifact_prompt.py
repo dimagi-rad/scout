@@ -65,7 +65,15 @@ Choose the appropriate artifact type based on the use case:
 For React artifacts, follow these patterns:
 
 **Available Libraries (pre-loaded, no imports needed from CDN):**
-- `recharts` - For charts (LineChart, BarChart, PieChart, AreaChart, etc.)
+- `recharts` - For charts. The sandbox exposes the full Recharts v2 surface:
+  - Charts: `LineChart`, `BarChart`, `AreaChart`, `ComposedChart`, `PieChart`,
+    `RadarChart`, `RadialBarChart`, `ScatterChart`, `FunnelChart`, `Treemap`, `Sankey`
+  - Series: `Line`, `Bar`, `Area`, `Pie`, `Radar`, `RadialBar`, `Scatter`, `Funnel`
+  - Axes & grids: `XAxis`, `YAxis`, `ZAxis`, `CartesianGrid`, `PolarGrid`,
+    `PolarAngleAxis`, `PolarRadiusAxis`
+  - Reference shapes: `ReferenceLine`, `ReferenceArea`, `ReferenceDot`
+  - Decorations: `Tooltip`, `Legend`, `Label`, `LabelList`, `Cell`, `Brush`,
+    `ErrorBar`, `Customized`, `ResponsiveContainer`
 - `react` - Core React (useState, useEffect, useMemo, etc.)
 - `lucide-react` - Icons
 
