@@ -299,6 +299,7 @@ def _make_injecting_tool_node(
             for tc in last_msg.tool_calls:
                 if tc["name"] in MCP_TOOL_NAMES:
                     extra = {k: state.get(v, "") for k, v in injections.items()}
+                    extra["_tool_call_id"] = tc.get("id", "")
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
@@ -333,8 +334,12 @@ async def build_agent_graph(
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
     # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
-    injections = {"workspace_id": "workspace_id", "user_id": "user_id"}
-    hidden_params = list(injections.keys())
+    injections = {
+        "workspace_id": "workspace_id",
+        "user_id": "user_id",
+        "_thread_id": "thread_id",
+    }
+    hidden_params = [*injections.keys(), "_tool_call_id"]
 
     # --- Build LLM with tools ---
     llm = ChatAnthropic(

@@ -206,6 +206,7 @@ async def chat_view(request):
         "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "user_role": "analyst",
+        "thread_id": str(thread_id),
     }
 
     # Attach Langfuse tracing callback if configured
