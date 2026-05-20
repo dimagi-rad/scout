@@ -33,7 +33,7 @@ def test_make_injecting_tool_node_injects_thread_id_and_tool_call_id(monkeypatch
     injections = {
         "workspace_id": "workspace_id",
         "user_id": "user_id",
-        "_thread_id": "thread_id",
+        "thread_id": "thread_id",
     }
     node = _make_injecting_tool_node(base_node, injections)
 
@@ -60,8 +60,8 @@ def test_make_injecting_tool_node_injects_thread_id_and_tool_call_id(monkeypatch
     assert forwarded_args["foo"] == "bar"
     assert forwarded_args["workspace_id"] == "ws-1"
     assert forwarded_args["user_id"] == "user-1"
-    assert forwarded_args["_thread_id"] == "thread-1"
-    assert forwarded_args["_tool_call_id"] == "tc-abc-123"
+    assert forwarded_args["thread_id"] == "thread-1"
+    assert forwarded_args["tool_call_id"] == "tc-abc-123"
 
 
 def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, caplog):
