@@ -13,7 +13,6 @@ import time
 
 from allauth.socialaccount.models import SocialToken
 from django.conf import settings
-from langchain_mcp_adapters.callbacks import Callbacks, ProgressCallback
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 logger = logging.getLogger(__name__)
@@ -29,12 +28,10 @@ class MCPServerUnavailable(Exception):
     """Raised when the circuit breaker is open."""
 
 
-async def get_mcp_tools(on_progress: ProgressCallback | None = None) -> list:
+async def get_mcp_tools() -> list:
     """Load MCP tools as LangChain tools.
 
-    Creates a fresh MultiServerMCPClient on each call. Pass on_progress to
-    receive real-time step updates during long-running tools such as
-    run_materialization.
+    Creates a fresh MultiServerMCPClient on each call.
 
     Raises MCPServerUnavailable when the circuit breaker is open.
     """
@@ -50,11 +47,9 @@ async def get_mcp_tools(on_progress: ProgressCallback | None = None) -> list:
         logger.info("Circuit breaker cooldown elapsed, allowing retry")
 
     url = settings.MCP_SERVER_URL
-    callbacks = Callbacks(on_progress=on_progress) if on_progress else None
     try:
         client = MultiServerMCPClient(
             {"scout-data": {"transport": "streamable_http", "url": url}},
-            callbacks=callbacks,
         )
         tools = await client.get_tools()
         logger.info("Loaded %d MCP tools: %s", len(tools), [t.name for t in tools])
