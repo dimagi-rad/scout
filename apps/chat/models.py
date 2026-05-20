@@ -24,6 +24,7 @@ class Thread(models.Model):
     share_token = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    last_viewed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [

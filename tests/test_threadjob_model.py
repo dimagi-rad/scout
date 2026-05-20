@@ -41,3 +41,11 @@ def test_threadjob_procrastinate_job_id_is_unique():
             procrastinate_job_id=99,
             tool_call_id="y",
         )
+
+
+@pytest.mark.django_db
+def test_thread_last_viewed_at_defaults_to_null():
+    user = User.objects.create_user(email="a@b.c", password="x")
+    ws = Workspace.objects.create(name="W", created_by=user)
+    thread = Thread.objects.create(workspace=ws, user=user)
+    assert thread.last_viewed_at is None
