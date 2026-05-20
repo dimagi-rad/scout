@@ -7,6 +7,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 
+from apps.chat.models import ThreadJob
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
 from apps.workspaces.models import (
@@ -354,3 +355,119 @@ async def teardown_schema(schema_id: str) -> None:
             "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
         )
         raise
+
+
+SYSTEM_RESUME_MARKER = "[__system_resume__]"
+
+
+async def _build_agent_for_resume(workspace, user):
+    """Build the LangGraph agent in the same shape views.py does, minus streaming."""
+    from apps.agents.graph.base import build_agent_graph
+    from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+    from apps.chat.checkpointer import ensure_checkpointer
+
+    mcp_tools = await get_mcp_tools()
+    oauth_tokens = await get_user_oauth_tokens(user)
+    checkpointer = await ensure_checkpointer()
+    return await build_agent_graph(
+        workspace=workspace,
+        user=user,
+        checkpointer=checkpointer,
+        mcp_tools=mcp_tools,
+        oauth_tokens=oauth_tokens,
+    )
+
+
+async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[str, list[dict]]:
+    """Inspect MaterializationRun rows for this job, return (status, per-tenant summary)."""
+    runs = [
+        r
+        async for r in MaterializationRun.objects.filter(
+            procrastinate_job_id=procrastinate_job_id,
+        ).select_related("tenant_schema__tenant")
+    ]
+    if not runs:
+        return "no_runs", []
+    summary: list[dict] = []
+    any_cancelled = False
+    any_failed = False
+    all_completed = True
+    for r in runs:
+        tenant_id = r.tenant_schema.tenant.external_id
+        summary.append({"tenant": tenant_id, "state": r.state, "result": r.result})
+        if r.state == MaterializationRun.RunState.CANCELLED:
+            any_cancelled = True
+            all_completed = False
+        elif r.state == MaterializationRun.RunState.FAILED:
+            any_failed = True
+            all_completed = False
+        elif r.state != MaterializationRun.RunState.COMPLETED:
+            all_completed = False
+    status = (
+        "cancelled" if any_cancelled
+        else ("failed" if any_failed else ("completed" if all_completed else "partial"))
+    )
+    return status, summary
+
+
+@app.task(pass_context=True)
+async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
+    """Inject a system-framed message into the LangGraph conversation and
+    re-invoke the agent so it can respond to the original request with the
+    now-loaded data.
+    """
+    from langchain_core.messages import HumanMessage
+
+    try:
+        tj = await ThreadJob.objects.select_related("thread__workspace", "thread__user").aget(
+            id=thread_job_id
+        )
+    except ThreadJob.DoesNotExist:
+        logger.warning("resume: ThreadJob %s not found", thread_job_id)
+        return {"status": "missing"}
+
+    if tj.state in ThreadJob.TERMINAL_STATES and tj.state != ThreadJob.State.CANCELLED:
+        # Already resumed (idempotent retry); cancellation still gets one resume.
+        return {"status": "already_terminal", "state": tj.state}
+
+    status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
+    # If cancel beat us here, prefer that signal.
+    if tj.state == ThreadJob.State.CANCELLED:
+        status = "cancelled"
+
+    body = (
+        f"{SYSTEM_RESUME_MARKER} Materialization just completed "
+        f"(status={status}). Please continue with the user's original request "
+        f"using the now-loaded data. Per-tenant: {summary}"
+    )
+
+    workspace = tj.thread.workspace
+    user = tj.thread.user
+    agent = await _build_agent_for_resume(workspace, user)
+    input_state = {
+        "messages": [HumanMessage(content=body)],
+        "workspace_id": str(workspace.id),
+        "user_id": str(user.id),
+        "user_role": "analyst",
+        "thread_id": str(tj.thread.id),
+    }
+    config = {"configurable": {"thread_id": str(tj.thread.id)}, "recursion_limit": 50}
+
+    try:
+        await agent.ainvoke(input_state, config)
+    except Exception:
+        logger.exception("resume: agent.ainvoke failed for thread_job %s", thread_job_id)
+        await ThreadJob.objects.filter(id=tj.id).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+        )
+        return {"status": "agent_failed"}
+
+    terminal = (
+        ThreadJob.State.CANCELLED if status == "cancelled"
+        else (ThreadJob.State.FAILED if status == "failed" else ThreadJob.State.COMPLETED)
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        state=terminal, completed_at=timezone.now(),
+    )
+    return {"status": "resumed", "terminal_state": terminal}
