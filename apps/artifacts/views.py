@@ -354,12 +354,24 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         `
                         const { useState, useEffect, useRef, useMemo, useCallback, memo, Fragment } = React;
                         const {
-                            LineChart, Line, AreaChart, Area, BarChart, Bar,
-                            PieChart, Pie, Cell, ScatterChart, Scatter,
-                            XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-                            ResponsiveContainer, ComposedChart, RadarChart, Radar,
+                            // Charts
+                            AreaChart, BarChart, ComposedChart, LineChart, PieChart,
+                            RadarChart, RadialBarChart, ScatterChart, FunnelChart,
+                            Treemap, Sankey,
+                            // Series
+                            Area, Bar, Line, Pie, Radar, RadialBar, Scatter, Funnel,
+                            // Axes & grids
+                            XAxis, YAxis, ZAxis, CartesianGrid, CartesianAxis,
                             PolarGrid, PolarAngleAxis, PolarRadiusAxis,
-                            Treemap, Sankey, FunnelChart, Funnel
+                            // Reference shapes
+                            ReferenceLine, ReferenceArea, ReferenceDot,
+                            // Decorations
+                            Tooltip, Legend, Label, LabelList, Cell, Customized,
+                            Brush, ErrorBar,
+                            // Containers & primitives
+                            ResponsiveContainer, Cross, Curve, Dot, Polygon,
+                            Rectangle, Sector, Symbols, Trapezoid,
+                            Layer, Surface, Text
                         } = Recharts;
 
                         // Lucide icon helper: creates a React component from a lucide icon name
