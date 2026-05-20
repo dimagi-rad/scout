@@ -140,6 +140,44 @@ class TestCommCareFormLoader:
             "https://www.commcarehq.org/a/dimagi/api/v0.5/form/?offset=2&limit=2"
         )
 
+    def test_resolves_query_string_only_meta_next(self):
+        """Regression test for the ``MissingSchema`` error that occurs when
+        CommCare returns ``meta.next`` as a bare query string (no leading
+        slash). The earlier ``startswith("/")`` shim passed these through
+        unresolved; ``urljoin`` must produce an absolute URL by replacing
+        the query on the base URL.
+        """
+        from mcp_server.loaders.commcare_forms import CommCareFormLoader
+
+        page1 = MagicMock()
+        page1.status_code = 200
+        page1.json.return_value = {
+            "meta": {
+                "total_count": 2,
+                "next": "?limit=1000&offset=1000",
+            },
+            "objects": [{"id": "f1", "form": {}}],
+        }
+        page2 = MagicMock()
+        page2.status_code = 200
+        page2.json.return_value = {
+            "meta": {"total_count": 2, "next": None},
+            "objects": [{"id": "f2", "form": {}}],
+        }
+
+        with _mock_session([page1, page2]) as mock_session_cls:
+            forms = CommCareFormLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "user:key"}
+            ).load()
+
+        assert len(forms) == 2
+        session = mock_session_cls.return_value
+        assert session.get.call_count == 2
+        second_call_url = session.get.call_args_list[1].args[0]
+        assert second_call_url == (
+            "https://www.commcarehq.org/a/dimagi/api/v0.5/form/?limit=1000&offset=1000"
+        )
+
     def test_raises_on_auth_failure(self):
         from mcp_server.loaders.commcare_base import CommCareAuthError
         from mcp_server.loaders.commcare_forms import CommCareFormLoader

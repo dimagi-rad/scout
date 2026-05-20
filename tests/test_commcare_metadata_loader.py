@@ -150,3 +150,38 @@ class TestCommCareMetadataLoader:
         assert second_call_url == (
             "https://www.commcarehq.org/a/dimagi/api/v0.5/application/?offset=1&limit=100"
         )
+
+    def test_resolves_query_string_only_meta_next(self):
+        """Regression test: when CommCare returns ``meta.next`` as a bare
+        query string (e.g. ``?limit=100&offset=100``), ``urljoin`` must
+        resolve it against the base URL. The prior ``startswith("/")``
+        shim passed these through unresolved and caused ``MissingSchema``.
+        """
+        from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
+
+        page1 = MagicMock()
+        page1.status_code = 200
+        page1.json.return_value = {
+            "objects": [{"id": "app1", "name": "App 1", "modules": []}],
+            "meta": {"next": "?limit=100&offset=100"},
+        }
+        page2 = MagicMock()
+        page2.status_code = 200
+        page2.json.return_value = {
+            "objects": [{"id": "app2", "name": "App 2", "modules": []}],
+            "meta": {"next": None},
+        }
+
+        with self._mock_session([page1, page2]) as mock_session_cls:
+            loader = CommCareMetadataLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "user:key"}
+            )
+            result = loader.load()
+
+        assert len(result["app_definitions"]) == 2
+        session = mock_session_cls.return_value
+        assert session.get.call_count == 2
+        second_call_url = session.get.call_args_list[1].args[0]
+        assert second_call_url == (
+            "https://www.commcarehq.org/a/dimagi/api/v0.5/application/?limit=100&offset=100"
+        )
