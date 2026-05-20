@@ -1,7 +1,9 @@
 import pytest
+from django.contrib.auth import get_user_model
+from django.db import IntegrityError
+
 from apps.chat.models import Thread, ThreadJob
 from apps.workspaces.models import Workspace
-from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
@@ -27,11 +29,15 @@ def test_threadjob_procrastinate_job_id_is_unique():
     ws = Workspace.objects.create(name="W", created_by=user)
     thread = Thread.objects.create(workspace=ws, user=user)
     ThreadJob.objects.create(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=99, tool_call_id="x",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=99,
+        tool_call_id="x",
     )
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         ThreadJob.objects.create(
-            thread=thread, job_type="materialization",
-            procrastinate_job_id=99, tool_call_id="y",
+            thread=thread,
+            job_type="materialization",
+            procrastinate_job_id=99,
+            tool_call_id="y",
         )
