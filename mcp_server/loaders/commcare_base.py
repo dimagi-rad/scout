@@ -8,6 +8,7 @@ and a single auth-header builder.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urljoin
 
 import requests
 
@@ -44,6 +45,18 @@ class CommCareBaseLoader:
         self.domain = domain
         self._session = requests.Session()
         self._session.headers.update(build_auth_header(credential))
+
+    def _resolve_next_url(self, base_url: str, next_url: str | None) -> str | None:
+        """Resolve a potentially-relative ``next`` URL from a CommCare API response.
+
+        CommCare APIs return ``meta.next`` in several formats:
+        - Absolute URL (e.g. ``https://www.commcarehq.org/a/domain/api/...``) — returned as-is.
+        - Path-relative (e.g. ``/a/domain/api/...``) — resolved against the base URL.
+        - Query-string-only (e.g. ``?limit=1000&offset=1000``) — resolved against the base URL.
+        """
+        if not next_url:
+            return None
+        return urljoin(base_url, next_url)
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising CommCareAuthError on 401/403."""

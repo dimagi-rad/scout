@@ -45,15 +45,14 @@ class CommCareMetadataLoader(CommCareBaseLoader):
         }
 
     def _fetch_apps(self) -> list[dict]:
-        url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/application/"
+        initial_url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/application/"
+        url: str | None = initial_url
         params: dict = {"limit": 100}
         apps: list[dict] = []
         while url:
             data = self._get(url, params=params).json()
             apps.extend(data.get("objects", []))
-            url = data.get("meta", {}).get("next")
-            if url and url.startswith("/"):
-                url = f"{_BASE_URL}{url}"
+            url = self._resolve_next_url(initial_url, data.get("meta", {}).get("next"))
             params = {}
         return apps
 

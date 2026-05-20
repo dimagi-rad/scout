@@ -41,7 +41,8 @@ class CommCareFormLoader(CommCareBaseLoader):
         ``total_count`` is read from the first response's ``meta.total_count``;
         subsequent pages yield ``None``.
         """
-        url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/form/"
+        initial_url = f"{_BASE_URL}/a/{self.domain}/api/v0.5/form/"
+        url: str | None = initial_url
         params: dict = {"limit": self.page_size}
         total_loaded = 0
         first_page = True
@@ -66,9 +67,7 @@ class CommCareFormLoader(CommCareBaseLoader):
                     self.domain,
                 )
                 yield forms, page_total
-            url = data.get("meta", {}).get("next")
-            if url and url.startswith("/"):
-                url = f"{_BASE_URL}{url}"
+            url = self._resolve_next_url(initial_url, data.get("meta", {}).get("next"))
             params = {}
 
     def load(self) -> list[dict]:
