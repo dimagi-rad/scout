@@ -398,7 +398,16 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
-        summary.append({"tenant": tenant_id, "state": r.state, "result": r.result})
+        row_counts: dict = {}
+        if isinstance(r.result, dict):
+            for source, info in (r.result.get("sources") or {}).items():
+                if isinstance(info, dict) and "rows" in info:
+                    row_counts[source] = info["rows"]
+        summary.append({
+            "tenant": tenant_id,
+            "state": r.state,
+            "row_counts": row_counts,
+        })
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
             all_completed = False
@@ -434,10 +443,31 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         # Already resumed (idempotent retry); cancellation still gets one resume.
         return {"status": "already_terminal", "state": tj.state}
 
+    # Claim the resume slot atomically before invoking the LLM.
+    # If a concurrent task already claimed it (or a retry races with
+    # itself), this returns 0 and we no-op.
+    claimed = await ThreadJob.objects.filter(
+        id=tj.id, state__in=list(ThreadJob.ACTIVE_STATES),
+    ).aupdate(state=ThreadJob.State.RUNNING)
+    if not claimed:
+        logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
+        return {"status": "already_claimed"}
+
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
     # If cancel beat us here, prefer that signal.
     if tj.state == ThreadJob.State.CANCELLED:
         status = "cancelled"
+
+    if status == "no_runs":
+        logger.warning(
+            "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
+            "marking ThreadJob FAILED without resuming agent",
+            thread_job_id, tj.procrastinate_job_id,
+        )
+        await ThreadJob.objects.filter(id=tj.id).aupdate(
+            state=ThreadJob.State.FAILED, completed_at=timezone.now(),
+        )
+        return {"status": "no_runs"}
 
     body = (
         f"{SYSTEM_RESUME_MARKER} Materialization just completed "
@@ -473,7 +503,10 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     terminal = (
         ThreadJob.State.CANCELLED if status == "cancelled"
-        else (ThreadJob.State.FAILED if status == "failed" else ThreadJob.State.COMPLETED)
+        else (
+            ThreadJob.State.FAILED if status in ("failed", "partial")
+            else ThreadJob.State.COMPLETED
+        )
     )
     await ThreadJob.objects.filter(id=tj.id).aupdate(
         state=terminal, completed_at=timezone.now(),
