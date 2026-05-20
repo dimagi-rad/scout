@@ -80,6 +80,15 @@ export const workspaceApi = {
   getMembers: (workspaceId: string) =>
     api.get<WorkspaceMember[]>(`/api/workspaces/${workspaceId}/members/`),
 
+  addMember: (
+    workspaceId: string,
+    body: { email: string; role: WorkspaceMember["role"] },
+  ) =>
+    api.post<WorkspaceMember>(
+      `/api/workspaces/${workspaceId}/members/`,
+      body,
+    ),
+
   updateMember: (workspaceId: string, membershipId: string, role: WorkspaceMember["role"]) =>
     api.patch<{ id: string; role: string }>(
       `/api/workspaces/${workspaceId}/members/${membershipId}/`,
