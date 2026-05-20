@@ -286,3 +286,39 @@ async def test_cancel_endpoint_requires_workspace_membership(workspace, other_us
 
     resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_chains_resume_task(
+    workspace, user, tenant_membership_obj, context_with_job_id
+):
+    """When materialize_workspace finishes, it defers
+    resume_thread_after_materialization for the matching ThreadJob."""
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="tc-chain",
+    )
+
+    from apps.workspaces import tasks as tasks_mod
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=9999))
+        await tasks_mod.materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    resume_mock.defer_async.assert_awaited_once()
+    kwargs = resume_mock.defer_async.await_args.kwargs
+    assert kwargs["thread_job_id"] == str(tj.id)

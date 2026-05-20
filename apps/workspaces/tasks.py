@@ -190,6 +190,14 @@ async def materialize_workspace(
             logger.exception("Materialization failed for tenant %s", tenant_id)
             tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
 
+    # Chain the resume task so the agent picks up where it left off.
+    try:
+        tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
+        if tj is not None:
+            await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+    except Exception:
+        logger.exception("Failed to defer resume task for job %s", job_id)
+
     return {
         "tenants": tenant_results,
         "all_succeeded": all(r.get("success") for r in tenant_results),
