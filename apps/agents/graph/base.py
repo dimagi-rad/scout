@@ -163,14 +163,21 @@ async def _fetch_schema_context(tenant, user) -> str:
 
     if ts is None:
         return (
-            "No data has been loaded yet. "
-            f'Call `run_materialization` with `pipeline="{pipeline_name}"` to load data.'
+            f"No data has been loaded yet. Call `run_materialization` with "
+            f"`pipeline=\"{pipeline_name}\"` to start loading. This tool returns "
+            f"IMMEDIATELY with `status: started` — do NOT call other data tools "
+            f"in the same turn. Acknowledge to the user in ONE sentence and end "
+            f"your turn. The system will resume the conversation automatically "
+            f"when materialization completes."
         )
 
     if ts.state == SchemaState.MATERIALIZING:
         return (
-            "Data is currently loading — this usually takes a minute. "
-            "Ask the user to retry shortly. Do NOT trigger another data load."
+            "A materialization is already in progress in the background. Do NOT "
+            "trigger another one and do NOT call other data tools (the data is "
+            "not yet ready). Briefly tell the user it's still loading and end "
+            "your turn — the system will resume the conversation automatically "
+            "when the current materialization completes."
         )
 
     # Schema is active: fetch table list

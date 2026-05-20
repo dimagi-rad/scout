@@ -46,7 +46,7 @@ async def test_fetch_schema_context_materializing(mock_tenant, mock_user):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
-    assert "currently loading" in result.lower()
+    assert "loading" in result.lower()
     assert "run_materialization" not in result
 
 
