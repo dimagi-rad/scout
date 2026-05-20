@@ -299,7 +299,14 @@ def _make_injecting_tool_node(
             for tc in last_msg.tool_calls:
                 if tc["name"] in MCP_TOOL_NAMES:
                     extra = {k: state.get(v, "") for k, v in injections.items()}
-                    extra["_tool_call_id"] = tc.get("id", "")
+                    tc_id = tc.get("id") or ""
+                    if not tc_id:
+                        logger.warning(
+                            "MCP tool call '%s' has no id; _tool_call_id will be empty — "
+                            "background-job attribution will fail",
+                            tc["name"],
+                        )
+                    extra["_tool_call_id"] = tc_id
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
@@ -339,6 +346,9 @@ async def build_agent_graph(
         "user_id": "user_id",
         "_thread_id": "thread_id",
     }
+    # _tool_call_id is injected per-call (from the LangChain tool_call dict's
+    # own id), not from agent state, so it can't live in `injections`. List it
+    # here so the LLM-facing tool schema still hides it.
     hidden_params = [*injections.keys(), "_tool_call_id"]
 
     # --- Build LLM with tools ---

@@ -123,6 +123,7 @@ class AgentState(TypedDict):
             workspace_id="ws-uuid-123",
             user_id="user-123",
             user_role="analyst",
+            thread_id="thread-uuid-456",
         )
 
     Notes
