@@ -365,6 +365,46 @@ async def teardown_schema(schema_id: str) -> None:
         raise
 
 
+STALE_JOB_THRESHOLD = timedelta(hours=1)
+
+
+async def _procrastinate_job_active(job_id: int) -> bool:
+    """Return True if the given procrastinate job is still in 'todo' or 'doing'."""
+    from procrastinate.contrib.django.procrastinate_app import current_app
+
+    try:
+        status = await current_app.job_manager.get_job_status_async(job_id)
+    except Exception:
+        return False
+    return status.value in {"todo", "doing"}
+
+
+@app.periodic(cron="*/15 * * * *")
+@app.task
+async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
+    """Flip ThreadJobs that have been active too long and whose procrastinate
+    job is no longer running. Fires the resume task so the user is not stuck
+    with a phantom spinner.
+    """
+    cutoff = timezone.now() - STALE_JOB_THRESHOLD
+    flipped = 0
+    async for tj in ThreadJob.objects.filter(
+        state__in=list(ThreadJob.ACTIVE_STATES),
+        created_at__lt=cutoff,
+    ):
+        if await _procrastinate_job_active(tj.procrastinate_job_id):
+            continue
+        await ThreadJob.objects.filter(id=tj.id).aupdate(
+            state=ThreadJob.State.FAILED, completed_at=timezone.now(),
+        )
+        flipped += 1
+        try:
+            await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+        except Exception:
+            logger.exception("Janitor: failed to defer resume for %s", tj.id)
+    return {"flipped": flipped}
+
+
 SYSTEM_RESUME_MARKER = "[__system_resume__]"
 
 

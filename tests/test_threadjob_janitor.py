@@ -1,0 +1,42 @@
+from datetime import timedelta
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from asgiref.sync import sync_to_async
+from django.contrib.auth import get_user_model
+from django.utils import timezone
+
+from apps.chat.models import Thread, ThreadJob
+from apps.workspaces.models import Workspace
+
+User = get_user_model()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_janitor_flips_stale_threadjobs_to_failed():
+    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=9999, tool_call_id="tc9",
+        state=ThreadJob.State.PENDING,
+    )
+    # Backdate to before the threshold (cron runs every 15 min;
+    # STALE_JOB_THRESHOLD is 1 hour per the plan).
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2)
+    )
+
+    from apps.workspaces.tasks import expire_stale_thread_jobs
+
+    with patch("apps.workspaces.tasks._procrastinate_job_active",
+               new=AsyncMock(return_value=False)), \
+         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+        resume.defer_async = AsyncMock(return_value=None)
+        await expire_stale_thread_jobs()
+
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    resume.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
