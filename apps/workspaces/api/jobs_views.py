@@ -91,7 +91,7 @@ async def cancel_job_view(request, workspace_id, thread_job_id):
         return err
 
     try:
-        tj = await ThreadJob.objects.select_related("thread").aget(
+        tj = await ThreadJob.objects.aget(
             id=thread_job_id,
             thread__workspace=workspace,
             thread__user=user,

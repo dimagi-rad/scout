@@ -27,19 +27,13 @@ async def cancel_thread_job(thread_job: ThreadJob) -> int:
     """
     now = datetime.now(UTC)
 
-    run_ids = [
-        r.id
-        async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=thread_job.procrastinate_job_id,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        )
-    ]
-    runs_cancelled = 0
-    if run_ids:
-        runs_cancelled = await MaterializationRun.objects.filter(id__in=run_ids).aupdate(
-            state=MaterializationRun.RunState.CANCELLED,
-            completed_at=now,
-        )
+    runs_cancelled = await MaterializationRun.objects.filter(
+        procrastinate_job_id=thread_job.procrastinate_job_id,
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ).aupdate(
+        state=MaterializationRun.RunState.CANCELLED,
+        completed_at=now,
+    )
 
     await ThreadJob.objects.filter(id=thread_job.id).aupdate(
         state=ThreadJob.State.CANCELLED,

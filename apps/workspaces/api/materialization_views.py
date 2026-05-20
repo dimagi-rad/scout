@@ -53,8 +53,19 @@ async def materialization_cancel_view(request, workspace_id):
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
     tjs = [
         tj
-        async for tj in ThreadJob.objects.filter(procrastinate_job_id__in=job_ids)
+        async for tj in ThreadJob.objects.filter(
+            procrastinate_job_id__in=job_ids,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        )
     ]
+    if not tjs:
+        logger.warning(
+            "materialization_cancel_view: found %d active run(s) for workspace %s "
+            "but no matching active ThreadJob — runs left running (pre-Task-7 orphan?)",
+            len(active_runs),
+            workspace_id,
+        )
+        return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
     total = 0
     for tj in tjs:
         total += await cancel_thread_job(tj)

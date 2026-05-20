@@ -139,3 +139,51 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
     assert tj.state == ThreadJob.State.CANCELLED
     run = await MaterializationRun.objects.aget(procrastinate_job_id=2002)
     assert run.state == MaterializationRun.RunState.CANCELLED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_job_cross_user_blocked():
+    owner = await sync_to_async(User.objects.create_user)(email="o@b.c", password="x")
+    other = await sync_to_async(User.objects.create_user)(email="x@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=owner)
+    # Both users are workspace members so aresolve_workspace lets them through.
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=owner, role=WorkspaceRole.READ_WRITE,
+    )
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=other, role=WorkspaceRole.READ,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=owner)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=3030, tool_call_id="tcX",
+        state=ThreadJob.State.RUNNING,
+    )
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="x@b.c", password="x")
+    resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
+    assert resp.status_code == 404
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_job_double_cancel_is_idempotent():
+    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=4040, tool_call_id="tc4",
+        state=ThreadJob.State.CANCELLED,
+    )
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="a@b.c", password="x")
+    resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "already_terminal", "state": "cancelled"}
