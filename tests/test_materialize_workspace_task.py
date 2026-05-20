@@ -8,6 +8,7 @@ from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 
+from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
@@ -223,11 +224,21 @@ async def test_cancel_endpoint_marks_runs_cancelled(workspace, user, tenant):
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=123,
     )
+    # The refactored view routes through cancel_thread_job, which looks up
+    # ThreadJobs by procrastinate_job_id. Create one so the run is cancelled.
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=123,
+        tool_call_id="tc_legacy",
+        state=ThreadJob.State.RUNNING,
+    )
 
     client = AsyncClient()
     await sync_to_async(client.login)(email=user.email, password="testpass123")
 
-    with patch("apps.workspaces.api.materialization_views.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
 

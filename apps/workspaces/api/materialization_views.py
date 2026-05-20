@@ -1,12 +1,12 @@
 """Async API views for materialization lifecycle (cancel)."""
 
 import logging
-from datetime import UTC, datetime
 
 from django.http import JsonResponse
-from procrastinate.contrib.django.procrastinate_app import current_app
 
+from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
+from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -26,6 +26,9 @@ async def materialization_cancel_view(request, workspace_id):
     procrastinate's abort signal only takes effect at the next ``await``
     boundary (and our work runs inside ``asyncio.to_thread``, so it never
     sees one).
+
+    Delegates to ``cancel_thread_job`` for each matching ThreadJob so that
+    both the run state and the job state are flipped atomically.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -35,33 +38,24 @@ async def materialization_cancel_view(request, workspace_id):
     if err is not None:
         return err
 
-    active = [
-        run
-        async for run in MaterializationRun.objects.select_related("tenant_schema__tenant").filter(
+    active_runs = [
+        r
+        async for r in MaterializationRun.objects.select_related(
+            "tenant_schema__tenant"
+        ).filter(
             tenant_schema__tenant__in=workspace.tenants.all(),
             state__in=list(MaterializationRun.ACTIVE_STATES),
         )
     ]
-    if not active:
+    if not active_runs:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
-    now = datetime.now(UTC)
-    run_ids = [r.id for r in active]
-    await MaterializationRun.objects.filter(id__in=run_ids).aupdate(
-        state=MaterializationRun.RunState.CANCELLED,
-        completed_at=now,
-    )
-
-    job_ids = [r.procrastinate_job_id for r in active if r.procrastinate_job_id is not None]
-    for job_id in job_ids:
-        try:
-            await current_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
-        except Exception:
-            logger.warning("Failed to abort procrastinate job %s", job_id, exc_info=True)
-
-    return JsonResponse(
-        {
-            "status": "cancelled",
-            "runs_cancelled": len(run_ids),
-        }
-    )
+    job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
+    tjs = [
+        tj
+        async for tj in ThreadJob.objects.filter(procrastinate_job_id__in=job_ids)
+    ]
+    total = 0
+    for tj in tjs:
+        total += await cancel_thread_job(tj)
+    return JsonResponse({"status": "cancelled", "runs_cancelled": total})

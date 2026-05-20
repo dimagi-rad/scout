@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
@@ -96,3 +98,44 @@ async def test_active_jobs_non_member_blocked():
     await sync_to_async(client.login)(email="out@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_job_flips_state_and_aborts_procrastinate():
+    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t1", provider="commcare", canonical_name="Test Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t1")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=2002, tool_call_id="tc2",
+        state=ThreadJob.State.RUNNING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema, pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=2002,
+    )
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="a@b.c", password="x")
+
+    with patch(
+        "apps.workspaces.api.jobs_cancel.current_app"
+    ) as mock_app:
+        mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
+        resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "cancelled"
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.CANCELLED
+    run = await MaterializationRun.objects.aget(procrastinate_job_id=2002)
+    assert run.state == MaterializationRun.RunState.CANCELLED

@@ -6,6 +6,7 @@ from django.http import JsonResponse
 
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
+from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -76,3 +77,30 @@ async def active_jobs_view(request, workspace_id):
     return JsonResponse(
         {"jobs": [_job_to_dict(j, runs_by_job.get(j.procrastinate_job_id)) for j in jobs]}
     )
+
+
+@async_login_required
+async def cancel_job_view(request, workspace_id, thread_job_id):
+    """POST /api/workspaces/<workspace_id>/jobs/<thread_job_id>/cancel/"""
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return err
+
+    try:
+        tj = await ThreadJob.objects.select_related("thread").aget(
+            id=thread_job_id,
+            thread__workspace=workspace,
+            thread__user=user,
+        )
+    except ThreadJob.DoesNotExist:
+        return JsonResponse({"error": "ThreadJob not found"}, status=404)
+
+    if tj.state in ThreadJob.TERMINAL_STATES:
+        return JsonResponse({"status": "already_terminal", "state": tj.state})
+
+    runs_cancelled = await cancel_thread_job(tj)
+    return JsonResponse({"status": "cancelled", "runs_cancelled": runs_cancelled})
