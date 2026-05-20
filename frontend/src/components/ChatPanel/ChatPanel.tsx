@@ -122,9 +122,10 @@ export function ChatPanel() {
   const [input, setInput] = useState("")
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [showShareMenu, setShowShareMenu] = useState(false)
+  const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
 
-  const { jobsByThreadId } = useWorkspaceJobs(activeDomainId)
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs(activeDomainId)
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,
@@ -179,7 +180,7 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDomainId])
 
-  // Load messages from backend when threadId changes
+  // Load messages from backend when threadId changes (or after a background job completes)
   useEffect(() => {
     if (!threadId || !activeDomainId) return
     let cancelled = false
@@ -201,7 +202,14 @@ export function ChatPanel() {
     loadMessages()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, activeDomainId])
+  }, [threadId, activeDomainId, messageReloadKey])
+
+  // Reload messages when a background materialization job for this thread completes
+  useEffect(() => {
+    if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
+      setMessageReloadKey((k) => k + 1)
+    }
+  }, [threadId, recentlyCompletedThreadIds])
 
   // Refresh thread list when streaming finishes (so new threads appear)
   useEffect(() => {

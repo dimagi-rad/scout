@@ -7,7 +7,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 
-from apps.chat.models import ThreadJob
+from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
 from apps.workspaces.models import (
@@ -525,24 +525,29 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     workspace = tj.thread.workspace
     user = tj.thread.user
-    agent, oauth_tokens = await _build_agent_for_resume(workspace, user)
-    input_state = {
-        "messages": [HumanMessage(content=body)],
-        "workspace_id": str(workspace.id),
-        "user_id": str(user.id),
-        "user_role": "analyst",
-        "thread_id": str(tj.thread.id),
-    }
-    config = {
-        "configurable": {"thread_id": str(tj.thread.id)},
-        "recursion_limit": 50,
-        "oauth_tokens": oauth_tokens,
-    }
 
     try:
+        agent, oauth_tokens = await _build_agent_for_resume(workspace, user)
+        input_state = {
+            "messages": [HumanMessage(content=body)],
+            "workspace_id": str(workspace.id),
+            "user_id": str(user.id),
+            "user_role": "analyst",
+            "thread_id": str(tj.thread.id),
+        }
+        config = {
+            "configurable": {"thread_id": str(tj.thread.id)},
+            "recursion_limit": 50,
+            "oauth_tokens": oauth_tokens,
+        }
         await agent.ainvoke(input_state, config)
+        # Bump Thread.updated_at so the sidebar's "newer than last_viewed" check
+        # fires the green-dot indicator after a successful background resume.
+        await Thread.objects.filter(id=tj.thread_id).aupdate(updated_at=timezone.now())
     except Exception:
-        logger.exception("resume: agent.ainvoke failed for thread_job %s", thread_job_id)
+        logger.exception(
+            "resume: agent build or invoke failed for thread_job %s", thread_job_id
+        )
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
