@@ -683,7 +683,9 @@ async def run_materialization(
             tc["result"] = error_response(VALIDATION_ERROR, "thread_id is required")
             return tc["result"]
 
-        _memberships, err = await _resolve_workspace_memberships(workspace_id, user_id)
+        # Authorization guard: confirms the user has at least one tenant
+        # membership in this workspace before we dispatch a job.
+        _, err = await _resolve_workspace_memberships(workspace_id, user_id)
         if err:
             tc["result"] = error_response(NOT_FOUND, err)
             return tc["result"]
@@ -701,6 +703,11 @@ async def run_materialization(
             return tc["result"]
         job_id = getattr(job, "id", job) if not isinstance(job, int) else job
 
+        # Atomicity note: defer_async and ThreadJob.acreate are not in a single
+        # transaction. If acreate fails after the worker has already picked up
+        # the job, abort=True is best-effort (procrastinate only honors it at
+        # cooperative await points). The janitor task (expire_stale_thread_jobs,
+        # Task 14) cleans up any orphaned runs.
         try:
             tj = await ThreadJob.objects.acreate(
                 thread_id=thread_id,
