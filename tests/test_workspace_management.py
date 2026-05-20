@@ -264,3 +264,36 @@ class TestMemberManagement:
         client.force_login(writer)
         resp = client.delete(f"/api/workspaces/{workspace.id}/members/{reader_membership.id}/")
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Member management: add member
+# ---------------------------------------------------------------------------
+
+
+class TestMemberAdd:
+    def test_manager_can_add_same_tenant_user(self, client, user, workspace, tenant, db):
+        """Manager adds an existing user who shares the workspace's tenant."""
+        from apps.users.models import TenantMembership
+
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "alice@example.com", "role": WorkspaceRole.READ_WRITE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["email"] == "alice@example.com"
+        assert body["role"] == WorkspaceRole.READ_WRITE
+        assert body.keys() == {"id", "user_id", "email", "name", "role", "created_at"}
+        assert body["user_id"] == str(target.id)
+        assert body["name"] == target.get_full_name()
+
+        membership = WorkspaceMembership.objects.get(workspace=workspace, user=target)
+        assert membership.invited_by == user
+        assert membership.role == WorkspaceRole.READ_WRITE

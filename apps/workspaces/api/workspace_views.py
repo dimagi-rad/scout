@@ -1,5 +1,6 @@
 """Workspace management API views."""
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models import Count
 from rest_framework import status
@@ -255,6 +256,7 @@ class WorkspaceDetailView(APIView):
 class WorkspaceMemberListView(APIView):
     """
     GET  /api/workspaces/<workspace_id>/members/  — list members (any member).
+    POST /api/workspaces/<workspace_id>/members/  — add an existing user as a member (manage only).
     """
 
     permission_classes = [IsAuthenticated]
@@ -277,6 +279,65 @@ class WorkspaceMemberListView(APIView):
             for m in memberships
         ]
         return Response(results)
+
+    def post(self, request, workspace_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return err
+        if membership.role != WorkspaceRole.MANAGE:
+            return Response(
+                {"error": "Only managers can add members."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        email = (request.data.get("email") or "").strip()
+        if not email or "@" not in email:
+            return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        role = request.data.get("role")
+        if role not in WorkspaceRole.values:
+            return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+
+        target = get_user_model().objects.filter(email__iexact=email).first()
+        if target is None:
+            return Response(
+                {"error": "No Scout user with that email."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        workspace_tenant_ids = workspace.workspace_tenants.values_list("tenant_id", flat=True)
+        shares_tenant = TenantMembership.objects.filter(
+            user=target, tenant_id__in=workspace_tenant_ids
+        ).exists()
+        if not shares_tenant:
+            return Response(
+                {"error": "User is not part of this workspace's tenants."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if WorkspaceMembership.objects.filter(workspace=workspace, user=target).exists():
+            return Response(
+                {"error": "User is already a member."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        new_membership = WorkspaceMembership.objects.create(
+            workspace=workspace,
+            user=target,
+            role=role,
+            invited_by=request.user,
+        )
+        return Response(
+            {
+                "id": str(new_membership.id),
+                "user_id": str(target.id),
+                "email": target.email,
+                "name": target.get_full_name(),
+                "role": new_membership.role,
+                "created_at": new_membership.created_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class WorkspaceMemberDetailView(APIView):
