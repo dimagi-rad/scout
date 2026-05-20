@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Link, useParams, useNavigate } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
 import { authApi } from "@/api/auth"
@@ -7,6 +7,7 @@ import { ApiError } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
@@ -19,6 +20,8 @@ import { RoleBadge } from "@/components/RoleBadge"
 
 // ── Members Tab ─────────────────────────────────────────────────────────────
 
+const DEFAULT_NEW_MEMBER_ROLE: WorkspaceMember["role"] = "read_write"
+
 function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
   const [members, setMembers] = useState<WorkspaceMember[]>([])
   const [loading, setLoading] = useState(true)
@@ -27,6 +30,15 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
+
+  // Add-member form state
+  const [addOpen, setAddOpen] = useState(false)
+  const [addEmail, setAddEmail] = useState("")
+  const [addRole, setAddRole] = useState<WorkspaceMember["role"]>(DEFAULT_NEW_MEMBER_ROLE)
+  const [addSubmitting, setAddSubmitting] = useState(false)
+  const [addError, setAddError] = useState<string | null>(null)
+
+  const addTriggerRef = useRef<HTMLButtonElement>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -70,6 +82,40 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
+  async function handleAdd() {
+    const email = addEmail.trim()
+    if (!email) {
+      setAddError("Email is required.")
+      return
+    }
+    setAddSubmitting(true)
+    setAddError(null)
+    try {
+      const newMember = await workspaceApi.addMember(workspaceId, {
+        email,
+        role: addRole,
+      })
+      setMembers((prev) => [...prev, newMember])
+      setAddEmail("")
+      setAddRole(DEFAULT_NEW_MEMBER_ROLE)
+      setAddOpen(false)
+      // Defer focus until after the trigger button is re-rendered
+      setTimeout(() => addTriggerRef.current?.focus(), 0)
+    } catch (err) {
+      setAddError(err instanceof ApiError ? err.message : "Failed to add member")
+    } finally {
+      setAddSubmitting(false)
+    }
+  }
+
+  function handleAddCancel() {
+    setAddOpen(false)
+    setAddEmail("")
+    setAddRole(DEFAULT_NEW_MEMBER_ROLE)
+    setAddError(null)
+    setTimeout(() => addTriggerRef.current?.focus(), 0)
+  }
+
   if (loading) return <div className="py-8 text-center text-muted-foreground">Loading…</div>
   if (error) return <div className="py-8 text-center text-destructive">{error}</div>
 
@@ -79,7 +125,90 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
         <span className="text-sm text-muted-foreground">
           {members.length} {members.length === 1 ? "member" : "members"}
         </span>
+        {isManager && !addOpen && (
+          <Button
+            ref={addTriggerRef}
+            size="sm"
+            onClick={() => setAddOpen(true)}
+            data-testid="add-member-button"
+          >
+            + Add member
+          </Button>
+        )}
       </div>
+
+      {isManager && addOpen && (
+        <form
+          className="mb-4 rounded-lg border p-3"
+          data-testid="add-member-form"
+          onSubmit={(e) => {
+            e.preventDefault()
+            handleAdd()
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault()
+              handleAddCancel()
+            }
+          }}
+        >
+          <div className="flex items-center gap-2">
+            <Input
+              type="email"
+              autoFocus
+              placeholder="alice@example.com"
+              className="flex-1"
+              aria-label="Member email"
+              value={addEmail}
+              onChange={(e) => setAddEmail(e.target.value)}
+              disabled={addSubmitting}
+              data-testid="add-member-email"
+            />
+            <Select
+              value={addRole}
+              onValueChange={(v) => setAddRole(v as WorkspaceMember["role"])}
+              disabled={addSubmitting}
+            >
+              <SelectTrigger
+                className="h-9 w-36"
+                aria-label="Member role"
+                data-testid="add-member-role"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="read">Read</SelectItem>
+                <SelectItem value="read_write">Read-Write</SelectItem>
+                <SelectItem value="manage">Manager</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={addSubmitting}
+              data-testid="add-member-submit"
+            >
+              {addSubmitting ? "Adding…" : "Add"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={handleAddCancel}
+              disabled={addSubmitting}
+              data-testid="add-member-cancel"
+            >
+              Cancel
+            </Button>
+          </div>
+          {addError && (
+            <p className="mt-2 text-sm text-destructive" data-testid="add-member-error">
+              {addError}
+            </p>
+          )}
+        </form>
+      )}
+
       {mutationError && (
         <p className="mb-3 text-sm text-destructive">{mutationError}</p>
       )}
