@@ -43,7 +43,10 @@ async def test_resume_appends_system_message_and_invokes_agent():
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
-    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=mock_agent)):
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
         result = await resume_thread_after_materialization(
             None, thread_job_id=str(tj.id),
         )
@@ -58,3 +61,6 @@ async def test_resume_appends_system_message_and_invokes_agent():
     assert len(messages) == 1
     assert messages[0].content.startswith("[__system_resume__]")
     assert "completed" in messages[0].content
+    # Confirm oauth_tokens is forwarded into the runtime config.
+    config = call_args.args[1]
+    assert "oauth_tokens" in config

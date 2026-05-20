@@ -361,7 +361,10 @@ SYSTEM_RESUME_MARKER = "[__system_resume__]"
 
 
 async def _build_agent_for_resume(workspace, user):
-    """Build the LangGraph agent in the same shape views.py does, minus streaming."""
+    """Build the LangGraph agent + load oauth_tokens for runtime config.
+
+    Returns (agent, oauth_tokens).
+    """
     from apps.agents.graph.base import build_agent_graph
     from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
     from apps.chat.checkpointer import ensure_checkpointer
@@ -369,13 +372,14 @@ async def _build_agent_for_resume(workspace, user):
     mcp_tools = await get_mcp_tools()
     oauth_tokens = await get_user_oauth_tokens(user)
     checkpointer = await ensure_checkpointer()
-    return await build_agent_graph(
+    agent = await build_agent_graph(
         workspace=workspace,
         user=user,
         checkpointer=checkpointer,
         mcp_tools=mcp_tools,
         oauth_tokens=oauth_tokens,
     )
+    return agent, oauth_tokens
 
 
 async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[str, list[dict]]:
@@ -443,7 +447,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     workspace = tj.thread.workspace
     user = tj.thread.user
-    agent = await _build_agent_for_resume(workspace, user)
+    agent, oauth_tokens = await _build_agent_for_resume(workspace, user)
     input_state = {
         "messages": [HumanMessage(content=body)],
         "workspace_id": str(workspace.id),
@@ -451,7 +455,11 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         "user_role": "analyst",
         "thread_id": str(tj.thread.id),
     }
-    config = {"configurable": {"thread_id": str(tj.thread.id)}, "recursion_limit": 50}
+    config = {
+        "configurable": {"thread_id": str(tj.thread.id)},
+        "recursion_limit": 50,
+        "oauth_tokens": oauth_tokens,
+    }
 
     try:
         await agent.ainvoke(input_state, config)
