@@ -303,8 +303,6 @@ async def test_materialize_workspace_chains_resume_task(
         tool_call_id="tc-chain",
     )
 
-    from apps.workspaces import tasks as tasks_mod
-
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
@@ -313,7 +311,7 @@ async def test_materialize_workspace_chains_resume_task(
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
         resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=9999))
-        await tasks_mod.materialize_workspace(
+        await materialize_workspace(
             context_with_job_id,
             workspace_id=str(workspace.id),
             user_id="",
