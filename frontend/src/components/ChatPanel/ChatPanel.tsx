@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
 import { SLASH_COMMANDS } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
+import { useWorkspaceJobs } from "@/hooks/useWorkspaceJobs"
 
 function threadStorageKey(domainId: string) {
   return `scout:thread:${domainId}`
@@ -122,6 +123,9 @@ export function ChatPanel() {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [showShareMenu, setShowShareMenu] = useState(false)
   const prevStatusRef = useRef<string>("")
+
+  const { jobsByThreadId } = useWorkspaceJobs(activeDomainId)
+  const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
@@ -297,6 +301,7 @@ export function ChatPanel() {
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
             workspaceId={activeDomainId ?? undefined}
+            activeMaterializationJob={activeMaterializationJob}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}

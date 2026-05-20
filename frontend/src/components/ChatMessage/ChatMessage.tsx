@@ -5,6 +5,7 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
+import type { ActiveJob } from "@/api/jobs"
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
 import {
   QueryToolOutput,
@@ -72,6 +73,7 @@ interface ChatMessageProps {
   message: UIMessage
   isActiveMessage: boolean
   workspaceId?: string
+  activeMaterializationJob?: ActiveJob | null
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -136,9 +138,10 @@ interface ToolCallPartProps {
   isLatest: boolean
   isActiveMessage: boolean
   workspaceId?: string
+  activeMaterializationJob?: ActiveJob | null
 }
 
-function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId }: ToolCallPartProps) {
+function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, activeMaterializationJob }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
@@ -156,17 +159,21 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId }: T
     hasOutput && part.output != null && !richOutput ? formatToolOutput(part.output) : null
 
   const showCancelButton =
-    toolName === "run_materialization" && isLoading && isActiveMessage && !!workspaceId
+    toolName === "run_materialization"
+    && !!activeMaterializationJob
+    && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
+    && isActiveMessage
+    && !!workspaceId
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
   const handleCancel = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (!workspaceId || cancelState === "pending") return
+    if (!workspaceId || !activeMaterializationJob || cancelState === "pending") return
     setCancelState("pending")
     try {
-      await api.post(`/api/workspaces/${workspaceId}/materialization/cancel/`, {})
-      // The button stays in pending state until the tool transitions out of
-      // the loading state (the agent will receive cancelled status on its
-      // next poll and respond in the conversation).
+      await api.post(
+        `/api/workspaces/${workspaceId}/jobs/${activeMaterializationJob.thread_job_id}/cancel/`,
+        {},
+      )
     } catch {
       setCancelState("error")
       setTimeout(() => setCancelState("idle"), 3000)
@@ -215,12 +222,30 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId }: T
           </button>
         )}
       </div>
-      {expanded && (richOutput ?? fallbackText) && (
+      {expanded && (toolName === "run_materialization" && activeMaterializationJob || richOutput || fallbackText) && (
         <div className="border-t px-3 py-2.5">
+          {toolName === "run_materialization" && activeMaterializationJob && (
+            <div className="text-xs text-muted-foreground mb-2">
+              ⏳ {activeMaterializationJob.progress?.message ?? "Materializing..."}
+              {activeMaterializationJob.progress?.rows_loaded != null && (
+                <>
+                  {" "}({activeMaterializationJob.progress.rows_loaded.toLocaleString()}
+                  {activeMaterializationJob.progress.rows_total
+                    ? ` / ${activeMaterializationJob.progress.rows_total.toLocaleString()}`
+                    : ""})
+                </>
+              )}
+              {activeMaterializationJob.progress?.percent != null && (
+                <> — {activeMaterializationJob.progress.percent}%</>
+              )}
+            </div>
+          )}
           {richOutput ?? (
-            <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
-              {fallbackText!.slice(0, 2000)}
-            </pre>
+            fallbackText && (
+              <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
+                {fallbackText.slice(0, 2000)}
+              </pre>
+            )
           )}
         </div>
       )}
@@ -268,7 +293,7 @@ function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; 
   )
 }
 
-export function ChatMessage({ message, isActiveMessage, workspaceId }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage, workspaceId, activeMaterializationJob }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -328,7 +353,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId }: ChatMessa
               }
             }
 
-            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} />
+            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} activeMaterializationJob={activeMaterializationJob} />
           }
 
           return null
