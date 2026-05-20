@@ -4,6 +4,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.users.models import TenantMembership
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 User = get_user_model()
@@ -264,3 +265,164 @@ class TestMemberManagement:
         client.force_login(writer)
         resp = client.delete(f"/api/workspaces/{workspace.id}/members/{reader_membership.id}/")
         assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Member management: add member
+# ---------------------------------------------------------------------------
+
+
+class TestMemberAdd:
+    def test_manager_can_add_same_tenant_user(self, client, user, workspace, tenant, db):
+        """Manager adds an existing user who shares the workspace's tenant."""
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "alice@example.com", "role": WorkspaceRole.READ_WRITE},
+            content_type="application/json",
+        )
+
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["email"] == "alice@example.com"
+        assert body["role"] == WorkspaceRole.READ_WRITE
+        assert body.keys() == {"id", "user_id", "email", "name", "role", "created_at"}
+        assert body["user_id"] == str(target.id)
+        assert body["name"] == target.get_full_name()
+
+        membership = WorkspaceMembership.objects.get(workspace=workspace, user=target)
+        assert membership.invited_by == user
+        assert membership.role == WorkspaceRole.READ_WRITE
+
+    def test_missing_email_returns_400(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "Email is required."
+
+    def test_malformed_email_returns_400(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "not-an-email", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+
+    def test_invalid_role_returns_400(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "alice@example.com", "role": "admin"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "Invalid role."
+
+    def test_unknown_email_returns_404(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "No Scout user with that email."
+
+    def test_user_without_shared_tenant_returns_403(self, client, user, workspace, db):
+        """Target user exists but has no TenantMembership on this workspace's tenants."""
+        _outsider = User.objects.create_user(email="outsider@example.com", password="pass")
+        # Deliberately no TenantMembership (membership-on-tenant check should fail)
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "outsider@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "User is not part of this workspace's tenants."
+
+    def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
+        writer = User.objects.create_user(email="wr@example.com", password="pass")
+        TenantMembership.objects.create(user=writer, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=writer, role=WorkspaceRole.READ_WRITE
+        )
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+
+        client.force_login(writer)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "alice@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "Only managers can add members."
+
+    def test_existing_member_returns_409(self, client, user, workspace, tenant, db):
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=target, role=WorkspaceRole.READ
+        )
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "alice@example.com", "role": WorkspaceRole.READ_WRITE},
+            content_type="application/json",
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "User is already a member."
+
+    def test_case_insensitive_duplicate_returns_409(self, client, user, workspace, tenant, db):
+        """Adding ALICE@X.COM when alice@x.com is already a member should 409."""
+        target = User.objects.create_user(email="alice@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=target, role=WorkspaceRole.READ
+        )
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ALICE@EXAMPLE.COM", "role": WorkspaceRole.READ_WRITE},
+            content_type="application/json",
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "User is already a member."
+
+    def test_add_with_role_read(self, client, user, workspace, tenant, db):
+        target = User.objects.create_user(email="r@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "r@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["role"] == WorkspaceRole.READ
+
+    def test_add_with_role_manage(self, client, user, workspace, tenant, db):
+        target = User.objects.create_user(email="m@example.com", password="pass")
+        TenantMembership.objects.create(user=target, tenant=tenant)
+
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "m@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+        assert resp.json()["role"] == WorkspaceRole.MANAGE
