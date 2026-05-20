@@ -10,6 +10,7 @@ from apps.chat.thread_views import (
     thread_list_view,
     thread_messages_view,
     thread_share_view,
+    thread_viewed_view,
 )
 from apps.chat.views import chat_view
 
@@ -20,6 +21,7 @@ workspace_thread_urlpatterns = [
     path("", thread_list_view, name="thread_list"),
     path("<uuid:thread_id>/messages/", thread_messages_view, name="thread_messages"),
     path("<uuid:thread_id>/share/", thread_share_view, name="thread_share"),
+    path("<uuid:thread_id>/viewed/", thread_viewed_view, name="thread_viewed"),
 ]
 
 urlpatterns = [
