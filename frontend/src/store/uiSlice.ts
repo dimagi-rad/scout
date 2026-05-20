@@ -9,6 +9,7 @@ export interface Thread {
   is_shared: boolean
   is_public: boolean
   share_token: string | null
+  last_viewed_at: string | null
 }
 
 export interface ThreadShareState {
