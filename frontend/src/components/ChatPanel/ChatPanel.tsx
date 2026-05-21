@@ -204,12 +204,18 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, activeDomainId, messageReloadKey])
 
-  // Reload messages when a background materialization job for this thread completes
+  // Reload messages when a background materialization job for this thread
+  // completes — but NOT while we're streaming a new turn. A mid-stream reload
+  // would tear down the in-flight messages array and lose the user's current
+  // tokens. The Thread.updated_at bump from the resume task triggers the
+  // sidebar refetch, so the user still sees the green-dot indicator and can
+  // click into the thread to get the new agent message on a fresh load.
   useEffect(() => {
+    if (isStreaming) return
     if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
       setMessageReloadKey((k) => k + 1)
     }
-  }, [threadId, recentlyCompletedThreadIds])
+  }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
   // Refresh thread list when streaming finishes (so new threads appear)
   useEffect(() => {

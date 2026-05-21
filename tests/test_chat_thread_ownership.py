@@ -1,5 +1,6 @@
 """Tests for thread-ownership validation in the chat endpoint (Fix 1a)."""
 
+import asyncio
 import json
 
 import pytest
@@ -8,6 +9,7 @@ from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 
 from apps.chat.models import Thread
+from apps.chat.views import _upsert_thread
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     Workspace,
@@ -103,3 +105,36 @@ async def test_chat_allows_own_thread_id():
     )
     # Must NOT be 404 from thread-ownership check
     assert resp.status_code != 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_upsert_thread_bumps_updated_at_on_subsequent_turn():
+    """Finding #5: every chat turn must advance Thread.updated_at. Previously
+    aupdate_or_create with only create_defaults ran save(update_fields=set())
+    on the existing-row path, which silently bypassed auto_now and left
+    updated_at frozen at thread creation — breaking sidebar ordering and
+    the "newer than last_viewed" green-dot indicator."""
+    user = await sync_to_async(User.objects.create_user)(
+        email="updated-at@b.c", password="x",
+    )
+    ws = await sync_to_async(Workspace.objects.create)(name="W-updated", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-up", provider="commcare", canonical_name="Up Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    await _upsert_thread(thread_id, user, "first turn", workspace=ws)
+    initial = await Thread.objects.aget(id=thread_id)
+    initial_updated_at = initial.updated_at
+
+    # Postgres timestamps have microsecond precision; sleep a beat so the
+    # bump is observable.
+    await asyncio.sleep(0.01)
+    await _upsert_thread(thread_id, user, "second turn", workspace=ws)
+    refreshed = await Thread.objects.aget(id=thread_id)
+    assert refreshed.updated_at > initial_updated_at, (
+        f"updated_at should bump on second turn; "
+        f"initial={initial_updated_at!r} refreshed={refreshed.updated_at!r}"
+    )

@@ -42,7 +42,10 @@ export function useWorkspaceJobs(workspaceId: string | null): UseWorkspaceJobs {
       if (justCompleted.length > 0) {
         setRecentlyCompletedThreadIds(justCompleted)
       } else {
-        setRecentlyCompletedThreadIds([])
+        // Functional updater so React skips the re-render when the value
+        // is already empty (every clean poll would otherwise churn the
+        // ChatPanel reload effect).
+        setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
       }
     } catch (e) {
       setState((s) => ({ ...s, lastError: String(e) }))
@@ -51,6 +54,12 @@ export function useWorkspaceJobs(workspaceId: string | null): UseWorkspaceJobs {
 
   useEffect(() => {
     if (!workspaceId) return
+    // Reset cross-workspace state: prevThreadIdsRef would otherwise carry
+    // thread ids from the previous workspace and the first poll in the new
+    // workspace would falsely report them as "just completed". Clear
+    // recentlyCompletedThreadIds for the same reason.
+    prevThreadIdsRef.current = new Set()
+    setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
     let cancelled = false
     const interval = setInterval(() => {
       if (!cancelled) void fetchOnce()

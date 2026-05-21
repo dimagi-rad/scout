@@ -146,13 +146,24 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
 
+  // Scope activeMaterializationJob to THIS specific tool-call card via
+  // toolCallId — without this, the progress block and Stop button would
+  // render on every historical run_materialization card in the thread.
+  // part.toolCallId is the AI-SDK v6 field name surfaced on tool-input /
+  // tool-output parts.
+  const matchingJob =
+    activeMaterializationJob
+    && (activeMaterializationJob.tool_call_id === part.toolCallId)
+      ? activeMaterializationJob
+      : null
+
   // Auto-expand while actively streaming; collapsed by default for historical messages.
   // User overrides tied to isLatest reset automatically when a part is superseded.
-  // run_materialization stays expanded as long as there is an active job for it,
-  // regardless of whether the SSE stream is still active (isActiveMessage).
+  // run_materialization stays expanded as long as there is an active job
+  // FOR THIS CARD, regardless of whether the SSE stream is still active.
   const autoExpanded =
     AUTO_EXPAND_TOOLS.has(toolName)
-    && (isLatest || isLoading || (toolName === "run_materialization" && !!activeMaterializationJob))
+    && (isLatest || isLoading || (toolName === "run_materialization" && !!matchingJob))
     && (isActiveMessage || toolName === "run_materialization")
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
@@ -165,17 +176,17 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
 
   const showCancelButton =
     toolName === "run_materialization"
-    && !!activeMaterializationJob
-    && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
+    && !!matchingJob
+    && (matchingJob.state === "pending" || matchingJob.state === "running")
     && !!workspaceId
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
   const handleCancel = async (e: React.MouseEvent) => {
     e.stopPropagation()
-    if (!workspaceId || !activeMaterializationJob || cancelState === "pending") return
+    if (!workspaceId || !matchingJob || cancelState === "pending") return
     setCancelState("pending")
     try {
       await api.post(
-        `/api/workspaces/${workspaceId}/jobs/${activeMaterializationJob.thread_job_id}/cancel/`,
+        `/api/workspaces/${workspaceId}/jobs/${matchingJob.thread_job_id}/cancel/`,
         {},
       )
     } catch {
@@ -226,21 +237,21 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
           </button>
         )}
       </div>
-      {expanded && (toolName === "run_materialization" && activeMaterializationJob || richOutput || fallbackText) && (
+      {expanded && (toolName === "run_materialization" && matchingJob || richOutput || fallbackText) && (
         <div className="border-t px-3 py-2.5">
-          {toolName === "run_materialization" && activeMaterializationJob && (
+          {toolName === "run_materialization" && matchingJob && (
             <div className="text-xs text-muted-foreground mb-2">
-              ⏳ {activeMaterializationJob.progress?.message ?? "Materializing..."}
-              {activeMaterializationJob.progress?.rows_loaded != null && (
+              ⏳ {matchingJob.progress?.message ?? "Materializing..."}
+              {matchingJob.progress?.rows_loaded != null && (
                 <>
-                  {" "}({activeMaterializationJob.progress.rows_loaded.toLocaleString()}
-                  {activeMaterializationJob.progress.rows_total
-                    ? ` / ${activeMaterializationJob.progress.rows_total.toLocaleString()}`
+                  {" "}({matchingJob.progress.rows_loaded.toLocaleString()}
+                  {matchingJob.progress.rows_total
+                    ? ` / ${matchingJob.progress.rows_total.toLocaleString()}`
                     : ""})
                 </>
               )}
-              {activeMaterializationJob.progress?.percent != null && (
-                <> — {activeMaterializationJob.progress.percent}%</>
+              {matchingJob.progress?.percent != null && (
+                <> — {matchingJob.progress.percent}%</>
               )}
             </div>
           )}

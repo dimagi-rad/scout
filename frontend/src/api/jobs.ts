@@ -15,6 +15,11 @@ export interface JobProgress {
 export interface ActiveJob {
   thread_job_id: string
   thread_id: string
+  /** AI-SDK toolCallId of the run_materialization tool call this job is
+   *  attached to. Used to scope progress + Stop UI to the specific tool-call
+   *  card rather than every historical run_materialization message in the
+   *  thread. */
+  tool_call_id: string
   job_type: "materialization"
   state: JobState
   progress: JobProgress | null

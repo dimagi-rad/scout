@@ -62,6 +62,9 @@ async def test_active_jobs_returns_pending_job_with_progress():
     assert j["state"] == "pending"
     assert j["progress"]["percent"] == 64
     assert j["progress"]["rows_loaded"] == 64000
+    # tool_call_id is exposed so the frontend can scope the progress card
+    # to the specific run_materialization tool-call message in the chat.
+    assert j["tool_call_id"] == "tc1"
 
 
 @pytest.mark.asyncio

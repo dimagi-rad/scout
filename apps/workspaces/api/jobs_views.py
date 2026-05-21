@@ -33,6 +33,11 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),
+        # tool_call_id ties this job to the specific run_materialization
+        # tool-call card in the chat transcript so the frontend can scope
+        # progress and Stop affordances per-card rather than to every
+        # historical run_materialization message.
+        "tool_call_id": job.tool_call_id,
         "job_type": job.job_type,
         "state": job.state,
         "progress": progress,

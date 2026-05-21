@@ -14,6 +14,7 @@ import time
 import uuid
 
 from django.http import JsonResponse, StreamingHttpResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
 
 from apps.agents.graph.base import build_agent_graph
@@ -33,14 +34,20 @@ logger = logging.getLogger(__name__)
 
 
 async def _upsert_thread(thread_id, user, title, *, workspace):
-    """Create the Thread row if absent. Ownership has already been validated
-    by the caller — this helper only handles the (non-conflicting) upsert.
-    auto_now on updated_at handles the timestamp on every save.
+    """Create the Thread row if absent and bump updated_at on every turn.
+
+    Ownership has already been validated by the caller — this helper only
+    handles the (non-conflicting) upsert.
+
+    The explicit ``updated_at`` in ``defaults`` is load-bearing: without it,
+    ``aupdate_or_create`` on the existing-row path runs ``save(update_fields=set())``
+    which skips ``auto_now`` and leaves ``Thread.updated_at`` frozen at the
+    creation timestamp. That broke the sidebar's "newer than last_viewed"
+    indicator and any ordering by ``-updated_at``.
     """
-    # On create: set user, workspace, and title.
-    # On update: no field changes needed — auto_now on updated_at handles the timestamp.
     await Thread.objects.aupdate_or_create(
         id=thread_id,
+        defaults={"updated_at": timezone.now()},
         create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
     )
 
