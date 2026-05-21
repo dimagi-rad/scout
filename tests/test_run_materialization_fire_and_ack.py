@@ -83,3 +83,72 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     assert not await ThreadJob.objects.filter(procrastinate_job_id=8888).aexists()
     # Rollback abort was attempted
     cancel_mock.assert_awaited_once_with(8888, abort=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_rejects_thread_owned_by_other_user():
+    """Defense-in-depth check: the MCP tool rejects a thread_id that doesn't
+    belong to (user_id, workspace_id) even if the chat-layer guard somehow
+    failed."""
+    user_a = await sync_to_async(User.objects.create_user)(email="usera@b.c", password="x")
+    user_b = await sync_to_async(User.objects.create_user)(email="userb@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-cross", created_by=user_a)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="tx", provider="commcare", canonical_name="X Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_a)
+    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_b)
+    foreign_thread = await sync_to_async(Thread.objects.create)(
+        workspace=ws, user=user_a,
+    )
+
+    result = await run_materialization(
+        workspace_id=str(ws.id),
+        user_id=str(user_b.id),  # user_b calls, but thread belongs to user_a
+        thread_id=str(foreign_thread.id),
+        tool_call_id="tc-cross",
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "NOT_FOUND"
+    # Confirm no ThreadJob was created for the foreign thread
+    assert not await ThreadJob.objects.filter(thread_id=foreign_thread.id).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_returns_already_in_progress_if_active():
+    """If a materialization is already running in this workspace, do not
+    dispatch a duplicate — return the existing thread_job_id."""
+    user = await sync_to_async(User.objects.create_user)(email="dup@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-dup", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="tdup", provider="commcare", canonical_name="Dup Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
+
+    # Thread 1 owns the already-in-progress job
+    thread1 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    existing_tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread1, job_type="materialization",
+        procrastinate_job_id=11111, tool_call_id="tc-existing",
+        state=ThreadJob.State.PENDING,
+    )
+
+    # Thread 2 is the caller that tries to start a second materialization
+    thread2 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+
+    result = await run_materialization(
+        workspace_id=str(ws.id),
+        user_id=str(user.id),
+        thread_id=str(thread2.id),
+        tool_call_id="tc-new",
+    )
+
+    assert result["data"]["status"] == "already_in_progress"
+    assert result["data"]["thread_job_id"] == str(existing_tj.id)
+    # Crucially, NO new ThreadJob is created — workspace still has only one
+    assert await ThreadJob.objects.filter(thread__workspace_id=ws.id).acount() == 1

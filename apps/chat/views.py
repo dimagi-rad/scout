@@ -33,22 +33,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _upsert_thread(thread_id, user, title, *, workspace):
-    """Create or update a Thread record.
-
-    Explicitly validates ownership before upserting: if the thread_id already
-    exists and belongs to a different user or workspace, the upsert is skipped
-    with a warning rather than relying on a PK IntegrityError as a side-effect.
+    """Create the Thread row if absent. Ownership has already been validated
+    by the caller — this helper only handles the (non-conflicting) upsert.
     auto_now on updated_at handles the timestamp on every save.
     """
-    existing = await Thread.objects.filter(id=thread_id).afirst()
-    if existing is not None and (
-        existing.user_id != user.pk or existing.workspace_id != workspace.pk
-    ):
-        logger.warning(
-            "Thread %s belongs to a different user/workspace, skipping upsert",
-            thread_id,
-        )
-        return
     # On create: set user, workspace, and title.
     # On update: no field changes needed — auto_now on updated_at handles the timestamp.
     await Thread.objects.aupdate_or_create(
@@ -117,6 +105,21 @@ async def chat_view(request):
 
     if tm is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
+
+    # Validate thread ownership: a user must not be able to attach this turn
+    # to another user's thread (or another workspace's thread).
+    # Return 404 rather than 403 to avoid leaking thread-existence information.
+    # A non-UUID thread_id cannot match any row, so skip the check (the upsert
+    # below will fail gracefully if the value is truly invalid).
+    try:
+        existing_thread = await Thread.objects.filter(id=thread_id).afirst()
+    except Exception:
+        existing_thread = None
+    if existing_thread is not None and (
+        existing_thread.user_id != user.pk
+        or existing_thread.workspace_id != workspace.pk
+    ):
+        return JsonResponse({"error": "Thread not found"}, status=404)
 
     # Record thread metadata (fire-and-forget on error)
     try:

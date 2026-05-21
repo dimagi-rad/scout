@@ -31,7 +31,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
 
-from apps.chat.models import ThreadJob
+from apps.chat.models import Thread, ThreadJob
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
@@ -547,6 +547,41 @@ async def run_materialization(
         _, err = await _resolve_workspace_memberships(workspace_id, user_id)
         if err:
             tc["result"] = error_response(NOT_FOUND, err)
+            return tc["result"]
+
+        # Defense in depth: even though the chat layer validates thread
+        # ownership, the MCP tool also checks before binding a ThreadJob to
+        # the thread, since this tool is the one persisting the trust boundary.
+        thread_exists = await Thread.objects.filter(
+            id=thread_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        ).aexists()
+        if not thread_exists:
+            tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
+            return tc["result"]
+
+        # Guard against concurrent dispatch: if any materialization is already
+        # in flight for this workspace, return its identity so the chat agent
+        # can tell the user to wait, rather than dispatching a duplicate.
+        existing = await ThreadJob.objects.filter(
+            thread__workspace_id=workspace_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).afirst()
+        if existing is not None:
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "thread_job_id": str(existing.id),
+                    "message": (
+                        "A materialization is already running in this workspace. "
+                        "I'll continue once it finishes."
+                    ),
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
             return tc["result"]
 
         try:
