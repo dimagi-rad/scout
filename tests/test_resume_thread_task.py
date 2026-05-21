@@ -217,7 +217,6 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
 async def test_resume_bumps_thread_updated_at_on_success():
     """After a successful resume, Thread.updated_at is updated so the
     sidebar's green-dot indicator can fire (lastUpdated > lastViewed)."""
-    from django.utils import timezone
 
     user = await sync_to_async(User.objects.create_user)(email="e@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W5", created_by=user)
