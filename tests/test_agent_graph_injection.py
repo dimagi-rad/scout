@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage
@@ -80,8 +81,6 @@ def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, cap
     tool_call = {"name": "run_materialization", "id": None, "args": {}}  # explicit None id
     ai_msg = AIMessage(content="", tool_calls=[tool_call])
     state = {"messages": [ai_msg], "workspace_id": "ws-1"}
-
-    import logging
 
     with caplog.at_level(logging.WARNING, logger="apps.agents.graph.base"):
         asyncio.run(node(state))

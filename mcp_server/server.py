@@ -565,8 +565,8 @@ async def run_materialization(
         # Atomicity note: defer_async and ThreadJob.acreate are not in a single
         # transaction. If acreate fails after the worker has already picked up
         # the job, abort=True is best-effort (procrastinate only honors it at
-        # cooperative await points). The janitor task (expire_stale_thread_jobs,
-        # Task 14) cleans up any orphaned runs.
+        # cooperative await points). The janitor task (expire_stale_thread_jobs)
+        # cleans up any orphaned runs.
         try:
             tj = await ThreadJob.objects.acreate(
                 thread_id=thread_id,

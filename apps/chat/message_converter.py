@@ -2,12 +2,13 @@
 
 import uuid
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from apps.chat.constants import SYSTEM_RESUME_MARKER
+
 
 def langchain_messages_to_ui(lc_messages) -> list[dict]:
     """Convert LangChain BaseMessages to AI SDK v6 UIMessage format."""
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-    from apps.workspaces.tasks import SYSTEM_RESUME_MARKER  # avoid circular import
 
     visible = [
         m

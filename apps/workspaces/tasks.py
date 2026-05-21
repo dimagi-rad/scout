@@ -6,7 +6,13 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone
+from langchain_core.messages import HumanMessage
+from procrastinate.contrib.django.procrastinate_app import current_app
 
+from apps.agents.graph.base import build_agent_graph
+from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.chat.checkpointer import ensure_checkpointer
+from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
@@ -376,8 +382,6 @@ STALE_JOB_THRESHOLD = timedelta(hours=1)
 
 async def _procrastinate_job_active(job_id: int) -> bool:
     """Return True if the given procrastinate job is still in 'todo' or 'doing'."""
-    from procrastinate.contrib.django.procrastinate_app import current_app
-
     try:
         status = await current_app.job_manager.get_job_status_async(job_id)
     except Exception:
@@ -416,18 +420,11 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     return {"flipped": flipped}
 
 
-SYSTEM_RESUME_MARKER = "[__system_resume__]"
-
-
 async def _build_agent_for_resume(workspace, user):
     """Build the LangGraph agent + load oauth_tokens for runtime config.
 
     Returns (agent, oauth_tokens).
     """
-    from apps.agents.graph.base import build_agent_graph
-    from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
-    from apps.chat.checkpointer import ensure_checkpointer
-
     mcp_tools = await get_mcp_tools()
     oauth_tokens = await get_user_oauth_tokens(user)
     checkpointer = await ensure_checkpointer()
@@ -488,8 +485,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     re-invoke the agent so it can respond to the original request with the
     now-loaded data.
     """
-    from langchain_core.messages import HumanMessage
-
     try:
         tj = await ThreadJob.objects.select_related("thread__workspace", "thread__user").aget(
             id=thread_job_id
@@ -505,8 +500,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # Claim the resume slot atomically before invoking the LLM.
     # If a concurrent task already claimed it (or a retry races with
     # itself), this returns 0 and we no-op.
-    # CANCELLED is intentionally included because Option A in the design lets
-    # the agent compose a follow-up message even for cancelled materializations.
+    # Atomically claim the resume slot. CANCELLED is intentionally included
+    # so the agent can compose a follow-up message even for cancelled
+    # materializations.
     CLAIMABLE_STATES = [*ThreadJob.ACTIVE_STATES, ThreadJob.State.CANCELLED]
     claimed = await ThreadJob.objects.filter(
         id=tj.id, state__in=CLAIMABLE_STATES,
