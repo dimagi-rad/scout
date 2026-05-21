@@ -127,93 +127,122 @@ async def materialize_workspace(
     aggregated result for the agent.
     """
     job_id = context.job.id
-
-    try:
-        workspace = await Workspace.objects.aget(id=workspace_id)
-    except Workspace.DoesNotExist:
-        logger.exception("materialize_workspace: workspace %s not found", workspace_id)
-        return {"error": "Workspace not found"}
-
-    qs = TenantMembership.objects.select_related("user", "tenant").filter(
-        tenant_id__in=[
-            wt.tenant_id
-            async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
-                "tenant"
-            )
-        ]
-    )
-    if user_id:
-        qs = qs.filter(user_id=user_id)
-
-    memberships = [tm async for tm in qs]
-    if not memberships:
-        logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
-        return {"error": "No tenant memberships found", "tenants": []}
-
-    registry = get_registry()
-    provider_pipeline_map = {p.provider: p.name for p in registry.list()}
     tenant_results: list[dict] = []
 
-    for tm in memberships:
-        tenant_id = tm.tenant.external_id
-        pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
-        if pipeline_name is None:
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "success": False,
-                    "error": f"No pipeline for provider '{tm.tenant.provider}'",
-                }
-            )
-            continue
-
-        credential = await aresolve_credential(tm)
-        if credential is None:
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "success": False,
-                    "error": "No credential configured",
-                }
-            )
-            continue
-
-        pipeline_config = registry.get(pipeline_name)
+    try:
         try:
-            result = await asyncio.to_thread(
-                _run_pipeline_with_progress,
-                tm,
-                credential,
-                pipeline_config,
+            workspace = await Workspace.objects.aget(id=workspace_id)
+        except Workspace.DoesNotExist:
+            logger.exception("materialize_workspace: workspace %s not found", workspace_id)
+            return {"error": "Workspace not found"}
+
+        qs = TenantMembership.objects.select_related("user", "tenant").filter(
+            tenant_id__in=[
+                wt.tenant_id
+                async for wt in WorkspaceTenant.objects.filter(
+                    workspace=workspace
+                ).select_related("tenant")
+            ]
+        )
+        if user_id:
+            qs = qs.filter(user_id=user_id)
+
+        memberships = [tm async for tm in qs]
+        if not memberships:
+            logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
+            return {"error": "No tenant memberships found", "tenants": []}
+
+        registry = get_registry()
+        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+
+        for tm in memberships:
+            tenant_id = tm.tenant.external_id
+            pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
+            if pipeline_name is None:
+                tenant_results.append(
+                    {
+                        "tenant": tenant_id,
+                        "success": False,
+                        "error": f"No pipeline for provider '{tm.tenant.provider}'",
+                    }
+                )
+                continue
+
+            credential = await aresolve_credential(tm)
+            if credential is None:
+                tenant_results.append(
+                    {
+                        "tenant": tenant_id,
+                        "success": False,
+                        "error": "No credential configured",
+                    }
+                )
+                continue
+
+            pipeline_config = registry.get(pipeline_name)
+            try:
+                result = await asyncio.to_thread(
+                    _run_pipeline_with_progress,
+                    tm,
+                    credential,
+                    pipeline_config,
+                    job_id,
+                )
+                tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
+            except MaterializationCancelled:
+                tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
+                # Stop processing remaining tenants — the user has cancelled.
+                break
+            except Exception as e:
+                logger.exception("Materialization failed for tenant %s", tenant_id)
+                tenant_results.append(
+                    {"tenant": tenant_id, "success": False, "error": str(e)}
+                )
+
+        return {
+            "tenants": tenant_results,
+            "all_succeeded": all(r.get("success") for r in tenant_results),
+        }
+    finally:
+        # ALWAYS defer the resume task so the user is not left with a phantom
+        # spinner — even on early-return paths (workspace missing, no
+        # memberships) where the loop above never executed.
+        await _defer_resume_for_job(job_id)
+
+
+async def _defer_resume_for_job(job_id: int) -> None:
+    """Find the ThreadJob bound to ``job_id`` and defer the resume task.
+
+    MCP commits the ThreadJob row *after* defer_async returns the procrastinate
+    job id (see mcp_server.server.run_materialization), so under load the
+    worker may finish before the row is visible. Hedge with a bounded backoff:
+    total budget ~3.75s, which is acceptable because procrastinate workers
+    handle one task at a time per slot. If the row still is not visible after
+    retries, the janitor (expire_stale_thread_jobs) catches up eventually.
+
+    TODO: a cleaner fix is to let MCP write a placeholder ThreadJob *before*
+    defer_async, then patch in the procrastinate_job_id after dispatch. That
+    requires making procrastinate_job_id nullable (a migration we are
+    skipping for this PR).
+    """
+    try:
+        tj = None
+        for delay in (0, 0.25, 0.5, 1.0, 2.0):
+            if delay:
+                await asyncio.sleep(delay)
+            tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
+            if tj is not None:
+                break
+        if tj is None:
+            logger.warning(
+                "materialize_workspace: no ThreadJob found for job_id %s after retries; "
+                "janitor will catch up if MCP eventually commits one",
                 job_id,
             )
-            tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
-        except MaterializationCancelled:
-            tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
-            # Stop processing remaining tenants — the user has cancelled.
-            break
-        except Exception as e:
-            logger.exception("Materialization failed for tenant %s", tenant_id)
-            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
-
-    # Chain the resume task so the agent picks up where it left off.
-    try:
-        tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
-        if tj is None:
-            # MCP may still be committing the ThreadJob row (it dispatches
-            # the procrastinate job before creating the tracking row).
-            # Retry once after a short delay to close the race.
-            await asyncio.sleep(0.5)
-            tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
-        if tj is not None:
-            await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+            return
+        await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
         logger.exception("Failed to defer resume task for job %s", job_id)
-
-    return {
-        "tenants": tenant_results,
-        "all_succeeded": all(r.get("success") for r in tenant_results),
-    }
 
 
 def _run_pipeline_with_progress(
@@ -380,12 +409,23 @@ async def teardown_schema(schema_id: str) -> None:
 STALE_JOB_THRESHOLD = timedelta(hours=1)
 
 
-async def _procrastinate_job_active(job_id: int) -> bool:
-    """Return True if the given procrastinate job is still in 'todo' or 'doing'."""
+async def _procrastinate_job_active(job_id: int) -> bool | None:
+    """Return True/False if the procrastinate job status is known; None on error.
+
+    A bare ``return False`` on exception conflates "not active" with "couldn't
+    tell" — the janitor would then misclassify actively-running jobs as
+    candidates for cleanup during a transient DB blip. Callers must treat
+    ``None`` as "don't touch this row this tick".
+    """
     try:
         status = await current_app.job_manager.get_job_status_async(job_id)
     except Exception:
-        return False
+        logger.warning(
+            "Could not fetch procrastinate status for job %s; janitor will skip this tick",
+            job_id,
+            exc_info=True,
+        )
+        return None
     return status.value in {"todo", "doing"}
 
 
@@ -402,7 +442,14 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
         state__in=list(ThreadJob.ACTIVE_STATES),
         created_at__lt=cutoff,
     ):
-        if await _procrastinate_job_active(tj.procrastinate_job_id):
+        active = await _procrastinate_job_active(tj.procrastinate_job_id)
+        if active is None:
+            # Status unknown (probably a transient DB error). Don't touch the
+            # row this tick — the next periodic invocation will retry. This
+            # prevents the janitor from incorrectly cleaning up jobs that may
+            # still be running.
+            continue
+        if active:
             continue
         if tj.state == ThreadJob.State.RUNNING:
             # A worker started a resume and presumably crashed mid-ainvoke.
@@ -523,11 +570,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         return {"status": "already_claimed"}
 
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    # If the job was loaded as CANCELLED (user clicked Stop before we ran),
-    # force status to "cancelled" regardless of what _aggregate_materialization_state
-    # found — the user's intent wins.
-    if tj.state == ThreadJob.State.CANCELLED:
-        status = "cancelled"
+    # No in-memory tj.state override: the prior `if tj.state == CANCELLED:
+    # status = "cancelled"` block used a snapshot taken *before* the CAS,
+    # which produced the wrong message when the user clicked Stop after
+    # runs had already finished — the data IS loaded but the agent said
+    # "cancelled" and the user's request was abandoned.
+    # _aggregate_materialization_state is now the source of truth: if any
+    # MaterializationRun is CANCELLED it returns status="cancelled"; if all
+    # COMPLETED it returns "completed". A user whose Stop click raced with
+    # completion sees the truthful "completed" — their data is intact.
 
     if status == "no_runs":
         logger.warning(
@@ -596,7 +647,23 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             else ThreadJob.State.COMPLETED
         )
     )
-    await ThreadJob.objects.filter(id=tj.id).aupdate(
-        state=terminal, completed_at=timezone.now(),
-    )
+    # CAS-scoped to state=RUNNING (the value we set when claiming the job).
+    # If a concurrent cancel landed during agent.ainvoke (which can take 30s+),
+    # the row is already CANCELLED and we must NOT clobber it back to a
+    # success terminal. The filter returns zero rows; we then re-read the
+    # actual persisted state so the return value reflects reality, not the
+    # value we *would have* written.
+    updated = await ThreadJob.objects.filter(
+        id=tj.id, state=ThreadJob.State.RUNNING,
+    ).aupdate(state=terminal, completed_at=timezone.now())
+    if not updated:
+        actual_state = await ThreadJob.objects.filter(id=tj.id).values_list(
+            "state", flat=True,
+        ).afirst()
+        logger.info(
+            "resume: ThreadJob %s state changed during ainvoke; not clobbering "
+            "(intended terminal=%s, actual=%s)",
+            thread_job_id, terminal, actual_state,
+        )
+        return {"status": "resumed", "terminal_state": actual_state or terminal}
     return {"status": "resumed", "terminal_state": terminal}

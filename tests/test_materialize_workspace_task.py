@@ -292,6 +292,118 @@ async def test_cancel_endpoint_requires_workspace_membership(workspace, other_us
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_defers_resume_on_no_memberships_early_return(
+    workspace, user, context_with_job_id,
+):
+    """Finding #4: the early-return path (no memberships) must still defer
+    the resume task. Otherwise the user is left with a phantom spinner —
+    the chat layer is waiting on a chained resume that never fires."""
+    # Workspace exists, but the workspace has no tenants → no memberships.
+    # Build a fresh workspace with no tenants/memberships.
+    from apps.workspaces.models import Workspace as _Workspace
+    bare_ws = await sync_to_async(_Workspace.objects.create)(
+        name="bare-no-memberships", created_by=user,
+    )
+    # Create a ThreadJob bound to context_with_job_id.job.id so the resume
+    # finally-block can locate it.
+    thread = await Thread.objects.acreate(workspace=bare_ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="tc-early-return",
+    )
+
+    with patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock:
+        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=42424))
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(bare_ws.id),
+            user_id="",
+        )
+
+    # Early-return error envelope returned to the worker.
+    assert result == {"error": "No tenant memberships found", "tenants": []}
+    # But the resume task IS still deferred (in the finally block).
+    resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_defers_resume_on_workspace_not_found(
+    workspace, user, context_with_job_id,
+):
+    """Even when the workspace lookup fails, the resume must be deferred so
+    the user is not stuck with a spinner. The _defer_resume_for_job helper
+    looks up the ThreadJob by procrastinate_job_id, independent of the
+    workspace_id passed in."""
+    # ThreadJob bound to the context's job id, on an unrelated workspace.
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=context_with_job_id.job.id,
+        tool_call_id="tc-no-ws",
+    )
+
+    with patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock:
+        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=51515))
+        # Pass a non-existent workspace_id to trigger the early-return branch.
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id="00000000-0000-0000-0000-000000000000",
+            user_id="",
+        )
+
+    assert result == {"error": "Workspace not found"}
+    resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
+    workspace, user,
+):
+    """Finding #11: MCP commits the ThreadJob after defer_async returns the
+    procrastinate job id; under load the worker can finish before the row
+    is visible. The bounded retry loop in _defer_resume_for_job hedges
+    against that race — it must still locate the ThreadJob on a later tick.
+
+    We test the helper in isolation: insert the ThreadJob *after* the first
+    polling attempt by spying on asyncio.sleep."""
+    from apps.workspaces import tasks as workspaces_tasks
+
+    job_id = 70707
+    insert_state = {"inserted": False, "tj_id": None}
+
+    async def fake_sleep(_delay):
+        # On the first sleep, commit the ThreadJob so the *next* afirst sees it.
+        if not insert_state["inserted"]:
+            thread = await Thread.objects.acreate(workspace=workspace, user=user)
+            tj = await ThreadJob.objects.acreate(
+                thread=thread,
+                job_type="materialization",
+                procrastinate_job_id=job_id,
+                tool_call_id="tc-retry",
+            )
+            insert_state["inserted"] = True
+            insert_state["tj_id"] = str(tj.id)
+
+    with (
+        patch("apps.workspaces.tasks.asyncio.sleep", side_effect=fake_sleep),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
+    ):
+        resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=99))
+        await workspaces_tasks._defer_resume_for_job(job_id)
+
+    assert insert_state["inserted"], "fake_sleep should have inserted the ThreadJob"
+    resume_mock.defer_async.assert_awaited_once_with(
+        thread_job_id=insert_state["tj_id"],
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_chains_resume_task(
     workspace, user, tenant_membership_obj, context_with_job_id
 ):

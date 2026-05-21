@@ -561,11 +561,22 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        # Guard against concurrent dispatch: if any materialization is already
-        # in flight for this workspace, return its identity so the chat agent
-        # can tell the user to wait, rather than dispatching a duplicate.
+        # Guard against concurrent dispatch in the SAME thread: if this chat
+        # already has a materialization in flight, return its identity so the
+        # agent can tell the user to wait. We scope the guard by thread_id
+        # (not workspace) because the chained resume task only fires once
+        # against the original ThreadJob — a second caller in a different
+        # thread would otherwise get no follow-up message when the worker
+        # finishes (resume defers to a single thread_job_id). Note: this lets
+        # two threads in the same workspace dispatch parallel materializations
+        # that share tenant_schemas. This is not new: the prior workspace-
+        # scoped guard already permitted parallel runs across *different*
+        # workspaces sharing a tenant (multi-workspace tenants), and the
+        # materializer has no advisory lock per tenant_schema. If we ever add
+        # tenant-level dedupe we should add it here with a tenant_id filter
+        # rather than the workspace_id we removed.
         existing = await ThreadJob.objects.filter(
-            thread__workspace_id=workspace_id,
+            thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
             state__in=list(ThreadJob.ACTIVE_STATES),
         ).afirst()
@@ -575,7 +586,7 @@ async def run_materialization(
                     "status": "already_in_progress",
                     "thread_job_id": str(existing.id),
                     "message": (
-                        "A materialization is already running in this workspace. "
+                        "A materialization is already running in this chat. "
                         "I'll continue once it finishes."
                     ),
                 },

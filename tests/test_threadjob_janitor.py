@@ -79,6 +79,41 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
+    """Finding #10: when _procrastinate_job_active returns None (status check
+    failed, e.g. a transient DB blip), the janitor must NOT touch the
+    ThreadJob. The previous bare ``except → return False`` conflated
+    "not active" with "couldn't tell" — the janitor would then incorrectly
+    clean up actively-running jobs during an outage."""
+    user = await sync_to_async(User.objects.create_user)(email="unknown@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-unknown", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=24242, tool_call_id="tc-unknown",
+        state=ThreadJob.State.PENDING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+
+    with patch(
+        "apps.workspaces.tasks._procrastinate_job_active",
+        new=AsyncMock(return_value=None),  # status unknown
+    ), patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+        resume.defer_async = AsyncMock(return_value=None)
+        result = await expire_stale_thread_jobs()
+
+    # No resume deferred and no state change — the row is left for the next
+    # tick to retry.
+    resume.defer_async.assert_not_called()
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.PENDING
+    assert result == {"flipped": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
     """A ThreadJob stuck in RUNNING (worker crashed mid-ainvoke) is marked
     FAILED directly — the janitor does NOT defer a duplicate resume which

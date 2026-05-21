@@ -119,8 +119,8 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_run_materialization_returns_already_in_progress_if_active():
-    """If a materialization is already running in this workspace, do not
+async def test_run_materialization_returns_already_in_progress_if_active_in_same_thread():
+    """If a materialization is already running in THIS chat thread, do not
     dispatch a duplicate — return the existing thread_job_id."""
     user = await sync_to_async(User.objects.create_user)(email="dup@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-dup", created_by=user)
@@ -130,25 +130,65 @@ async def test_run_materialization_returns_already_in_progress_if_active():
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
 
-    # Thread 1 owns the already-in-progress job
-    thread1 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    # Same thread holds the in-progress job and is also the caller.
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     existing_tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread1, job_type="materialization",
+        thread=thread, job_type="materialization",
         procrastinate_job_id=11111, tool_call_id="tc-existing",
         state=ThreadJob.State.PENDING,
     )
 
-    # Thread 2 is the caller that tries to start a second materialization
-    thread2 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-
     result = await run_materialization(
         workspace_id=str(ws.id),
         user_id=str(user.id),
-        thread_id=str(thread2.id),
+        thread_id=str(thread.id),
         tool_call_id="tc-new",
     )
 
     assert result["data"]["status"] == "already_in_progress"
     assert result["data"]["thread_job_id"] == str(existing_tj.id)
-    # Crucially, NO new ThreadJob is created — workspace still has only one
-    assert await ThreadJob.objects.filter(thread__workspace_id=ws.id).acount() == 1
+    # No new ThreadJob created for this thread
+    assert await ThreadJob.objects.filter(thread=thread).acount() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_allows_dispatch_from_different_thread_in_same_workspace():
+    """The dedupe guard is scoped per-thread (not per-workspace) so a parallel
+    chat session in the same workspace can run its own materialization. The
+    chained resume task only fires once per ThreadJob, so a workspace-scoped
+    guard would leave the second caller's spinner hanging forever."""
+    user = await sync_to_async(User.objects.create_user)(email="parallel@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-parallel", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="tparallel", provider="commcare", canonical_name="Parallel Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
+
+    # Thread 1 has an in-progress job.
+    thread1 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread1, job_type="materialization",
+        procrastinate_job_id=22222, tool_call_id="tc-thread1",
+        state=ThreadJob.State.PENDING,
+    )
+
+    # Thread 2 is a different chat — should be allowed to dispatch its own.
+    thread2 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+
+    job_mock = MagicMock(id=33333)
+    with patch("mcp_server.server.materialize_workspace") as mw:
+        mw.defer_async = AsyncMock(return_value=job_mock)
+        result = await run_materialization(
+            workspace_id=str(ws.id),
+            user_id=str(user.id),
+            thread_id=str(thread2.id),
+            tool_call_id="tc-thread2",
+        )
+
+    assert result["data"]["status"] == "started"
+    # Two ThreadJobs in this workspace now (one per thread).
+    assert await ThreadJob.objects.filter(thread__workspace_id=ws.id).acount() == 2
+    new_tj = await ThreadJob.objects.aget(procrastinate_job_id=33333)
+    assert new_tj.thread_id == thread2.id
