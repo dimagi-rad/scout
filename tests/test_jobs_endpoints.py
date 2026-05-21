@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
@@ -187,3 +187,33 @@ async def test_cancel_job_double_cancel_is_idempotent():
     resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 200
     assert resp.json() == {"status": "already_terminal", "state": "cancelled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_does_not_overwrite_terminal_threadjob():
+    """If a ThreadJob has already reached a terminal state (e.g., resume
+    finished concurrently), cancel must not overwrite it."""
+    user = await sync_to_async(User.objects.create_user)(email="cancel-race@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-race", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=9090, tool_call_id="tc-race",
+        state=ThreadJob.State.COMPLETED,  # Already terminal — resume just finished
+    )
+    # Call cancel_thread_job directly to exercise the race window
+    from apps.workspaces.api.jobs_cancel import cancel_thread_job
+
+    with patch(
+        "apps.workspaces.api.jobs_cancel.current_app"
+    ) as mock_app:
+        mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
+        await cancel_thread_job(tj)
+
+    await sync_to_async(tj.refresh_from_db)()
+    # State must remain COMPLETED, not be overwritten with CANCELLED
+    assert tj.state == ThreadJob.State.COMPLETED

@@ -35,10 +35,10 @@ async def cancel_thread_job(thread_job: ThreadJob) -> int:
         completed_at=now,
     )
 
-    await ThreadJob.objects.filter(id=thread_job.id).aupdate(
-        state=ThreadJob.State.CANCELLED,
-        completed_at=now,
-    )
+    await ThreadJob.objects.filter(
+        id=thread_job.id,
+        state__in=list(ThreadJob.ACTIVE_STATES),
+    ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=now)
 
     try:
         await current_app.job_manager.cancel_job_by_id_async(
