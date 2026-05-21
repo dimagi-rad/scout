@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
 import { SLASH_COMMANDS } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
-import { useWorkspaceJobs } from "@/hooks/useWorkspaceJobs"
+import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 
 function threadStorageKey(domainId: string) {
   return `scout:thread:${domainId}`
@@ -125,7 +125,7 @@ export function ChatPanel() {
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
 
-  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs(activeDomainId)
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,

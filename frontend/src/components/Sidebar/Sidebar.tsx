@@ -15,7 +15,7 @@ import {
   Loader2,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { useWorkspaceJobs } from "@/hooks/useWorkspaceJobs"
+import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -39,7 +39,7 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
-  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs(activeDomainId)
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [selectorOpen, setSelectorOpen] = useState(false)
   const [wsSearch, setWsSearch] = useState("")

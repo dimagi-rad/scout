@@ -6,11 +6,13 @@ import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
 import { OfflineBanner } from "@/components/OfflineBanner/OfflineBanner"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useAppStore } from "@/store/store"
+import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
 
 export function AppLayout() {
   const { isOnline } = useNetworkStatus()
   const prevIsOnlineRef = useRef(isOnline)
 
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
   const recipeStatus = useAppStore((s) => s.recipeStatus)
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
@@ -45,15 +47,17 @@ export function AppLayout() {
   ])
 
   return (
-    <div className="flex h-screen">
-      <Sidebar />
-      <main className="flex-1 min-w-0 overflow-auto">
-        <ErrorBoundary>
-          <Outlet />
-        </ErrorBoundary>
-      </main>
-      <ArtifactPanel />
-      <OfflineBanner />
-    </div>
+    <WorkspaceJobsProvider workspaceId={activeDomainId}>
+      <div className="flex h-screen">
+        <Sidebar />
+        <main className="flex-1 min-w-0 overflow-auto">
+          <ErrorBoundary>
+            <Outlet />
+          </ErrorBoundary>
+        </main>
+        <ArtifactPanel />
+        <OfflineBanner />
+      </div>
+    </WorkspaceJobsProvider>
   )
 }

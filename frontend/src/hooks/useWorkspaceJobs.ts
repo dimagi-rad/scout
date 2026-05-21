@@ -21,7 +21,12 @@ export interface UseWorkspaceJobs {
   notifyJobLikelyStarted: () => void
 }
 
-export function useWorkspaceJobs(workspaceId: string | null): UseWorkspaceJobs {
+/**
+ * Polling implementation hook. Do NOT call this directly from components —
+ * use `useWorkspaceJobs` from `@/contexts/WorkspaceJobsContext` instead so the
+ * polling loop has a single owner. The provider is the only legitimate caller.
+ */
+export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJobs {
   const [state, setState] = useState<State>({ jobs: [], lastError: null })
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
