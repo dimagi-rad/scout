@@ -39,7 +39,7 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
-  const { jobsByThreadId } = useWorkspaceJobs(activeDomainId)
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs(activeDomainId)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [selectorOpen, setSelectorOpen] = useState(false)
   const [wsSearch, setWsSearch] = useState("")
@@ -57,6 +57,14 @@ export function Sidebar() {
       fetchThreads(activeDomainId)
     }
   }, [activeDomainId, fetchThreads])
+
+  // Refetch threads when jobs complete so the sidebar green-dot indicator
+  // picks up the bumped Thread.updated_at from the resume task.
+  useEffect(() => {
+    if (activeDomainId && recentlyCompletedThreadIds.length > 0) {
+      void fetchThreads(activeDomainId)
+    }
+  }, [recentlyCompletedThreadIds, activeDomainId, fetchThreads])
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
@@ -173,9 +181,11 @@ export function Sidebar() {
         <div className="flex-1 overflow-y-auto px-2 pb-2">
           {threads.map((thread) => {
             const job = jobsByThreadId[thread.id]
-            const lastViewed = thread.last_viewed_at ? new Date(thread.last_viewed_at) : null
             const lastUpdated = new Date(thread.updated_at)
-            const hasUnread = lastViewed !== null && lastUpdated > lastViewed
+            const baseline = thread.last_viewed_at
+              ? new Date(thread.last_viewed_at)
+              : new Date(thread.created_at)
+            const hasUnread = lastUpdated > baseline
             return (
               <button
                 key={thread.id}

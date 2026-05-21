@@ -148,7 +148,12 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
 
   // Auto-expand while actively streaming; collapsed by default for historical messages.
   // User overrides tied to isLatest reset automatically when a part is superseded.
-  const autoExpanded = (isLatest || isLoading) && isActiveMessage && AUTO_EXPAND_TOOLS.has(toolName)
+  // run_materialization stays expanded as long as there is an active job for it,
+  // regardless of whether the SSE stream is still active (isActiveMessage).
+  const autoExpanded =
+    AUTO_EXPAND_TOOLS.has(toolName)
+    && (isLatest || isLoading || (toolName === "run_materialization" && !!activeMaterializationJob))
+    && (isActiveMessage || toolName === "run_materialization")
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
   const expanded = effectiveOverride ?? autoExpanded
@@ -162,7 +167,6 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
     toolName === "run_materialization"
     && !!activeMaterializationJob
     && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
-    && isActiveMessage
     && !!workspaceId
   const [cancelState, setCancelState] = useState<"idle" | "pending" | "error">("idle")
   const handleCancel = async (e: React.MouseEvent) => {
