@@ -193,6 +193,12 @@ async def materialize_workspace(
     # Chain the resume task so the agent picks up where it left off.
     try:
         tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
+        if tj is None:
+            # MCP may still be committing the ThreadJob row (it dispatches
+            # the procrastinate job before creating the tracking row).
+            # Retry once after a short delay to close the race.
+            await asyncio.sleep(0.5)
+            tj = await ThreadJob.objects.filter(procrastinate_job_id=job_id).afirst()
         if tj is not None:
             await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
@@ -394,14 +400,19 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     ):
         if await _procrastinate_job_active(tj.procrastinate_job_id):
             continue
-        await ThreadJob.objects.filter(id=tj.id).aupdate(
-            state=ThreadJob.State.FAILED, completed_at=timezone.now(),
-        )
-        flipped += 1
+        # Defer resume FIRST. The resume task is responsible for flipping the
+        # ThreadJob state — letting it do so ensures the user gets an agent
+        # follow-up message instead of a silent FAILED.
         try:
             await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+            flipped += 1
         except Exception:
             logger.exception("Janitor: failed to defer resume for %s", tj.id)
+            # As a fallback, still flip to FAILED so the user doesn't see a
+            # permanent spinner.
+            await ThreadJob.objects.filter(id=tj.id).aupdate(
+                state=ThreadJob.State.FAILED, completed_at=timezone.now(),
+            )
     return {"flipped": flipped}
 
 
@@ -494,15 +505,20 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # Claim the resume slot atomically before invoking the LLM.
     # If a concurrent task already claimed it (or a retry races with
     # itself), this returns 0 and we no-op.
+    # CANCELLED is intentionally included because Option A in the design lets
+    # the agent compose a follow-up message even for cancelled materializations.
+    CLAIMABLE_STATES = [*ThreadJob.ACTIVE_STATES, ThreadJob.State.CANCELLED]
     claimed = await ThreadJob.objects.filter(
-        id=tj.id, state__in=list(ThreadJob.ACTIVE_STATES),
+        id=tj.id, state__in=CLAIMABLE_STATES,
     ).aupdate(state=ThreadJob.State.RUNNING)
     if not claimed:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
         return {"status": "already_claimed"}
 
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    # If cancel beat us here, prefer that signal.
+    # If the job was loaded as CANCELLED (user clicked Stop before we ran),
+    # force status to "cancelled" regardless of what _aggregate_materialization_state
+    # found — the user's intent wins.
     if tj.state == ThreadJob.State.CANCELLED:
         status = "cancelled"
 
@@ -541,9 +557,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             "oauth_tokens": oauth_tokens,
         }
         await agent.ainvoke(input_state, config)
-        # Bump Thread.updated_at so the sidebar's "newer than last_viewed" check
-        # fires the green-dot indicator after a successful background resume.
-        await Thread.objects.filter(id=tj.thread_id).aupdate(updated_at=timezone.now())
     except Exception:
         logger.exception(
             "resume: agent build or invoke failed for thread_job %s", thread_job_id
@@ -553,6 +566,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             completed_at=timezone.now(),
         )
         return {"status": "agent_failed"}
+
+    # Bump Thread.updated_at so the sidebar's "newer than last_viewed" check
+    # fires the green-dot indicator after a successful background resume.
+    # Isolated try/except: a DB failure here must not contaminate the
+    # success path (the agent message was already persisted via ainvoke).
+    try:
+        await Thread.objects.filter(id=tj.thread_id).aupdate(updated_at=timezone.now())
+    except Exception:
+        logger.warning(
+            "resume: Thread.updated_at bump failed for thread %s; "
+            "green-dot indicator may not fire",
+            tj.thread_id, exc_info=True,
+        )
 
     terminal = (
         ThreadJob.State.CANCELLED if status == "cancelled"
