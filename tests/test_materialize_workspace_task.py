@@ -10,10 +10,12 @@ from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
+from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    Workspace,
     WorkspaceMembership,
     WorkspaceRole,
 )
@@ -300,8 +302,7 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
     the chat layer is waiting on a chained resume that never fires."""
     # Workspace exists, but the workspace has no tenants → no memberships.
     # Build a fresh workspace with no tenants/memberships.
-    from apps.workspaces.models import Workspace as _Workspace
-    bare_ws = await sync_to_async(_Workspace.objects.create)(
+    bare_ws = await sync_to_async(Workspace.objects.create)(
         name="bare-no-memberships", created_by=user,
     )
     # Create a ThreadJob bound to context_with_job_id.job.id so the resume
@@ -371,8 +372,6 @@ async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
 
     We test the helper in isolation: insert the ThreadJob *after* the first
     polling attempt by spying on asyncio.sleep."""
-    from apps.workspaces import tasks as workspaces_tasks
-
     job_id = 70707
     insert_state = {"inserted": False, "tj_id": None}
 
@@ -537,21 +536,100 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
 
-    # The endpoint may report "no_active_run" (no own ThreadJobs and no orphan
-    # runs) — but for orphan-run discovery we'd cancel the workspace-scoped
-    # run. The critical assertion is that the *owner*'s ThreadJob state is
-    # NOT flipped to CANCELLED by the peer.
+    # The endpoint must report no_active_run: the peer owns no ThreadJobs of
+    # their own, and the only active run belongs to another user (so it is
+    # NOT an orphan and must not be swept by the orphan-fallback either).
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "no_active_run"
+    assert body["runs_cancelled"] == 0
+
     await sync_to_async(owner_tj.refresh_from_db)()
     assert owner_tj.state == ThreadJob.State.RUNNING, (
         "Peer must not be able to cancel another user's chat-driven ThreadJob"
     )
-    # Implicit assertion: cancel_thread_job was never called for owner_tj, so
-    # no resume task is queued against the victim's thread. (We cannot probe
-    # the queue directly here, but state==RUNNING confirms the path didn't
-    # run.)
-    # active_run may be CANCELLED via the orphan fallback (workspace-scoped),
-    # which is an acceptable per-finding trade-off; the security boundary is
-    # that the victim's *chat* must not receive a cancellation message.
+    # The owner's MaterializationRun must remain untouched. Previously the
+    # orphan-fallback used a user-scoped tracked set, so the peer's call
+    # incorrectly classified the owner's run as "orphan" and cancelled it.
     await active_run.arefresh_from_db()
-    assert active_run.state == MaterializationRun.RunState.CANCELLED
+    assert active_run.state == MaterializationRun.RunState.LOADING, (
+        "Peer must not be able to cancel another user's MaterializationRun "
+        "via the orphan-fallback path"
+    )
+    # The orphan-cancel branch must NOT have been invoked for this job id.
+    mock_orphan_app.job_manager.cancel_job_by_id_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_cancel_orphan_path_skips_other_users_runs(
+    workspace, user, other_user, tenant,
+):
+    """When user A calls the legacy cancel endpoint and user B has a
+    chat-driven materialization (with ThreadJob) in the same workspace, only
+    the genuinely-orphan run (no ThreadJob anywhere) is cancelled. User B's
+    MaterializationRun and ThreadJob must remain untouched.
+
+    Regression test for the orphan-detection bug: ``orphan_job_ids`` was
+    computed against the caller-scoped tracked set, so other users' jobs
+    leaked into the orphan branch and were aborted."""
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=workspace, user=other_user, role=WorkspaceRole.READ_WRITE,
+    )
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="test_orphan_skip_other", state=SchemaState.ACTIVE,
+    )
+
+    # Run #1: belongs to user B's chat (has a ThreadJob).
+    b_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=1001,
+    )
+    b_thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    b_tj = await ThreadJob.objects.acreate(
+        thread=b_thread,
+        job_type="materialization",
+        procrastinate_job_id=1001,
+        tool_call_id="tc-b-owner",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    # Run #2: genuine orphan (e.g., /refresh/ path — no ThreadJob anywhere).
+    orphan_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=1002,
+    )
+
+    # User A (other_user) calls cancel.
+    client = AsyncClient()
+    await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
+         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+        mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Only the orphan run is reported cancelled.
+    assert body["status"] == "cancelled"
+    assert body["runs_cancelled"] == 1
+
+    # B's run + ThreadJob untouched.
+    await b_run.arefresh_from_db()
+    assert b_run.state == MaterializationRun.RunState.LOADING
+    await sync_to_async(b_tj.refresh_from_db)()
+    assert b_tj.state == ThreadJob.State.RUNNING
+
+    # Orphan run is cancelled and procrastinate was signalled exactly once
+    # (for the orphan job id, not B's job id).
+    await orphan_run.arefresh_from_db()
+    assert orphan_run.state == MaterializationRun.RunState.CANCELLED
+    assert orphan_run.completed_at is not None
+    mock_orphan_app.job_manager.cancel_job_by_id_async.assert_awaited_once_with(
+        1002, abort=True,
+    )

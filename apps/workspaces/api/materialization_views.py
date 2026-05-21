@@ -67,6 +67,17 @@ async def materialization_cancel_view(request, workspace_id):
             thread__user=user,
         )
     ]
+    # ALL ThreadJobs for these job_ids (any user) — used to distinguish
+    # truly-orphan runs (no ThreadJob exists anywhere, e.g., /refresh/ path)
+    # from runs that belong to another user (which we MUST NOT cancel here
+    # since this endpoint is only allowed to act on the caller's own jobs).
+    all_tracked_job_ids = {
+        pid
+        async for pid in ThreadJob.objects.filter(
+            procrastinate_job_id__in=job_ids,
+        ).values_list("procrastinate_job_id", flat=True)
+    }
+
     # Cancel tracked materializations via cancel_thread_job (which also flips
     # the ThreadJob state). Track which procrastinate_job_ids we covered.
     total = 0
@@ -75,9 +86,10 @@ async def materialization_cancel_view(request, workspace_id):
         total += await cancel_thread_job(tj)
         tracked_job_ids.add(tj.procrastinate_job_id)
 
-    # Cancel any orphan MaterializationRuns (no ThreadJob — usually /refresh/-initiated
-    # materializations that go through run_pipeline directly).
-    orphan_job_ids = job_ids - tracked_job_ids
+    # Cancel only TRULY orphan MaterializationRuns (no ThreadJob anywhere).
+    # Runs belonging to other users' ThreadJobs are deliberately skipped —
+    # this endpoint must not disrupt another user's chat-driven materialization.
+    orphan_job_ids = job_ids - all_tracked_job_ids
     if orphan_job_ids:
         logger.info(
             "materialization_cancel_view: %d orphan run(s) without ThreadJob — "
