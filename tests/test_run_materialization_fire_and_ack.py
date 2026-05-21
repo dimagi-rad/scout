@@ -10,6 +10,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceTenant,
 )
+from mcp_server.server import run_materialization
 
 User = get_user_model()
 
@@ -25,8 +26,6 @@ async def test_run_materialization_returns_started_immediately_and_creates_threa
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-
-    from mcp_server.server import run_materialization
 
     job_mock = MagicMock(id=7777)
     with patch("mcp_server.server.materialize_workspace") as mw:
@@ -61,8 +60,6 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-
-    from mcp_server.server import run_materialization
 
     job_mock = MagicMock(id=8888)
     cancel_mock = AsyncMock(return_value=None)

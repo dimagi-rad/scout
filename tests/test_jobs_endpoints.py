@@ -7,6 +7,7 @@ from django.test import AsyncClient
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
+from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import (
     MaterializationRun,
     TenantSchema,
@@ -206,8 +207,6 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
         state=ThreadJob.State.COMPLETED,  # Already terminal — resume just finished
     )
     # Call cancel_thread_job directly to exercise the race window
-    from apps.workspaces.api.jobs_cancel import cancel_thread_job
-
     with patch(
         "apps.workspaces.api.jobs_cancel.current_app"
     ) as mock_app:

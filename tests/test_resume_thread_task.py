@@ -12,6 +12,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceTenant,
 )
+from apps.workspaces.tasks import resume_thread_after_materialization
 
 User = get_user_model()
 
@@ -38,8 +39,6 @@ async def test_resume_appends_system_message_and_invokes_agent():
         procrastinate_job_id=3003,
         result={"rows": 50000},
     )
-
-    from apps.workspaces.tasks import resume_thread_after_materialization
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -90,8 +89,6 @@ async def test_resume_is_idempotent_when_already_claimed():
         procrastinate_job_id=4040,
     )
 
-    from apps.workspaces.tasks import resume_thread_after_materialization
-
     result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
     assert result["status"] == "already_terminal"
 
@@ -110,8 +107,6 @@ async def test_resume_no_runs_marks_threadjob_failed_without_invoking_agent():
         state=ThreadJob.State.RUNNING,
     )
     # No MaterializationRun rows for procrastinate_job_id=5050.
-
-    from apps.workspaces.tasks import resume_thread_after_materialization
 
     # _build_agent_for_resume must NOT be invoked.
     with patch("apps.workspaces.tasks._build_agent_for_resume") as build:
@@ -147,8 +142,6 @@ async def test_resume_partial_maps_to_failed():
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=6060,
     )
-
-    from apps.workspaces.tasks import resume_thread_after_materialization
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -189,8 +182,6 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
         state=MaterializationRun.RunState.CANCELLED,
         procrastinate_job_id=7777,
     )
-
-    from apps.workspaces.tasks import resume_thread_after_materialization
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -240,8 +231,6 @@ async def test_resume_bumps_thread_updated_at_on_success():
 
     # Record the updated_at before the resume runs
     pre_resume_updated_at = thread.updated_at
-
-    from apps.workspaces.tasks import resume_thread_after_materialization
 
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})

@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.workspaces.models import Workspace
+from apps.workspaces.tasks import expire_stale_thread_jobs
 
 User = get_user_model()
 
@@ -31,8 +32,6 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
     await ThreadJob.objects.filter(id=tj.id).aupdate(
         created_at=timezone.now() - timedelta(hours=2)
     )
-
-    from apps.workspaces.tasks import expire_stale_thread_jobs
 
     with patch("apps.workspaces.tasks._procrastinate_job_active",
                new=AsyncMock(return_value=False)), \
@@ -64,8 +63,6 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
     await ThreadJob.objects.filter(id=tj.id).aupdate(
         created_at=timezone.now() - timedelta(hours=2)
     )
-
-    from apps.workspaces.tasks import expire_stale_thread_jobs
 
     with patch("apps.workspaces.tasks._procrastinate_job_active",
                new=AsyncMock(return_value=False)), \
