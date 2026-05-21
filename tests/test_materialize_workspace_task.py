@@ -14,6 +14,8 @@ from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    WorkspaceMembership,
+    WorkspaceRole,
 )
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.services.materializer import MaterializationCancelled
@@ -376,3 +378,68 @@ async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, us
 
     await orphan_run.arefresh_from_db()
     assert orphan_run.state == MaterializationRun.RunState.CANCELLED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
+    workspace, user, other_user, tenant,
+):
+    """A workspace member must NOT be able to cancel another member's
+    chat-driven materialization via the legacy
+    /api/workspaces/<id>/materialization/cancel/ endpoint.
+
+    The legacy endpoint resolves the workspace by membership, so a peer could
+    previously sweep up ThreadJobs owned by another user — which then triggers
+    a resume-task message in the victim's chat. The fix adds a thread__user
+    filter so only the caller's own ThreadJobs are cancelled."""
+    # Make other_user a member of the workspace (peer with access).
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=workspace, user=other_user, role=WorkspaceRole.READ_WRITE,
+    )
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="test_xuser_cancel", state=SchemaState.ACTIVE,
+    )
+    # Active run owned by `user`'s thread.
+    active_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=777,
+    )
+    owner_thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    owner_tj = await ThreadJob.objects.acreate(
+        thread=owner_thread,
+        job_type="materialization",
+        procrastinate_job_id=777,
+        tool_call_id="tc-owner",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    # other_user (a workspace peer) attempts to cancel via the legacy endpoint.
+    client = AsyncClient()
+    await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
+         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+        mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
+
+    # The endpoint may report "no_active_run" (no own ThreadJobs and no orphan
+    # runs) — but for orphan-run discovery we'd cancel the workspace-scoped
+    # run. The critical assertion is that the *owner*'s ThreadJob state is
+    # NOT flipped to CANCELLED by the peer.
+    assert resp.status_code == 200
+    await sync_to_async(owner_tj.refresh_from_db)()
+    assert owner_tj.state == ThreadJob.State.RUNNING, (
+        "Peer must not be able to cancel another user's chat-driven ThreadJob"
+    )
+    # Implicit assertion: cancel_thread_job was never called for owner_tj, so
+    # no resume task is queued against the victim's thread. (We cannot probe
+    # the queue directly here, but state==RUNNING confirms the path didn't
+    # run.)
+    # active_run may be CANCELLED via the orphan fallback (workspace-scoped),
+    # which is an acceptable per-finding trade-off; the security boundary is
+    # that the victim's *chat* must not receive a cancellation message.
+    await active_run.arefresh_from_db()
+    assert active_run.state == MaterializationRun.RunState.CANCELLED

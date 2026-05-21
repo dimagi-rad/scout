@@ -53,11 +53,18 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
+    # Filter by thread__user so a workspace member cannot cancel another
+    # member's chat-driven materialization (which would otherwise trigger a
+    # "Materialization just completed (status=cancelled)" resume message in
+    # the victim's thread). The orphan path below covers untracked runs
+    # (e.g. /refresh/-triggered jobs with no ThreadJob); those are workspace-
+    # scoped, but cancelling them does not inject anything into anyone's chat.
     tjs = [
         tj
         async for tj in ThreadJob.objects.filter(
             procrastinate_job_id__in=job_ids,
             state__in=list(ThreadJob.ACTIVE_STATES),
+            thread__user=user,
         )
     ]
     # Cancel tracked materializations via cancel_thread_job (which also flips
