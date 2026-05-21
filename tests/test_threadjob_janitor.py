@@ -75,3 +75,34 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
     await sync_to_async(tj.refresh_from_db)()
     # Fallback: janitor flips to FAILED so the user doesn't see a spinner forever.
     assert tj.state == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
+    """A ThreadJob stuck in RUNNING (worker crashed mid-ainvoke) is marked
+    FAILED directly — the janitor does NOT defer a duplicate resume which
+    could race with the original."""
+    user = await sync_to_async(User.objects.create_user)(email="stuck@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-stuck", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=12345, tool_call_id="tc-stuck",
+        state=ThreadJob.State.RUNNING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+
+    with patch("apps.workspaces.tasks._procrastinate_job_active",
+               new=AsyncMock(return_value=False)), \
+         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+        resume.defer_async = AsyncMock(return_value=None)
+        result = await expire_stale_thread_jobs()
+
+    resume.defer_async.assert_not_called()
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.completed_at is not None
+    assert result["flipped"] == 1

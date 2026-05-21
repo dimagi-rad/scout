@@ -404,16 +404,27 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     ):
         if await _procrastinate_job_active(tj.procrastinate_job_id):
             continue
-        # Defer resume FIRST. The resume task is responsible for flipping the
-        # ThreadJob state — letting it do so ensures the user gets an agent
-        # follow-up message instead of a silent FAILED.
+        if tj.state == ThreadJob.State.RUNNING:
+            # A worker started a resume and presumably crashed mid-ainvoke.
+            # Marking FAILED directly avoids deferring a duplicate resume that
+            # could race with a still-running first invocation.
+            updated = await ThreadJob.objects.filter(
+                id=tj.id, state=ThreadJob.State.RUNNING,
+            ).aupdate(state=ThreadJob.State.FAILED, completed_at=timezone.now())
+            if updated:
+                flipped += 1
+                logger.warning(
+                    "Janitor: ThreadJob %s stuck in RUNNING (worker crash?); marked FAILED",
+                    tj.id,
+                )
+            continue
+        # PENDING stuck job — never claimed by any worker. Safe to defer a fresh
+        # resume so the user gets an agent follow-up.
         try:
             await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
             flipped += 1
         except Exception:
             logger.exception("Janitor: failed to defer resume for %s", tj.id)
-            # As a fallback, still flip to FAILED so the user doesn't see a
-            # permanent spinner.
             await ThreadJob.objects.filter(id=tj.id).aupdate(
                 state=ThreadJob.State.FAILED, completed_at=timezone.now(),
             )
@@ -497,13 +508,13 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         # Already resumed (idempotent retry); cancellation still gets one resume.
         return {"status": "already_terminal", "state": tj.state}
 
-    # Claim the resume slot atomically before invoking the LLM.
-    # If a concurrent task already claimed it (or a retry races with
-    # itself), this returns 0 and we no-op.
-    # Atomically claim the resume slot. CANCELLED is intentionally included
-    # so the agent can compose a follow-up message even for cancelled
-    # materializations.
-    CLAIMABLE_STATES = [*ThreadJob.ACTIVE_STATES, ThreadJob.State.CANCELLED]
+    # CLAIMABLE_STATES excludes RUNNING because aupdate() returns the count of
+    # rows MATCHED (not changed). Including RUNNING would let a second
+    # concurrent invocation re-claim an already-running ThreadJob and produce
+    # a duplicate agent.ainvoke() against the same LangGraph thread.
+    # CANCELLED is intentionally included so the agent can compose a follow-up
+    # message even for cancelled materializations.
+    CLAIMABLE_STATES = [ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
     claimed = await ThreadJob.objects.filter(
         id=tj.id, state__in=CLAIMABLE_STATES,
     ).aupdate(state=ThreadJob.State.RUNNING)

@@ -31,7 +31,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
     tj = await sync_to_async(ThreadJob.objects.create)(
         thread=thread, job_type="materialization",
         procrastinate_job_id=3003, tool_call_id="tc3",
-        state=ThreadJob.State.RUNNING,
+        state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
         tenant_schema=schema, pipeline="commcare_sync",
@@ -104,7 +104,7 @@ async def test_resume_no_runs_marks_threadjob_failed_without_invoking_agent():
     tj = await sync_to_async(ThreadJob.objects.create)(
         thread=thread, job_type="materialization",
         procrastinate_job_id=5050, tool_call_id="tc5",
-        state=ThreadJob.State.RUNNING,
+        state=ThreadJob.State.PENDING,
     )
     # No MaterializationRun rows for procrastinate_job_id=5050.
 
@@ -134,7 +134,7 @@ async def test_resume_partial_maps_to_failed():
     tj = await sync_to_async(ThreadJob.objects.create)(
         thread=thread, job_type="materialization",
         procrastinate_job_id=6060, tool_call_id="tc6",
-        state=ThreadJob.State.RUNNING,
+        state=ThreadJob.State.PENDING,
     )
     # One run still in LOADING — triggers "partial" aggregate status.
     await sync_to_async(MaterializationRun.objects.create)(
@@ -220,7 +220,7 @@ async def test_resume_bumps_thread_updated_at_on_success():
     tj = await sync_to_async(ThreadJob.objects.create)(
         thread=thread, job_type="materialization",
         procrastinate_job_id=7070, tool_call_id="tc7",
-        state=ThreadJob.State.RUNNING,
+        state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
         tenant_schema=schema, pipeline="commcare_sync",
@@ -245,3 +245,41 @@ async def test_resume_bumps_thread_updated_at_on_success():
     # Thread.updated_at must have been bumped after the successful resume
     await sync_to_async(thread.refresh_from_db)()
     assert thread.updated_at > pre_resume_updated_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_cas_rejects_already_running_threadjob():
+    """If a ThreadJob is already in RUNNING state (a concurrent resume
+    claimed it first), a second invocation must NOT proceed to ainvoke."""
+    user = await sync_to_async(User.objects.create_user)(email="cas@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-cas", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-cas", provider="commcare", canonical_name="CAS Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_cas")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread, job_type="materialization",
+        procrastinate_job_id=24680, tool_call_id="tc-cas",
+        state=ThreadJob.State.RUNNING,  # already-running; simulates a concurrent claim
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema, pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=24680,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(
+            None, thread_job_id=str(tj.id),
+        )
+
+    assert result["status"] == "already_claimed"
+    mock_agent.ainvoke.assert_not_called()
