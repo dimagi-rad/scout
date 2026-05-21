@@ -95,9 +95,10 @@ async def test_resume_is_idempotent_when_already_claimed():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_no_runs_marks_threadjob_failed_without_invoking_agent():
-    """If somehow there are no MaterializationRun rows for the procrastinate
-    job, the resume short-circuits to FAILED and does not invoke the agent."""
+async def test_resume_no_runs_still_invokes_agent_with_explanation():
+    """no_runs case: agent IS invoked so the user gets a useful message
+    rather than being left with a frozen spinner, but the ThreadJob is
+    still marked FAILED for observability."""
     user = await sync_to_async(User.objects.create_user)(email="c@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W3", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
@@ -108,12 +109,24 @@ async def test_resume_no_runs_marks_threadjob_failed_without_invoking_agent():
     )
     # No MaterializationRun rows for procrastinate_job_id=5050.
 
-    # _build_agent_for_resume must NOT be invoked.
-    with patch("apps.workspaces.tasks._build_agent_for_resume") as build:
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
-        build.assert_not_called()
 
-    assert result["status"] == "no_runs"
+    # Agent IS invoked — user must get a message
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert any(
+        phrase in body.lower()
+        for phrase in ("no pipelines", "no_runs", "no credentials", "pipeline configured")
+    )
+
+    assert result["status"] == "resumed"
+    assert result["terminal_state"] == ThreadJob.State.FAILED
     await sync_to_async(tj.refresh_from_db)()
     assert tj.state == ThreadJob.State.FAILED
 

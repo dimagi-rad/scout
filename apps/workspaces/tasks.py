@@ -532,19 +532,21 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     if status == "no_runs":
         logger.warning(
             "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
-            "marking ThreadJob FAILED without resuming agent",
+            "invoking agent with explanation so the user is not left with a spinner",
             thread_job_id, tj.procrastinate_job_id,
         )
-        await ThreadJob.objects.filter(id=tj.id).aupdate(
-            state=ThreadJob.State.FAILED, completed_at=timezone.now(),
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization finished without running any "
+            f"pipelines. This typically means the workspace's tenants have no "
+            f"pipeline configured or no credentials set up. Please tell the user "
+            f"what happened and suggest checking the workspace's connection."
         )
-        return {"status": "no_runs"}
-
-    body = (
-        f"{SYSTEM_RESUME_MARKER} Materialization just completed "
-        f"(status={status}). Please continue with the user's original request "
-        f"using the now-loaded data. Per-tenant: {summary}"
-    )
+    else:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization just completed "
+            f"(status={status}). Please continue with the user's original request "
+            f"using the now-loaded data. Per-tenant: {summary}"
+        )
 
     workspace = tj.thread.workspace
     user = tj.thread.user
@@ -590,7 +592,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     terminal = (
         ThreadJob.State.CANCELLED if status == "cancelled"
         else (
-            ThreadJob.State.FAILED if status in ("failed", "partial")
+            ThreadJob.State.FAILED if status in ("failed", "partial", "no_runs")
             else ThreadJob.State.COMPLETED
         )
     )

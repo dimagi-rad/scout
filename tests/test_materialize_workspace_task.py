@@ -320,3 +320,59 @@ async def test_materialize_workspace_chains_resume_task(
     resume_mock.defer_async.assert_awaited_once()
     kwargs = resume_mock.defer_async.await_args.kwargs
     assert kwargs["thread_job_id"] == str(tj.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, user, tenant):
+    """Mixed case: workspace has one tracked materialization (chat-triggered,
+    with ThreadJob) and one orphan (e.g., /refresh/-triggered, no ThreadJob).
+    The cancel endpoint must cancel BOTH runs."""
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="test_mixed_cancel", state=SchemaState.ACTIVE
+    )
+
+    # Tracked run: has a ThreadJob
+    tracked_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=555,
+    )
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=555,
+        tool_call_id="tc-tracked",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    # Orphan run: no ThreadJob (e.g., /refresh/-initiated)
+    orphan_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=666,
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email=user.email, password="testpass123")
+
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
+         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+        mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "cancelled"
+    # Both runs must be cancelled
+    assert body["runs_cancelled"] == 2
+
+    await tracked_run.arefresh_from_db()
+    assert tracked_run.state == MaterializationRun.RunState.CANCELLED
+
+    await orphan_run.arefresh_from_db()
+    assert orphan_run.state == MaterializationRun.RunState.CANCELLED

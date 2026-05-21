@@ -60,22 +60,30 @@ async def materialization_cancel_view(request, workspace_id):
             state__in=list(ThreadJob.ACTIVE_STATES),
         )
     ]
-    if not tjs:
-        # No ThreadJob exists — likely a /refresh/-initiated materialization
-        # which goes through run_pipeline directly. Cancel the runs and
-        # procrastinate jobs ourselves to preserve back-compat behavior.
+    # Cancel tracked materializations via cancel_thread_job (which also flips
+    # the ThreadJob state). Track which procrastinate_job_ids we covered.
+    total = 0
+    tracked_job_ids = set()
+    for tj in tjs:
+        total += await cancel_thread_job(tj)
+        tracked_job_ids.add(tj.procrastinate_job_id)
+
+    # Cancel any orphan MaterializationRuns (no ThreadJob — usually /refresh/-initiated
+    # materializations that go through run_pipeline directly).
+    orphan_job_ids = job_ids - tracked_job_ids
+    if orphan_job_ids:
         logger.info(
-            "materialization_cancel_view: %d active run(s) for workspace %s "
-            "have no ThreadJob; falling back to direct cancellation",
-            len(active_runs),
-            workspace_id,
+            "materialization_cancel_view: %d orphan run(s) without ThreadJob — "
+            "falling back to direct cancellation",
+            len(orphan_job_ids),
         )
         now = datetime.now(UTC)
-        run_ids = [r.id for r in active_runs]
-        runs_cancelled = await MaterializationRun.objects.filter(
-            id__in=run_ids,
+        orphan_run_ids = [r.id for r in active_runs if r.procrastinate_job_id in orphan_job_ids]
+        orphan_cancelled = await MaterializationRun.objects.filter(
+            id__in=orphan_run_ids,
         ).aupdate(state=MaterializationRun.RunState.CANCELLED, completed_at=now)
-        for procrastinate_job_id in job_ids:
+        total += orphan_cancelled
+        for procrastinate_job_id in orphan_job_ids:
             try:
                 await current_app.job_manager.cancel_job_by_id_async(
                     procrastinate_job_id, abort=True,
@@ -85,8 +93,7 @@ async def materialization_cancel_view(request, workspace_id):
                     "Failed to abort procrastinate job %s", procrastinate_job_id,
                     exc_info=True,
                 )
-        return JsonResponse({"status": "cancelled", "runs_cancelled": runs_cancelled})
-    total = 0
-    for tj in tjs:
-        total += await cancel_thread_job(tj)
+
+    if total == 0:
+        return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
     return JsonResponse({"status": "cancelled", "runs_cancelled": total})
