@@ -9,7 +9,7 @@ from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
@@ -18,6 +18,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
+    WorkspaceTenant,
 )
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.services.materializer import MaterializationCancelled
@@ -115,9 +116,6 @@ async def test_materialize_workspace_records_failure(
 def multi_tenant_workspace(db, workspace, user):
     """Augment the single-tenant `workspace` fixture with a second tenant +
     membership, so workspace_tenants.acount() > 1."""
-    from apps.users.models import Tenant, TenantMembership
-    from apps.workspaces.models import WorkspaceTenant
-
     second_tenant = Tenant.objects.create(
         provider="commcare", external_id="test-domain-2", canonical_name="Test Domain 2"
     )
