@@ -199,9 +199,32 @@ async def materialize_workspace(
                     {"tenant": tenant_id, "success": False, "error": str(e)}
                 )
 
+        all_succeeded = all(r.get("success") for r in tenant_results)
+
+        # Multi-tenant workspaces query through a WorkspaceViewSchema that
+        # UNION ALLs the per-tenant tables. build_view_schema requires every
+        # tenant to have an ACTIVE TenantSchema, so we can only attempt this
+        # after the per-tenant loop completes successfully. This must run
+        # *before* the resume task fires (deferred in the finally block) so
+        # the agent's first list_tables call after materialization returns
+        # the namespaced view instead of "No active view schema for workspace".
+        workspace_tenant_count = await workspace.workspace_tenants.acount()
+        if workspace_tenant_count > 1 and all_succeeded:
+            try:
+                await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
+            except Exception:
+                # Don't re-raise — the resume task should still fire so the
+                # user gets *some* agent response. The view-schema-failed
+                # state is itself queryable by the agent (it will see the
+                # validation error and surface it).
+                logger.exception(
+                    "Post-materialization view schema rebuild failed for workspace %s",
+                    workspace_id,
+                )
+
         return {
             "tenants": tenant_results,
-            "all_succeeded": all(r.get("success") for r in tenant_results),
+            "all_succeeded": all_succeeded,
         }
     finally:
         # ALWAYS defer the resume task so the user is not left with a phantom
