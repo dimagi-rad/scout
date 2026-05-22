@@ -27,12 +27,24 @@ env:
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    # Required by resume_thread_after_materialization → get_mcp_tools.
+    # Without this the worker falls back to localhost:8100 and every resume
+    # task fails with httpx.ConnectError.
+    MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    # Langfuse host for resume-task agent traces (keys come via secrets below).
+    LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
     - DJANGO_SECRET_KEY
     - DB_CREDENTIAL_KEY
     - SENTRY_DSN
+    # Required by ChatAnthropic in build_agent_graph for the resume task.
+    - ANTHROPIC_API_KEY
+    # Without these, the resume task's agent.ainvoke runs untraced — exactly
+    # the blind spot that hid the original ConnectError for two failed runs.
+    - LANGFUSE_SECRET_KEY
+    - LANGFUSE_PUBLIC_KEY
 
 ssh:
   user: scout

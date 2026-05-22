@@ -9,7 +9,7 @@ from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import TenantMembership
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
@@ -18,6 +18,7 @@ from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
+    WorkspaceTenant,
 )
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.services.materializer import MaterializationCancelled
@@ -109,6 +110,144 @@ async def test_materialize_workspace_records_failure(
     assert result["all_succeeded"] is False
     assert result["tenants"][0]["success"] is False
     assert "upstream API down" in result["tenants"][0]["error"]
+
+
+@pytest.fixture
+def multi_tenant_workspace(db, workspace, user):
+    """Augment the single-tenant `workspace` fixture with a second tenant +
+    membership, so workspace_tenants.acount() > 1."""
+    second_tenant = Tenant.objects.create(
+        provider="commcare", external_id="test-domain-2", canonical_name="Test Domain 2"
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=second_tenant)
+    TenantMembership.objects.create(user=user, tenant=second_tenant)
+    return workspace
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_rebuilds_view_schema_when_multi_tenant_succeeds(
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+):
+    """After all tenants materialize, the workspace view schema is rebuilt
+    so the agent's next list_tables call sees the namespaced views."""
+    mock_manager = MagicMock()
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(multi_tenant_workspace.id),
+            user_id="",
+        )
+
+    assert result["all_succeeded"] is True
+    mock_manager.build_view_schema.assert_called_once_with(multi_tenant_workspace)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
+    workspace, tenant_membership_obj, context_with_job_id
+):
+    """Single-tenant workspaces don't use a view schema, so we must not
+    attempt to build one (build_view_schema would raise for tenant_count==1)."""
+    mock_manager = MagicMock()
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    mock_manager.build_view_schema.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_skips_view_rebuild_when_any_tenant_failed(
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+):
+    """When even one tenant pipeline fails, the view rebuild would itself
+    fail (it requires every tenant to have an ACTIVE schema), so we skip
+    it rather than burning a noisy traceback."""
+    mock_manager = MagicMock()
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            side_effect=RuntimeError("upstream API down"),
+        ),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(multi_tenant_workspace.id),
+            user_id="",
+        )
+
+    assert result["all_succeeded"] is False
+    mock_manager.build_view_schema.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
+    multi_tenant_workspace, tenant_membership_obj, context_with_job_id
+):
+    """If build_view_schema raises (e.g. DB write failure), the materialize
+    task must still defer the resume task so the user is not left with a
+    silent phantom spinner."""
+    mock_manager = MagicMock()
+    mock_manager.build_view_schema.side_effect = RuntimeError("DDL failed")
+    defer_mock = AsyncMock()
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks._defer_resume_for_job", defer_mock),
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(multi_tenant_workspace.id),
+            user_id="",
+        )
+
+    # The task returns successfully (tenants succeeded), the view rebuild
+    # exception is swallowed, and the resume task is still deferred.
+    assert result["all_succeeded"] is True
+    mock_manager.build_view_schema.assert_called_once()
+    defer_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

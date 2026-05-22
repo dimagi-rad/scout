@@ -64,5 +64,10 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        "mcp_server": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }
