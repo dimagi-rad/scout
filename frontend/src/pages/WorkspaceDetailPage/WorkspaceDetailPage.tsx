@@ -298,8 +298,14 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
+  const [query, setQuery] = useState("")
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
+
+  // Reset search when the add panel is closed manually.
+  useEffect(() => {
+    if (!showAdd) setQuery("")
+  }, [showAdd])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -324,12 +330,23 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
   const available = userTenants.filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
 
+  // Internal-UUID → external opportunity ID, for the connected list display.
+  const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
+
+  const normalizedQuery = query.trim().replace(/^#/, "").toLowerCase()
+  const filteredAvailable = normalizedQuery
+    ? available.filter(
+        (t) =>
+          t.tenant_name.toLowerCase().includes(normalizedQuery) ||
+          t.tenant_id.toLowerCase().includes(normalizedQuery),
+      )
+    : available
+
   async function handleAdd(tenantUuid: string) {
     setAddingId(tenantUuid)
     try {
       await workspaceApi.addTenant(workspaceId, tenantUuid)
       await load()
-      setShowAdd(false)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
@@ -369,24 +386,40 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
       {showAdd && available.length > 0 && (
         <div className="mb-4 rounded-lg border bg-muted/30 p-4">
           <p className="mb-2 text-sm font-medium">Available data sources</p>
-          <div className="space-y-2">
-            {available.map((t) => (
-              <div key={t.tenant_uuid} className="flex items-center justify-between">
-                <div>
-                  <span className="text-sm">{t.tenant_name}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">{t.provider}</span>
+          <Input
+            type="search"
+            placeholder="Search by name or opportunity ID…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="mb-3"
+            data-testid="tenant-search-input"
+          />
+          {filteredAvailable.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No data sources match &ldquo;{normalizedQuery}&rdquo;.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {filteredAvailable.map((t) => (
+                <div key={t.tenant_uuid} className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">{t.tenant_name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      #{t.tenant_id} · {t.provider}
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => handleAdd(t.tenant_uuid)}
+                    disabled={addingId === t.tenant_uuid}
+                    data-testid={`add-tenant-${t.tenant_uuid}`}
+                  >
+                    {addingId === t.tenant_uuid ? "Adding…" : "Add"}
+                  </Button>
                 </div>
-                <Button
-                  size="sm"
-                  onClick={() => handleAdd(t.tenant_uuid)}
-                  disabled={addingId === t.tenant_uuid}
-                  data-testid={`add-tenant-${t.tenant_uuid}`}
-                >
-                  {addingId === t.tenant_uuid ? "Adding…" : "Add"}
-                </Button>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -408,7 +441,11 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
             >
               <div>
                 <div className="font-medium">{t.tenant_name}</div>
-                <div className="text-xs text-muted-foreground">{t.provider}</div>
+                <div className="text-xs text-muted-foreground">
+                  {externalIdByUuid.has(t.tenant_id)
+                    ? `#${externalIdByUuid.get(t.tenant_id)} · ${t.provider}`
+                    : t.provider}
+                </div>
               </div>
               {isManager && tenants.length > 1 && (
                 confirmRemoveId === t.id ? (
