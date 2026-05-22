@@ -61,58 +61,6 @@ class TestMCPClient:
         mod.reset_circuit_breaker()
 
     @pytest.mark.asyncio
-    async def test_get_mcp_tools_passes_callback_to_client(self):
-        """on_progress callback is forwarded to Callbacks(on_progress=...)."""
-        from langchain_mcp_adapters.callbacks import Callbacks
-
-        import apps.agents.mcp_client as mod
-
-        mod.reset_circuit_breaker()
-
-        mock_client = AsyncMock()
-        mock_client.get_tools.return_value = []
-
-        async def my_callback(progress, total, message, context):
-            pass
-
-        with (
-            patch(
-                "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
-            ) as MockCls,
-            patch.object(mod, "settings") as mock_settings,
-        ):
-            mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
-            await mod.get_mcp_tools(on_progress=my_callback)
-
-        _, kwargs = MockCls.call_args
-        assert isinstance(kwargs.get("callbacks"), Callbacks)
-        assert kwargs["callbacks"].on_progress is my_callback
-        mod.reset_circuit_breaker()
-
-    @pytest.mark.asyncio
-    async def test_get_mcp_tools_no_callback_passes_none(self):
-        """Without on_progress, callbacks kwarg is None."""
-        import apps.agents.mcp_client as mod
-
-        mod.reset_circuit_breaker()
-
-        mock_client = AsyncMock()
-        mock_client.get_tools.return_value = []
-
-        with (
-            patch(
-                "apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client
-            ) as MockCls,
-            patch.object(mod, "settings") as mock_settings,
-        ):
-            mock_settings.MCP_SERVER_URL = "http://localhost:8100/mcp"
-            await mod.get_mcp_tools()
-
-        _, kwargs = MockCls.call_args
-        assert kwargs.get("callbacks") is None
-        mod.reset_circuit_breaker()
-
-    @pytest.mark.asyncio
     async def test_circuit_breaker_opens_after_failures(self):
         """Circuit breaker raises MCPServerUnavailable after threshold failures."""
         import apps.agents.mcp_client as mod

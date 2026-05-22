@@ -110,6 +110,10 @@ class AgentState(TypedDict):
         - 'analyst': Can run queries and create artifacts
         - 'admin': Full access including knowledge management
 
+    thread_id : str
+        UUID of the active chat thread (as string). Injected into MCP tool calls
+        that need to associate background jobs (ThreadJob) with the conversation.
+
     Example
     -------
     Initial state for a new conversation::
@@ -119,6 +123,7 @@ class AgentState(TypedDict):
             workspace_id="ws-uuid-123",
             user_id="user-123",
             user_role="analyst",
+            thread_id="thread-uuid-456",
         )
 
     Notes
@@ -138,3 +143,6 @@ class AgentState(TypedDict):
     # User context - for permissions and audit
     user_id: str
     user_role: str
+
+    # Thread context - for associating background jobs with the conversation
+    thread_id: str

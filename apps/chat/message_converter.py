@@ -2,19 +2,31 @@
 
 import uuid
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+from apps.chat.constants import SYSTEM_RESUME_MARKER
+
 
 def langchain_messages_to_ui(lc_messages) -> list[dict]:
     """Convert LangChain BaseMessages to AI SDK v6 UIMessage format."""
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    visible = [
+        m
+        for m in lc_messages
+        if not (
+            isinstance(getattr(m, "content", None), str)
+            and m.content.startswith(SYSTEM_RESUME_MARKER)
+        )
+    ]
 
     ui_messages: list[dict] = []
     # Collect tool results keyed by tool_call_id for pairing
     tool_results: dict[str, ToolMessage] = {}
-    for msg in lc_messages:
+    for msg in visible:
         if isinstance(msg, ToolMessage):
             tool_results[msg.tool_call_id] = msg
 
-    for msg in lc_messages:
+    for msg in visible:
         if isinstance(msg, HumanMessage):
             content = msg.content if isinstance(msg.content, str) else str(msg.content)
             ui_messages.append(

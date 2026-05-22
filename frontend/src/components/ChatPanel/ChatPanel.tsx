@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
 import { SLASH_COMMANDS } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
+import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 
 function threadStorageKey(domainId: string) {
   return `scout:thread:${domainId}`
@@ -121,7 +122,11 @@ export function ChatPanel() {
   const [input, setInput] = useState("")
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [showShareMenu, setShowShareMenu] = useState(false)
+  const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
+
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
+  const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
@@ -175,7 +180,7 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDomainId])
 
-  // Load messages from backend when threadId changes
+  // Load messages from backend when threadId changes (or after a background job completes)
   useEffect(() => {
     if (!threadId || !activeDomainId) return
     let cancelled = false
@@ -197,7 +202,20 @@ export function ChatPanel() {
     loadMessages()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threadId, activeDomainId])
+  }, [threadId, activeDomainId, messageReloadKey])
+
+  // Reload messages when a background materialization job for this thread
+  // completes — but NOT while we're streaming a new turn. A mid-stream reload
+  // would tear down the in-flight messages array and lose the user's current
+  // tokens. The Thread.updated_at bump from the resume task triggers the
+  // sidebar refetch, so the user still sees the green-dot indicator and can
+  // click into the thread to get the new agent message on a fresh load.
+  useEffect(() => {
+    if (isStreaming) return
+    if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
+      setMessageReloadKey((k) => k + 1)
+    }
+  }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
   // Refresh thread list when streaming finishes (so new threads appear)
   useEffect(() => {
@@ -297,6 +315,7 @@ export function ChatPanel() {
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
             workspaceId={activeDomainId ?? undefined}
+            activeMaterializationJob={activeMaterializationJob}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}

@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from django.http import JsonResponse
 from procrastinate.contrib.django.procrastinate_app import current_app
 
+from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
+from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
@@ -26,6 +28,9 @@ async def materialization_cancel_view(request, workspace_id):
     procrastinate's abort signal only takes effect at the next ``await``
     boundary (and our work runs inside ``asyncio.to_thread``, so it never
     sees one).
+
+    Delegates to ``cancel_thread_job`` for each matching ThreadJob so that
+    both the run state and the job state are flipped atomically.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -35,33 +40,79 @@ async def materialization_cancel_view(request, workspace_id):
     if err is not None:
         return err
 
-    active = [
-        run
-        async for run in MaterializationRun.objects.select_related("tenant_schema__tenant").filter(
+    active_runs = [
+        r
+        async for r in MaterializationRun.objects.select_related(
+            "tenant_schema__tenant"
+        ).filter(
             tenant_schema__tenant__in=workspace.tenants.all(),
             state__in=list(MaterializationRun.ACTIVE_STATES),
         )
     ]
-    if not active:
+    if not active_runs:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
-    now = datetime.now(UTC)
-    run_ids = [r.id for r in active]
-    await MaterializationRun.objects.filter(id__in=run_ids).aupdate(
-        state=MaterializationRun.RunState.CANCELLED,
-        completed_at=now,
-    )
+    job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
+    # Filter by thread__user so a workspace member cannot cancel another
+    # member's chat-driven materialization (which would otherwise trigger a
+    # "Materialization just completed (status=cancelled)" resume message in
+    # the victim's thread). The orphan path below covers untracked runs
+    # (e.g. /refresh/-triggered jobs with no ThreadJob); those are workspace-
+    # scoped, but cancelling them does not inject anything into anyone's chat.
+    tjs = [
+        tj
+        async for tj in ThreadJob.objects.filter(
+            procrastinate_job_id__in=job_ids,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+            thread__user=user,
+        )
+    ]
+    # ALL ThreadJobs for these job_ids (any user) — used to distinguish
+    # truly-orphan runs (no ThreadJob exists anywhere, e.g., /refresh/ path)
+    # from runs that belong to another user (which we MUST NOT cancel here
+    # since this endpoint is only allowed to act on the caller's own jobs).
+    all_tracked_job_ids = {
+        pid
+        async for pid in ThreadJob.objects.filter(
+            procrastinate_job_id__in=job_ids,
+        ).values_list("procrastinate_job_id", flat=True)
+    }
 
-    job_ids = [r.procrastinate_job_id for r in active if r.procrastinate_job_id is not None]
-    for job_id in job_ids:
-        try:
-            await current_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
-        except Exception:
-            logger.warning("Failed to abort procrastinate job %s", job_id, exc_info=True)
+    # Cancel tracked materializations via cancel_thread_job (which also flips
+    # the ThreadJob state). Track which procrastinate_job_ids we covered.
+    total = 0
+    tracked_job_ids = set()
+    for tj in tjs:
+        total += await cancel_thread_job(tj)
+        tracked_job_ids.add(tj.procrastinate_job_id)
 
-    return JsonResponse(
-        {
-            "status": "cancelled",
-            "runs_cancelled": len(run_ids),
-        }
-    )
+    # Cancel only TRULY orphan MaterializationRuns (no ThreadJob anywhere).
+    # Runs belonging to other users' ThreadJobs are deliberately skipped —
+    # this endpoint must not disrupt another user's chat-driven materialization.
+    orphan_job_ids = job_ids - all_tracked_job_ids
+    if orphan_job_ids:
+        logger.info(
+            "materialization_cancel_view: %d orphan run(s) without ThreadJob — "
+            "falling back to direct cancellation",
+            len(orphan_job_ids),
+        )
+        now = datetime.now(UTC)
+        orphan_run_ids = [r.id for r in active_runs if r.procrastinate_job_id in orphan_job_ids]
+        orphan_cancelled = await MaterializationRun.objects.filter(
+            id__in=orphan_run_ids,
+        ).aupdate(state=MaterializationRun.RunState.CANCELLED, completed_at=now)
+        total += orphan_cancelled
+        for procrastinate_job_id in orphan_job_ids:
+            try:
+                await current_app.job_manager.cancel_job_by_id_async(
+                    procrastinate_job_id, abort=True,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to abort procrastinate job %s", procrastinate_job_id,
+                    exc_info=True,
+                )
+
+    if total == 0:
+        return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
+    return JsonResponse({"status": "cancelled", "runs_cancelled": total})

@@ -12,8 +12,10 @@ import {
   ChevronDown,
   Search,
   Settings,
+  Loader2,
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
+import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -37,6 +39,7 @@ export function Sidebar() {
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
+  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [selectorOpen, setSelectorOpen] = useState(false)
   const [wsSearch, setWsSearch] = useState("")
@@ -54,6 +57,14 @@ export function Sidebar() {
       fetchThreads(activeDomainId)
     }
   }, [activeDomainId, fetchThreads])
+
+  // Refetch threads when jobs complete so the sidebar green-dot indicator
+  // picks up the bumped Thread.updated_at from the resume task.
+  useEffect(() => {
+    if (activeDomainId && recentlyCompletedThreadIds.length > 0) {
+      void fetchThreads(activeDomainId)
+    }
+  }, [recentlyCompletedThreadIds, activeDomainId, fetchThreads])
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
@@ -168,20 +179,45 @@ export function Sidebar() {
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-2">
-          {threads.map((thread) => (
-            <button
-              key={thread.id}
-              onClick={() => { selectThread(thread.id); navigate(`${pathPrefix}/chat`) }}
-              data-testid={`sidebar-thread-${thread.id}`}
-              className={`w-full rounded-md px-3 py-1.5 text-left text-sm truncate transition-colors ${
-                thread.id === threadId
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-              }`}
-            >
-              {thread.title}
-            </button>
-          ))}
+          {threads.map((thread) => {
+            const job = jobsByThreadId[thread.id]
+            const lastUpdated = new Date(thread.updated_at)
+            const baseline = thread.last_viewed_at
+              ? new Date(thread.last_viewed_at)
+              : new Date(thread.created_at)
+            const hasUnread = lastUpdated > baseline
+            return (
+              <button
+                key={thread.id}
+                onClick={() => { selectThread(thread.id); navigate(`${pathPrefix}/chat`) }}
+                data-testid={`sidebar-thread-${thread.id}`}
+                className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
+                  thread.id === threadId
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                }`}
+              >
+                <span className="flex-1 truncate">{thread.title}</span>
+                {job ? (
+                  <span
+                    className="flex items-center gap-1 text-xs"
+                    data-testid={`sidebar-thread-job-${thread.id}`}
+                    title={job.progress?.message ?? "Materializing..."}
+                  >
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    {job.progress?.percent != null && (
+                      <span>{job.progress.percent}%</span>
+                    )}
+                  </span>
+                ) : hasUnread ? (
+                  <span
+                    className="h-2 w-2 rounded-full bg-green-500"
+                    data-testid={`sidebar-thread-unread-${thread.id}`}
+                  />
+                ) : null}
+              </button>
+            )
+          })}
         </div>
       </div>
 

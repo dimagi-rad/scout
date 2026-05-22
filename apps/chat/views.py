@@ -7,7 +7,6 @@ does not support async streaming responses.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -15,6 +14,7 @@ import time
 import uuid
 
 from django.http import JsonResponse, StreamingHttpResponse
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
 
 from apps.agents.graph.base import build_agent_graph
@@ -34,26 +34,20 @@ logger = logging.getLogger(__name__)
 
 
 async def _upsert_thread(thread_id, user, title, *, workspace):
-    """Create or update a Thread record.
+    """Create the Thread row if absent and bump updated_at on every turn.
 
-    Explicitly validates ownership before upserting: if the thread_id already
-    exists and belongs to a different user or workspace, the upsert is skipped
-    with a warning rather than relying on a PK IntegrityError as a side-effect.
-    auto_now on updated_at handles the timestamp on every save.
+    Ownership has already been validated by the caller — this helper only
+    handles the (non-conflicting) upsert.
+
+    The explicit ``updated_at`` in ``defaults`` is load-bearing: without it,
+    ``aupdate_or_create`` on the existing-row path runs ``save(update_fields=set())``
+    which skips ``auto_now`` and leaves ``Thread.updated_at`` frozen at the
+    creation timestamp. That broke the sidebar's "newer than last_viewed"
+    indicator and any ordering by ``-updated_at``.
     """
-    existing = await Thread.objects.filter(id=thread_id).afirst()
-    if existing is not None and (
-        existing.user_id != user.pk or existing.workspace_id != workspace.pk
-    ):
-        logger.warning(
-            "Thread %s belongs to a different user/workspace, skipping upsert",
-            thread_id,
-        )
-        return
-    # On create: set user, workspace, and title.
-    # On update: no field changes needed — auto_now on updated_at handles the timestamp.
     await Thread.objects.aupdate_or_create(
         id=thread_id,
+        defaults={"updated_at": timezone.now()},
         create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
     )
 
@@ -119,6 +113,21 @@ async def chat_view(request):
     if tm is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
+    # Validate thread ownership: a user must not be able to attach this turn
+    # to another user's thread (or another workspace's thread).
+    # Return 404 rather than 403 to avoid leaking thread-existence information.
+    # A non-UUID thread_id cannot match any row, so skip the check (the upsert
+    # below will fail gracefully if the value is truly invalid).
+    try:
+        existing_thread = await Thread.objects.filter(id=thread_id).afirst()
+    except Exception:
+        existing_thread = None
+    if existing_thread is not None and (
+        existing_thread.user_id != user.pk
+        or existing_thread.workspace_id != workspace.pk
+    ):
+        return JsonResponse({"error": "Thread not found"}, status=404)
+
     # Record thread metadata (fire-and-forget on error)
     try:
         await _upsert_thread(
@@ -133,21 +142,9 @@ async def chat_view(request):
     # Touch the schema to reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
-    # Load MCP tools; attach progress callback for run_materialization updates.
-    progress_queue: asyncio.Queue = asyncio.Queue()
-
-    async def _on_mcp_progress(progress, total, message, context) -> None:
-        if message is not None:
-            await progress_queue.put(
-                {
-                    "current": int(progress),
-                    "total": int(total) if total else 0,
-                    "message": message,
-                }
-            )
-
+    # Load MCP tools.
     try:
-        mcp_tools = await get_mcp_tools(on_progress=_on_mcp_progress)
+        mcp_tools = await get_mcp_tools()
     except Exception as e:
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
@@ -206,6 +203,7 @@ async def chat_view(request):
         "workspace_id": str(workspace.id),
         "user_id": str(user.id),
         "user_role": "analyst",
+        "thread_id": str(thread_id),
     }
 
     # Attach Langfuse tracing callback if configured
@@ -230,9 +228,7 @@ async def chat_view(request):
 
     async def _traced_stream():
         with trace_ctx:
-            async for chunk in langgraph_to_ui_stream(
-                agent, input_state, config, progress_queue=progress_queue
-            ):
+            async for chunk in langgraph_to_ui_stream(agent, input_state, config):
                 yield chunk
 
     # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)

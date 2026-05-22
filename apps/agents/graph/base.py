@@ -163,14 +163,21 @@ async def _fetch_schema_context(tenant, user) -> str:
 
     if ts is None:
         return (
-            "No data has been loaded yet. "
-            f'Call `run_materialization` with `pipeline="{pipeline_name}"` to load data.'
+            f"No data has been loaded yet. Call `run_materialization` with "
+            f"`pipeline=\"{pipeline_name}\"` to start loading. This tool returns "
+            f"IMMEDIATELY with `status: started` — do NOT call other data tools "
+            f"in the same turn. Acknowledge to the user in ONE sentence and end "
+            f"your turn. The system will resume the conversation automatically "
+            f"when materialization completes."
         )
 
     if ts.state == SchemaState.MATERIALIZING:
         return (
-            "Data is currently loading — this usually takes a minute. "
-            "Ask the user to retry shortly. Do NOT trigger another data load."
+            "A materialization is already in progress in the background. Do NOT "
+            "trigger another one and do NOT call other data tools (the data is "
+            "not yet ready). Briefly tell the user it's still loading and end "
+            "your turn — the system will resume the conversation automatically "
+            "when the current materialization completes."
         )
 
     # Schema is active: fetch table list
@@ -299,6 +306,14 @@ def _make_injecting_tool_node(
             for tc in last_msg.tool_calls:
                 if tc["name"] in MCP_TOOL_NAMES:
                     extra = {k: state.get(v, "") for k, v in injections.items()}
+                    tc_id = tc.get("id") or ""
+                    if not tc_id:
+                        logger.warning(
+                            "MCP tool call '%s' has no id; tool_call_id will be empty — "
+                            "background-job attribution will fail",
+                            tc["name"],
+                        )
+                    extra["tool_call_id"] = tc_id
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
@@ -333,8 +348,15 @@ async def build_agent_graph(
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
     # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
-    injections = {"workspace_id": "workspace_id", "user_id": "user_id"}
-    hidden_params = list(injections.keys())
+    injections = {
+        "workspace_id": "workspace_id",
+        "user_id": "user_id",
+        "thread_id": "thread_id",
+    }
+    # tool_call_id is injected per-call (from the LangChain tool_call dict's
+    # own id), not from agent state, so it can't live in `injections`. List it
+    # here so the LLM-facing tool schema still hides it.
+    hidden_params = [*injections.keys(), "tool_call_id"]
 
     # --- Build LLM with tools ---
     llm = ChatAnthropic(

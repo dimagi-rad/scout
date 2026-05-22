@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
+import { markThreadViewed } from "@/api/threads"
 
 export interface Thread {
   id: string
@@ -9,6 +10,7 @@ export interface Thread {
   is_shared: boolean
   is_public: boolean
   share_token: string | null
+  last_viewed_at: string | null
 }
 
 export interface ThreadShareState {
@@ -27,7 +29,7 @@ export interface UiSlice {
   threadsStatus: ThreadsStatus
   uiActions: {
     newThread: () => void
-    selectThread: (id: string) => void
+    selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
     updateThreadSharing: (
       threadId: string,
@@ -39,7 +41,7 @@ export interface UiSlice {
   }
 }
 
-export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
+export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) => ({
   threadId: crypto.randomUUID(),
   activeArtifactId: null,
   threads: [],
@@ -48,8 +50,19 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set) => ({
     newThread: () => {
       set({ threadId: crypto.randomUUID(), activeArtifactId: null })
     },
-    selectThread: (id: string) => {
+    selectThread: async (id: string) => {
       set({ threadId: id, activeArtifactId: null })
+      const workspaceId = (get() as { activeDomainId?: string | null }).activeDomainId
+      if (workspaceId) {
+        try {
+          await markThreadViewed(workspaceId, id)
+        } catch {
+          // Best-effort; failure does not block thread selection.
+        }
+        // Refresh the threads list so last_viewed_at flows through and the
+        // green-dot indicator clears.
+        await get().uiActions.fetchThreads(workspaceId)
+      }
     },
     fetchThreads: async (workspaceId: string) => {
       set({ threadsStatus: "loading" })

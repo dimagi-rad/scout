@@ -38,12 +38,6 @@ logger = logging.getLogger(__name__)
 # Maximum wall-clock time for agent execution before we abort.
 AGENT_TIMEOUT_SECONDS = 300  # 5 minutes
 
-# Tools that emit MCP progress notifications and get early card-open treatment.
-_PROGRESS_TOOLS = frozenset({"run_materialization"})
-
-# Sentinel used to signal end of the LangGraph event stream.
-_STREAM_DONE = object()
-
 
 def _sse(chunk: dict) -> str:
     """Format a chunk as an SSE data event."""
@@ -86,27 +80,15 @@ async def langgraph_to_ui_stream(
     agent: Any,
     input_state: dict,
     config: dict,
-    progress_queue: asyncio.Queue | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Stream LangGraph agent events as UI Message Stream Protocol (SSE) chunks.
-
-    When progress_queue is provided, progress notifications delivered by the
-    MCP on_progress callback are interleaved with LangGraph events so that
-    run_materialization step updates appear in the tool card in real time.
     """
     text_id = "text-0"
     text_started = False
     reasoning_id = "reasoning-0"
     reasoning_started = False
     tool_calls_processed: set[str] = set()
-    # Maps run_id -> toolCallId for tools whose card was opened on tool_start.
-    tool_cards_opened: dict[str, str] = {}
-    # toolCallId of the currently in-flight progress tool (if any).
-    active_progress_tool_call_id: str | None = None
-
-    # Use a noop queue when no progress queue is supplied so the loop is unified.
-    _queue: asyncio.Queue = progress_queue if progress_queue is not None else asyncio.Queue()
 
     # Preamble
     yield _sse({"type": "start"})
@@ -114,70 +96,18 @@ async def langgraph_to_ui_stream(
 
     event_stream = agent.astream_events(input_state, config=config, version="v2")
 
-    async def _next_event() -> Any:
-        try:
-            return await event_stream.__anext__()
-        except StopAsyncIteration:
-            return _STREAM_DONE
-
     try:
         deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
-
-        lg_task: asyncio.Task = asyncio.create_task(_next_event())
-        pg_task: asyncio.Task = asyncio.create_task(_queue.get())
 
         while True:
             if asyncio.get_event_loop().time() > deadline:
                 raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
-
-            done, _ = await asyncio.wait({lg_task, pg_task}, return_when=asyncio.FIRST_COMPLETED)
-
-            # Process progress items first so they appear before the tool result.
-            if pg_task in done:
-                progress = pg_task.result()
-                if progress is not None and active_progress_tool_call_id:
-                    msg = progress.get("message", "")
-                    current = int(progress.get("current", 0))
-                    total = int(progress.get("total", 0))
-                    text = f"⏳ {msg} ({current}/{total})" if total else f"⏳ {msg}"
-                    yield _sse(
-                        {
-                            "type": "tool-output-available",
-                            "toolCallId": active_progress_tool_call_id,
-                            "output": text,
-                        }
-                    )
-                pg_task = asyncio.create_task(_queue.get())
-
-            if lg_task not in done:
-                continue
-
-            event = lg_task.result()
-
-            if event is _STREAM_DONE:
-                pg_task.cancel()
+            try:
+                event = await event_stream.__anext__()
+            except StopAsyncIteration:
                 break
 
-            lg_task = asyncio.create_task(_next_event())
             event_type = event.get("event")
-
-            # ── on_tool_start: open card early for progress-enabled tools ──────
-            if event_type == "on_tool_start":
-                tool_name = event.get("name", "")
-                run_id = event.get("run_id")
-                if tool_name in _PROGRESS_TOOLS and run_id:
-                    tool_call_id = uuid.uuid4().hex
-                    tool_cards_opened[run_id] = tool_call_id
-                    active_progress_tool_call_id = tool_call_id
-                    yield _sse(
-                        {
-                            "type": "tool-input-available",
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "input": {},
-                        }
-                    )
-                continue
 
             # ── on_chat_model_stream ───────────────────────────────────────────
             if event_type == "on_chat_model_stream":
@@ -257,41 +187,15 @@ async def langgraph_to_ui_stream(
                     input_state.get("project_id", ""),
                 )
 
-                # Drain any remaining progress items before emitting the final result.
-                if active_progress_tool_call_id:
-                    while not _queue.empty():
-                        try:
-                            progress = _queue.get_nowait()
-                            msg = progress.get("message", "")
-                            current = int(progress.get("current", 0))
-                            total = int(progress.get("total", 0))
-                            text = f"⏳ {msg} ({current}/{total})" if total else f"⏳ {msg}"
-                            yield _sse(
-                                {
-                                    "type": "tool-output-available",
-                                    "toolCallId": active_progress_tool_call_id,
-                                    "output": text,
-                                }
-                            )
-                        except asyncio.QueueEmpty:
-                            break
-
-                # Reuse the toolCallId if this card was pre-opened on tool_start.
-                tool_call_id = tool_cards_opened.pop(run_id, None) if run_id else None
-                if tool_call_id is None:
-                    tool_call_id = run_id or uuid.uuid4().hex
-                    yield _sse(
-                        {
-                            "type": "tool-input-available",
-                            "toolCallId": tool_call_id,
-                            "toolName": tool_name,
-                            "input": {},
-                        }
-                    )
-
-                # Clear active progress tracker when the tool completes.
-                if tool_call_id == active_progress_tool_call_id:
-                    active_progress_tool_call_id = None
+                tool_call_id = run_id or uuid.uuid4().hex
+                yield _sse(
+                    {
+                        "type": "tool-input-available",
+                        "toolCallId": tool_call_id,
+                        "toolName": tool_name,
+                        "input": {},
+                    }
+                )
 
                 truncated = len(content) > 2000
                 display_content = content[:2000]
@@ -333,9 +237,6 @@ async def langgraph_to_ui_stream(
                 "delta": "\n\nAn error occurred while processing your request.",
             }
         )
-    finally:
-        lg_task.cancel()
-        pg_task.cancel()
 
     # Close any open parts
     if reasoning_started:

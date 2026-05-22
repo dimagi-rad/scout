@@ -24,6 +24,7 @@ class Thread(models.Model):
     share_token = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    last_viewed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         indexes = [
@@ -45,3 +46,47 @@ class Thread(models.Model):
         elif not self.is_shared:
             self.share_token = None
         super().save(*args, **kwargs)
+
+
+class ThreadJob(models.Model):
+    """Tracks a long-running background job (materialization, etc.) tied to a chat thread.
+
+    The frontend polls active jobs to drive sidebar indicators and live progress;
+    the resume worker uses ``tool_call_id`` to inject completion into the
+    LangGraph conversation when the job finishes.
+    """
+
+    class JobType(models.TextChoices):
+        MATERIALIZATION = "materialization", "Materialization"
+
+    class State(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+
+    TERMINAL_STATES = frozenset({State.COMPLETED, State.FAILED, State.CANCELLED})
+    ACTIVE_STATES = frozenset({State.PENDING, State.RUNNING})
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.ForeignKey(
+        "chat.Thread", on_delete=models.CASCADE, related_name="jobs"
+    )
+    job_type = models.CharField(max_length=32, choices=JobType.choices)
+    procrastinate_job_id = models.BigIntegerField(unique=True, db_index=True)
+    tool_call_id = models.CharField(max_length=64)
+    state = models.CharField(
+        max_length=16, choices=State.choices, default=State.PENDING
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["thread", "state"], name="chat_threadjob_th_state"),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.job_type}({self.state}) for thread {self.thread_id}"

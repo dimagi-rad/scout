@@ -2,6 +2,7 @@
 
 import json
 import logging
+from datetime import UTC, datetime
 
 from django.http import JsonResponse
 
@@ -82,6 +83,7 @@ async def _list_threads(user, *, workspace_id):
             "created_at": t.created_at.isoformat(),
             "updated_at": t.updated_at.isoformat(),
             "is_shared": t.is_shared,
+            "last_viewed_at": t.last_viewed_at.isoformat() if t.last_viewed_at else None,
         }
         async for t in Thread.objects.filter(user=user, workspace=workspace).order_by(
             "-updated_at"
@@ -187,6 +189,29 @@ async def thread_share_view(request, workspace_id, thread_id):
         return JsonResponse(result)
 
     return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@async_login_required
+async def thread_viewed_view(request, workspace_id, thread_id):
+    """POST /api/workspaces/<workspace_id>/threads/<thread_id>/viewed/
+
+    Update Thread.last_viewed_at to now. Called by the frontend when the user
+    opens a thread; clears the green-dot unread indicator.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+
+    updated = await Thread.objects.filter(
+        id=thread_id, user=user, workspace=workspace,
+    ).aupdate(last_viewed_at=datetime.now(UTC))
+    if not updated:
+        return JsonResponse({"error": "Thread not found"}, status=404)
+    return JsonResponse({"status": "ok"})
 
 
 async def public_thread_view(request, share_token):

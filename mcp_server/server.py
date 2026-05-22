@@ -20,19 +20,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import asyncio
+import contextlib
 import logging
 import os
 import sys
-import time
 from datetime import UTC, datetime
 
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
-from procrastinate.jobs import Status as _ProcrastinateStatus
 
+from apps.chat.models import Thread, ThreadJob
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
@@ -509,175 +508,93 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     return memberships, None
 
 
-_MATERIALIZATION_POLL_INTERVAL_S = 3
-_MATERIALIZATION_POLL_DEADLINE_S = 600
-
-
-def _format_progress_message(progress: dict, multi_tenant: bool) -> str:
-    """Render a user-facing progress string from a MaterializationRun.progress dict.
-
-    Examples (single-tenant):
-        Provisioning schema for my-experiment...
-        Loading sessions from OCS API... 4.6% (500 / 13,028 rows)
-        Loading sessions from OCS API... 500 rows loaded
-
-    For multi-tenant workspaces the message is prefixed with ``[tenant-id]``.
-    """
-    base = progress.get("message") or "Working..."
-    rows_loaded = progress.get("rows_loaded") or 0
-    rows_total = progress.get("rows_total")
-    source = progress.get("source")
-
-    if rows_loaded:
-        if rows_total:
-            pct = (rows_loaded / rows_total) * 100 if rows_total else 0
-            base = f"{base} {pct:.1f}% ({rows_loaded:,} / {rows_total:,} rows)"
-        else:
-            base = f"{base} {rows_loaded:,} rows loaded"
-    elif source and not progress.get("message"):
-        base = f"Working on {source}..."
-
-    if multi_tenant:
-        tenant_id = progress.get("tenant_id")
-        if tenant_id:
-            base = f"[{tenant_id}] {base}"
-    return base
-
-
-_PROCRASTINATE_TERMINAL_STATUSES = frozenset(
-    {
-        _ProcrastinateStatus.SUCCEEDED,
-        _ProcrastinateStatus.FAILED,
-        _ProcrastinateStatus.CANCELLED,
-        _ProcrastinateStatus.ABORTED,
-    }
-)
-
-
-async def _is_procrastinate_job_finished(job_id: int) -> bool:
-    """True if the procrastinate job has reached a terminal state.
-
-    Used by the workspace-progress poller as a backstop: the worker can
-    legitimately skip a membership (no pipeline / no credential) without
-    creating a MaterializationRun row, which would otherwise leave the
-    poller waiting for runs that never appear.
-    """
-    try:
-        status = await _procrastinate_app.job_manager.get_job_status_async(job_id)
-    except Exception:
-        logger.warning("Failed to fetch procrastinate job %s status", job_id, exc_info=True)
-        return False
-    return status in _PROCRASTINATE_TERMINAL_STATUSES
-
-
-async def _query_workspace_progress(workspace_id: str, job_id: int, expected_count: int) -> dict:
-    """Aggregate progress across all MaterializationRuns for this dispatched job.
-
-    Returns:
-        ``{
-            "all_done": bool,            # every expected run reached a terminal state
-            "any_cancelled": bool,
-            "active_progress": dict | None,   # the latest active run's progress dict
-            "tenants": list[dict],            # per-tenant completed/failed/cancelled summaries
-            "queued": bool,                   # True if the worker hasn't created any rows yet
-        }``
-    """
-    runs = [
-        r
-        async for r in MaterializationRun.objects.filter(
-            procrastinate_job_id=job_id
-        ).select_related("tenant_schema__tenant")
-    ]
-    job_finished = await _is_procrastinate_job_finished(job_id)
-    if not runs:
-        # No rows yet — but if the procrastinate job has finished, it means
-        # every membership was skipped (e.g. all lacked pipelines or
-        # credentials). Treat that as done so the poll loop exits.
-        return {
-            "all_done": job_finished,
-            "any_cancelled": False,
-            "active_progress": None,
-            "tenants": [],
-            "queued": not job_finished,
-            "multi_tenant": expected_count > 1,
-        }
-
-    terminal_states = {
-        MaterializationRun.RunState.COMPLETED,
-        MaterializationRun.RunState.FAILED,
-        MaterializationRun.RunState.CANCELLED,
-    }
-    active_progress: dict | None = None
-    any_cancelled = False
-    completed_runs = 0
-    tenants: list[dict] = []
-    multi_tenant = expected_count > 1
-
-    # Sort by started_at ascending so the most-recent active run wins active_progress.
-    runs.sort(key=lambda r: r.started_at)
-    for run in runs:
-        tenant_id = run.tenant_schema.tenant.external_id
-        if run.state in terminal_states:
-            completed_runs += 1
-            tenants.append(
-                {
-                    "tenant": tenant_id,
-                    "state": run.state,
-                    "result": run.result,
-                }
-            )
-            if run.state == MaterializationRun.RunState.CANCELLED:
-                any_cancelled = True
-        else:
-            # The latest in-progress run drives the live message.
-            progress = dict(run.progress or {})
-            progress.setdefault("tenant_id", tenant_id)
-            active_progress = progress
-
-    # Fall back to the procrastinate job state when fewer rows exist than
-    # expected: the worker skips memberships without creating a run row, so
-    # ``completed_runs >= expected_count`` would otherwise never hold and
-    # the poll loop would time out.
-    all_done = completed_runs >= expected_count or job_finished
-
-    return {
-        "all_done": all_done,
-        "any_cancelled": any_cancelled,
-        "active_progress": active_progress,
-        "tenants": tenants,
-        "queued": False,
-        "multi_tenant": multi_tenant,
-    }
-
 
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
     user_id: str = "",
+    thread_id: str = "",
+    tool_call_id: str = "",
     ctx: Context | None = None,
 ) -> dict:
-    """Materialize data for all tenants in the workspace.
+    """Start a materialization in the background and acknowledge immediately.
 
-    Defers the work to the procrastinate ``materialize_workspace`` task, then
-    polls ``MaterializationRun.progress`` every few seconds and emits MCP
-    progress notifications so the chat UI can show live updates without
-    holding open a long-running HTTP request to the loaders.
+    Defers the work to the procrastinate ``materialize_workspace`` task and
+    creates a ThreadJob row tying that procrastinate job to the calling chat
+    thread. Returns ``status: started`` right away — the chat agent should
+    acknowledge briefly to the user and end its turn. When materialization
+    finishes, a chained ``resume_thread_after_materialization`` task injects
+    completion into the conversation via the LangGraph checkpointer.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
-        user_id: User UUID (injected server-side by the agent graph).
+        user_id: User UUID (injected server-side).
+        thread_id: Chat thread UUID (injected server-side).
+        tool_call_id: LangChain tool_call_id for this invocation (injected
+            server-side); persisted on ThreadJob so the resume task can
+            attribute its work to the right call.
     """
     async with tool_context("run_materialization", workspace_id) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
+        if not thread_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "thread_id is required")
+            return tc["result"]
 
-        memberships, err = await _resolve_workspace_memberships(workspace_id, user_id)
+        # Authorization guard: confirms the user has at least one tenant
+        # membership in this workspace before we dispatch a job.
+        _, err = await _resolve_workspace_memberships(workspace_id, user_id)
         if err:
             tc["result"] = error_response(NOT_FOUND, err)
             return tc["result"]
 
-        expected_count = len(memberships)
+        # Defense in depth: even though the chat layer validates thread
+        # ownership, the MCP tool also checks before binding a ThreadJob to
+        # the thread, since this tool is the one persisting the trust boundary.
+        thread_exists = await Thread.objects.filter(
+            id=thread_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+        ).aexists()
+        if not thread_exists:
+            tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
+            return tc["result"]
+
+        # Guard against concurrent dispatch in the SAME thread: if this chat
+        # already has a materialization in flight, return its identity so the
+        # agent can tell the user to wait. We scope the guard by thread_id
+        # (not workspace) because the chained resume task only fires once
+        # against the original ThreadJob — a second caller in a different
+        # thread would otherwise get no follow-up message when the worker
+        # finishes (resume defers to a single thread_job_id). Note: this lets
+        # two threads in the same workspace dispatch parallel materializations
+        # that share tenant_schemas. This is not new: the prior workspace-
+        # scoped guard already permitted parallel runs across *different*
+        # workspaces sharing a tenant (multi-workspace tenants), and the
+        # materializer has no advisory lock per tenant_schema. If we ever add
+        # tenant-level dedupe we should add it here with a tenant_id filter
+        # rather than the workspace_id we removed.
+        existing = await ThreadJob.objects.filter(
+            thread_id=thread_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).afirst()
+        if existing is not None:
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "thread_job_id": str(existing.id),
+                    "message": (
+                        "A materialization is already running in this chat. "
+                        "I'll continue once it finishes."
+                    ),
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
         try:
             job = await materialize_workspace.defer_async(
                 workspace_id=str(workspace_id),
@@ -685,73 +602,40 @@ async def run_materialization(
             )
         except Exception:
             logger.exception("Failed to dispatch materialize_workspace task")
-            tc["result"] = error_response(INTERNAL_ERROR, "Failed to dispatch materialization task")
-            return tc["result"]
-        # ``defer_async`` returns a JobDeferResult-like object exposing the
-        # job id; some procrastinate versions return the integer directly.
-        job_id = getattr(job, "id", job) if not isinstance(job, int) else job
-
-        deadline = time.monotonic() + _MATERIALIZATION_POLL_DEADLINE_S
-        last_message: str | None = None
-        progress_summary: dict | None = None
-        while time.monotonic() < deadline:
-            await asyncio.sleep(_MATERIALIZATION_POLL_INTERVAL_S)
-            progress_summary = await _query_workspace_progress(workspace_id, job_id, expected_count)
-
-            if ctx is not None and progress_summary["active_progress"]:
-                p = progress_summary["active_progress"]
-                step = p.get("step") or 0
-                total_steps = p.get("total_steps") or 1
-                message = _format_progress_message(p, progress_summary["multi_tenant"])
-                if message != last_message:
-                    try:
-                        await ctx.report_progress(step, total_steps, message)
-                    except Exception:
-                        logger.warning("Progress notification delivery failed", exc_info=True)
-                    last_message = message
-
-            if progress_summary["all_done"] or progress_summary["any_cancelled"]:
-                break
-        else:
-            # Polling deadline reached without reaching a terminal state.
-            tc["result"] = success_response(
-                {
-                    "status": "timeout",
-                    "tenants": progress_summary["tenants"] if progress_summary else [],
-                    "all_succeeded": False,
-                },
-                schema="",
-                timing_ms=tc["timer"].elapsed_ms,
+            tc["result"] = error_response(
+                INTERNAL_ERROR, "Failed to dispatch materialization task"
             )
             return tc["result"]
+        job_id = getattr(job, "id", job) if not isinstance(job, int) else job
 
-        if progress_summary is None:
-            progress_summary = await _query_workspace_progress(workspace_id, job_id, expected_count)
+        # Atomicity note: defer_async and ThreadJob.acreate are not in a single
+        # transaction. If acreate fails after the worker has already picked up
+        # the job, abort=True is best-effort (procrastinate only honors it at
+        # cooperative await points). The janitor task (expire_stale_thread_jobs)
+        # cleans up any orphaned runs.
+        try:
+            tj = await ThreadJob.objects.acreate(
+                thread_id=thread_id,
+                job_type=ThreadJob.JobType.MATERIALIZATION,
+                procrastinate_job_id=job_id,
+                tool_call_id=tool_call_id,
+                state=ThreadJob.State.PENDING,
+            )
+        except Exception:
+            logger.exception("Failed to create ThreadJob; rolling back dispatch")
+            with contextlib.suppress(Exception):
+                await _procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+            tc["result"] = error_response(INTERNAL_ERROR, "Failed to track job")
+            return tc["result"]
 
-        results = []
-        for t in progress_summary["tenants"]:
-            state = t["state"]
-            if state == MaterializationRun.RunState.COMPLETED:
-                results.append({"tenant": t["tenant"], "success": True, "result": t["result"]})
-            elif state == MaterializationRun.RunState.CANCELLED:
-                results.append({"tenant": t["tenant"], "success": False, "cancelled": True})
-            else:  # FAILED
-                err_msg = "Pipeline failed"
-                if isinstance(t.get("result"), dict):
-                    err_msg = t["result"].get("error") or err_msg
-                results.append({"tenant": t["tenant"], "success": False, "error": err_msg})
-
-        all_succeeded = bool(results) and all(r.get("success") for r in results)
-        status = (
-            "cancelled"
-            if progress_summary["any_cancelled"]
-            else ("completed" if all_succeeded else "failed")
-        )
         tc["result"] = success_response(
             {
-                "status": status,
-                "tenants": results,
-                "all_succeeded": all_succeeded,
+                "status": "started",
+                "thread_job_id": str(tj.id),
+                "message": (
+                    "Materialization started in background. "
+                    "I'll continue when it finishes."
+                ),
             },
             schema="",
             timing_ms=tc["timer"].elapsed_ms,
