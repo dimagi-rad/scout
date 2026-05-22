@@ -37,13 +37,19 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.workspaces.models import SchemaState, TenantSchema
-from mcp_server.context import load_tenant_context
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    WorkspaceViewSchema,
+)
+from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_list_tables,
     transformation_aware_list_tables,
+    workspace_list_tables,
 )
 
 if TYPE_CHECKING:
@@ -164,7 +170,7 @@ async def _fetch_schema_context(tenant, user) -> str:
     if ts is None:
         return (
             f"No data has been loaded yet. Call `run_materialization` with "
-            f"`pipeline=\"{pipeline_name}\"` to start loading. This tool returns "
+            f'`pipeline="{pipeline_name}"` to start loading. This tool returns '
             f"IMMEDIATELY with `status: started` — do NOT call other data tools "
             f"in the same turn. Acknowledge to the user in ONE sentence and end "
             f"your turn. The system will resume the conversation automatically "
@@ -238,6 +244,100 @@ async def _fetch_schema_context(tenant, user) -> str:
             "Use the `get_lineage` tool to explore how any table was built."
         )
     return compact
+
+
+_MULTI_TENANT_NAMESPACE_HINT = (
+    "This is a multi-tenant workspace. Tables are namespaced views prefixed with the "
+    "tenant name using double underscore: `{tenant_name}__{table_name}`. "
+    "To query across tenants, use explicit JOINs between namespaced tables."
+)
+
+
+async def _fetch_multi_tenant_schema_context(workspace, user) -> str:
+    """Build the ## Data Availability block for a multi-tenant workspace.
+
+    Mirrors `_fetch_schema_context` but consults `WorkspaceViewSchema` plus the
+    per-tenant `MaterializationRun` records, so the agent knows up front whether
+    data is loaded, still materializing, or missing — without having to call
+    `list_tables` first to discover the state.
+    """
+    vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
+
+    tenant_ids = [t.id async for t in workspace.tenants.all()]
+
+    active_run = None
+    if tenant_ids:
+        active_run = await MaterializationRun.objects.filter(
+            tenant_schema__tenant_id__in=tenant_ids,
+            state__in=list(MaterializationRun.ACTIVE_STATES),
+        ).afirst()
+
+    if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
+        return (
+            "A materialization is already in progress in the background. Do NOT "
+            "trigger another one and do NOT call other data tools (the data is "
+            "not yet ready). Briefly tell the user it's still loading and end "
+            "your turn — the system will resume the conversation automatically "
+            "when the current materialization completes."
+        )
+
+    if vs is None or vs.state != SchemaState.ACTIVE:
+        return (
+            f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
+            "No data has been loaded yet. Call `run_materialization` to start "
+            "loading data for all tenants in this workspace. This tool returns "
+            "IMMEDIATELY with `status: started` — do NOT call other data tools "
+            "in the same turn. Acknowledge to the user in ONE sentence and end "
+            "your turn. The system will resume the conversation automatically "
+            "when materialization completes."
+        )
+
+    # View schema is ACTIVE — list the namespaced views from information_schema.
+    tables: list[dict] = []
+    try:
+        ctx = await load_workspace_context(str(workspace.id))
+        tables = await workspace_list_tables(ctx)
+    except Exception:
+        logger.debug("Could not fetch multi-tenant table list for context injection", exc_info=True)
+
+    last_run = None
+    if tenant_ids:
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema__tenant_id__in=tenant_ids,
+                state=MaterializationRun.RunState.COMPLETED,
+            )
+            .order_by("-completed_at")
+            .afirst()
+        )
+    last_materialized_at = (
+        last_run.completed_at.isoformat() if last_run and last_run.completed_at else None
+    )
+
+    if not tables:
+        return (
+            f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
+            "Data is loaded but no tables are visible yet. The view schema may "
+            "still be initializing — call `list_tables` to re-check shortly."
+        )
+
+    lines: list[str] = []
+    if last_materialized_at:
+        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}")
+    else:
+        lines.append("Data is loaded and ready.")
+    lines.append("")
+    lines.append(_MULTI_TENANT_NAMESPACE_HINT)
+    lines.append("")
+    lines.append("### Available Tables")
+    lines.append("")
+    lines.append("| Table |")
+    lines.append("|---|")
+    for t in tables:
+        lines.append(f"| {t['name']} |")
+    lines.append("")
+    lines.append("Use the `describe_table` tool for column details.")
+    return "\n".join(lines)
 
 
 def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
@@ -583,13 +683,8 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
-        sections.append(
-            "\n## Data Availability\n\n"
-            "This is a multi-tenant workspace. Tables are prefixed with the tenant name "
-            "using double underscore: `{tenant_name}__{table_name}`.\n"
-            "To query across tenants, use explicit JOINs between namespaced tables.\n"
-            "Call `list_tables` to see all available tables.\n"
-        )
+        schema_context = await _fetch_multi_tenant_schema_context(workspace, user)
+        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
 
     result = "\n".join(sections)
 
