@@ -144,21 +144,6 @@ class TestDjangoAllauthConfiguration:
         assert hasattr(settings, "SITE_ID")
         assert settings.SITE_ID == 1
 
-    def test_google_provider_configured(self, settings):
-        """Test Google OAuth provider configuration."""
-        providers = settings.SOCIALACCOUNT_PROVIDERS
-        assert "google" in providers
-        assert "SCOPE" in providers["google"]
-        assert "profile" in providers["google"]["SCOPE"]
-        assert "email" in providers["google"]["SCOPE"]
-
-    def test_github_provider_configured(self, settings):
-        """Test GitHub OAuth provider configuration."""
-        providers = settings.SOCIALACCOUNT_PROVIDERS
-        assert "github" in providers
-        assert "SCOPE" in providers["github"]
-        assert "user:email" in providers["github"]["SCOPE"]
-
 
 # ============================================================================
 # 2. TestSocialAccountHelpers

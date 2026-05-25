@@ -208,15 +208,6 @@ LOGOUT_REDIRECT_URL = "/"
 # Provider-specific settings (credentials stored in DB via Django admin SocialApp model)
 # Configure client IDs and secrets via Django admin at /admin/socialaccount/socialapp/
 SOCIALACCOUNT_PROVIDERS = {
-    "google": {
-        "SCOPE": ["profile", "email"],
-        "AUTH_PARAMS": {"access_type": "online"},
-        "OAUTH_PKCE_ENABLED": True,
-    },
-    "github": {
-        "SCOPE": ["user:email"],
-        "OAUTH_PKCE_ENABLED": True,
-    },
     "commcare_connect": {
         "OAUTH_PKCE_ENABLED": True,
     },
@@ -227,6 +218,22 @@ SOCIALACCOUNT_PROVIDERS = {
         "OAUTH_PKCE_ENABLED": True,
     },
 }
+
+# OAuth email-domain restriction.
+# Map of allauth provider id -> list of allowed email domains (lowercase, exact match).
+# A provider absent from the dict (or mapped to an empty list) is unrestricted.
+# A provider with a non-empty list rejects OAuth logins whose email domain isn't in the list.
+# A login that returns no email is allowed regardless (best-effort: covers providers like
+# Connect that don't return an email).
+# Override at deploy time with the SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS env var (JSON).
+SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
+    "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
+    default={
+        "commcare": ["dimagi.com"],
+        "commcare_connect": ["dimagi.com"],
+        "ocs": ["dimagi.com"],
+    },
+)
 
 
 # Django REST Framework settings

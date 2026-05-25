@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import logging
 
+from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialToken
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
+from django.contrib import messages
+from django.shortcuts import redirect
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,36 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             if data.get("token_secret"):
                 data["token_secret"] = self.decrypt_token(data["token_secret"])
         return super().deserialize_instance(model, data)
+
+    def pre_social_login(self, request, sociallogin):
+        """Reject OAuth logins whose email is not in the per-provider allow-list.
+
+        Runs after a successful OAuth callback but before any User/SocialAccount
+        is created or login session established. Configured by the
+        SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS setting (provider id -> list of
+        allowed email domains). A provider with no entry (or an empty list) is
+        unrestricted; a login that returns no email is allowed regardless.
+        """
+        provider = sociallogin.account.provider
+        allowed = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(provider) or []
+        if not allowed:
+            return
+
+        email = (sociallogin.user.email or "").strip().lower()
+        if not email:
+            return
+
+        domain = email.rpartition("@")[2]
+        allowed_lower = [d.lower() for d in allowed]
+        if domain in allowed_lower:
+            return
+
+        messages.error(
+            request,
+            "Sign-in with this account is not permitted. "
+            f"Only {', '.join('@' + d for d in allowed_lower)} addresses can use {provider}.",
+        )
+        raise ImmediateHttpResponse(redirect("account_login"))
 
 
 def encrypt_credential(plaintext: str) -> str:
