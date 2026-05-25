@@ -17,7 +17,7 @@ class TestAllowedEmailDomainsSetting:
     def test_setting_exists_and_is_dict(self):
         assert isinstance(settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS, dict)
 
-    def test_default_restricts_all_five_providers_to_dimagi_com(self):
+    def test_default_restricts_three_providers_to_dimagi_com(self):
         expected_providers = {"commcare", "commcare_connect", "ocs"}
         actual = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
         assert set(actual.keys()) == expected_providers
@@ -27,7 +27,7 @@ class TestAllowedEmailDomainsSetting:
 
 def _make_request():
     """Build a request with the messages framework wired in."""
-    request = RequestFactory().get("/accounts/google/login/callback/")
+    request = RequestFactory().get("/accounts/commcare/login/callback/")
     request.session = {}
     request._messages = FallbackStorage(request)
     return request
@@ -48,17 +48,17 @@ class TestPreSocialLoginEnforcement:
     def adapter(self):
         return EncryptingSocialAccountAdapter()
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_allowed_domain_passes(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "alice@dimagi.com")
+        sociallogin = _make_sociallogin("commcare", "alice@dimagi.com")
         # Should not raise.
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_disallowed_domain_blocked(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "alice@example.com")
+        sociallogin = _make_sociallogin("commcare", "alice@example.com")
         with pytest.raises(ImmediateHttpResponse) as exc_info:
             adapter.pre_social_login(request, sociallogin)
         response = exc_info.value.response
@@ -70,10 +70,10 @@ class TestPreSocialLoginEnforcement:
         assert "not permitted" in messages[0].message.lower()
         assert "@dimagi.com" in messages[0].message
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_empty_email_allowed(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "")
+        sociallogin = _make_sociallogin("commcare", "")
         assert adapter.pre_social_login(request, sociallogin) is None
 
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
@@ -82,44 +82,46 @@ class TestPreSocialLoginEnforcement:
         sociallogin = _make_sociallogin("commcare_connect", "user@anything.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_provider_not_in_allowlist_is_unrestricted(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("github", "user@example.com")
+        sociallogin = _make_sociallogin("ocs", "user@example.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_case_insensitive_match(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "Alice@DIMAGI.COM")
+        sociallogin = _make_sociallogin("commcare", "Alice@DIMAGI.COM")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com", "dimagi.org"]})
+    @override_settings(
+        SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com", "dimagi.org"]}
+    )
     def test_multiple_allowed_domains(self, adapter):
         # First domain matches.
         assert (
-            adapter.pre_social_login(_make_request(), _make_sociallogin("google", "a@dimagi.com"))
+            adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "a@dimagi.com"))
             is None
         )
         # Second domain matches.
         assert (
-            adapter.pre_social_login(_make_request(), _make_sociallogin("google", "b@dimagi.org"))
+            adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "b@dimagi.org"))
             is None
         )
         # Third domain blocked.
         with pytest.raises(ImmediateHttpResponse):
-            adapter.pre_social_login(_make_request(), _make_sociallogin("google", "c@other.com"))
+            adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "c@other.com"))
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": []})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": []})
     def test_empty_allow_list_means_unrestricted(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "user@anything.com")
+        sociallogin = _make_sociallogin("commcare", "user@anything.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_subdomain_is_not_treated_as_match(self, adapter):
         """Per spec: exact domain match only, no subdomain wildcards."""
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "alice@sub.dimagi.com")
+        sociallogin = _make_sociallogin("commcare", "alice@sub.dimagi.com")
         with pytest.raises(ImmediateHttpResponse):
             adapter.pre_social_login(request, sociallogin)

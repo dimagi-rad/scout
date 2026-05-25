@@ -9,16 +9,14 @@ in at the earliest enforcement point so blocked users never get a Django
 
 ## Motivation
 
-Scout currently accepts any successful OAuth sign-in from Google, GitHub,
-CommCare HQ, CommCare Connect, and OCS, and auto-creates a Django user on
-first login. For deployments that should only serve Dimagi staff, we want a
-hard restriction on the email domain returned by the provider.
+Scout currently accepts any successful OAuth sign-in from CommCare HQ,
+CommCare Connect, and OCS, and auto-creates a Django user on first login.
+For deployments that should only serve Dimagi staff, we want a hard
+restriction on the email domain returned by the provider.
 
 The restriction needs to be configurable per provider because the providers
 have different semantics:
 
-- Google reliably returns verified `@dimagi.com` emails for staff.
-- GitHub returns user-controlled emails (still useful as a check).
 - CommCare HQ may or may not return an email depending on scopes.
 - CommCare Connect does not return an email at all.
 - OCS varies by deployment.
@@ -32,8 +30,6 @@ A single Django setting:
 SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
     default={
-        "google": ["dimagi.com"],
-        "github": ["dimagi.com"],
         "commcare": ["dimagi.com"],
         "commcare_connect": ["dimagi.com"],
         "ocs": ["dimagi.com"],
@@ -113,8 +109,8 @@ middleware shim, and `override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS=...)
 
 Cases:
 
-1. **Allowed domain passes** — `provider="google"`, email
-   `"alice@dimagi.com"`, settings `{"google": ["dimagi.com"]}`.
+1. **Allowed domain passes** — `provider="commcare"`, email
+   `"alice@dimagi.com"`, settings `{"commcare": ["dimagi.com"]}`.
    `pre_social_login` returns `None`; no exception raised.
 2. **Disallowed domain blocked** — same setup, email
    `"alice@example.com"`. Asserts `ImmediateHttpResponse` raised; embedded
@@ -125,7 +121,7 @@ Cases:
    settings `{}`. Returns `None` regardless of email.
 5. **Case-insensitive match** — email `"Alice@DIMAGI.COM"`, allow-list
    `["dimagi.com"]`. Allowed.
-6. **Multiple domains** — `{"google": ["dimagi.com", "dimagi.org"]}`.
+6. **Multiple domains** — `{"commcare": ["dimagi.com", "dimagi.org"]}`.
    Emails on both domains pass; an email on a third domain is blocked.
 
 ## Out of scope

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Restrict OAuth sign-ins to users whose verified email matches a per-provider allow-list (default `dimagi.com` for all five providers), enforced at allauth's pre-login hook so blocked users never get a `User`, `SocialAccount`, or tenant-resolution side effects.
+**Goal:** Restrict OAuth sign-ins to users whose verified email matches a per-provider allow-list (default `dimagi.com` for all three providers), enforced at allauth's pre-login hook so blocked users never get a `User`, `SocialAccount`, or tenant-resolution side effects.
 
 **Architecture:** Add a Django setting `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]]` populated from a JSON env var. Extend the existing `EncryptingSocialAccountAdapter` (at `apps/users/adapters.py`) with `pre_social_login`, which checks the email returned by allauth's OAuth callback against the configured allow-list and raises `ImmediateHttpResponse(redirect("account_login"))` after queueing a `messages.error` for the blocked user.
 
@@ -15,7 +15,7 @@
 ### Task 1: Add `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS` setting
 
 Add a per-provider allow-list to Django settings, configurable via a JSON env
-var, with a default that restricts all five known providers to `dimagi.com`.
+var, with a default that restricts all three known providers to `dimagi.com`.
 
 **Files:**
 - Modify: `config/settings/base.py` (add new setting after the existing `SOCIALACCOUNT_PROVIDERS` block near line 229)
@@ -37,8 +37,8 @@ class TestAllowedEmailDomainsSetting:
     def test_setting_exists_and_is_dict(self):
         assert isinstance(settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS, dict)
 
-    def test_default_restricts_all_five_providers_to_dimagi_com(self):
-        expected_providers = {"google", "github", "commcare", "commcare_connect", "ocs"}
+    def test_default_restricts_three_providers_to_dimagi_com(self):
+        expected_providers = {"commcare", "commcare_connect", "ocs"}
         actual = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
         assert set(actual.keys()) == expected_providers
         for provider, domains in actual.items():
@@ -66,8 +66,6 @@ Open `config/settings/base.py`. Locate the closing brace of `SOCIALACCOUNT_PROVI
 SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
     default={
-        "google": ["dimagi.com"],
-        "github": ["dimagi.com"],
         "commcare": ["dimagi.com"],
         "commcare_connect": ["dimagi.com"],
         "ocs": ["dimagi.com"],
@@ -88,7 +86,7 @@ git add config/settings/base.py tests/test_oauth_domain_restriction.py
 git commit -m "feat(auth): add SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS setting
 
 Per-provider allow-list (provider id -> list of allowed email domains)
-parsed from JSON env var, defaulting to ['dimagi.com'] for the five
+parsed from JSON env var, defaulting to ['dimagi.com'] for the three
 configured providers."
 ```
 
@@ -124,7 +122,7 @@ from apps.users.models import User
 
 def _make_request():
     """Build a request with the messages framework wired in."""
-    request = RequestFactory().get("/accounts/google/login/callback/")
+    request = RequestFactory().get("/accounts/commcare/login/callback/")
     request.session = {}
     request._messages = FallbackStorage(request)
     return request
@@ -145,17 +143,17 @@ class TestPreSocialLoginEnforcement:
     def adapter(self):
         return EncryptingSocialAccountAdapter()
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_allowed_domain_passes(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "alice@dimagi.com")
+        sociallogin = _make_sociallogin("commcare", "alice@dimagi.com")
         # Should not raise.
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_disallowed_domain_blocked(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "alice@example.com")
+        sociallogin = _make_sociallogin("commcare", "alice@example.com")
         with pytest.raises(ImmediateHttpResponse) as exc_info:
             adapter.pre_social_login(request, sociallogin)
         response = exc_info.value.response
@@ -167,10 +165,10 @@ class TestPreSocialLoginEnforcement:
         assert "not permitted" in messages[0].message.lower()
         assert "@dimagi.com" in messages[0].message
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_empty_email_allowed(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "")
+        sociallogin = _make_sociallogin("commcare", "")
         assert adapter.pre_social_login(request, sociallogin) is None
 
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
@@ -179,35 +177,35 @@ class TestPreSocialLoginEnforcement:
         sociallogin = _make_sociallogin("commcare_connect", "user@anything.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_provider_not_in_allowlist_is_unrestricted(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("github", "user@example.com")
+        sociallogin = _make_sociallogin("ocs", "user@example.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
     def test_case_insensitive_match(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "Alice@DIMAGI.COM")
+        sociallogin = _make_sociallogin("commcare", "Alice@DIMAGI.COM")
         assert adapter.pre_social_login(request, sociallogin) is None
 
     @override_settings(
-        SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com", "dimagi.org"]}
+        SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com", "dimagi.org"]}
     )
     def test_multiple_allowed_domains(self, adapter):
         request = _make_request()
         # First domain matches.
-        assert adapter.pre_social_login(_make_request(), _make_sociallogin("google", "a@dimagi.com")) is None
+        assert adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "a@dimagi.com")) is None
         # Second domain matches.
-        assert adapter.pre_social_login(_make_request(), _make_sociallogin("google", "b@dimagi.org")) is None
+        assert adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "b@dimagi.org")) is None
         # Third domain blocked.
         with pytest.raises(ImmediateHttpResponse):
-            adapter.pre_social_login(_make_request(), _make_sociallogin("google", "c@other.com"))
+            adapter.pre_social_login(_make_request(), _make_sociallogin("commcare", "c@other.com"))
 
-    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": []})
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": []})
     def test_empty_allow_list_means_unrestricted(self, adapter):
         request = _make_request()
-        sociallogin = _make_sociallogin("google", "user@anything.com")
+        sociallogin = _make_sociallogin("commcare", "user@anything.com")
         assert adapter.pre_social_login(request, sociallogin) is None
 ```
 
@@ -311,12 +309,12 @@ Append to `.env.example` (place it near the other OAuth entries; if there is no 
 
 ```
 # Optional: per-provider allow-list of email domains for OAuth sign-in.
-# JSON object keyed by allauth provider id ("google", "github", "commcare",
+# JSON object keyed by allauth provider id ("commcare",
 # "commcare_connect", "ocs"); each value is a list of lowercase domains.
 # A provider absent from the dict (or with an empty list) is unrestricted.
 # A login that returns no email bypasses the check.
-# Defaults to {"google": ["dimagi.com"], "github": ["dimagi.com"], ...} if unset.
-# SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"], "github": ["dimagi.com"]}
+# Defaults to ["dimagi.com"] for each of commcare, commcare_connect, and ocs if unset.
+# SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"], "commcare_connect": ["dimagi.com"], "ocs": ["dimagi.com"]}
 ```
 
 - [ ] **Step 3: Commit**
