@@ -96,7 +96,7 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         messages.error(
             request,
             "Sign-in with this account is not permitted. "
-            f"Only {', '.join('@' + d for d in allowed_lower)} addresses can use {provider}.",
+            f"Login using '{provider.title}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
         )
         raise ImmediateHttpResponse(redirect("account_login"))
 
