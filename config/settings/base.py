@@ -238,8 +238,6 @@ SOCIALACCOUNT_PROVIDERS = {
 SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
     default={
-        "google": ["dimagi.com"],
-        "github": ["dimagi.com"],
         "commcare": ["dimagi.com"],
         "commcare_connect": ["dimagi.com"],
         "ocs": ["dimagi.com"],
