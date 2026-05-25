@@ -228,6 +228,24 @@ SOCIALACCOUNT_PROVIDERS = {
     },
 }
 
+# OAuth email-domain restriction.
+# Map of allauth provider id -> list of allowed email domains (lowercase, exact match).
+# A provider absent from the dict (or mapped to an empty list) is unrestricted.
+# A provider with a non-empty list rejects OAuth logins whose email domain isn't in the list.
+# A login that returns no email is allowed regardless (best-effort: covers providers like
+# Connect that don't return an email).
+# Override at deploy time with the SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS env var (JSON).
+SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
+    "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
+    default={
+        "google": ["dimagi.com"],
+        "github": ["dimagi.com"],
+        "commcare": ["dimagi.com"],
+        "commcare_connect": ["dimagi.com"],
+        "ocs": ["dimagi.com"],
+    },
+)
+
 
 # Django REST Framework settings
 REST_FRAMEWORK = {
