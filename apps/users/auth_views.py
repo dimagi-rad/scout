@@ -30,14 +30,6 @@ logger = logging.getLogger(__name__)
 
 UserModel = get_user_model()
 
-PROVIDER_DISPLAY = {
-    "google": "Google",
-    "github": "GitHub",
-    "commcare": "CommCare",
-    "commcare_connect": "CommCare Connect",
-    "ocs": "Open Chat Studio",
-}
-
 
 def _user_response(user, *, onboarding_complete=False):
     """Build standard user JSON response dict."""
@@ -242,7 +234,7 @@ def providers_view(request):
     for app in apps:
         entry = {
             "id": app.provider,
-            "name": PROVIDER_DISPLAY.get(app.provider, app.name),
+            "name": app.name,
             # No prefix — the frontend prepends BASE_PATH to all API-provided URLs
             "login_url": f"/accounts/{app.provider}/login/",
         }
