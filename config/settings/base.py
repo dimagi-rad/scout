@@ -208,15 +208,6 @@ LOGOUT_REDIRECT_URL = "/"
 # Provider-specific settings (credentials stored in DB via Django admin SocialApp model)
 # Configure client IDs and secrets via Django admin at /admin/socialaccount/socialapp/
 SOCIALACCOUNT_PROVIDERS = {
-    "google": {
-        "SCOPE": ["profile", "email"],
-        "AUTH_PARAMS": {"access_type": "online"},
-        "OAUTH_PKCE_ENABLED": True,
-    },
-    "github": {
-        "SCOPE": ["user:email"],
-        "OAUTH_PKCE_ENABLED": True,
-    },
     "commcare_connect": {
         "OAUTH_PKCE_ENABLED": True,
     },
