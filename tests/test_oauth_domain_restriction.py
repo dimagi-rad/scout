@@ -115,3 +115,11 @@ class TestPreSocialLoginEnforcement:
         request = _make_request()
         sociallogin = _make_sociallogin("google", "user@anything.com")
         assert adapter.pre_social_login(request, sociallogin) is None
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"google": ["dimagi.com"]})
+    def test_subdomain_is_not_treated_as_match(self, adapter):
+        """Per spec: exact domain match only, no subdomain wildcards."""
+        request = _make_request()
+        sociallogin = _make_sociallogin("google", "alice@sub.dimagi.com")
+        with pytest.raises(ImmediateHttpResponse):
+            adapter.pre_social_login(request, sociallogin)
