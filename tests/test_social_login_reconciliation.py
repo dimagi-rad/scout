@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.signals import pre_social_login
 from django.contrib.auth import get_user_model
 
 from apps.users.signals import reconcile_existing_user_on_login
@@ -127,3 +128,11 @@ def test_merge_failure_does_not_break_login(caplog):
         r.levelname == "ERROR" and "Auto-merge failed" in r.message
         for r in caplog.records
     )
+
+
+def test_signal_is_wired_in_app_ready():
+    receivers = [
+        entry[1]() for entry in pre_social_login.receivers if entry[1]() is not None
+    ]
+    receiver_names = [getattr(r, "__name__", "") for r in receivers]
+    assert "reconcile_existing_user_on_login" in receiver_names
