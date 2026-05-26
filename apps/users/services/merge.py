@@ -37,19 +37,21 @@ _ROLE_RANK = {
 # Identified by (model label, field name) so we can skip the canonical
 # `user` field on a model while still picking up other User-pointing fields
 # on the same model (e.g. WorkspaceMembership.invited_by).
-_SPECIAL_CASE_RELATIONS: frozenset[tuple[str, str]] = frozenset({
-    ("socialaccount.SocialAccount", "user"),
-    ("account.EmailAddress", "user"),
-    ("users.TenantMembership", "user"),
-    ("workspaces.WorkspaceMembership", "user"),
-    # Django auth join tables — unique on (user, group) / (user, permission).
-    # If both users happen to share a group/permission, a bulk repoint would
-    # IntegrityError. Scout doesn't actively use django.contrib.auth.Group, so
-    # the simplest safe handling is to skip; if Group ever becomes load-bearing
-    # we revisit with explicit conflict resolution.
-    ("auth.User_groups", "user"),
-    ("auth.User_user_permissions", "user"),
-})
+_SPECIAL_CASE_RELATIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("socialaccount.SocialAccount", "user"),
+        ("account.EmailAddress", "user"),
+        ("users.TenantMembership", "user"),
+        ("workspaces.WorkspaceMembership", "user"),
+        # Django auth join tables — unique on (user, group) / (user, permission).
+        # If both users happen to share a group/permission, a bulk repoint would
+        # IntegrityError. Scout doesn't actively use django.contrib.auth.Group, so
+        # the simplest safe handling is to skip; if Group ever becomes load-bearing
+        # we revisit with explicit conflict resolution.
+        ("auth.User_groups", "user"),
+        ("auth.User_user_permissions", "user"),
+    }
+)
 
 
 def _repoint_long_tail_fks(canonical: User, duplicate: User) -> dict[str, int]:
@@ -135,7 +137,8 @@ def _dedupe_email_addresses(canonical: User, duplicate: User) -> tuple[int, int]
             email=canonical.email,
         ).update(primary=False)
         primary, _created = EmailAddress.objects.get_or_create(
-            user=canonical, email=canonical.email,
+            user=canonical,
+            email=canonical.email,
             defaults={"primary": True, "verified": True},
         )
         if not primary.primary or not primary.verified:
@@ -265,7 +268,8 @@ def merge_users(
         ).count()
         canonical_ws_ids = set(
             WorkspaceMembership.objects.filter(user=canonical).values_list(
-                "workspace_id", flat=True,
+                "workspace_id",
+                flat=True,
             )
         )
         dup_wms = WorkspaceMembership.objects.filter(user=duplicate)
@@ -280,8 +284,8 @@ def merge_users(
     with transaction.atomic():
         report.field_changes = _merge_user_fields(canonical, duplicate)
         report.socialaccount_repointed = _repoint_social_accounts(canonical, duplicate)
-        report.emailaddress_repointed, report.emailaddress_deleted = (
-            _dedupe_email_addresses(canonical, duplicate)
+        report.emailaddress_repointed, report.emailaddress_deleted = _dedupe_email_addresses(
+            canonical, duplicate
         )
         report.tenant_membership_repointed, report.tenant_membership_conflict_deleted = (
             _merge_tenant_memberships(canonical, duplicate)
@@ -294,6 +298,8 @@ def merge_users(
         report.duplicate_user_deleted = True
     logger.info(
         "Merged user=%s into canonical=%s: %s",
-        report.duplicate_id, report.canonical_id, report,
+        report.duplicate_id,
+        report.canonical_id,
+        report,
     )
     return report

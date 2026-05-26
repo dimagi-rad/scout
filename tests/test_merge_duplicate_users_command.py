@@ -74,8 +74,13 @@ def test_canonical_id_forces_canonical_choice():
     out = StringIO()
 
     call_command(
-        "merge_duplicate_users", "--dry-run", "--email", "x@y.com",
-        "--canonical-id", str(newer.pk), stdout=out,
+        "merge_duplicate_users",
+        "--dry-run",
+        "--email",
+        "x@y.com",
+        "--canonical-id",
+        str(newer.pk),
+        stdout=out,
     )
 
     output = out.getvalue()
@@ -84,8 +89,13 @@ def test_canonical_id_forces_canonical_choice():
     # Invalid canonical-id raises
     with pytest.raises(CommandError):
         call_command(
-            "merge_duplicate_users", "--dry-run", "--email", "x@y.com",
-            "--canonical-id", "999999", stdout=out,
+            "merge_duplicate_users",
+            "--dry-run",
+            "--email",
+            "x@y.com",
+            "--canonical-id",
+            "999999",
+            stdout=out,
         )
 
 
@@ -136,9 +146,12 @@ def test_failure_in_one_group_does_not_block_others():
 
     def fake_merge(*, canonical, duplicate, dry_run=False):
         from apps.users.services.merge import merge_users as real_merge
+
         if dry_run:
             return MergeReport(
-                canonical_id=canonical.pk, duplicate_id=duplicate.pk, dry_run=True,
+                canonical_id=canonical.pk,
+                duplicate_id=duplicate.pk,
+                dry_run=True,
             )
         call_count["n"] += 1
         if call_count["n"] == 1:

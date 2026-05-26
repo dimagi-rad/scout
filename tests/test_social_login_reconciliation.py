@@ -70,7 +70,9 @@ def test_collision_merges_user_and_redirects_session():
     canonical = User.objects.create(email="brian@y.com", username="canon")
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
-        user=duplicate, provider="commcare_connect", uid="999",
+        user=duplicate,
+        provider="commcare_connect",
+        uid="999",
         extra_data={"email": "brian@y.com"},
     )
     sl = SimpleNamespace(user=duplicate, account=dup_account)
@@ -92,7 +94,9 @@ def test_collision_match_is_case_insensitive():
     canonical = User.objects.create(email="Brian@Y.com", username="canon")
     duplicate = User.objects.create(email=None, username="dup")
     dup_account = SocialAccount.objects.create(
-        user=duplicate, provider="commcare_connect", uid="x",
+        user=duplicate,
+        provider="commcare_connect",
+        uid="x",
         extra_data={"email": "brian@y.com"},
     )
     sl = SimpleNamespace(user=duplicate, account=dup_account)
@@ -105,10 +109,12 @@ def test_collision_match_is_case_insensitive():
 
 @pytest.mark.django_db
 def test_merge_failure_does_not_break_login(caplog):
-    canonical = User.objects.create(email="brian@y.com", username="canon")
+    User.objects.create(email="brian@y.com", username="canon")
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
-        user=duplicate, provider="commcare_connect", uid="999",
+        user=duplicate,
+        provider="commcare_connect",
+        uid="999",
         extra_data={"email": "brian@y.com"},
     )
     sl = SimpleNamespace(user=duplicate, account=dup_account)
@@ -124,15 +130,10 @@ def test_merge_failure_does_not_break_login(caplog):
     assert User.objects.filter(pk=duplicate.pk).exists()
     assert sl.user == duplicate
     # Failure was logged at ERROR
-    assert any(
-        r.levelname == "ERROR" and "Auto-merge failed" in r.message
-        for r in caplog.records
-    )
+    assert any(r.levelname == "ERROR" and "Auto-merge failed" in r.message for r in caplog.records)
 
 
 def test_signal_is_wired_in_app_ready():
-    receivers = [
-        entry[1]() for entry in pre_social_login.receivers if entry[1]() is not None
-    ]
+    receivers = [entry[1]() for entry in pre_social_login.receivers if entry[1]() is not None]
     receiver_names = [getattr(r, "__name__", "") for r in receivers]
     assert "reconcile_existing_user_on_login" in receiver_names

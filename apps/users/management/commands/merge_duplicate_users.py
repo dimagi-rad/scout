@@ -26,7 +26,8 @@ class Command(BaseCommand):
         parser.add_argument("--dry-run", action="store_true", help="Print plan, write nothing.")
         parser.add_argument("--email", help="Only operate on the group sharing this email.")
         parser.add_argument(
-            "--canonical-id", type=int,
+            "--canonical-id",
+            type=int,
             help="Force this user as canonical. Must be in the targeted group.",
         )
         parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
@@ -35,9 +36,7 @@ class Command(BaseCommand):
         groups = self._find_groups(target_email=opts.get("email"))
         if not groups:
             target = opts.get("email")
-            self.stdout.write(
-                f"no duplicates found{' for ' + target if target else ''}"
-            )
+            self.stdout.write(f"no duplicates found{' for ' + target if target else ''}")
             return
 
         plans: list[tuple[list[User], MergeReport, User]] = []
@@ -54,9 +53,9 @@ class Command(BaseCommand):
             return
 
         if not opts.get("yes"):
-            response = input(
-                f"About to merge {len(plans)} duplicate(s). Continue? [y/N] "
-            ).strip().lower()
+            response = (
+                input(f"About to merge {len(plans)} duplicate(s). Continue? [y/N] ").strip().lower()
+            )
             if response != "y":
                 self.stdout.write("aborted")
                 return
@@ -67,7 +66,7 @@ class Command(BaseCommand):
             try:
                 merge_users(canonical=canonical, duplicate=dup)
                 self.stdout.write(f"merged User#{dup_pk} -> User#{canonical.pk}")
-            except Exception as exc:  # noqa: BLE001 — best-effort per-group recovery
+            except Exception as exc:
                 self.stderr.write(f"failed User#{dup_pk} -> User#{canonical.pk}: {exc!r}")
 
     def _find_groups(self, *, target_email: str | None) -> list[list[User]]:

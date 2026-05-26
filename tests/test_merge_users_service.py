@@ -60,7 +60,10 @@ def test_field_level_merge_copies_password_from_duplicate():
 def test_field_level_merge_ors_staff_and_superuser_flags():
     canonical = User.objects.create(email="canon@y.com", username="canon")
     duplicate = User.objects.create(
-        email="dup@y.com", username="dup", is_staff=True, is_superuser=True,
+        email="dup@y.com",
+        username="dup",
+        is_staff=True,
+        is_superuser=True,
     )
 
     merge_users(canonical=canonical, duplicate=duplicate)
@@ -74,8 +77,11 @@ def test_field_level_merge_ors_staff_and_superuser_flags():
 def test_field_level_merge_fills_empty_name_fields_from_duplicate():
     canonical = User.objects.create(email="canon@y.com", username="canon")
     duplicate = User.objects.create(
-        email="dup@y.com", username="dup",
-        first_name="Brian", last_name="DeRenzi", avatar_url="https://x/y.png",
+        email="dup@y.com",
+        username="dup",
+        first_name="Brian",
+        last_name="DeRenzi",
+        avatar_url="https://x/y.png",
     )
 
     merge_users(canonical=canonical, duplicate=duplicate)
@@ -89,10 +95,16 @@ def test_field_level_merge_fills_empty_name_fields_from_duplicate():
 @pytest.mark.django_db
 def test_field_level_merge_keeps_canonical_name_when_already_set():
     canonical = User.objects.create(
-        email="canon@y.com", username="canon", first_name="Already", last_name="Set",
+        email="canon@y.com",
+        username="canon",
+        first_name="Already",
+        last_name="Set",
     )
     duplicate = User.objects.create(
-        email="dup@y.com", username="dup", first_name="Newer", last_name="Name",
+        email="dup@y.com",
+        username="dup",
+        first_name="Newer",
+        last_name="Name",
     )
 
     merge_users(canonical=canonical, duplicate=duplicate)
@@ -139,7 +151,9 @@ def test_emailaddress_dedupes_when_both_have_same_email():
 def test_emailaddress_repoints_distinct_addresses():
     canonical = User.objects.create(email="brian@y.com", username="canon")
     duplicate = User.objects.create(email="brian-old@y.com", username="dup")
-    EmailAddress.objects.create(user=duplicate, email="brian-old@y.com", primary=True, verified=True)
+    EmailAddress.objects.create(
+        user=duplicate, email="brian-old@y.com", primary=True, verified=True
+    )
 
     report = merge_users(canonical=canonical, duplicate=duplicate)
 
@@ -184,7 +198,8 @@ def test_tenantmembership_conflict_keeps_canonical_and_deletes_duplicates():
     only_dup = Tenant.objects.create(provider="ocs", external_id="exp9", canonical_name="Exp9")
     canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared)
     TenantCredential.objects.create(
-        tenant_membership=canon_tm, credential_type=TenantCredential.OAUTH,
+        tenant_membership=canon_tm,
+        credential_type=TenantCredential.OAUTH,
     )
     TenantMembership.objects.create(user=duplicate, tenant=shared)  # conflict
     TenantMembership.objects.create(user=duplicate, tenant=only_dup)
@@ -282,7 +297,10 @@ def test_workspacemembership_invited_by_is_repointed_via_introspection():
     ws = Workspace.objects.create(name="W")
     # `other` has a membership; `duplicate` invited them.
     WorkspaceMembership.objects.create(
-        workspace=ws, user=other, role=WorkspaceRole.READ, invited_by=duplicate,
+        workspace=ws,
+        user=other,
+        role=WorkspaceRole.READ,
+        invited_by=duplicate,
     )
 
     merge_users(canonical=canonical, duplicate=duplicate)
@@ -309,10 +327,13 @@ def test_merge_rolls_back_on_exception():
     duplicate = User.objects.create(email="dup@y.com", username="dup")
     SocialAccount.objects.create(user=duplicate, provider="commcare", uid="42")
 
-    with patch(
-        "apps.users.services.merge._repoint_long_tail_fks",
-        side_effect=RuntimeError("simulated failure"),
-    ), pytest.raises(RuntimeError):
+    with (
+        patch(
+            "apps.users.services.merge._repoint_long_tail_fks",
+            side_effect=RuntimeError("simulated failure"),
+        ),
+        pytest.raises(RuntimeError),
+    ):
         merge_users(canonical=canonical, duplicate=duplicate)
 
     # Everything must be untouched

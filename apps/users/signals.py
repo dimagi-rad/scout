@@ -94,9 +94,7 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         return  # already has an email — nothing to reconcile
 
     UserModel = get_user_model()
-    canonical = (
-        UserModel.objects.filter(email__iexact=new_email).exclude(pk=user.pk).first()
-    )
+    canonical = UserModel.objects.filter(email__iexact=new_email).exclude(pk=user.pk).first()
     if canonical is None:
         user.email = new_email
         user.save(update_fields=["email"])
@@ -107,12 +105,17 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         merge_users(canonical=canonical, duplicate=user)
     except Exception:
         logger.exception(
-            "Auto-merge failed for user=%s into canonical=%s", original_pk, canonical.pk,
+            "Auto-merge failed for user=%s into canonical=%s",
+            original_pk,
+            canonical.pk,
         )
         return
     sociallogin.user = canonical
     sociallogin.account.user = canonical
     logger.info(
         "auto-merge: user=%s into canonical=%s email=%s provider=%s",
-        original_pk, canonical.pk, new_email, sociallogin.account.provider,
+        original_pk,
+        canonical.pk,
+        new_email,
+        sociallogin.account.provider,
     )
