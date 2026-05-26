@@ -99,20 +99,20 @@ export function LoginForm() {
                 <div className="absolute inset-0 flex items-center">
                   <span className="w-full border-t" />
                 </div>
-                <div className="relative flex flex-col items-center gap-1">
-                  <span className="bg-card px-2 text-xs uppercase text-muted-foreground">
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-card px-2 text-muted-foreground">
                     or continue with
                   </span>
-                  {restrictedDomains.length > 0 && (
-                    <span
-                      className="bg-card px-2 text-xs text-muted-foreground"
-                      data-testid="oauth-allowed-domains"
-                    >
-                      ({restrictedDomains.map((d) => `@${d}`).join(", ")} addresses only)
-                    </span>
-                  )}
                 </div>
               </div>
+              {restrictedDomains.length > 0 && (
+                <p
+                  className="mb-3 text-center text-xs text-muted-foreground"
+                  data-testid="oauth-allowed-domains"
+                >
+                  ({restrictedDomains.map((d) => `@${d}`).join(", ")} addresses only)
+                </p>
+              )}
               <div className="space-y-2">
                 {providers.map((provider) => (
                   <Button
