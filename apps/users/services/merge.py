@@ -17,11 +17,19 @@ from allauth.socialaccount.models import SocialAccount
 from django.db import transaction
 
 from apps.users.models import TenantMembership
+from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 if TYPE_CHECKING:
     from apps.users.models import User
 
 logger = logging.getLogger(__name__)
+
+
+_ROLE_RANK = {
+    WorkspaceRole.READ: 0,
+    WorkspaceRole.READ_WRITE: 1,
+    WorkspaceRole.MANAGE: 2,
+}
 
 
 @dataclass
@@ -108,6 +116,34 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
     return repointed, conflict_deleted
 
 
+def _merge_workspace_memberships(canonical: User, duplicate: User) -> tuple[int, int]:
+    """Returns (repointed_count, conflict_merged_count).
+
+    If canonical already has a membership for a workspace, upgrade its role to
+    the higher of the two (per _ROLE_RANK) and delete the duplicate's row.
+    Otherwise repoint duplicate's row to canonical.
+    """
+    canonical_by_ws = {
+        m.workspace_id: m for m in WorkspaceMembership.objects.filter(user=canonical)
+    }
+    dup_memberships = list(WorkspaceMembership.objects.filter(user=duplicate))
+    conflict_merged = 0
+    repointed = 0
+    for dup_m in dup_memberships:
+        canon_m = canonical_by_ws.get(dup_m.workspace_id)
+        if canon_m is None:
+            dup_m.user = canonical
+            dup_m.save(update_fields=["user"])
+            repointed += 1
+            continue
+        if _ROLE_RANK[WorkspaceRole(dup_m.role)] > _ROLE_RANK[WorkspaceRole(canon_m.role)]:
+            canon_m.role = dup_m.role
+            canon_m.save(update_fields=["role"])
+        dup_m.delete()
+        conflict_merged += 1
+    return repointed, conflict_merged
+
+
 def _merge_user_fields(canonical: User, duplicate: User) -> dict[str, str]:
     """Apply field-level merge rules. Mutates canonical in place; returns changes."""
     changes: dict[str, str] = {}
@@ -172,6 +208,18 @@ def merge_users(
         report.tenant_membership_repointed = dup_tms.exclude(
             tenant_id__in=canonical_tenant_ids,
         ).count()
+        canonical_ws_ids = set(
+            WorkspaceMembership.objects.filter(user=canonical).values_list(
+                "workspace_id", flat=True,
+            )
+        )
+        dup_wms = WorkspaceMembership.objects.filter(user=duplicate)
+        report.workspace_membership_conflict_merged = dup_wms.filter(
+            workspace_id__in=canonical_ws_ids,
+        ).count()
+        report.workspace_membership_repointed = dup_wms.exclude(
+            workspace_id__in=canonical_ws_ids,
+        ).count()
         return report
     with transaction.atomic():
         report.field_changes = _merge_user_fields(canonical, duplicate)
@@ -181,5 +229,8 @@ def merge_users(
         )
         report.tenant_membership_repointed, report.tenant_membership_conflict_deleted = (
             _merge_tenant_memberships(canonical, duplicate)
+        )
+        report.workspace_membership_repointed, report.workspace_membership_conflict_merged = (
+            _merge_workspace_memberships(canonical, duplicate)
         )
     return report

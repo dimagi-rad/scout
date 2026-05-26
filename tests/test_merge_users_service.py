@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant, TenantCredential, TenantMembership
 from apps.users.services.merge import merge_users, select_canonical
+from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
 User = get_user_model()
 
@@ -192,3 +193,46 @@ def test_tenantmembership_conflict_keeps_canonical_and_deletes_duplicates():
     assert TenantMembership.objects.filter(user=canonical, tenant=shared).count() == 1
     # canonical now also has only_dup's tenant
     assert TenantMembership.objects.filter(user=canonical, tenant=only_dup).exists()
+
+
+@pytest.mark.django_db
+def test_workspacemembership_repoints_when_no_overlap():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    ws = Workspace.objects.create(name="W")
+    WorkspaceMembership.objects.create(workspace=ws, user=duplicate, role=WorkspaceRole.READ)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.workspace_membership_repointed == 1
+    assert report.workspace_membership_conflict_merged == 0
+    assert WorkspaceMembership.objects.get(workspace=ws).user == canonical
+
+
+@pytest.mark.django_db
+def test_workspacemembership_conflict_upgrades_to_higher_role():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    ws = Workspace.objects.create(name="W")
+    WorkspaceMembership.objects.create(workspace=ws, user=canonical, role=WorkspaceRole.READ)
+    WorkspaceMembership.objects.create(workspace=ws, user=duplicate, role=WorkspaceRole.MANAGE)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.workspace_membership_conflict_merged == 1
+    membership = WorkspaceMembership.objects.get(workspace=ws)
+    assert membership.user == canonical
+    assert membership.role == WorkspaceRole.MANAGE
+
+
+@pytest.mark.django_db
+def test_workspacemembership_conflict_keeps_canonical_when_higher():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    ws = Workspace.objects.create(name="W")
+    WorkspaceMembership.objects.create(workspace=ws, user=canonical, role=WorkspaceRole.MANAGE)
+    WorkspaceMembership.objects.create(workspace=ws, user=duplicate, role=WorkspaceRole.READ)
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert WorkspaceMembership.objects.get(workspace=ws).role == WorkspaceRole.MANAGE
