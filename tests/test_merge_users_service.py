@@ -358,3 +358,24 @@ def test_dry_run_writes_nothing_and_returns_a_plan():
     assert SocialAccount.objects.get(provider="commcare", uid="42").user == duplicate
     assert User.objects.filter(pk=duplicate.pk).exists()
     assert not report.duplicate_user_deleted
+
+
+@pytest.mark.django_db
+def test_merge_skips_auth_group_through_tables_when_shared():
+    """Both users share a django.contrib.auth Group. The introspection loop
+    must skip the User_groups through-table, otherwise the bulk update would
+    IntegrityError on the (user, group) unique constraint."""
+    from django.contrib.auth.models import Group
+
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    g = Group.objects.create(name="shared-group")
+    canonical.groups.add(g)
+    duplicate.groups.add(g)
+
+    # Should not raise IntegrityError
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    # Canonical still has the group; through-table state is consistent.
+    canonical.refresh_from_db()
+    assert g in canonical.groups.all()

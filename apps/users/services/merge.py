@@ -43,13 +43,14 @@ _SPECIAL_CASE_RELATIONS: frozenset[tuple[str, str]] = frozenset(
         ("account.EmailAddress", "user"),
         ("users.TenantMembership", "user"),
         ("workspaces.WorkspaceMembership", "user"),
-        # Django auth join tables — unique on (user, group) / (user, permission).
-        # If both users happen to share a group/permission, a bulk repoint would
-        # IntegrityError. Scout doesn't actively use django.contrib.auth.Group, so
-        # the simplest safe handling is to skip; if Group ever becomes load-bearing
-        # we revisit with explicit conflict resolution.
-        ("auth.User_groups", "user"),
-        ("auth.User_user_permissions", "user"),
+        # Django auth join tables — auto-generated through-tables for the custom
+        # User model. Unique on (user, group) / (user, permission); a bulk repoint
+        # would IntegrityError if both users share a group/permission. Scout
+        # doesn't actively use django.contrib.auth.Group, so the simplest safe
+        # handling is to skip; if Group ever becomes load-bearing we revisit
+        # with explicit conflict resolution.
+        ("users.User_groups", "user"),
+        ("users.User_user_permissions", "user"),
     }
 )
 
