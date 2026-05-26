@@ -53,7 +53,7 @@ def select_canonical(users: list[User]) -> User:
     )
 
 
-def _merge_user_fields(canonical, duplicate) -> dict[str, str]:
+def _merge_user_fields(canonical: User, duplicate: User) -> dict[str, str]:
     """Apply field-level merge rules. Mutates canonical in place; returns changes."""
     changes: dict[str, str] = {}
     if not canonical.has_usable_password() and duplicate.has_usable_password():
@@ -77,7 +77,8 @@ def _merge_user_fields(canonical, duplicate) -> dict[str, str]:
     if canonical.timezone == "UTC" and duplicate.timezone and duplicate.timezone != "UTC":
         canonical.timezone = duplicate.timezone
         changes["timezone"] = f"copied: {duplicate.timezone!r}"
-    canonical.save()
+    if changes:
+        canonical.save(update_fields=list(changes.keys()))
     return changes
 
 
