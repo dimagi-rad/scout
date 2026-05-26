@@ -49,3 +49,14 @@ def test_no_email_in_extra_data_is_noop():
 
     existing.refresh_from_db()
     assert existing.email is None
+
+
+@pytest.mark.django_db
+def test_no_collision_backfills_user_email():
+    existing = User.objects.create(email=None, username="connect-user")
+    sl = _sociallogin(existing, {"email": "brian@y.com"})
+
+    reconcile_existing_user_on_login(sender=None, request=None, sociallogin=sl)
+
+    existing.refresh_from_db()
+    assert existing.email == "brian@y.com"

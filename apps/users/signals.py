@@ -3,6 +3,7 @@
 import logging
 
 from asgiref.sync import async_to_sync
+from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
@@ -79,8 +80,8 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
     """Bridge the gap where allauth's _lookup_by_socialaccount short-circuits.
 
     When an existing OAuth user logs in and the provider now returns an email
-    that the User row doesn't yet have, either backfill it (Task 12) or merge
-    into the user that already owns that email (Task 13).
+    that the User row doesn't yet have, either backfill it or merge into the
+    user that already owns that email.
     """
     new_email = sociallogin.account.extra_data.get("email")
     if not new_email:
@@ -90,4 +91,13 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         return  # brand-new user; allauth's _lookup_by_email handles it
     if user.email:
         return  # already has an email — nothing to reconcile
-    # Branches for backfill/collision arrive in Tasks 12-14.
+
+    UserModel = get_user_model()
+    canonical = (
+        UserModel.objects.filter(email__iexact=new_email).exclude(pk=user.pk).first()
+    )
+    if canonical is None:
+        user.email = new_email
+        user.save(update_fields=["email"])
+        return
+    # Collision branch lives in Task 13.
