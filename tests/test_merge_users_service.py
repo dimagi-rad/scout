@@ -5,6 +5,7 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 
+from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantCredential, TenantMembership
 from apps.users.services.merge import merge_users, select_canonical
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
@@ -236,3 +237,31 @@ def test_workspacemembership_conflict_keeps_canonical_when_higher():
     merge_users(canonical=canonical, duplicate=duplicate)
 
     assert WorkspaceMembership.objects.get(workspace=ws).role == WorkspaceRole.MANAGE
+
+
+@pytest.mark.django_db
+def test_chat_threads_are_repointed_via_introspection():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    ws = Workspace.objects.create(name="W")
+    Thread.objects.create(user=duplicate, workspace=ws, title="T1")
+    Thread.objects.create(user=duplicate, workspace=ws, title="T2")
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert Thread.objects.filter(user=canonical).count() == 2
+    assert Thread.objects.filter(user=duplicate).count() == 0
+    label = "chat.Thread.user"
+    assert report.long_tail_fk_counts.get(label) == 2
+
+
+@pytest.mark.django_db
+def test_setnull_fk_is_repointed_via_introspection():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    ws = Workspace.objects.create(name="W", created_by=duplicate)
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    ws.refresh_from_db()
+    assert ws.created_by == canonical

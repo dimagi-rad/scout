@@ -32,6 +32,41 @@ _ROLE_RANK = {
 }
 
 
+_SPECIAL_CASE_MODELS = frozenset({
+    "socialaccount.SocialAccount",
+    "account.EmailAddress",
+    "users.TenantMembership",
+    "workspaces.WorkspaceMembership",
+})
+
+
+def _repoint_long_tail_fks(canonical: User, duplicate: User) -> dict[str, int]:
+    """Bulk-update every User FK except those handled by special-case logic.
+
+    Picks up new User FKs added by future apps without code changes. Uses
+    ``get_fields(include_hidden=True)`` so relations declared with
+    ``related_name="+"`` (e.g. ``Workspace.created_by``) are also repointed.
+    If a new FK has a unique constraint involving the user field, this raises
+    IntegrityError on the bulk update — surface that and add explicit
+    handling to merge_users.
+    """
+    counts: dict[str, int] = {}
+    for rel in canonical._meta.get_fields(include_hidden=True):
+        # Only one-to-many reverse relations (FKs pointing at User).
+        if not rel.is_relation or not rel.one_to_many:
+            continue
+        label = rel.related_model._meta.label
+        if label in _SPECIAL_CASE_MODELS:
+            continue
+        field_name = rel.field.name
+        n = rel.related_model._default_manager.filter(
+            **{field_name: duplicate},
+        ).update(**{field_name: canonical})
+        if n:
+            counts[f"{label}.{field_name}"] = n
+    return counts
+
+
 @dataclass
 class MergeReport:
     """Per-merge summary used for logging and command output."""
@@ -233,4 +268,5 @@ def merge_users(
         report.workspace_membership_repointed, report.workspace_membership_conflict_merged = (
             _merge_workspace_memberships(canonical, duplicate)
         )
+        report.long_tail_fk_counts = _repoint_long_tail_fks(canonical, duplicate)
     return report
