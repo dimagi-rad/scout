@@ -63,11 +63,12 @@ class Command(BaseCommand):
 
         for users, _plan, canonical in plans:
             dup = next(u for u in users if u.pk != canonical.pk)
+            dup_pk = dup.pk  # capture before merge_users() deletes the duplicate
             try:
                 merge_users(canonical=canonical, duplicate=dup)
-                self.stdout.write(f"merged User#{dup.pk} -> User#{canonical.pk}")
+                self.stdout.write(f"merged User#{dup_pk} -> User#{canonical.pk}")
             except Exception as exc:  # noqa: BLE001 — best-effort per-group recovery
-                self.stderr.write(f"failed User#{dup.pk} -> User#{canonical.pk}: {exc!r}")
+                self.stderr.write(f"failed User#{dup_pk} -> User#{canonical.pk}: {exc!r}")
 
     def _find_groups(self, *, target_email: str | None) -> list[list[User]]:
         qs = User.objects.exclude(email__isnull=True).exclude(email="")
