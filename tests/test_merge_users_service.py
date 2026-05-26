@@ -5,6 +5,7 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 
+from apps.users.models import Tenant, TenantCredential, TenantMembership
 from apps.users.services.merge import merge_users, select_canonical
 
 User = get_user_model()
@@ -152,3 +153,42 @@ def test_emailaddress_creates_primary_row_for_canonical_email():
     primary = EmailAddress.objects.get(user=canonical, email="brian@y.com")
     assert primary.primary is True
     assert primary.verified is True
+
+
+@pytest.mark.django_db
+def test_tenantmembership_repoints_when_canonical_has_no_overlap():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    t1 = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
+    t2 = Tenant.objects.create(provider="commcare", external_id="d2", canonical_name="D2")
+    TenantMembership.objects.create(user=duplicate, tenant=t1)
+    TenantMembership.objects.create(user=duplicate, tenant=t2)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.tenant_membership_repointed == 2
+    assert report.tenant_membership_conflict_deleted == 0
+    assert TenantMembership.objects.filter(user=canonical).count() == 2
+
+
+@pytest.mark.django_db
+def test_tenantmembership_conflict_keeps_canonical_and_deletes_duplicates():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
+    only_dup = Tenant.objects.create(provider="ocs", external_id="exp9", canonical_name="Exp9")
+    canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared)
+    TenantCredential.objects.create(
+        tenant_membership=canon_tm, credential_type=TenantCredential.OAUTH,
+    )
+    TenantMembership.objects.create(user=duplicate, tenant=shared)  # conflict
+    TenantMembership.objects.create(user=duplicate, tenant=only_dup)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.tenant_membership_repointed == 1
+    assert report.tenant_membership_conflict_deleted == 1
+    # canonical still has its row for the shared tenant
+    assert TenantMembership.objects.filter(user=canonical, tenant=shared).count() == 1
+    # canonical now also has only_dup's tenant
+    assert TenantMembership.objects.filter(user=canonical, tenant=only_dup).exists()

@@ -16,6 +16,8 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.db import transaction
 
+from apps.users.models import TenantMembership
+
 if TYPE_CHECKING:
     from apps.users.models import User
 
@@ -91,6 +93,21 @@ def _dedupe_email_addresses(canonical: User, duplicate: User) -> tuple[int, int]
     return repointed, deleted
 
 
+def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, int]:
+    """Returns (repointed_count, conflict_deleted_count).
+
+    If canonical already has a membership for a given tenant, delete duplicate's
+    row (its OneToOne TenantCredential cascades). Otherwise repoint to canonical.
+    """
+    canonical_tenant_ids = set(
+        TenantMembership.objects.filter(user=canonical).values_list("tenant_id", flat=True)
+    )
+    dup_qs = TenantMembership.objects.filter(user=duplicate)
+    conflict_deleted, _ = dup_qs.filter(tenant_id__in=canonical_tenant_ids).delete()
+    repointed = dup_qs.exclude(tenant_id__in=canonical_tenant_ids).update(user=canonical)
+    return repointed, conflict_deleted
+
+
 def _merge_user_fields(canonical: User, duplicate: User) -> dict[str, str]:
     """Apply field-level merge rules. Mutates canonical in place; returns changes."""
     changes: dict[str, str] = {}
@@ -145,11 +162,24 @@ def merge_users(
         dup_qs = EmailAddress.objects.filter(user=duplicate)
         report.emailaddress_deleted = dup_qs.filter(email__in=canonical_emails).count()
         report.emailaddress_repointed = dup_qs.exclude(email__in=canonical_emails).count()
+        canonical_tenant_ids = set(
+            TenantMembership.objects.filter(user=canonical).values_list("tenant_id", flat=True)
+        )
+        dup_tms = TenantMembership.objects.filter(user=duplicate)
+        report.tenant_membership_conflict_deleted = dup_tms.filter(
+            tenant_id__in=canonical_tenant_ids,
+        ).count()
+        report.tenant_membership_repointed = dup_tms.exclude(
+            tenant_id__in=canonical_tenant_ids,
+        ).count()
         return report
     with transaction.atomic():
         report.field_changes = _merge_user_fields(canonical, duplicate)
         report.socialaccount_repointed = _repoint_social_accounts(canonical, duplicate)
         report.emailaddress_repointed, report.emailaddress_deleted = (
             _dedupe_email_addresses(canonical, duplicate)
+        )
+        report.tenant_membership_repointed, report.tenant_membership_conflict_deleted = (
+            _merge_tenant_memberships(canonical, duplicate)
         )
     return report
