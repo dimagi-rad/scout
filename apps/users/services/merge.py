@@ -32,33 +32,42 @@ _ROLE_RANK = {
 }
 
 
-_SPECIAL_CASE_MODELS = frozenset({
-    "socialaccount.SocialAccount",
-    "account.EmailAddress",
-    "users.TenantMembership",
-    "workspaces.WorkspaceMembership",
+# Reverse FK relations handled by explicit helpers above. Anything else with a
+# User FK gets the generic bulk-repoint in _repoint_long_tail_fks.
+# Identified by (model label, field name) so we can skip the canonical
+# `user` field on a model while still picking up other User-pointing fields
+# on the same model (e.g. WorkspaceMembership.invited_by).
+_SPECIAL_CASE_RELATIONS: frozenset[tuple[str, str]] = frozenset({
+    ("socialaccount.SocialAccount", "user"),
+    ("account.EmailAddress", "user"),
+    ("users.TenantMembership", "user"),
+    ("workspaces.WorkspaceMembership", "user"),
+    # Django auth join tables — unique on (user, group) / (user, permission).
+    # If both users happen to share a group/permission, a bulk repoint would
+    # IntegrityError. Scout doesn't actively use django.contrib.auth.Group, so
+    # the simplest safe handling is to skip; if Group ever becomes load-bearing
+    # we revisit with explicit conflict resolution.
+    ("auth.User_groups", "user"),
+    ("auth.User_user_permissions", "user"),
 })
 
 
 def _repoint_long_tail_fks(canonical: User, duplicate: User) -> dict[str, int]:
-    """Bulk-update every User FK except those handled by special-case logic.
+    """Bulk-update every User reverse FK except those handled by explicit helpers.
 
-    Picks up new User FKs added by future apps without code changes. Uses
-    ``get_fields(include_hidden=True)`` so relations declared with
-    ``related_name="+"`` (e.g. ``Workspace.created_by``) are also repointed.
-    If a new FK has a unique constraint involving the user field, this raises
-    IntegrityError on the bulk update — surface that and add explicit
-    handling to merge_users.
+    Skips the (model, field) pairs in _SPECIAL_CASE_RELATIONS. Picks up new
+    User FKs added by future apps without code changes. If a new FK has a
+    unique constraint involving the user field, the bulk update will raise
+    IntegrityError — surface that and add explicit handling.
     """
     counts: dict[str, int] = {}
     for rel in canonical._meta.get_fields(include_hidden=True):
-        # Only one-to-many reverse relations (FKs pointing at User).
-        if not rel.is_relation or not rel.one_to_many:
+        if not (rel.is_relation and rel.one_to_many):
             continue
         label = rel.related_model._meta.label
-        if label in _SPECIAL_CASE_MODELS:
-            continue
         field_name = rel.field.name
+        if (label, field_name) in _SPECIAL_CASE_RELATIONS:
+            continue
         n = rel.related_model._default_manager.filter(
             **{field_name: duplicate},
         ).update(**{field_name: canonical})

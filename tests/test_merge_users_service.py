@@ -265,3 +265,23 @@ def test_setnull_fk_is_repointed_via_introspection():
 
     ws.refresh_from_db()
     assert ws.created_by == canonical
+
+
+@pytest.mark.django_db
+def test_workspacemembership_invited_by_is_repointed_via_introspection():
+    """invited_by is a SET_NULL FK to User; it should be repointed by the
+    long-tail loop even though WorkspaceMembership.user has special-case
+    handling for the role-merge path."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    other = User.objects.create(email="other@y.com", username="other")
+    ws = Workspace.objects.create(name="W")
+    # `other` has a membership; `duplicate` invited them.
+    WorkspaceMembership.objects.create(
+        workspace=ws, user=other, role=WorkspaceRole.READ, invited_by=duplicate,
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    membership = WorkspaceMembership.objects.get(workspace=ws, user=other)
+    assert membership.invited_by == canonical
