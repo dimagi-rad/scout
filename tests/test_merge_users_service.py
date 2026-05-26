@@ -318,3 +318,22 @@ def test_merge_rolls_back_on_exception():
     # Everything must be untouched
     assert User.objects.filter(pk=duplicate.pk).exists()
     assert SocialAccount.objects.get(provider="commcare", uid="42").user == duplicate
+
+
+@pytest.mark.django_db
+def test_dry_run_writes_nothing_and_returns_a_plan():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    SocialAccount.objects.create(user=duplicate, provider="commcare", uid="42")
+    EmailAddress.objects.create(user=canonical, email="canon@y.com", primary=True)
+    EmailAddress.objects.create(user=duplicate, email="canon@y.com", primary=True)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate, dry_run=True)
+
+    assert report.dry_run is True
+    assert report.socialaccount_repointed == 1
+    assert report.emailaddress_deleted == 1
+    # Nothing actually changed
+    assert SocialAccount.objects.get(provider="commcare", uid="42").user == duplicate
+    assert User.objects.filter(pk=duplicate.pk).exists()
+    assert not report.duplicate_user_deleted
