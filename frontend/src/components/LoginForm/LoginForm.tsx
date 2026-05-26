@@ -12,6 +12,7 @@ interface OAuthProvider {
   id: string
   name: string
   login_url: string
+  allowed_email_domains: string[]
 }
 
 export function LoginForm() {
@@ -48,6 +49,10 @@ export function LoginForm() {
   const oauthReturnUrl = isEmbed
     ? (document.referrer ? new URL(document.referrer).pathname : "/labs/scout/")
     : `${BASE_PATH}/`
+
+  const restrictedDomains = Array.from(
+    new Set(providers.flatMap((p) => p.allowed_email_domains))
+  ).sort()
 
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
@@ -94,10 +99,18 @@ export function LoginForm() {
                 <div className="absolute inset-0 flex items-center">
                   <span className="w-full border-t" />
                 </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-card px-2 text-muted-foreground">
+                <div className="relative flex flex-col items-center gap-1">
+                  <span className="bg-card px-2 text-xs uppercase text-muted-foreground">
                     or continue with
                   </span>
+                  {restrictedDomains.length > 0 && (
+                    <span
+                      className="bg-card px-2 text-xs text-muted-foreground"
+                      data-testid="oauth-allowed-domains"
+                    >
+                      ({restrictedDomains.map((d) => `@${d}`).join(", ")} addresses only)
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="space-y-2">
