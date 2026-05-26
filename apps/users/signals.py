@@ -2,6 +2,7 @@
 
 import logging
 
+from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
@@ -98,6 +99,19 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
     if canonical is None:
         user.email = new_email
         user.save(update_fields=["email"])
+        return
+
+    canonical_owns_email = EmailAddress.objects.filter(
+        user=canonical,
+        email__iexact=new_email,
+        verified=True,
+    ).exists()
+    if not canonical_owns_email:
+        logger.warning(
+            "Refusing auto-merge: canonical user=%s lacks verified EmailAddress for %s",
+            canonical.pk,
+            new_email,
+        )
         return
 
     original_pk = user.pk
