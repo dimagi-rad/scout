@@ -195,6 +195,9 @@ SOCIALACCOUNT_AUTO_SIGNUP = True
 SOCIALACCOUNT_EMAIL_REQUIRED = False
 # Auto-connect social account to existing user with matching email
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
+# Trust Dimagi-operated providers to have verified the email address on their
+# end. Required so allauth's _lookup_by_email gate fires for these providers.
+SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
 # Allow OAuth users to skip email verification since provider already verified
 SOCIALACCOUNT_EMAIL_VERIFICATION = "none"
 # Store OAuth tokens so we can use them for data materialization
@@ -210,12 +213,15 @@ LOGOUT_REDIRECT_URL = "/"
 SOCIALACCOUNT_PROVIDERS = {
     "commcare_connect": {
         "OAUTH_PKCE_ENABLED": True,
+        "VERIFIED_EMAIL": True,
     },
     "commcare": {
         "OAUTH_PKCE_ENABLED": True,
+        "VERIFIED_EMAIL": True,
     },
     "ocs": {
         "OAUTH_PKCE_ENABLED": True,
+        "VERIFIED_EMAIL": True,
     },
 }
 
