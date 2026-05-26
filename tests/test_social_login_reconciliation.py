@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 
 from apps.users.signals import reconcile_existing_user_on_login
@@ -60,3 +61,41 @@ def test_no_collision_backfills_user_email():
 
     existing.refresh_from_db()
     assert existing.email == "brian@y.com"
+
+
+@pytest.mark.django_db
+def test_collision_merges_user_and_redirects_session():
+    canonical = User.objects.create(email="brian@y.com", username="canon")
+    duplicate = User.objects.create(email=None, username="connect-user")
+    dup_account = SocialAccount.objects.create(
+        user=duplicate, provider="commcare_connect", uid="999",
+        extra_data={"email": "brian@y.com"},
+    )
+    sl = SimpleNamespace(user=duplicate, account=dup_account)
+
+    reconcile_existing_user_on_login(sender=None, request=None, sociallogin=sl)
+
+    # duplicate was merged away
+    assert not User.objects.filter(pk=duplicate.pk).exists()
+    # Connect SocialAccount now points at canonical
+    dup_account.refresh_from_db()
+    assert dup_account.user == canonical
+    # Session redirected
+    assert sl.user == canonical
+    assert sl.account.user == canonical
+
+
+@pytest.mark.django_db
+def test_collision_match_is_case_insensitive():
+    canonical = User.objects.create(email="Brian@Y.com", username="canon")
+    duplicate = User.objects.create(email=None, username="dup")
+    dup_account = SocialAccount.objects.create(
+        user=duplicate, provider="commcare_connect", uid="x",
+        extra_data={"email": "brian@y.com"},
+    )
+    sl = SimpleNamespace(user=duplicate, account=dup_account)
+
+    reconcile_existing_user_on_login(sender=None, request=None, sociallogin=sl)
+
+    assert not User.objects.filter(pk=duplicate.pk).exists()
+    assert sl.user == canonical

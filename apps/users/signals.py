@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from apps.users.services.merge import merge_users
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -100,4 +101,12 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         user.email = new_email
         user.save(update_fields=["email"])
         return
-    # Collision branch lives in Task 13.
+
+    original_pk = user.pk
+    merge_users(canonical=canonical, duplicate=user)
+    sociallogin.user = canonical
+    sociallogin.account.user = canonical
+    logger.info(
+        "auto-merge: user=%s into canonical=%s email=%s provider=%s",
+        original_pk, canonical.pk, new_email, sociallogin.account.provider,
+    )
