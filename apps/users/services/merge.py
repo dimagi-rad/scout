@@ -53,6 +53,34 @@ def select_canonical(users: list[User]) -> User:
     )
 
 
+def _merge_user_fields(canonical, duplicate) -> dict[str, str]:
+    """Apply field-level merge rules. Mutates canonical in place; returns changes."""
+    changes: dict[str, str] = {}
+    if not canonical.has_usable_password() and duplicate.has_usable_password():
+        canonical.password = duplicate.password
+        changes["password"] = "copied from duplicate"  # noqa: S105
+    if duplicate.is_staff and not canonical.is_staff:
+        canonical.is_staff = True
+        changes["is_staff"] = "True (OR with duplicate)"
+    if duplicate.is_superuser and not canonical.is_superuser:
+        canonical.is_superuser = True
+        changes["is_superuser"] = "True (OR with duplicate)"
+    if duplicate.last_login and (
+        canonical.last_login is None or duplicate.last_login > canonical.last_login
+    ):
+        canonical.last_login = duplicate.last_login
+        changes["last_login"] = duplicate.last_login.isoformat()
+    for field_name in ("first_name", "last_name", "avatar_url"):
+        if not getattr(canonical, field_name) and getattr(duplicate, field_name):
+            setattr(canonical, field_name, getattr(duplicate, field_name))
+            changes[field_name] = f"copied: {getattr(duplicate, field_name)!r}"
+    if canonical.timezone == "UTC" and duplicate.timezone and duplicate.timezone != "UTC":
+        canonical.timezone = duplicate.timezone
+        changes["timezone"] = f"copied: {duplicate.timezone!r}"
+    canonical.save()
+    return changes
+
+
 def merge_users(
     *,
     canonical: User,
@@ -65,8 +93,12 @@ def merge_users(
     """
     if canonical.pk == duplicate.pk:
         raise ValueError("canonical and duplicate must be different users")
-    return MergeReport(
+    report = MergeReport(
         canonical_id=canonical.pk,
         duplicate_id=duplicate.pk,
         dry_run=dry_run,
     )
+    if dry_run:
+        return report
+    report.field_changes = _merge_user_fields(canonical, duplicate)
+    return report
