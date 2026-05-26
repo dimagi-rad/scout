@@ -1,6 +1,7 @@
 """Unit tests for apps.users.services.merge.merge_users and helpers."""
 
 import pytest
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 
@@ -109,3 +110,45 @@ def test_socialaccounts_are_repointed_to_canonical():
     assert report.socialaccount_repointed == 2
     assert SocialAccount.objects.filter(user=canonical).count() == 3
     assert SocialAccount.objects.filter(user=duplicate).count() == 0
+
+
+@pytest.mark.django_db
+def test_emailaddress_dedupes_when_both_have_same_email():
+    canonical = User.objects.create(email="brian@y.com", username="canon")
+    duplicate = User.objects.create(email="brian-old@y.com", username="dup")
+    EmailAddress.objects.create(user=canonical, email="brian@y.com", primary=True, verified=True)
+    EmailAddress.objects.create(user=duplicate, email="brian@y.com", primary=True, verified=False)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.emailaddress_deleted == 1
+    assert EmailAddress.objects.filter(email="brian@y.com").count() == 1
+    survivor = EmailAddress.objects.get(email="brian@y.com")
+    assert survivor.user == canonical
+    assert survivor.primary is True
+    assert survivor.verified is True
+
+
+@pytest.mark.django_db
+def test_emailaddress_repoints_distinct_addresses():
+    canonical = User.objects.create(email="brian@y.com", username="canon")
+    duplicate = User.objects.create(email="brian-old@y.com", username="dup")
+    EmailAddress.objects.create(user=duplicate, email="brian-old@y.com", primary=True, verified=True)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.emailaddress_repointed == 1
+    assert EmailAddress.objects.filter(user=canonical, email="brian-old@y.com").exists()
+
+
+@pytest.mark.django_db
+def test_emailaddress_creates_primary_row_for_canonical_email():
+    canonical = User.objects.create(email="brian@y.com", username="canon")
+    duplicate = User.objects.create(email="brian-old@y.com", username="dup")
+    # No EmailAddress rows for canonical; merge should create one.
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    primary = EmailAddress.objects.get(user=canonical, email="brian@y.com")
+    assert primary.primary is True
+    assert primary.verified is True

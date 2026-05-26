@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.db import transaction
 
@@ -58,6 +59,36 @@ def select_canonical(users: list[User]) -> User:
 
 def _repoint_social_accounts(canonical: User, duplicate: User) -> int:
     return SocialAccount.objects.filter(user=duplicate).update(user=canonical)
+
+
+def _dedupe_email_addresses(canonical: User, duplicate: User) -> tuple[int, int]:
+    """Returns (repointed_count, deleted_count).
+
+    For each EmailAddress on duplicate: if canonical already has a row with the
+    same email, delete duplicate's; otherwise repoint to canonical. Then ensure
+    canonical has exactly one primary+verified row matching User.email.
+    """
+    canonical_emails = set(
+        EmailAddress.objects.filter(user=canonical).values_list("email", flat=True)
+    )
+    dup_qs = EmailAddress.objects.filter(user=duplicate)
+    deleted, _ = dup_qs.filter(email__in=canonical_emails).delete()
+    repointed = dup_qs.exclude(email__in=canonical_emails).update(user=canonical)
+    if canonical.email:
+        # Demote any existing primaries on canonical before creating/promoting
+        # the canonical-email row, to avoid violating unique(user_id, primary=True).
+        EmailAddress.objects.filter(user=canonical, primary=True).exclude(
+            email=canonical.email,
+        ).update(primary=False)
+        primary, _created = EmailAddress.objects.get_or_create(
+            user=canonical, email=canonical.email,
+            defaults={"primary": True, "verified": True},
+        )
+        if not primary.primary or not primary.verified:
+            primary.primary = True
+            primary.verified = True
+            primary.save(update_fields=["primary", "verified"])
+    return repointed, deleted
 
 
 def _merge_user_fields(canonical: User, duplicate: User) -> dict[str, str]:
@@ -108,8 +139,17 @@ def merge_users(
     )
     if dry_run:
         report.socialaccount_repointed = SocialAccount.objects.filter(user=duplicate).count()
+        canonical_emails = set(
+            EmailAddress.objects.filter(user=canonical).values_list("email", flat=True)
+        )
+        dup_qs = EmailAddress.objects.filter(user=duplicate)
+        report.emailaddress_deleted = dup_qs.filter(email__in=canonical_emails).count()
+        report.emailaddress_repointed = dup_qs.exclude(email__in=canonical_emails).count()
         return report
     with transaction.atomic():
         report.field_changes = _merge_user_fields(canonical, duplicate)
         report.socialaccount_repointed = _repoint_social_accounts(canonical, duplicate)
+        report.emailaddress_repointed, report.emailaddress_deleted = (
+            _dedupe_email_addresses(canonical, duplicate)
+        )
     return report
