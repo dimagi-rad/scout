@@ -12,6 +12,9 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from allauth.socialaccount.models import SocialAccount
+from django.db import transaction
+
 if TYPE_CHECKING:
     from apps.users.models import User
 
@@ -51,6 +54,10 @@ def select_canonical(users: list[User]) -> User:
             u.pk,
         ),
     )
+
+
+def _repoint_social_accounts(canonical: User, duplicate: User) -> int:
+    return SocialAccount.objects.filter(user=duplicate).update(user=canonical)
 
 
 def _merge_user_fields(canonical: User, duplicate: User) -> dict[str, str]:
@@ -100,6 +107,9 @@ def merge_users(
         dry_run=dry_run,
     )
     if dry_run:
+        report.socialaccount_repointed = SocialAccount.objects.filter(user=duplicate).count()
         return report
-    report.field_changes = _merge_user_fields(canonical, duplicate)
+    with transaction.atomic():
+        report.field_changes = _merge_user_fields(canonical, duplicate)
+        report.socialaccount_repointed = _repoint_social_accounts(canonical, duplicate)
     return report

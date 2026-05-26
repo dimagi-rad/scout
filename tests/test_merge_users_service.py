@@ -1,6 +1,7 @@
 """Unit tests for apps.users.services.merge.merge_users and helpers."""
 
 import pytest
+from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
 
 from apps.users.services.merge import merge_users, select_canonical
@@ -93,3 +94,18 @@ def test_field_level_merge_keeps_canonical_name_when_already_set():
     canonical.refresh_from_db()
     assert canonical.first_name == "Already"
     assert canonical.last_name == "Set"
+
+
+@pytest.mark.django_db
+def test_socialaccounts_are_repointed_to_canonical():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    SocialAccount.objects.create(user=duplicate, provider="commcare", uid="42")
+    SocialAccount.objects.create(user=duplicate, provider="ocs", uid="ocs-7")
+    SocialAccount.objects.create(user=canonical, provider="commcare_connect", uid="9")
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.socialaccount_repointed == 2
+    assert SocialAccount.objects.filter(user=canonical).count() == 3
+    assert SocialAccount.objects.filter(user=duplicate).count() == 0
