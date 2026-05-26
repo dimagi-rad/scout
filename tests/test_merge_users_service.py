@@ -6,6 +6,7 @@ import pytest
 from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantCredential, TenantMembership
@@ -365,8 +366,6 @@ def test_merge_skips_auth_group_through_tables_when_shared():
     """Both users share a django.contrib.auth Group. The introspection loop
     must skip the User_groups through-table, otherwise the bulk update would
     IntegrityError on the (user, group) unique constraint."""
-    from django.contrib.auth.models import Group
-
     canonical = User.objects.create(email="canon@y.com", username="canon")
     duplicate = User.objects.create(email="dup@y.com", username="dup")
     g = Group.objects.create(name="shared-group")

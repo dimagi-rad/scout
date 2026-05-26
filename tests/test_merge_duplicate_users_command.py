@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import CommandError, call_command
 
 from apps.users.services.merge import MergeReport
+from apps.users.services.merge import merge_users as _merge_users_real
 
 User = get_user_model()
 
@@ -145,8 +146,6 @@ def test_failure_in_one_group_does_not_block_others():
     call_count = {"n": 0}
 
     def fake_merge(*, canonical, duplicate, dry_run=False):
-        from apps.users.services.merge import merge_users as real_merge
-
         if dry_run:
             return MergeReport(
                 canonical_id=canonical.pk,
@@ -157,7 +156,7 @@ def test_failure_in_one_group_does_not_block_others():
         if call_count["n"] == 1:
             raise RuntimeError("simulated failure on first group")
         # Real merge for second group
-        return real_merge(canonical=canonical, duplicate=duplicate)
+        return _merge_users_real(canonical=canonical, duplicate=duplicate)
 
     with patch(
         "apps.users.management.commands.merge_duplicate_users.merge_users",
