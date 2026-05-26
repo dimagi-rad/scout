@@ -668,6 +668,8 @@ class TestProvidersEndpoint:
         for p in data["providers"]:
             assert "name" in p
             assert "login_url" in p
+            assert "allowed_email_domains" in p
+            assert isinstance(p["allowed_email_domains"], list)
             assert "connected" not in p  # not authenticated
 
     def test_returns_empty_when_no_providers(self, client, site):
@@ -686,6 +688,17 @@ class TestProvidersEndpoint:
         providers = {p["id"]: p for p in resp.json()["providers"]}
         assert providers["google"]["connected"] is True  # social_account fixture is google
         assert providers["github"]["connected"] is False
+
+    def test_includes_allowed_email_domains_from_settings(
+        self, client, google_social_app, github_social_app, settings
+    ):
+        """allowed_email_domains reflects SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS, defaulting to []."""
+        settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS = {"google": ["dimagi.com", "example.org"]}
+        resp = client.get("/api/auth/providers/")
+        assert resp.status_code == 200
+        by_id = {p["id"]: p for p in resp.json()["providers"]}
+        assert by_id["google"]["allowed_email_domains"] == ["dimagi.com", "example.org"]
+        assert by_id["github"]["allowed_email_domains"] == []
 
 
 # ============================================================================

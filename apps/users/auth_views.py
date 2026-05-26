@@ -5,6 +5,7 @@ import logging
 
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import async_to_sync
+from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.sites.models import Site
@@ -237,6 +238,9 @@ def providers_view(request):
             "name": app.name,
             # No prefix — the frontend prepends BASE_PATH to all API-provided URLs
             "login_url": f"/accounts/{app.provider}/login/",
+            "allowed_email_domains": settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(
+                app.provider, []
+            ),
         }
         if request.user.is_authenticated:
             # SocialAccount.provider stores the provider_id (e.g. "commcare_prod"),
