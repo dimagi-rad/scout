@@ -1,5 +1,7 @@
 """Unit tests for apps.users.services.merge.merge_users and helpers."""
 
+from unittest.mock import patch
+
 import pytest
 from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
@@ -104,6 +106,7 @@ def test_field_level_merge_keeps_canonical_name_when_already_set():
 def test_socialaccounts_are_repointed_to_canonical():
     canonical = User.objects.create(email="canon@y.com", username="canon")
     duplicate = User.objects.create(email="dup@y.com", username="dup")
+    duplicate_pk = duplicate.pk
     SocialAccount.objects.create(user=duplicate, provider="commcare", uid="42")
     SocialAccount.objects.create(user=duplicate, provider="ocs", uid="ocs-7")
     SocialAccount.objects.create(user=canonical, provider="commcare_connect", uid="9")
@@ -112,7 +115,7 @@ def test_socialaccounts_are_repointed_to_canonical():
 
     assert report.socialaccount_repointed == 2
     assert SocialAccount.objects.filter(user=canonical).count() == 3
-    assert SocialAccount.objects.filter(user=duplicate).count() == 0
+    assert SocialAccount.objects.filter(user_id=duplicate_pk).count() == 0
 
 
 @pytest.mark.django_db
@@ -243,6 +246,7 @@ def test_workspacemembership_conflict_keeps_canonical_when_higher():
 def test_chat_threads_are_repointed_via_introspection():
     canonical = User.objects.create(email="canon@y.com", username="canon")
     duplicate = User.objects.create(email="dup@y.com", username="dup")
+    duplicate_pk = duplicate.pk
     ws = Workspace.objects.create(name="W")
     Thread.objects.create(user=duplicate, workspace=ws, title="T1")
     Thread.objects.create(user=duplicate, workspace=ws, title="T2")
@@ -250,7 +254,7 @@ def test_chat_threads_are_repointed_via_introspection():
     report = merge_users(canonical=canonical, duplicate=duplicate)
 
     assert Thread.objects.filter(user=canonical).count() == 2
-    assert Thread.objects.filter(user=duplicate).count() == 0
+    assert Thread.objects.filter(user_id=duplicate_pk).count() == 0
     label = "chat.Thread.user"
     assert report.long_tail_fk_counts.get(label) == 2
 
@@ -285,3 +289,32 @@ def test_workspacemembership_invited_by_is_repointed_via_introspection():
 
     membership = WorkspaceMembership.objects.get(workspace=ws, user=other)
     assert membership.invited_by == canonical
+
+
+@pytest.mark.django_db
+def test_duplicate_user_row_is_deleted():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.duplicate_user_deleted is True
+    assert not User.objects.filter(pk=duplicate.pk).exists()
+    assert User.objects.filter(pk=canonical.pk).exists()
+
+
+@pytest.mark.django_db
+def test_merge_rolls_back_on_exception():
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    SocialAccount.objects.create(user=duplicate, provider="commcare", uid="42")
+
+    with patch(
+        "apps.users.services.merge._repoint_long_tail_fks",
+        side_effect=RuntimeError("simulated failure"),
+    ), pytest.raises(RuntimeError):
+        merge_users(canonical=canonical, duplicate=duplicate)
+
+    # Everything must be untouched
+    assert User.objects.filter(pk=duplicate.pk).exists()
+    assert SocialAccount.objects.get(provider="commcare", uid="42").user == duplicate

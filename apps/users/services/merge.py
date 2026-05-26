@@ -225,7 +225,17 @@ def merge_users(
 ) -> MergeReport:
     """Merge ``duplicate`` into ``canonical`` and return a MergeReport.
 
-    Implementation arrives across the remaining tasks in this phase.
+    Field-level rules are applied to ``canonical`` (password copy, staff/super
+    OR, oldest-last-login, empty-name backfill, timezone backfill). All
+    User-pointing rows are then repointed or merged: SocialAccount,
+    EmailAddress (with dedupe + primary normalization), TenantMembership and
+    WorkspaceMembership (with conflict resolution), and every other
+    reverse-FK relation discovered via Django's `_meta` (the "long tail"). The
+    duplicate row is deleted last. All write steps run inside a single
+    ``transaction.atomic()`` block so any failure rolls the whole merge back.
+
+    When ``dry_run=True`` no writes occur and the returned MergeReport carries
+    counts only — useful for previewing the impact from the operator command.
     """
     if canonical.pk == duplicate.pk:
         raise ValueError("canonical and duplicate must be different users")
@@ -235,13 +245,14 @@ def merge_users(
         dry_run=dry_run,
     )
     if dry_run:
+        # Count-only plan (no writes).
         report.socialaccount_repointed = SocialAccount.objects.filter(user=duplicate).count()
         canonical_emails = set(
             EmailAddress.objects.filter(user=canonical).values_list("email", flat=True)
         )
-        dup_qs = EmailAddress.objects.filter(user=duplicate)
-        report.emailaddress_deleted = dup_qs.filter(email__in=canonical_emails).count()
-        report.emailaddress_repointed = dup_qs.exclude(email__in=canonical_emails).count()
+        dup_emails = EmailAddress.objects.filter(user=duplicate)
+        report.emailaddress_deleted = dup_emails.filter(email__in=canonical_emails).count()
+        report.emailaddress_repointed = dup_emails.exclude(email__in=canonical_emails).count()
         canonical_tenant_ids = set(
             TenantMembership.objects.filter(user=canonical).values_list("tenant_id", flat=True)
         )
@@ -265,6 +276,7 @@ def merge_users(
             workspace_id__in=canonical_ws_ids,
         ).count()
         return report
+
     with transaction.atomic():
         report.field_changes = _merge_user_fields(canonical, duplicate)
         report.socialaccount_repointed = _repoint_social_accounts(canonical, duplicate)
@@ -278,4 +290,10 @@ def merge_users(
             _merge_workspace_memberships(canonical, duplicate)
         )
         report.long_tail_fk_counts = _repoint_long_tail_fks(canonical, duplicate)
+        duplicate.delete()
+        report.duplicate_user_deleted = True
+    logger.info(
+        "Merged user=%s into canonical=%s: %s",
+        report.duplicate_id, report.canonical_id, report,
+    )
     return report
