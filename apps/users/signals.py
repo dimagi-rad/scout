@@ -103,7 +103,13 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         return
 
     original_pk = user.pk
-    merge_users(canonical=canonical, duplicate=user)
+    try:
+        merge_users(canonical=canonical, duplicate=user)
+    except Exception:
+        logger.exception(
+            "Auto-merge failed for user=%s into canonical=%s", original_pk, canonical.pk,
+        )
+        return
     sociallogin.user = canonical
     sociallogin.account.user = canonical
     logger.info(

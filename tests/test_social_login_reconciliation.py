@@ -1,6 +1,7 @@
 """Tests for the pre_social_login handler that backfills/merges emails."""
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from allauth.socialaccount.models import SocialAccount
@@ -99,3 +100,30 @@ def test_collision_match_is_case_insensitive():
 
     assert not User.objects.filter(pk=duplicate.pk).exists()
     assert sl.user == canonical
+
+
+@pytest.mark.django_db
+def test_merge_failure_does_not_break_login(caplog):
+    canonical = User.objects.create(email="brian@y.com", username="canon")
+    duplicate = User.objects.create(email=None, username="connect-user")
+    dup_account = SocialAccount.objects.create(
+        user=duplicate, provider="commcare_connect", uid="999",
+        extra_data={"email": "brian@y.com"},
+    )
+    sl = SimpleNamespace(user=duplicate, account=dup_account)
+
+    with patch(
+        "apps.users.signals.merge_users",
+        side_effect=RuntimeError("boom"),
+    ):
+        # Must not raise.
+        reconcile_existing_user_on_login(sender=None, request=None, sociallogin=sl)
+
+    # Duplicate still present, login continues on duplicate
+    assert User.objects.filter(pk=duplicate.pk).exists()
+    assert sl.user == duplicate
+    # Failure was logged at ERROR
+    assert any(
+        r.levelname == "ERROR" and "Auto-merge failed" in r.message
+        for r in caplog.records
+    )
