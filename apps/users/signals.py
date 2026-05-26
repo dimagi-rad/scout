@@ -73,3 +73,21 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
         except Exception:
             logger.warning("Failed to resolve CommCare domains after OAuth", exc_info=True)
+
+
+def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
+    """Bridge the gap where allauth's _lookup_by_socialaccount short-circuits.
+
+    When an existing OAuth user logs in and the provider now returns an email
+    that the User row doesn't yet have, either backfill it (Task 12) or merge
+    into the user that already owns that email (Task 13).
+    """
+    new_email = sociallogin.account.extra_data.get("email")
+    if not new_email:
+        return
+    user = sociallogin.user
+    if user.pk is None:
+        return  # brand-new user; allauth's _lookup_by_email handles it
+    if user.email:
+        return  # already has an email — nothing to reconcile
+    # Branches for backfill/collision arrive in Tasks 12-14.
