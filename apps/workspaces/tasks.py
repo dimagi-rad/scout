@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import timedelta
 
+import sentry_sdk
 from django.conf import settings
 from django.utils import timezone
 from langchain_core.messages import HumanMessage
@@ -26,6 +27,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app
+from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
     MaterializationCancelled,
@@ -193,6 +195,24 @@ async def materialize_workspace(
                 tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
                 # Stop processing remaining tenants — the user has cancelled.
                 break
+            except ConnectExportError as e:
+                # Upstream Connect failure after retry exhaustion. Capture
+                # the response's sentry-trace header so support can correlate
+                # with Connect's Sentry in a single hop. sentry_sdk.set_tag
+                # is a no-op when the SDK was never initialised (no DSN).
+                logger.exception(
+                    "Materialization failed for tenant %s on pipeline %s: "
+                    "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
+                    tenant_id,
+                    pipeline_name,
+                    e.status,
+                    e.attempts,
+                    e.last_id,
+                    e.sentry_trace,
+                )
+                sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
+                sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
+                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
             except Exception as e:
                 logger.exception("Materialization failed for tenant %s", tenant_id)
                 tenant_results.append(
