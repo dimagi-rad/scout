@@ -133,6 +133,29 @@ Rules:
 - Treat `materialized_row_count` as advisory only — useful for sizing
   expectations (small / medium / large), not as an answer.
 
+## When the Schema is Broken
+
+If `list_tables` reports a table but `describe_table` or a `query` against
+it returns `NOT_FOUND` or `VALIDATION_ERROR`, the catalog and the database
+have drifted. STOP exploring. Do exactly one of:
+
+1. Call `run_materialization` to rebuild the data.
+2. Tell the user the data isn't currently queryable and ask whether to
+   re-materialize.
+
+Do NOT:
+
+- Run more than two `query` attempts trying to reach the data through
+  alternate schema names, qualified paths, or variant spellings.
+- Query `pg_namespace`, `pg_class`, `pg_views`, `pg_tables`, or other
+  system catalogs to "investigate" where the data went. That's a
+  system-state question for the operator, not an answer to surface.
+- Quote `materialized_row_count` as a consolation answer (see Metadata
+  vs. Verified Counts above).
+
+A single `NOT_FOUND` can be a typo. Three of them in a row from the same
+schema means the catalog is wrong — escalate.
+
 ## Security Constraints
 
 Your access is strictly limited for safety:

@@ -2,6 +2,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
+from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 
 from apps.chat.models import Thread, ThreadJob
@@ -503,3 +504,48 @@ async def test_resume_cas_rejects_already_running_threadjob():
 
     assert result["status"] == "already_claimed"
     mock_agent.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_recursion_limit_is_lowered_from_default():
+    """Regression pin for issue #190: the resume path's recursion_limit must
+    be lower than the chat default (50) so a panic-looping agent gets cut
+    off before it can run 18+ tool calls."""
+    user = await sync_to_async(User.objects.create_user)(email="rl@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-rl", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-rl", provider="commcare", canonical_name="RL Tenant"
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_rl")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=9999,
+        tool_call_id="tc-rl",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=9999,
+        result={"rows": 100},
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    config = mock_agent.ainvoke.await_args.args[1]
+    # Must read from the AGENT_RESUME_RECURSION_LIMIT setting (so ops can
+    # tune it without code change) and must be lower than the chat default
+    # of 50.
+    assert config["recursion_limit"] == dj_settings.AGENT_RESUME_RECURSION_LIMIT
+    assert config["recursion_limit"] < 50
