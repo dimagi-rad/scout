@@ -8,6 +8,9 @@ sources:
     description: "User visit records with form data"
   - name: users
     description: "FLW/worker roster"
+    # Mutable rows (usernames, suspension status) — full DROP/CREATE/INSERT
+    # every run; do not resume from a partial-page watermark (issue #187).
+    resumable: false
   - name: completed_works
     description: "Completed work records"
   - name: payments

@@ -253,6 +253,62 @@ class TestPipelineListTables:
         names = {t["name"] for t in result}
         assert names == {"raw_users"}
 
+    @pytest.mark.asyncio
+    async def test_in_progress_source_not_listed(self):
+        """Issue #187: a source mid-resume (state="in_progress") must be
+        excluded from the catalog even if its physical table partly exists.
+        The table is only partially populated; surfacing it would let the
+        agent query incomplete data and produce wrong answers.
+        """
+        from mcp_server.services.metadata import pipeline_list_tables
+
+        mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
+        pipeline_config = _make_pipeline_config(
+            sources=[
+                ("users", "Connect users"),
+                ("completed_works", "Connect completed works"),
+            ]
+        )
+
+        completed_at = datetime(2026, 5, 27, 10, 0, 0, tzinfo=UTC)
+        mock_run = MagicMock()
+        mock_run.completed_at = completed_at
+        mock_run.result = {
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "completed_works": {
+                    "state": "in_progress",
+                    "rows": 4700,
+                    "cursor_state": {
+                        "last_id": 1500,
+                        "last_committed_at": "2026-05-27T09:00:00Z",
+                    },
+                },
+            }
+        }
+        mock_run.state = "partial"
+
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_users", "raw_completed_works"}),
+            ),
+        ):
+            mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
+
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
+
+        names = {t["name"] for t in result}
+        assert names == {"raw_users"}, (
+            "in_progress source must not appear in the catalog, even if its "
+            "physical table partially exists"
+        )
+
 
 class TestPipelineDescribeTable:
     def _make_ctx(self, schema_name="test_schema"):

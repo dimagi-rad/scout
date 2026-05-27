@@ -581,6 +581,13 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
+                # Expose ``cursor_state.last_id`` so the resume prompt can
+                # tell the agent "completed_works partially loaded up to
+                # id=X — the next materialization will continue from there"
+                # (issue #187).
+                cursor_state = info.get("cursor_state")
+                if isinstance(cursor_state, dict) and isinstance(cursor_state.get("last_id"), int):
+                    detail["resume_last_id"] = cursor_state["last_id"]
                 sources_detail[source] = detail
         summary.append(
             {
@@ -681,7 +688,10 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"(some sources loaded, others failed or were skipped). Answer what "
             f"you can from the available data and tell the user which sources are "
             f"unavailable. Do NOT claim that data is loaded for sources marked "
-            f"failed or skipped. Per-tenant: {summary}"
+            f"failed or skipped. A source with state=in_progress or state=failed "
+            f"and a non-null resume_last_id has partially-loaded rows that the "
+            f"next materialization will continue from — do NOT query its table "
+            f"as if it were complete. Per-tenant: {summary}"
         )
     else:
         body = (
