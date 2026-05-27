@@ -5,6 +5,7 @@ Settings common to all environments. Environment-specific settings
 override these in development.py, production.py, and test.py.
 """
 
+import os
 from pathlib import Path
 
 import environ
@@ -31,6 +32,17 @@ SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DJANGO_DEBUG", default=True)
+
+# Default deployment environment label for Sentry / Task Badger. Derived from the
+# settings module (set before settings load) rather than DEBUG: base.py defaults
+# DEBUG to True and production.py only flips it after this file is imported, so a
+# DEBUG-based default would freeze to "development" even under production settings.
+# An explicit SENTRY_ENVIRONMENT / TASKBADGER_ENVIRONMENT env var still wins.
+DEPLOY_ENVIRONMENT = (
+    "production"
+    if os.environ.get("DJANGO_SETTINGS_MODULE", "").endswith(".production")
+    else "development"
+)
 
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 
@@ -278,10 +290,7 @@ SENTRY_DSN = env("SENTRY_DSN", default="")
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
-        environment=env(
-            "SENTRY_ENVIRONMENT",
-            default="development" if DEBUG else "production",
-        ),
+        environment=env("SENTRY_ENVIRONMENT", default=DEPLOY_ENVIRONMENT),
         release=env("SENTRY_RELEASE", default="") or None,
         traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
         send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
@@ -289,10 +298,7 @@ if SENTRY_DSN:
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
-TASKBADGER_ENVIRONMENT = env(
-    "TASKBADGER_ENVIRONMENT",
-    default="development" if DEBUG else "production",
-)
+TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default=DEPLOY_ENVIRONMENT)
 
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")

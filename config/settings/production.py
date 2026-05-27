@@ -10,12 +10,6 @@ from .base import *
 
 DEBUG = False
 
-# Re-evaluate DEBUG-derived defaults that base.py froze before DEBUG was set to
-# False here. base.py defaults DEBUG to True, so any setting whose default keys
-# off DEBUG must be recomputed once production has flipped it. The env var still
-# wins when explicitly set.
-TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default="production")
-
 # Security settings
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
