@@ -51,6 +51,7 @@ env:
     - OCS_OAUTH_CLIENT_ID
     - OCS_OAUTH_CLIENT_SECRET
     - SENTRY_DSN
+    - TASKBADGER_API_KEY
 
 ssh:
   user: scout

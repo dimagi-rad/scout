@@ -1,4 +1,9 @@
+import logging
+
 from django.apps import AppConfig
+from django.conf import settings
+
+from config.taskbadger import init_taskbadger
 
 
 class WorkspacesConfig(AppConfig):
@@ -7,13 +12,11 @@ class WorkspacesConfig(AppConfig):
     verbose_name = "Workspaces"
 
     def ready(self):
-        import logging
-
-        from django.conf import settings
-
         cache_backend = settings.CACHES.get("default", {}).get("BACKEND", "")
         if "LocMemCache" in cache_backend:
             logging.getLogger("scout.config").warning(
                 "Using LocMemCache. "
                 "Rate limiting and caching will not work across multiple workers."
             )
+
+        init_taskbadger()

@@ -45,6 +45,9 @@ env:
     # the blind spot that hid the original ConnectError for two failed runs.
     - LANGFUSE_SECRET_KEY
     - LANGFUSE_PUBLIC_KEY
+    # Worker executes tasks and updates their Task Badger status; it also chains
+    # the resume task, so it defers (creates) Task Badger records too.
+    - TASKBADGER_API_KEY
 
 ssh:
   user: scout
