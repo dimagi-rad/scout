@@ -230,8 +230,6 @@ SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
     default={
         "commcare": ["dimagi.com"],
-        "commcare_connect": ["dimagi.com"],
-        "ocs": ["dimagi.com"],
     },
 )
 
