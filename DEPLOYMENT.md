@@ -74,9 +74,45 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 | `SCOUT_DB_CREDENTIAL_KEY` | Fernet key for DB credential encryption |
 | `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
 | `SCOUT_SENTRY_DSN` | Sentry DSN for the backend Django project (API, worker, MCP all share it) |
+| `SCOUT_TASKBADGER_API_KEY` | Task Badger project API key for background-job tracking (API + worker share it) |
 
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
+
+### Adding a new secret
+
+The chain runs AWS Secrets Manager → `.kamal/secrets` → `env.secret` in each Kamal
+config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
+
+1. **Store it in AWS Secrets Manager**, following the `SCOUT_*` naming convention:
+   ```bash
+   aws secretsmanager create-secret \
+     --name SCOUT_TASKBADGER_API_KEY \
+     --secret-string '<value>' \
+     --region us-east-1
+   ```
+   (Use `put-secret-value` instead of `create-secret` to rotate an existing one.)
+
+2. **Map it in `.kamal/secrets`** — fetch it from AWS, then extract it into the env
+   var name your app reads. Group related keys into one `fetch` call to cut AWS round-trips:
+   ```bash
+   TASKBADGER_SECRETS=$(kamal secrets fetch --adapter aws_secrets_manager SCOUT_TASKBADGER_API_KEY)
+   TASKBADGER_API_KEY=$(kamal secrets extract SCOUT_TASKBADGER_API_KEY $TASKBADGER_SECRETS)
+   ```
+
+3. **Reference it under `env.secret:`** in every Kamal config whose container needs it
+   (`config/deploy.yml`, `config/deploy-worker.yml`, `config/deploy-mcp.yml`):
+   ```yaml
+   env:
+     secret:
+       - TASKBADGER_API_KEY
+   ```
+
+4. **Verify and deploy.** `kamal secrets print` resolves the file locally so you can
+   confirm the value is non-empty before shipping; then redeploy the affected services.
+
+Only `env.secret` entries are injected from `.kamal/secrets`. Non-sensitive config goes
+in `env.clear` instead, written inline in the Kamal config (no AWS entry needed).
 
 ## Error monitoring (Sentry)
 
