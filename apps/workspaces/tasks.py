@@ -35,6 +35,11 @@ from mcp_server.services.materializer import (
     run_pipeline,
 )
 
+try:
+    from langfuse import Langfuse
+except ImportError:  # langfuse is an optional observability dependency
+    Langfuse = None
+
 # User-facing failure copy. The frontend renders these straight from the
 # checkpointer (apps/chat/thread_views.py:_load_thread_messages → AIMessage).
 RESUME_TIMEOUT_MESSAGE = (
@@ -545,14 +550,14 @@ async def _build_agent_for_resume(workspace, user):
 def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
     """Open a Langfuse span around the resume ainvoke. No-op when Langfuse is
     not configured so worker boots without LANGFUSE_* env vars stay quiet."""
+    if Langfuse is None:
+        return contextlib.nullcontext()
     secret_key = getattr(settings, "LANGFUSE_SECRET_KEY", "")
     public_key = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
     host = getattr(settings, "LANGFUSE_BASE_URL", "")
     if not all([secret_key, public_key, host]):
         return contextlib.nullcontext()
     try:
-        from langfuse import Langfuse
-
         client = Langfuse(secret_key=secret_key, public_key=public_key, host=host)
         return client.start_as_current_span(
             name="resume_thread_after_materialization",
