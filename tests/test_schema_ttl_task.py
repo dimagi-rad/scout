@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.utils import timezone
 
-from apps.workspaces.models import SchemaState, TenantSchema
+from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
 
 @pytest.fixture
@@ -77,6 +77,50 @@ async def test_teardown_schema_marks_expired_on_success(active_schema):
 
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.EXPIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_expire_inactive_schemas_marks_runs_stale(active_schema):
+    """When a schema is marked for teardown, its terminal data-bearing runs
+    (COMPLETED/PARTIAL) must be flipped to STALE so the catalog stops
+    returning ghost entries for tables that are about to be dropped.
+    """
+    active_schema.last_accessed_at = timezone.now() - timedelta(hours=25)
+    await active_schema.asave(update_fields=["last_accessed_at"])
+
+    # Create runs in various states to verify the filter is correct.
+    completed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+    partial_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.PARTIAL,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+    failed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.FAILED,
+    )
+
+    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+        from apps.workspaces.tasks import expire_inactive_schemas
+
+        await expire_inactive_schemas()
+
+    await completed_run.arefresh_from_db()
+    await partial_run.arefresh_from_db()
+    await failed_run.arefresh_from_db()
+
+    assert completed_run.state == MaterializationRun.RunState.STALE
+    assert partial_run.state == MaterializationRun.RunState.STALE
+    # FAILED runs are already terminal; the teardown task leaves them alone.
+    assert failed_run.state == MaterializationRun.RunState.FAILED
 
 
 @pytest.mark.asyncio

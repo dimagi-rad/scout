@@ -305,7 +305,10 @@ async def _fetch_multi_tenant_schema_context(workspace, user) -> str:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema__tenant_id__in=tenant_ids,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()

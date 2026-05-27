@@ -29,12 +29,15 @@ async def test_resume_appends_system_message_and_invokes_agent():
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t1")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=3003, tool_call_id="tc3",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=3003,
+        tool_call_id="tc3",
         state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=3003,
         result={"rows": 50000},
@@ -47,7 +50,8 @@ async def test_resume_appends_system_message_and_invokes_agent():
         AsyncMock(return_value=(mock_agent, {})),
     ):
         result = await resume_thread_after_materialization(
-            None, thread_job_id=str(tj.id),
+            None,
+            thread_job_id=str(tj.id),
         )
 
     assert result["status"] == "resumed"
@@ -73,18 +77,23 @@ async def test_resume_is_idempotent_when_already_claimed():
     user = await sync_to_async(User.objects.create_user)(email="b@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W2", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t2", provider="commcare", canonical_name="Test Tenant 2",
+        external_id="t2",
+        provider="commcare",
+        canonical_name="Test Tenant 2",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t2")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=4040, tool_call_id="tc4",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=4040,
+        tool_call_id="tc4",
         state=ThreadJob.State.COMPLETED,  # already terminal
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=4040,
     )
@@ -103,8 +112,10 @@ async def test_resume_no_runs_still_invokes_agent_with_explanation():
     ws = await sync_to_async(Workspace.objects.create)(name="W3", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=5050, tool_call_id="tc5",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=5050,
+        tool_call_id="tc5",
         state=ThreadJob.State.PENDING,
     )
     # No MaterializationRun rows for procrastinate_job_id=5050.
@@ -139,19 +150,24 @@ async def test_resume_partial_maps_to_failed():
     user = await sync_to_async(User.objects.create_user)(email="d@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W4", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t4", provider="commcare", canonical_name="Test Tenant 4",
+        external_id="t4",
+        provider="commcare",
+        canonical_name="Test Tenant 4",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t4")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=6060, tool_call_id="tc6",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=6060,
+        tool_call_id="tc6",
         state=ThreadJob.State.PENDING,
     )
     # One run still in LOADING — triggers "partial" aggregate status.
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=6060,
     )
@@ -178,20 +194,26 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
     user = await sync_to_async(User.objects.create_user)(email="f@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-cancel-resume", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t-cancel", provider="commcare", canonical_name="Cancel Tenant",
+        external_id="t-cancel",
+        provider="commcare",
+        canonical_name="Cancel Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(
-        tenant=tenant, schema_name="s_cancel",
+        tenant=tenant,
+        schema_name="s_cancel",
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=7777, tool_call_id="tc-cancel",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7777,
+        tool_call_id="tc-cancel",
         state=ThreadJob.State.CANCELLED,  # Cancelled BEFORE resume runs
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.CANCELLED,
         procrastinate_job_id=7777,
     )
@@ -203,7 +225,8 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
         AsyncMock(return_value=(mock_agent, {})),
     ):
         result = await resume_thread_after_materialization(
-            None, thread_job_id=str(tj.id),
+            None,
+            thread_job_id=str(tj.id),
         )
 
     assert result["status"] == "resumed"
@@ -231,12 +254,15 @@ async def test_resume_bumps_thread_updated_at_on_success():
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t5")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=7070, tool_call_id="tc7",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7070,
+        tool_call_id="tc7",
         state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=7070,
         result={"rows": 1000},
@@ -273,18 +299,23 @@ async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
     user = await sync_to_async(User.objects.create_user)(email="race@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-race", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t-race", provider="commcare", canonical_name="Race Tenant",
+        external_id="t-race",
+        provider="commcare",
+        canonical_name="Race Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_race")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=8484, tool_call_id="tc-race",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=8484,
+        tool_call_id="tc-race",
         state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=8484,
     )
@@ -324,20 +355,25 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
     user = await sync_to_async(User.objects.create_user)(email="stale@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-stale", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t-stale", provider="commcare", canonical_name="Stale Tenant",
+        external_id="t-stale",
+        provider="commcare",
+        canonical_name="Stale Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_stale")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=9595, tool_call_id="tc-stale",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=9595,
+        tool_call_id="tc-stale",
         # ThreadJob got flipped to CANCELLED by a late Stop click,
         # but the runs already completed before the cancel landed.
         state=ThreadJob.State.CANCELLED,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=9595,
         result={"rows": 1234},
@@ -362,24 +398,94 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
+    """A PARTIAL MaterializationRun must surface per-source state in the
+    resume prompt so the agent can disclose what failed.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="psrc@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-psrc", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-psrc",
+        provider="commcare_connect",
+        canonical_name="Conn Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant,
+        schema_name="s_psrc",
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=12345,
+        tool_call_id="tc-psrc",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_connect",
+        state=MaterializationRun.RunState.PARTIAL,
+        procrastinate_job_id=12345,
+        result={
+            "pipeline": "commcare_connect",
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "completed", "rows": 98869},
+                "completed_works": {
+                    "state": "failed",
+                    "rows": 0,
+                    "error": "RuntimeError: Connect 500",
+                },
+                "payments": {"state": "skipped", "rows": 0},
+            },
+        },
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    # The prompt must call out PARTIAL state and include per-source detail.
+    assert "PARTIAL" in body or "partial" in body
+    # Per-source state must be present so the agent knows what's queryable.
+    assert "completed_works" in body
+    assert "failed" in body
+    # And the resume terminal state for partial is FAILED (matches existing behavior).
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_resume_cas_rejects_already_running_threadjob():
     """If a ThreadJob is already in RUNNING state (a concurrent resume
     claimed it first), a second invocation must NOT proceed to ainvoke."""
     user = await sync_to_async(User.objects.create_user)(email="cas@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-cas", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t-cas", provider="commcare", canonical_name="CAS Tenant",
+        external_id="t-cas",
+        provider="commcare",
+        canonical_name="CAS Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_cas")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=24680, tool_call_id="tc-cas",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=24680,
+        tool_call_id="tc-cas",
         state=ThreadJob.State.RUNNING,  # already-running; simulates a concurrent claim
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.COMPLETED,
         procrastinate_job_id=24680,
     )
@@ -391,7 +497,8 @@ async def test_resume_cas_rejects_already_running_threadjob():
         AsyncMock(return_value=(mock_agent, {})),
     ):
         result = await resume_thread_after_materialization(
-            None, thread_job_id=str(tj.id),
+            None,
+            thread_job_id=str(tj.id),
         )
 
     assert result["status"] == "already_claimed"

@@ -148,7 +148,10 @@ async def list_tables(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema=ts,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()
@@ -196,7 +199,10 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
             last_run = (
                 await MaterializationRun.objects.filter(
                     tenant_schema=ts,
-                    state=MaterializationRun.RunState.COMPLETED,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
                 )
                 .order_by("-completed_at")
                 .afirst()
@@ -251,7 +257,10 @@ async def get_metadata(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema=ts,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()
@@ -508,7 +517,6 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     return memberships, None
 
 
-
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -602,9 +610,7 @@ async def run_materialization(
             )
         except Exception:
             logger.exception("Failed to dispatch materialize_workspace task")
-            tc["result"] = error_response(
-                INTERNAL_ERROR, "Failed to dispatch materialization task"
-            )
+            tc["result"] = error_response(INTERNAL_ERROR, "Failed to dispatch materialization task")
             return tc["result"]
         job_id = getattr(job, "id", job) if not isinstance(job, int) else job
 
@@ -633,8 +639,7 @@ async def run_materialization(
                 "status": "started",
                 "thread_job_id": str(tj.id),
                 "message": (
-                    "Materialization started in background. "
-                    "I'll continue when it finishes."
+                    "Materialization started in background. I'll continue when it finishes."
                 ),
             },
             schema="",
@@ -696,7 +701,10 @@ async def get_schema_status(workspace_id: str = "") -> dict:
             last_run = (
                 await MaterializationRun.objects.filter(
                     tenant_schema=ts,
-                    state=MaterializationRun.RunState.COMPLETED,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
                 )
                 .order_by("-completed_at")
                 .afirst()
@@ -741,7 +749,10 @@ async def get_schema_status(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema__tenant_id__in=tenant_ids,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()
