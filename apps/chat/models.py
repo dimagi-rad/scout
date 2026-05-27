@@ -70,17 +70,19 @@ class ThreadJob(models.Model):
     ACTIVE_STATES = frozenset({State.PENDING, State.RUNNING})
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    thread = models.ForeignKey(
-        "chat.Thread", on_delete=models.CASCADE, related_name="jobs"
-    )
+    thread = models.ForeignKey("chat.Thread", on_delete=models.CASCADE, related_name="jobs")
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     procrastinate_job_id = models.BigIntegerField(unique=True, db_index=True)
     tool_call_id = models.CharField(max_length=64)
-    state = models.CharField(
-        max_length=16, choices=State.choices, default=State.PENDING
-    )
+    state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    # Human-readable failure summary populated on FAILED/CANCELLED transitions
+    # so the frontend can render an inline error card after the spinner clears.
+    # Composed from MaterializationRun.result["sources"] when available, or a
+    # generic string when the failure has no per-source detail (e.g. agent
+    # ainvoke crash, janitor stuck-job flip).
+    error_summary = models.TextField(blank=True, default="")
 
     class Meta:
         indexes = [

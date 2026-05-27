@@ -125,7 +125,12 @@ export function ChatPanel() {
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
 
-  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
+  const {
+    jobsByThreadId,
+    recentlyCompletedThreadIds,
+    recentTerminationsByToolCallId,
+    notifyJobLikelyStarted,
+  } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,
@@ -315,7 +320,10 @@ export function ChatPanel() {
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
             workspaceId={activeDomainId ?? undefined}
+            threadId={threadId}
             activeMaterializationJob={activeMaterializationJob}
+            recentTerminationsByToolCallId={recentTerminationsByToolCallId}
+            onRetryDispatched={notifyJobLikelyStarted}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}

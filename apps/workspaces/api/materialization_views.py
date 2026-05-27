@@ -1,15 +1,18 @@
-"""Async API views for materialization lifecycle (cancel)."""
+"""Async API views for materialization lifecycle (cancel, retry)."""
 
+import contextlib
+import json
 import logging
 from datetime import UTC, datetime
 
 from django.http import JsonResponse
 from procrastinate.contrib.django.procrastinate_app import current_app
 
-from apps.chat.models import ThreadJob
+from apps.chat.models import Thread, ThreadJob
 from apps.users.decorators import async_login_required
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
+from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -42,9 +45,7 @@ async def materialization_cancel_view(request, workspace_id):
 
     active_runs = [
         r
-        async for r in MaterializationRun.objects.select_related(
-            "tenant_schema__tenant"
-        ).filter(
+        async for r in MaterializationRun.objects.select_related("tenant_schema__tenant").filter(
             tenant_schema__tenant__in=workspace.tenants.all(),
             state__in=list(MaterializationRun.ACTIVE_STATES),
         )
@@ -105,14 +106,107 @@ async def materialization_cancel_view(request, workspace_id):
         for procrastinate_job_id in orphan_job_ids:
             try:
                 await current_app.job_manager.cancel_job_by_id_async(
-                    procrastinate_job_id, abort=True,
+                    procrastinate_job_id,
+                    abort=True,
                 )
             except Exception:
                 logger.warning(
-                    "Failed to abort procrastinate job %s", procrastinate_job_id,
+                    "Failed to abort procrastinate job %s",
+                    procrastinate_job_id,
                     exc_info=True,
                 )
 
     if total == 0:
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
     return JsonResponse({"status": "cancelled", "runs_cancelled": total})
+
+
+@async_login_required
+async def materialization_retry_view(request, workspace_id):
+    """POST /api/workspaces/<workspace_id>/materialize/retry/
+
+    Dispatch a fresh ``materialize_workspace`` job without going through the
+    agent and (optionally) bind a new ThreadJob to the supplied ``thread_id``
+    so the existing resume mechanism fires when the new run finishes.
+
+    Body: ``{"thread_id": "<uuid>", "tool_call_id": "<id>"}`` — both optional.
+    Without ``thread_id`` we simply dispatch the materialization (no chat
+    resume). With ``thread_id``, a fresh ThreadJob is created and the resume
+    task picks up the new run when it finishes.
+
+    The retry is idempotent on the frontend (button disabled while pending);
+    on the backend we deduplicate against any ACTIVE ThreadJob for the
+    supplied thread before dispatching.
+    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return err
+
+    try:
+        payload = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+    thread_id = payload.get("thread_id") or ""
+    tool_call_id = payload.get("tool_call_id") or ""
+
+    # Validate the supplied thread belongs to this user + workspace before we
+    # bind anything to it. Without this an attacker who knows another user's
+    # thread_id could attach a materialization to it.
+    if thread_id:
+        thread = await Thread.objects.filter(
+            id=thread_id,
+            user=user,
+            workspace=workspace,
+        ).afirst()
+        if thread is None:
+            return JsonResponse({"error": "thread not found in this workspace"}, status=404)
+        # Dedupe: if there is already a materialization in flight for this
+        # thread, return its identity so the frontend can re-bind without
+        # double-dispatching. Mirrors the MCP run_materialization tool's
+        # in-flight guard.
+        existing = await ThreadJob.objects.filter(
+            thread_id=thread_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).afirst()
+        if existing is not None:
+            return JsonResponse(
+                {
+                    "status": "already_in_progress",
+                    "thread_job_id": str(existing.id),
+                }
+            )
+
+    try:
+        job = await materialize_workspace.defer_async(
+            workspace_id=str(workspace.id),
+            user_id=str(user.id),
+        )
+    except Exception:
+        logger.exception("materialization_retry_view: failed to dispatch")
+        return JsonResponse({"error": "Failed to dispatch materialization"}, status=500)
+    job_id = getattr(job, "id", job) if not isinstance(job, int) else job
+
+    if not thread_id:
+        return JsonResponse({"status": "started", "procrastinate_job_id": job_id})
+
+    try:
+        tj = await ThreadJob.objects.acreate(
+            thread_id=thread_id,
+            job_type=ThreadJob.JobType.MATERIALIZATION,
+            procrastinate_job_id=job_id,
+            tool_call_id=tool_call_id,
+            state=ThreadJob.State.PENDING,
+        )
+    except Exception:
+        logger.exception("materialization_retry_view: failed to create ThreadJob")
+        # Best-effort: cancel the dispatched job so we don't leak background work.
+        with contextlib.suppress(Exception):
+            await current_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+        return JsonResponse({"error": "Failed to track retry job"}, status=500)
+
+    return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
