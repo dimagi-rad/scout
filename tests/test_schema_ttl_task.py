@@ -81,15 +81,43 @@ async def test_teardown_schema_marks_expired_on_success(active_schema):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_expire_inactive_schemas_marks_runs_stale(active_schema):
-    """When a schema is marked for teardown, its terminal data-bearing runs
-    (COMPLETED/PARTIAL) must be flipped to STALE so the catalog stops
-    returning ghost entries for tables that are about to be dropped.
+async def test_expire_inactive_schemas_does_not_stale_runs_before_drop(active_schema):
+    """expire_inactive_schemas only flips the schema to TEARDOWN and dispatches
+    teardown_schema. It must NOT touch the data-bearing runs: the STALE flip is
+    deferred to teardown_schema, which runs it only after the physical DROP
+    succeeds. A schema in TEARDOWN is already unreachable via the catalog, so
+    leaving the runs terminal here is both harmless and necessary (it lets the
+    catalog recover the data intact if teardown later fails and reverts ACTIVE).
     """
     active_schema.last_accessed_at = timezone.now() - timedelta(hours=25)
     await active_schema.asave(update_fields=["last_accessed_at"])
 
-    # Create runs in various states to verify the filter is correct.
+    completed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+
+    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+        from apps.workspaces.tasks import expire_inactive_schemas
+
+        await expire_inactive_schemas()
+
+    await active_schema.arefresh_from_db()
+    await completed_run.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+    # The run is still terminal — NOT staled until the DROP actually happens.
+    assert completed_run.state == MaterializationRun.RunState.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_marks_runs_stale_on_success(active_schema):
+    """After the physical DROP succeeds, the data-bearing runs (COMPLETED/PARTIAL)
+    must be flipped to STALE so the catalog stops returning ghost entries for
+    tables that no longer exist. CANCELLED/FAILED runs are left alone.
+    """
     completed_run = await MaterializationRun.objects.acreate(
         tenant_schema=active_schema,
         pipeline="commcare_sync",
@@ -108,10 +136,11 @@ async def test_expire_inactive_schemas_marks_runs_stale(active_schema):
         state=MaterializationRun.RunState.FAILED,
     )
 
-    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
-        from apps.workspaces.tasks import expire_inactive_schemas
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.return_value = None
+        from apps.workspaces.tasks import teardown_schema
 
-        await expire_inactive_schemas()
+        await teardown_schema(schema_id=str(active_schema.id))
 
     await completed_run.arefresh_from_db()
     await partial_run.arefresh_from_db()
@@ -119,7 +148,6 @@ async def test_expire_inactive_schemas_marks_runs_stale(active_schema):
 
     assert completed_run.state == MaterializationRun.RunState.STALE
     assert partial_run.state == MaterializationRun.RunState.STALE
-    # FAILED runs are already terminal; the teardown task leaves them alone.
     assert failed_run.state == MaterializationRun.RunState.FAILED
 
 
@@ -138,3 +166,88 @@ async def test_teardown_schema_rolls_back_to_active_on_failure(active_schema):
 
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_leaves_runs_terminal_when_drop_fails(active_schema):
+    """Regression: a failed DROP must NOT leave the data-bearing runs STALE.
+
+    The physical schema is still present and the record reverts to ACTIVE, so
+    the runs must remain COMPLETED/PARTIAL — otherwise pipeline_list_tables
+    (which filters runs to COMPLETED/PARTIAL) returns [] for an ACTIVE schema
+    whose data is fully intact, and the user sees an empty workspace.
+    """
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    completed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+    partial_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.PARTIAL,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.side_effect = RuntimeError("DB error")
+        from apps.workspaces.tasks import teardown_schema
+
+        with pytest.raises(RuntimeError):
+            await teardown_schema(schema_id=str(active_schema.id))
+
+    await active_schema.arefresh_from_db()
+    await completed_run.arefresh_from_db()
+    await partial_run.arefresh_from_db()
+
+    # Schema is back to ACTIVE and the runs are still surfaced by the catalog.
+    assert active_schema.state == SchemaState.ACTIVE
+    assert completed_run.state == MaterializationRun.RunState.COMPLETED
+    assert partial_run.state == MaterializationRun.RunState.PARTIAL
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_expire_then_failed_teardown_keeps_data_visible(active_schema):
+    """Regression for the original defect: run the full expire -> teardown flow
+    and let the DROP fail. The schema must revert to ACTIVE with its data-bearing
+    runs still terminal, so the catalog (which filters runs to COMPLETED/PARTIAL)
+    keeps surfacing the intact data rather than returning an empty workspace.
+    """
+    active_schema.last_accessed_at = timezone.now() - timedelta(hours=25)
+    await active_schema.asave(update_fields=["last_accessed_at"])
+
+    completed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+
+    from apps.workspaces.tasks import expire_inactive_schemas, teardown_schema
+
+    # Step 1: the periodic janitor flips the schema to TEARDOWN and dispatches
+    # teardown_schema (dispatch is mocked; we invoke the task directly below).
+    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+        await expire_inactive_schemas()
+
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.TEARDOWN
+
+    # Step 2: the DROP fails transiently. The schema reverts to ACTIVE.
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.side_effect = RuntimeError("lock conflict")
+        with pytest.raises(RuntimeError):
+            await teardown_schema(schema_id=str(active_schema.id))
+
+    await active_schema.arefresh_from_db()
+    await completed_run.arefresh_from_db()
+
+    # Data is intact and still visible to the catalog.
+    assert active_schema.state == SchemaState.ACTIVE
+    assert completed_run.state == MaterializationRun.RunState.COMPLETED

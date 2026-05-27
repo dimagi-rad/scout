@@ -318,9 +318,13 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
     Handles both TenantSchema and WorkspaceViewSchema records.
     Schemas with null last_accessed_at are never auto-expired.
 
-    When a TenantSchema is marked for teardown, its terminal MaterializationRun
-    rows (COMPLETED/PARTIAL) are flipped to STALE so the catalog stops returning
-    table entries whose underlying physical tables are about to be dropped.
+    The data-bearing MaterializationRun rows are NOT touched here. A schema in
+    TEARDOWN is already unreachable via the catalog (load_tenant_context only
+    resolves ACTIVE/MATERIALIZING schemas), so flipping runs to STALE before the
+    physical DROP succeeds buys nothing — and if teardown_schema later fails the
+    DROP and reverts the schema to ACTIVE, prematurely-staled runs would strand
+    the (still-present) data as invisible. teardown_schema marks the runs STALE
+    only after manager.teardown actually drops the schema.
 
     `timestamp` is supplied by the procrastinate periodic deferrer; the default
     lets tests invoke this task directly.
@@ -334,17 +338,6 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
     ):
         schema.state = SchemaState.TEARDOWN
         await schema.asave(update_fields=["state"])
-        # Mark all data-bearing runs STALE so pipeline_list_tables stops
-        # returning ghost entries between the TEARDOWN flip and the actual
-        # DROP SCHEMA. CANCELLED/FAILED runs are already terminal and excluded
-        # from the catalog query, so they're left alone.
-        await MaterializationRun.objects.filter(
-            tenant_schema=schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        ).aupdate(state=MaterializationRun.RunState.STALE)
         await teardown_schema.defer_async(schema_id=str(schema.id))
 
     # Expire stale view schemas
@@ -426,10 +419,27 @@ async def teardown_schema(schema_id: str) -> None:
         # teardown() only raises when DROP SCHEMA itself fails — role-cleanup
         # failures are logged and swallowed there — so reaching this branch
         # means the physical schema is still present and the record should go
-        # back to ACTIVE rather than being stranded in TEARDOWN.
+        # back to ACTIVE rather than being stranded in TEARDOWN. The
+        # data-bearing runs are deliberately left in their terminal
+        # COMPLETED/PARTIAL state: the physical tables still exist, so the
+        # catalog must keep surfacing them once the schema is ACTIVE again.
         schema.state = SchemaState.ACTIVE
         await schema.asave(update_fields=["state"])
         raise
+
+    # The physical schema (and its tables) is now dropped. Flip the data-bearing
+    # runs to STALE so pipeline_list_tables stops returning ghost entries for
+    # tables that no longer exist. This is done here — after the DROP succeeds —
+    # rather than at TEARDOWN-flip time, so a failed DROP never strands intact
+    # data as invisible. CANCELLED/FAILED runs are already terminal and excluded
+    # from the catalog query, so they're left alone.
+    await MaterializationRun.objects.filter(
+        tenant_schema=schema,
+        state__in=[
+            MaterializationRun.RunState.COMPLETED,
+            MaterializationRun.RunState.PARTIAL,
+        ],
+    ).aupdate(state=MaterializationRun.RunState.STALE)
 
     try:
         schema.state = SchemaState.EXPIRED
