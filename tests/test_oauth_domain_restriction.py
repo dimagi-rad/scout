@@ -17,8 +17,8 @@ class TestAllowedEmailDomainsSetting:
     def test_setting_exists_and_is_dict(self):
         assert isinstance(settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS, dict)
 
-    def test_default_restricts_three_providers_to_dimagi_com(self):
-        expected_providers = {"commcare", "commcare_connect", "ocs"}
+    def test_default_restricts_providers_to_dimagi_com(self):
+        expected_providers = {"commcare"}
         actual = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS
         assert set(actual.keys()) == expected_providers
         for provider, domains in actual.items():
