@@ -66,13 +66,15 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
         {
             "name": "cases",
             "description": "CommCare cases",
-            "row_count": 1000,
+            "materialized_row_count": 1000,
+            "row_count_verified": False,
             "materialized_at": "2026-03-02T10:00:00",
         },
         {
             "name": "forms",
             "description": "CommCare forms",
-            "row_count": 500,
+            "materialized_row_count": 500,
+            "row_count_verified": False,
             "materialized_at": "2026-03-02T10:00:00",
         },
     ]
@@ -118,7 +120,8 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
         {
             "name": "cases",
             "description": "CommCare cases",
-            "row_count": 100,
+            "materialized_row_count": 100,
+            "row_count_verified": False,
             "materialized_at": "2026-03-02T10:00:00",
         },
     ]
@@ -344,10 +347,30 @@ async def test_fetch_multi_tenant_active_with_tables(mock_multi_workspace, mock_
     completed_run.completed_at.isoformat.return_value = "2026-05-22T10:00:00"
 
     tables = [
-        {"name": "tenant_a__raw_cases", "type": "view", "row_count": None},
-        {"name": "tenant_a__raw_forms", "type": "view", "row_count": None},
-        {"name": "tenant_b__raw_cases", "type": "view", "row_count": None},
-        {"name": "tenant_b__raw_forms", "type": "view", "row_count": None},
+        {
+            "name": "tenant_a__raw_cases",
+            "type": "view",
+            "materialized_row_count": None,
+            "row_count_verified": False,
+        },
+        {
+            "name": "tenant_a__raw_forms",
+            "type": "view",
+            "materialized_row_count": None,
+            "row_count_verified": False,
+        },
+        {
+            "name": "tenant_b__raw_cases",
+            "type": "view",
+            "materialized_row_count": None,
+            "row_count_verified": False,
+        },
+        {
+            "name": "tenant_b__raw_forms",
+            "type": "view",
+            "materialized_row_count": None,
+            "row_count_verified": False,
+        },
     ]
 
     with (

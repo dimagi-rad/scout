@@ -91,12 +91,16 @@ class TestPipelineListTables:
         assert len(result) == 2
         cases = next(t for t in result if t["name"] == "raw_cases")
         assert cases["description"] == "CommCare case records"
-        assert cases["row_count"] == 4823
+        assert cases["materialized_row_count"] == 4823
+        assert cases["row_count_verified"] is False
         assert cases["materialized_at"] == completed_at.isoformat()
         assert cases["type"] == "table"
+        # Legacy field name must no longer be emitted — the agent must not be
+        # able to read it as a verified count.
+        assert "row_count" not in cases
 
     @pytest.mark.asyncio
-    async def test_includes_dbt_models_with_null_row_count(self):
+    async def test_includes_dbt_models_with_null_materialized_row_count(self):
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
@@ -127,7 +131,8 @@ class TestPipelineListTables:
         assert "stg_cases" in names
         assert "stg_forms" in names
         stg = next(t for t in result if t["name"] == "stg_cases")
-        assert stg["row_count"] is None
+        assert stg["materialized_row_count"] is None
+        assert stg["row_count_verified"] is False
         assert stg["materialized_at"] == completed_at.isoformat()
 
     @pytest.mark.asyncio
