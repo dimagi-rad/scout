@@ -2,10 +2,13 @@
 
 import logging
 
+from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
+from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
+from apps.users.services.merge import merge_users
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -73,3 +76,60 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
         except Exception:
             logger.warning("Failed to resolve CommCare domains after OAuth", exc_info=True)
+
+
+def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
+    """Bridge the gap where allauth's _lookup_by_socialaccount short-circuits.
+
+    When an existing OAuth user logs in and the provider now returns an email
+    that the User row doesn't yet have, either backfill it or merge into the
+    user that already owns that email.
+    """
+    new_email = sociallogin.account.extra_data.get("email")
+    if not new_email:
+        return
+    user = sociallogin.user
+    if user.pk is None:
+        return  # brand-new user; allauth's _lookup_by_email handles it
+    if user.email:
+        return  # already has an email — nothing to reconcile
+
+    UserModel = get_user_model()
+    canonical = UserModel.objects.filter(email__iexact=new_email).exclude(pk=user.pk).first()
+    if canonical is None:
+        user.email = new_email
+        user.save(update_fields=["email"])
+        return
+
+    canonical_owns_email = EmailAddress.objects.filter(
+        user=canonical,
+        email__iexact=new_email,
+        verified=True,
+    ).exists()
+    if not canonical_owns_email:
+        logger.warning(
+            "Refusing auto-merge: canonical user=%s lacks verified EmailAddress for %s",
+            canonical.pk,
+            new_email,
+        )
+        return
+
+    original_pk = user.pk
+    try:
+        merge_users(canonical=canonical, duplicate=user)
+    except Exception:
+        logger.exception(
+            "Auto-merge failed for user=%s into canonical=%s",
+            original_pk,
+            canonical.pk,
+        )
+        return
+    sociallogin.user = canonical
+    sociallogin.account.user = canonical
+    logger.info(
+        "auto-merge: user=%s into canonical=%s email=%s provider=%s",
+        original_pk,
+        canonical.pk,
+        new_email,
+        sociallogin.account.provider,
+    )
