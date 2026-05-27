@@ -13,6 +13,7 @@ import logging
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialToken
+from allauth.socialaccount.providers import registry as providers_registry
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
 from django.contrib import messages
@@ -93,10 +94,12 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         if domain in allowed_lower:
             return
 
+        provider_class = providers_registry.get_class(provider)
+        provider_name = provider_class.name if provider_class else provider
         messages.error(
             request,
             "Sign-in with this account is not permitted. "
-            f"Login using '{provider.title}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
+            f"Login using '{provider_name}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
         )
         raise ImmediateHttpResponse(redirect("account_login"))
 
