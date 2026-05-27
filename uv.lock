@@ -2864,7 +2864,7 @@ requires-dist = [
     { name = "sentry-sdk", extras = ["django"], specifier = ">=2.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "sqlglot", specifier = ">=25.0" },
-    { name = "taskbadger", specifier = ">=2.1.0a1" },
+    { name = "taskbadger", specifier = ">=2.1.0a2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "whitenoise", specifier = ">=6.12.0" },
 ]
@@ -3080,7 +3080,7 @@ wheels = [
 
 [[package]]
 name = "taskbadger"
-version = "2.1.0a1"
+version = "2.1.0a2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
@@ -3088,9 +3088,9 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "tomlkit" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7a/5c/d9931d3c811922aa68776449f4d69bdca1111a14000710d3e292f5604a91/taskbadger-2.1.0a1.tar.gz", hash = "sha256:cb04ce1cf2b735a69517a75f56f5a581c8eb7f269244fdbaaa1e5bb416493c2d", size = 36709, upload-time = "2026-05-26T10:08:18.754Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/e9/0f847eb40e00dbf82e9a791bef0024ccf25f9464fea7a38b32bdf5e4b826/taskbadger-2.1.0a2.tar.gz", hash = "sha256:a356f9f3478692d1e5caca6a448aaf9b9bc5084b26457665faa8d98f4ab64876", size = 37215, upload-time = "2026-05-26T18:30:13.909Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/eb/3293edfa11b58621b7a7ad6457955d73b2d8635200fa79111158d2de97f8/taskbadger-2.1.0a1-py3-none-any.whl", hash = "sha256:ff13e7fb0b87242fd38453f0f4408083fa4f21b21bfd84937fc22cd121bcc9ef", size = 67169, upload-time = "2026-05-26T10:08:17.343Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/5c/c5ac955bddf683ecae6478e337db49fde98cf85023f4219e7dcb256c192e/taskbadger-2.1.0a2-py3-none-any.whl", hash = "sha256:b28bfe80573b83b9d361113982c0b48c98b2daf2b8db3707566ea1bd5a24747b", size = 67664, upload-time = "2026-05-26T18:30:15.121Z" },
 ]
 
 [[package]]
