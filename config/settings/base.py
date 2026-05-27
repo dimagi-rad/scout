@@ -283,6 +283,13 @@ if SENTRY_DSN:
         send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
     )
 
+# Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
+TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
+TASKBADGER_ENVIRONMENT = env(
+    "TASKBADGER_ENVIRONMENT",
+    default="development" if DEBUG else "production",
+)
+
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
