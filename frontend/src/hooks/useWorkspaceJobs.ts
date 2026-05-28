@@ -102,7 +102,7 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
   const recentTerminationsByToolCallId = state.recentTerminations.reduce<
     Record<string, RecentTermination>
   >((acc, t) => {
-    if (t.tool_call_id) acc[t.tool_call_id] = t
+    if (t.tool_call_id && !acc[t.tool_call_id]) acc[t.tool_call_id] = t
     return acc
   }, {})
 
