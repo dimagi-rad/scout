@@ -280,6 +280,12 @@ DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 
+# Hard ceiling on the materialization-resume agent.ainvoke. The agent's
+# recursion_limit is 50; 120s is generous for any sane follow-up response.
+# Beyond this, the user sees a synthetic "took too long" message instead of
+# a forever-spinner. Override per-test to exercise the timeout path.
+AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=120)
+
 # Langfuse observability (optional)
 LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
 LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")

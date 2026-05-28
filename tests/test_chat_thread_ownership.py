@@ -36,35 +36,38 @@ async def _csrf_client(email, password):
 async def test_chat_rejects_foreign_thread_id():
     """A user cannot inject content into another user's thread by passing
     that thread's UUID in the request body."""
-    owner = await sync_to_async(User.objects.create_user)(
-        email="owner-oth@b.c", password="x"
-    )
-    attacker = await sync_to_async(User.objects.create_user)(
-        email="attacker-oth@b.c", password="x"
-    )
+    owner = await sync_to_async(User.objects.create_user)(email="owner-oth@b.c", password="x")
+    attacker = await sync_to_async(User.objects.create_user)(email="attacker-oth@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-attack", created_by=owner)
     tenant = await sync_to_async(Tenant.objects.create)(
         external_id="t-attack", provider="commcare", canonical_name="Attack Tenant"
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=owner, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=owner,
+        role=WorkspaceRole.READ_WRITE,
     )
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=attacker, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=attacker,
+        role=WorkspaceRole.READ_WRITE,
     )
     owners_thread = await sync_to_async(Thread.objects.create)(
-        workspace=ws, user=owner,
+        workspace=ws,
+        user=owner,
     )
 
     client = await _csrf_client("attacker-oth@b.c", "x")
     resp = await client.post(
         "/api/chat/",
-        data=json.dumps({
-            "messages": [{"role": "user", "content": "inject content"}],
-            "workspaceId": str(ws.id),
-            "threadId": str(owners_thread.id),
-        }),
+        data=json.dumps(
+            {
+                "messages": [{"role": "user", "content": "inject content"}],
+                "workspaceId": str(ws.id),
+                "threadId": str(owners_thread.id),
+            }
+        ),
         content_type="application/json",
     )
     # Must be rejected — 404 hides thread existence, 403 from earlier guards also acceptable
@@ -78,16 +81,16 @@ async def test_chat_rejects_foreign_thread_id():
 @pytest.mark.django_db(transaction=True)
 async def test_chat_allows_own_thread_id():
     """A user can attach a turn to their own thread without rejection."""
-    user = await sync_to_async(User.objects.create_user)(
-        email="own-thread@b.c", password="x"
-    )
+    user = await sync_to_async(User.objects.create_user)(email="own-thread@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-own", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
         external_id="t-own", provider="commcare", canonical_name="Own Tenant"
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     own_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
 
@@ -96,11 +99,15 @@ async def test_chat_allows_own_thread_id():
     # on the ownership check.
     resp = await client.post(
         "/api/chat/",
-        data=json.dumps({
-            "messages": [{"role": "user", "content": "hello"},],
-            "workspaceId": str(ws.id),
-            "threadId": str(own_thread.id),
-        }),
+        data=json.dumps(
+            {
+                "messages": [
+                    {"role": "user", "content": "hello"},
+                ],
+                "workspaceId": str(ws.id),
+                "threadId": str(own_thread.id),
+            }
+        ),
         content_type="application/json",
     )
     # Must NOT be 404 from thread-ownership check
@@ -116,11 +123,14 @@ async def test_upsert_thread_bumps_updated_at_on_subsequent_turn():
     updated_at frozen at thread creation — breaking sidebar ordering and
     the "newer than last_viewed" green-dot indicator."""
     user = await sync_to_async(User.objects.create_user)(
-        email="updated-at@b.c", password="x",
+        email="updated-at@b.c",
+        password="x",
     )
     ws = await sync_to_async(Workspace.objects.create)(name="W-updated", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t-up", provider="commcare", canonical_name="Up Tenant",
+        external_id="t-up",
+        provider="commcare",
+        canonical_name="Up Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
 
