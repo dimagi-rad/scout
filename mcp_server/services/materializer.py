@@ -1196,47 +1196,52 @@ _CONNECT_USERS_INSERT = psql.SQL(
 _CONNECT_COMPLETED_WORKS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_completed_works
-        (username, opportunity_id, payment_unit_id, status, last_modified,
+        (id, username, opportunity_id, payment_unit_id, status, last_modified,
          entity_id, entity_name, reason, status_modified_date, payment_date,
          date_created, saved_completed_count, saved_approved_count,
          saved_payment_accrued, saved_payment_accrued_usd,
          saved_org_payment_accrued, saved_org_payment_accrued_usd)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
     """
 )
 
 _CONNECT_PAYMENTS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_payments
-        (username, opportunity_id, created_at, amount, amount_usd, date_paid,
+        (id, username, opportunity_id, created_at, amount, amount_usd, date_paid,
          payment_unit, confirmed, confirmation_date, organization, invoice_id,
          payment_method, payment_operator)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
     """
 )
 
 _CONNECT_INVOICES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_invoices
-        (opportunity_id, amount, amount_usd, date, invoice_number,
+        (id, opportunity_id, amount, amount_usd, date, invoice_number,
          service_delivery, exchange_rate)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
     """
 )
 
 _CONNECT_ASSESSMENTS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_assessments
-        (username, app, opportunity_id, date, score, passing_score, passed)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
+        (id, username, app, opportunity_id, date, score, passing_score, passed)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
     """
 )
 
 _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_completed_modules
-        (username, module, opportunity_id, date, duration)
-    VALUES (%s, %s, %s, %s, %s)
+        (id, username, module, opportunity_id, date, duration)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (id) DO NOTHING
     """
 )
 
@@ -1500,6 +1505,7 @@ def _write_connect_completed_works(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_completed_works (
+            id BIGINT PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
             payment_unit_id BIGINT,
@@ -1533,6 +1539,7 @@ def _write_connect_completed_works(
             rows_total = page_total
         rows = [
             (
+                r.get("id"),
                 r.get("username", ""),
                 r.get("opportunity_id"),
                 r.get("payment_unit_id"),
@@ -1592,6 +1599,7 @@ def _write_connect_payments(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_payments (
+            id BIGINT PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
             created_at TIMESTAMPTZ,
@@ -1621,6 +1629,7 @@ def _write_connect_payments(
             rows_total = page_total
         rows = [
             (
+                r.get("id"),
                 r.get("username", ""),
                 r.get("opportunity_id"),
                 r.get("created_at"),
@@ -1677,6 +1686,7 @@ def _write_connect_invoices(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_invoices (
+            id BIGINT PRIMARY KEY,
             opportunity_id BIGINT,
             amount NUMERIC(14, 2),
             amount_usd NUMERIC(14, 2),
@@ -1700,6 +1710,7 @@ def _write_connect_invoices(
             rows_total = page_total
         rows = [
             (
+                r.get("id"),
                 r.get("opportunity_id"),
                 r.get("amount"),
                 r.get("amount_usd"),
@@ -1748,6 +1759,7 @@ def _write_connect_assessments(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_assessments (
+            id BIGINT PRIMARY KEY,
             username TEXT,
             app BIGINT,
             opportunity_id BIGINT,
@@ -1771,6 +1783,7 @@ def _write_connect_assessments(
             rows_total = page_total
         rows = [
             (
+                r.get("id"),
                 r.get("username", ""),
                 r.get("app"),
                 r.get("opportunity_id"),
@@ -1819,6 +1832,7 @@ def _write_connect_completed_modules(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_completed_modules (
+            id BIGINT PRIMARY KEY,
             username TEXT,
             module BIGINT,
             opportunity_id BIGINT,
@@ -1840,6 +1854,7 @@ def _write_connect_completed_modules(
             rows_total = page_total
         rows = [
             (
+                r.get("id"),
                 r.get("username", ""),
                 r.get("module"),
                 r.get("opportunity_id"),

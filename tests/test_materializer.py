@@ -1104,3 +1104,252 @@ class TestWriteForms:
             with conn.cursor() as cur:
                 cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
             conn.close()
+
+
+@pytest.mark.django_db
+class TestConnectPageReplayIdempotency:
+    """Regression tests for bot comment #3315357471.
+
+    Verifies that re-inserting the same page (simulating a crash between
+    conn.commit() and cursor_callback()) does NOT duplicate rows in the
+    five Connect tables that previously lacked a primary key.
+    """
+
+    def _get_db_url(self):
+        import os
+
+        return os.environ.get("MANAGED_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+    def _make_schema(self, conn, schema_name):
+        # autocommit=True is set before calling this method (via psycopg.connect autocommit=True)
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+            cur.execute(f"CREATE SCHEMA {schema_name}")
+        conn.autocommit = False
+
+    def test_payments_page_replay_no_duplication(self, django_db_setup, db):
+        """Re-inserting a page of payments (simulating crash before watermark
+        persist) must not duplicate rows — ON CONFLICT (id) DO NOTHING applies.
+        """
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_payments
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_payments"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "id": 101,
+                    "username": "user1",
+                    "opportunity_id": 1,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "amount": "10.00",
+                    "amount_usd": "10.00",
+                    "date_paid": None,
+                    "payment_unit": 1,
+                    "confirmed": False,
+                    "confirmation_date": None,
+                    "organization": "org1",
+                    "invoice_id": None,
+                    "payment_method": "mobile_money",
+                    "payment_operator": "op1",
+                },
+                {
+                    "id": 102,
+                    "username": "user2",
+                    "opportunity_id": 1,
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "amount": "20.00",
+                    "amount_usd": "20.00",
+                    "date_paid": None,
+                    "payment_unit": 2,
+                    "confirmed": True,
+                    "confirmation_date": "2026-01-03T00:00:00Z",
+                    "organization": "org1",
+                    "invoice_id": 5,
+                    "payment_method": "mobile_money",
+                    "payment_operator": "op2",
+                },
+            ]
+
+            # First write — clean run, no cursor yet.
+            _write_connect_payments(
+                pages=iter([(page, 2)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Simulate crash: conn already committed the page, but cursor_callback
+            # was never called. Re-run from the prior watermark by writing the
+            # same page again (start_cursor is set to skip DROP/CREATE).
+            _write_connect_payments(
+                pages=iter([(page, 2)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=100,  # any non-None value triggers the resume path
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {test_schema}.raw_payments")
+                (count,) = cur.fetchone()
+
+            assert count == 2, (
+                f"Expected 2 rows after page replay, got {count} — "
+                "ON CONFLICT (id) DO NOTHING must be present"
+            )
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
+    def test_completed_works_page_replay_no_duplication(self, django_db_setup, db):
+        """Re-inserting a page of completed_works must not duplicate rows."""
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_completed_works
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_completed_works"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "id": 201,
+                    "username": "user1",
+                    "opportunity_id": 1,
+                    "payment_unit_id": 10,
+                    "status": "approved",
+                    "last_modified": "2026-01-01T00:00:00Z",
+                    "entity_id": "e1",
+                    "entity_name": "Entity 1",
+                    "reason": "",
+                    "status_modified_date": "2026-01-01T00:00:00Z",
+                    "payment_date": None,
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "saved_completed_count": 5,
+                    "saved_approved_count": 5,
+                    "saved_payment_accrued": "50.00",
+                    "saved_payment_accrued_usd": "50.00",
+                    "saved_org_payment_accrued": "50.00",
+                    "saved_org_payment_accrued_usd": "50.00",
+                },
+            ]
+
+            # First write — clean run.
+            _write_connect_completed_works(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Replay the same page (crash scenario — watermark not advanced).
+            _write_connect_completed_works(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=200,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {test_schema}.raw_completed_works")
+                (count,) = cur.fetchone()
+
+            assert count == 1, (
+                f"Expected 1 row after page replay, got {count} — "
+                "ON CONFLICT (id) DO NOTHING must be present"
+            )
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
+    def test_visits_page_replay_no_duplication(self, django_db_setup, db):
+        """Verify raw_visits remains safe: visit_id PK + ON CONFLICT DO UPDATE
+        means a page replay updates existing rows rather than duplicating them.
+        """
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_visits
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_visits"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "visit_id": 301,
+                    "opportunity_id": 1,
+                    "username": "user1",
+                    "deliver_unit": None,
+                    "entity_id": "e1",
+                    "entity_name": "Entity 1",
+                    "visit_date": "2026-01-01T00:00:00Z",
+                    "status": "pending",
+                    "reason": "",
+                    "location": "",
+                    "flagged": False,
+                    "flag_reason": None,
+                    "form_json": {},
+                    "completed_work": None,
+                    "status_modified_date": None,
+                    "review_status": "",
+                    "review_created_on": None,
+                    "justification": "",
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "completed_work_id": None,
+                    "deliver_unit_id": None,
+                    "images": [],
+                },
+            ]
+
+            # First write — clean run.
+            _write_connect_visits(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Replay with an updated status (DO UPDATE should apply the change).
+            updated_page = [{**page[0], "status": "approved"}]
+            _write_connect_visits(
+                pages=iter([(updated_page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=300,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*), MAX(status) FROM {test_schema}.raw_visits")
+                count, status = cur.fetchone()
+
+            assert count == 1, f"Expected 1 row after visit page replay, got {count}"
+            assert status == "approved", (
+                f"Expected status='approved' after DO UPDATE, got '{status}'"
+            )
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
