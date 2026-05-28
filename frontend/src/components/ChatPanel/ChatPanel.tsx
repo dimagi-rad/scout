@@ -5,6 +5,7 @@ import { getCsrfToken, api } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
@@ -127,7 +128,12 @@ export function ChatPanel() {
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
 
-  const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
+  const {
+    jobsByThreadId,
+    recentlyCompletedThreadIds,
+    recentTerminationsByToolCallId,
+    notifyJobLikelyStarted,
+  } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
 
   // Use a ref so the transport body closure always reads fresh values,
@@ -320,7 +326,10 @@ export function ChatPanel() {
             message={msg}
             isActiveMessage={isStreaming && msgIdx === messages.length - 1}
             workspaceId={activeDomainId ?? undefined}
+            threadId={threadId}
             activeMaterializationJob={activeMaterializationJob}
+            recentTerminationsByToolCallId={recentTerminationsByToolCallId}
+            onRetryDispatched={notifyJobLikelyStarted}
           />
         ))}
         {isStreaming && <ThinkingIndicator />}
@@ -330,6 +339,16 @@ export function ChatPanel() {
           </div>
         )}
       </div>
+
+      {/* Materialization progress banner — always visible when a job is active for this thread */}
+      {activeMaterializationJob
+        && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
+        && activeDomainId && (
+          <MaterializationProgressBanner
+            job={activeMaterializationJob}
+            workspaceId={activeDomainId}
+          />
+        )}
 
       {/* Input area */}
       <div className="border-t p-4">

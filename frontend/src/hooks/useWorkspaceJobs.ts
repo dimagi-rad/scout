@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { jobsApi, type ActiveJob } from "@/api/jobs"
+import { jobsApi, type ActiveJob, type RecentTermination } from "@/api/jobs"
 
 const POLL_INTERVAL_MS = 3000
 
 interface State {
   jobs: ActiveJob[]
+  recentTerminations: RecentTermination[]
   lastError: string | null
 }
 
@@ -15,6 +16,14 @@ export interface UseWorkspaceJobs {
    *  recent poll (gone from the active list). Consumers should refetch
    *  thread messages for these IDs. Resets to [] on the next poll cycle. */
   recentlyCompletedThreadIds: string[]
+  /** ThreadJobs that terminated within the server's recent-termination
+   *  window (default 30 minutes). Used to render an inline failure card on
+   *  the run_materialization tool-call once the spinner clears. */
+  recentTerminations: RecentTermination[]
+  /** Lookup by tool_call_id so ChatMessage can find the termination for a
+   *  specific run_materialization card in O(1). Failures with no
+   *  tool_call_id (e.g. retry jobs not bound to a card) are excluded. */
+  recentTerminationsByToolCallId: Record<string, RecentTermination>
   refresh: () => Promise<void>
   /** Force an immediate poll without waiting for the next tick (called when
    *  the user just fired a chat action that may have started a job). */
@@ -27,7 +36,11 @@ export interface UseWorkspaceJobs {
  * polling loop has a single owner. The provider is the only legitimate caller.
  */
 export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJobs {
-  const [state, setState] = useState<State>({ jobs: [], lastError: null })
+  const [state, setState] = useState<State>({
+    jobs: [],
+    recentTerminations: [],
+    lastError: null,
+  })
   const [recentlyCompletedThreadIds, setRecentlyCompletedThreadIds] = useState<string[]>([])
   const prevThreadIdsRef = useRef<Set<string>>(new Set())
 
@@ -43,7 +56,11 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
         }
       }
       prevThreadIdsRef.current = currentThreadIds
-      setState({ jobs: data.jobs, lastError: null })
+      setState({
+        jobs: data.jobs,
+        recentTerminations: data.recent_terminations ?? [],
+        lastError: null,
+      })
       if (justCompleted.length > 0) {
         setRecentlyCompletedThreadIds(justCompleted)
       } else {
@@ -82,10 +99,19 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     return acc
   }, {})
 
+  const recentTerminationsByToolCallId = state.recentTerminations.reduce<
+    Record<string, RecentTermination>
+  >((acc, t) => {
+    if (t.tool_call_id && !acc[t.tool_call_id]) acc[t.tool_call_id] = t
+    return acc
+  }, {})
+
   return {
     jobs: state.jobs,
     jobsByThreadId,
     recentlyCompletedThreadIds,
+    recentTerminations: state.recentTerminations,
+    recentTerminationsByToolCallId,
     refresh: fetchOnce,
     notifyJobLikelyStarted: fetchOnce,
   }

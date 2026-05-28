@@ -160,6 +160,10 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
     assert tj.state == ThreadJob.State.FAILED
     assert tj.completed_at is not None
     assert result["flipped"] == 1
+    # Stuck-RUNNING flip writes a generic, user-facing error_summary so the
+    # frontend's failure card has a message instead of a blank header.
+    assert tj.error_summary
+    assert "restart" in tj.error_summary.lower() or "interrupted" in tj.error_summary.lower()
 
 
 @pytest.mark.asyncio
@@ -213,3 +217,34 @@ def test_janitor_cutoff_is_10_minutes():
     user sees a synthetic 'we interrupted you' message. Locking the value in a
     test makes any future tightening intentional rather than accidental."""
     assert timedelta(minutes=10) == STALE_JOB_THRESHOLD
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_janitor_fallback_failed_writes_error_summary():
+    """The defer-fail fallback also writes a user-facing error_summary."""
+    user = await sync_to_async(User.objects.create_user)(email="fb@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-fb", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=77777,
+        tool_call_id="tc-fb",
+        state=ThreadJob.State.PENDING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+
+    with (
+        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
+        resume.defer_async = AsyncMock(side_effect=RuntimeError("queue down"))
+        await expire_stale_thread_jobs()
+
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.error_summary
+    assert "queue" in tj.error_summary.lower() or "retry" in tj.error_summary.lower()

@@ -1,9 +1,12 @@
+import json
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
+from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
@@ -80,6 +83,243 @@ async def test_active_jobs_returns_pending_job_with_progress():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_active_jobs_includes_recent_terminations():
+    """Recently-terminated ThreadJobs surface in the response so the frontend
+    can render an inline failure card once the spinner clears."""
+    user = await sync_to_async(User.objects.create_user)(email="rt@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    failed_tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=5001,
+        tool_call_id="tc-failed",
+        state=ThreadJob.State.FAILED,
+        error_summary="completed_works failed: HTTP 500",
+    )
+    # Set completed_at within the window
+    await ThreadJob.objects.filter(id=failed_tj.id).aupdate(completed_at=timezone.now())
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="rt@b.c", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["jobs"] == []
+    assert len(body["recent_terminations"]) == 1
+    rt = body["recent_terminations"][0]
+    assert rt["thread_job_id"] == str(failed_tj.id)
+    assert rt["state"] == "failed"
+    assert rt["error_summary"] == "completed_works failed: HTTP 500"
+    assert rt["retry_available"] is True
+    assert rt["tool_call_id"] == "tc-failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recent_terminations_filtered_by_user():
+    """A terminated ThreadJob in another user's thread must not leak."""
+    me = await sync_to_async(User.objects.create_user)(email="me@b.c", password="x")
+    other = await sync_to_async(User.objects.create_user)(email="other@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=me)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=me,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=other,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    other_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=other)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=other_thread,
+        job_type="materialization",
+        procrastinate_job_id=5002,
+        tool_call_id="tc-other",
+        state=ThreadJob.State.FAILED,
+        error_summary="should not leak",
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(completed_at=timezone.now())
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="me@b.c", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    assert resp.json()["recent_terminations"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recent_terminations_filtered_by_window():
+    """Terminations older than RECENT_TERMINATION_WINDOW are excluded."""
+    user = await sync_to_async(User.objects.create_user)(email="window@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=5003,
+        tool_call_id="tc-old",
+        state=ThreadJob.State.FAILED,
+    )
+    # Backdate completed_at past the 30-minute window.
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        completed_at=timezone.now() - timedelta(hours=2),
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="window@b.c", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    assert resp.json()["recent_terminations"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recent_terminations_completed_state_has_no_retry():
+    """COMPLETED state surfaces in the payload (so a stale failure card can be
+    cleared) but ``retry_available`` is False."""
+    user = await sync_to_async(User.objects.create_user)(email="ok@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=5004,
+        tool_call_id="tc-ok",
+        state=ThreadJob.State.COMPLETED,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(completed_at=timezone.now())
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="ok@b.c", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    body = resp.json()
+    assert len(body["recent_terminations"]) == 1
+    assert body["recent_terminations"][0]["retry_available"] is False
+    assert body["recent_terminations"][0]["state"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retry_endpoint_dispatches_new_materialization():
+    user = await sync_to_async(User.objects.create_user)(email="retry@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="retry@b.c", password="x")
+    fake_job = type("J", (), {"id": 5005})()
+    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
+        mock_task.defer_async = AsyncMock(return_value=fake_job)
+        resp = await client.post(
+            f"/api/workspaces/{ws.id}/materialize/retry/",
+            data=json.dumps({"thread_id": str(thread.id), "tool_call_id": "tc-retry"}),
+            content_type="application/json",
+        )
+    assert resp.status_code == 200, resp.content
+    body = resp.json()
+    assert body["status"] == "started"
+    assert "thread_job_id" in body
+    # A fresh ThreadJob is bound to the original thread so the resume
+    # mechanism fires when the new run finishes.
+    tj = await ThreadJob.objects.aget(id=body["thread_job_id"])
+    assert tj.thread_id == thread.id
+    assert tj.procrastinate_job_id == 5005
+    assert tj.state == ThreadJob.State.PENDING
+    assert tj.tool_call_id == "tc-retry"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retry_endpoint_dedupes_in_flight():
+    """If a materialization is already running for this thread, retry returns
+    the existing ThreadJob identity instead of dispatching a duplicate."""
+    user = await sync_to_async(User.objects.create_user)(email="dedupe@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    existing = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=5006,
+        tool_call_id="tc-existing",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="dedupe@b.c", password="x")
+    with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
+        mock_task.defer_async = AsyncMock()
+        resp = await client.post(
+            f"/api/workspaces/{ws.id}/materialize/retry/",
+            data=json.dumps({"thread_id": str(thread.id)}),
+            content_type="application/json",
+        )
+        # No new dispatch when there's an in-flight job
+        mock_task.defer_async.assert_not_called()
+    body = resp.json()
+    assert body["status"] == "already_in_progress"
+    assert body["thread_job_id"] == str(existing.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retry_endpoint_rejects_cross_user_thread():
+    """The supplied thread_id must belong to the caller in the workspace."""
+    me = await sync_to_async(User.objects.create_user)(email="r-me@b.c", password="x")
+    other = await sync_to_async(User.objects.create_user)(email="r-other@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=me)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=me,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=other,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    other_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=other)
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="r-me@b.c", password="x")
+    resp = await client.post(
+        f"/api/workspaces/{ws.id}/materialize/retry/",
+        data=json.dumps({"thread_id": str(other_thread.id)}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_active_jobs_empty_when_none_running():
     user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
@@ -92,7 +332,7 @@ async def test_active_jobs_empty_when_none_running():
     await sync_to_async(client.login)(email="a@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
-    assert resp.json() == {"jobs": []}
+    assert resp.json() == {"jobs": [], "recent_terminations": []}
 
 
 @pytest.mark.asyncio
@@ -249,3 +489,119 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
     await sync_to_async(tj.refresh_from_db)()
     # State must remain COMPLETED, not be overwritten with CANCELLED
     assert tj.state == ThreadJob.State.COMPLETED
+
+
+# ── Progress banner / total_rows tests ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_exposes_rows_total_for_percentage():
+    """When the MaterializationRun.progress carries rows_total (from Connect's
+    first-page ``count`` field), the active-jobs endpoint surfaces it so the
+    frontend can compute and display a percentage.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="total@rows.test", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="WTotal", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="ccc-opp-999",
+        provider="commcare_connect",
+        canonical_name="Connect Test",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant, schema_name="s_ccc_999"
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7777,
+        tool_call_id="tc-total",
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=7777,
+        progress={
+            "run_id": str(schema.id),
+            "step": 3,
+            "total_steps": 9,
+            "source": "visits",
+            "message": "Loading visits from commcare_connect API...",
+            "rows_loaded": 25000,
+            "rows_total": 50000,
+        },
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="total@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["jobs"]) == 1
+
+    p = body["jobs"][0]["progress"]
+    # rows_total is exposed so the frontend banner can show "25,000 / 50,000 rows"
+    assert p["rows_total"] == 50000
+    assert p["rows_loaded"] == 25000
+    # percent is pre-computed server-side (50%)
+    assert p["percent"] == 50
+    assert p["source"] == "visits"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_percent_null_when_rows_total_missing():
+    """When rows_total is absent (non-Connect providers or very first page),
+    percent must be null rather than a division-by-zero error.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="nopct@rows.test", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="WNoPct", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="cc-domain-x",
+        provider="commcare",
+        canonical_name="CommCare Test",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_cc_x")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=8888,
+        tool_call_id="tc-nopct",
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=8888,
+        progress={
+            "run_id": str(schema.id),
+            "step": 2,
+            "total_steps": 5,
+            "source": "cases",
+            "message": "Loading cases...",
+            "rows_loaded": 3200,
+            "rows_total": None,
+        },
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="nopct@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    p = body["jobs"][0]["progress"]
+    assert p["rows_loaded"] == 3200
+    assert p["rows_total"] is None
+    # percent must be null — not zero, not a division error
+    assert p["percent"] is None

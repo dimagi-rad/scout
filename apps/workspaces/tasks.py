@@ -56,6 +56,67 @@ RESUME_STUCK_RUNNING_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
+def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
+    """Compose a human-readable failure summary from MaterializationRun results.
+
+    Used to populate ``ThreadJob.error_summary`` so the frontend can render an
+    inline failure card after the spinner clears. Reads the per-source state
+    map in ``run.result["sources"]`` (post-#198 shape) and produces a short
+    string that names what failed and what (if anything) loaded.
+
+    Returns "" when there are no runs or the result map is empty — callers
+    should fall back to a generic message in that case.
+    """
+    if not runs:
+        return ""
+
+    failed_sources: list[tuple[str, str]] = []
+    completed_sources: list[tuple[str, int]] = []
+    skipped_sources: list[str] = []
+    cancelled_sources: list[str] = []
+
+    for run in runs:
+        result = run.result if isinstance(run.result, dict) else None
+        if not result:
+            continue
+        for name, info in (result.get("sources") or {}).items():
+            if not isinstance(info, dict):
+                continue
+            state = info.get("state")
+            if state == "failed":
+                failed_sources.append((name, str(info.get("error") or "unknown error")))
+            elif state == "completed":
+                completed_sources.append((name, int(info.get("rows") or 0)))
+            elif state == "skipped":
+                skipped_sources.append(name)
+            elif state == "cancelled":
+                cancelled_sources.append(name)
+
+    parts: list[str] = []
+    if failed_sources:
+        first = failed_sources[0]
+        if len(failed_sources) == 1:
+            parts.append(f"{first[0]} failed: {first[1]}")
+        else:
+            others = ", ".join(n for n, _ in failed_sources[1:])
+            parts.append(f"{first[0]} failed ({first[1]}); also failed: {others}")
+    if completed_sources:
+        total_rows = sum(rows for _, rows in completed_sources)
+        names = ", ".join(n for n, _ in completed_sources)
+        parts.append(f"{names} ({total_rows:,} rows) loaded successfully")
+    if skipped_sources:
+        parts.append(f"remaining sources skipped: {', '.join(skipped_sources)}")
+    if cancelled_sources:
+        parts.append(f"cancelled: {', '.join(cancelled_sources)}")
+
+    if not parts:
+        # No per-source detail (e.g. failure before any source ran). Surface
+        # the run state so the message is non-empty.
+        states = sorted({r.state for r in runs})
+        return f"Materialization {'/'.join(states)}."
+    return ". ".join(parts) + "."
+
+
 @app.task
 async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
@@ -546,7 +607,14 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
             updated = await ThreadJob.objects.filter(
                 id=tj.id,
                 state=ThreadJob.State.RUNNING,
-            ).aupdate(state=ThreadJob.State.FAILED, completed_at=timezone.now())
+            ).aupdate(
+                state=ThreadJob.State.FAILED,
+                completed_at=timezone.now(),
+                error_summary=(
+                    "Materialization completed but the follow-up response was "
+                    "interrupted (likely a server restart). Please retry."
+                ),
+            )
             if updated:
                 flipped += 1
                 logger.warning(
@@ -568,8 +636,23 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
             await ThreadJob.objects.filter(id=tj.id).aupdate(
                 state=ThreadJob.State.FAILED,
                 completed_at=timezone.now(),
+                error_summary=(
+                    "Background queue unavailable; the materialization could "
+                    "not be resumed. Please retry."
+                ),
             )
     return {"flipped": flipped}
+
+
+async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
+    """Read MaterializationRuns for this job and compose a user-facing summary."""
+    runs = [
+        r
+        async for r in MaterializationRun.objects.filter(
+            procrastinate_job_id=procrastinate_job_id,
+        )
+    ]
+    return _compose_failure_summary(runs)
 
 
 async def _build_agent_for_resume(workspace, user):
@@ -890,6 +973,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
+            error_summary=("The agent failed to respond after materialization. Please retry."),
         )
         return {"status": "agent_failed"}
     finally:
@@ -927,6 +1011,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             else ThreadJob.State.COMPLETED
         )
     )
+    error_summary = ""
+    if terminal == ThreadJob.State.FAILED:
+        if status == "no_runs":
+            error_summary = (
+                "Materialization finished without running any pipelines. "
+                "Check that the workspace's tenants have credentials configured."
+            )
+        else:
+            error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            if not error_summary:
+                error_summary = "Materialization did not complete successfully."
     # CAS-scoped to state=RUNNING (the value we set when claiming the job).
     # If a concurrent cancel landed during agent.ainvoke (which can take 30s+),
     # the row is already CANCELLED and we must NOT clobber it back to a
@@ -936,7 +1031,11 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     updated = await ThreadJob.objects.filter(
         id=tj.id,
         state=ThreadJob.State.RUNNING,
-    ).aupdate(state=terminal, completed_at=timezone.now())
+    ).aupdate(
+        state=terminal,
+        completed_at=timezone.now(),
+        error_summary=error_summary,
+    )
     if not updated:
         actual_state = (
             await ThreadJob.objects.filter(id=tj.id)

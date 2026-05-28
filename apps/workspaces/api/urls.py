@@ -7,7 +7,7 @@ Nested under /api/workspaces/<workspace_id>/
 from django.urls import path
 
 from .jobs_views import active_jobs_view, cancel_job_view
-from .materialization_views import materialization_cancel_view
+from .materialization_views import materialization_cancel_view, materialization_retry_view
 from .views import DataDictionaryView, RefreshSchemaView, RefreshStatusView, TableDetailView
 
 app_name = "data_dictionary"
@@ -25,6 +25,11 @@ urlpatterns = [
         "materialization/cancel/",
         materialization_cancel_view,
         name="materialization_cancel",
+    ),
+    path(
+        "materialize/retry/",
+        materialization_retry_view,
+        name="materialization_retry",
     ),
     path("jobs/active/", active_jobs_view, name="active_jobs"),
     path(

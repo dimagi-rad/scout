@@ -755,3 +755,148 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     assert kwargs["thread_id"] == str(tj.thread_id)
     span_cm.__enter__.assert_called_once()
     span_cm.__exit__.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_agent_failure_sets_error_summary():
+    """When agent.ainvoke raises, the ThreadJob is marked FAILED with a
+    generic error_summary so the frontend can render an inline retry card."""
+    user = await sync_to_async(User.objects.create_user)(email="afail@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-afail", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-afail",
+        provider="commcare",
+        canonical_name="AFail Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant,
+        schema_name="s_afail",
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=4801,
+        tool_call_id="tc-afail",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=4801,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("LLM 503"))
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "agent_failed"
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    assert "agent failed to respond" in tj.error_summary.lower()
+    assert "retry" in tj.error_summary.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_partial_run_sets_threadjob_error_summary():
+    """A PARTIAL aggregate maps to FAILED on the ThreadJob and the
+    error_summary is composed from MaterializationRun.result["sources"]."""
+    user = await sync_to_async(User.objects.create_user)(email="psum@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-psum", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-psum",
+        provider="commcare_connect",
+        canonical_name="PSum Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant,
+        schema_name="s_psum",
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=4802,
+        tool_call_id="tc-psum",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_connect",
+        state=MaterializationRun.RunState.PARTIAL,
+        procrastinate_job_id=4802,
+        result={
+            "pipeline": "commcare_connect",
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "completed", "rows": 98869},
+                "completed_works": {
+                    "state": "failed",
+                    "rows": 0,
+                    "error": "RuntimeError: Connect 500",
+                },
+                "payments": {"state": "skipped", "rows": 0},
+            },
+        },
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.error_summary
+    # Names the failed source
+    assert "completed_works" in tj.error_summary
+    # Names the loaded sources + their row count
+    assert "users" in tj.error_summary
+    assert "98,969" in tj.error_summary  # users 100 + visits 98869
+    # And calls out skipped
+    assert "payments" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_no_runs_sets_helpful_error_summary():
+    """no_runs case: error_summary mentions credentials/pipelines so users
+    can self-diagnose."""
+    user = await sync_to_async(User.objects.create_user)(email="nr@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-nr", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=4803,
+        tool_call_id="tc-nr",
+        state=ThreadJob.State.PENDING,
+    )
+    # No MaterializationRun rows -> no_runs path.
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.error_summary  # non-empty
+    assert any(
+        term in tj.error_summary.lower() for term in ("credentials", "pipeline", "pipelines")
+    )

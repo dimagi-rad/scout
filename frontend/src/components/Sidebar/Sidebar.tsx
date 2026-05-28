@@ -202,12 +202,28 @@ export function Sidebar() {
                   <span
                     className="flex items-center gap-1 text-xs"
                     data-testid={`sidebar-thread-job-${thread.id}`}
-                    title={job.progress?.message ?? "Materializing..."}
+                    title={
+                      job.progress?.source
+                        ? `Loading ${job.progress.source}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
+                        : (job.progress?.message ?? "Materializing...")
+                    }
                   >
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    {job.progress?.percent != null && (
-                      <span>{job.progress.percent}%</span>
-                    )}
+                    <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
+                    {job.progress?.percent != null ? (
+                      <span
+                        className="font-medium text-primary"
+                        data-testid={`sidebar-thread-job-percent-${thread.id}`}
+                      >
+                        {job.progress.percent}%
+                      </span>
+                    ) : job.progress?.source ? (
+                      <span
+                        className="truncate max-w-[4rem]"
+                        data-testid={`sidebar-thread-job-source-${thread.id}`}
+                      >
+                        {job.progress.source}
+                      </span>
+                    ) : null}
                   </span>
                 ) : hasUnread ? (
                   <span
