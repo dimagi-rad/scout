@@ -5,6 +5,7 @@ import { getCsrfToken, api } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
+import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
@@ -333,6 +334,16 @@ export function ChatPanel() {
           </div>
         )}
       </div>
+
+      {/* Materialization progress banner — always visible when a job is active for this thread */}
+      {activeMaterializationJob
+        && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
+        && activeDomainId && (
+          <MaterializationProgressBanner
+            job={activeMaterializationJob}
+            workspaceId={activeDomainId}
+          />
+        )}
 
       {/* Input area */}
       <div className="border-t p-4">

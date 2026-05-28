@@ -489,3 +489,119 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
     await sync_to_async(tj.refresh_from_db)()
     # State must remain COMPLETED, not be overwritten with CANCELLED
     assert tj.state == ThreadJob.State.COMPLETED
+
+
+# ── Progress banner / total_rows tests ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_exposes_rows_total_for_percentage():
+    """When the MaterializationRun.progress carries rows_total (from Connect's
+    first-page ``count`` field), the active-jobs endpoint surfaces it so the
+    frontend can compute and display a percentage.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="total@rows.test", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="WTotal", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="ccc-opp-999",
+        provider="commcare_connect",
+        canonical_name="Connect Test",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant, schema_name="s_ccc_999"
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7777,
+        tool_call_id="tc-total",
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=7777,
+        progress={
+            "run_id": str(schema.id),
+            "step": 3,
+            "total_steps": 9,
+            "source": "visits",
+            "message": "Loading visits from commcare_connect API...",
+            "rows_loaded": 25000,
+            "rows_total": 50000,
+        },
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="total@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["jobs"]) == 1
+
+    p = body["jobs"][0]["progress"]
+    # rows_total is exposed so the frontend banner can show "25,000 / 50,000 rows"
+    assert p["rows_total"] == 50000
+    assert p["rows_loaded"] == 25000
+    # percent is pre-computed server-side (50%)
+    assert p["percent"] == 50
+    assert p["source"] == "visits"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_percent_null_when_rows_total_missing():
+    """When rows_total is absent (non-Connect providers or very first page),
+    percent must be null rather than a division-by-zero error.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="nopct@rows.test", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="WNoPct", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="cc-domain-x",
+        provider="commcare",
+        canonical_name="CommCare Test",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_cc_x")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=8888,
+        tool_call_id="tc-nopct",
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=8888,
+        progress={
+            "run_id": str(schema.id),
+            "step": 2,
+            "total_steps": 5,
+            "source": "cases",
+            "message": "Loading cases...",
+            "rows_loaded": 3200,
+            "rows_total": None,
+        },
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="nopct@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    p = body["jobs"][0]["progress"]
+    assert p["rows_loaded"] == 3200
+    assert p["rows_total"] is None
+    # percent must be null — not zero, not a division error
+    assert p["percent"] is None
