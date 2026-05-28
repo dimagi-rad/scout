@@ -148,23 +148,25 @@ sources:
         assert by_name["visits"].resumable is True
         assert by_name["users"].resumable is False
 
-    def test_connect_sync_users_is_non_resumable(self):
-        """The real connect_sync.yml must mark ``users`` non-resumable."""
+    def test_connect_sync_resumability_flags(self):
+        """Only ``visits`` can keyset-resume: its v2 export carries an integer
+        ``id``. ``users`` is mutable (full reload), and the remaining sources'
+        v2 export serializers omit ``id`` entirely, so they have no watermark to
+        resume from and must be non-resumable (full DROP/CREATE/INSERT)."""
         registry = PipelineRegistry()
         config = registry.get("connect_sync")
         by_name = {s.name: s for s in config.sources}
-        assert by_name["users"].resumable is False
-        # The other six are resumable.
+        assert by_name["visits"].resumable is True
         for src_name in (
-            "visits",
+            "users",
             "completed_works",
             "payments",
             "invoices",
             "assessments",
             "completed_modules",
         ):
-            assert by_name[src_name].resumable is True, (
-                f"{src_name} should default to resumable=True"
+            assert by_name[src_name].resumable is False, (
+                f"{src_name} has no per-row id in the v2 export and must be non-resumable"
             )
 
     def test_relationships_defaults_to_empty(self, tmp_path):
