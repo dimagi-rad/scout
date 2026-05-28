@@ -508,7 +508,6 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     return memberships, None
 
 
-
 @mcp.tool()
 async def run_materialization(
     workspace_id: str = "",
@@ -602,9 +601,7 @@ async def run_materialization(
             )
         except Exception:
             logger.exception("Failed to dispatch materialize_workspace task")
-            tc["result"] = error_response(
-                INTERNAL_ERROR, "Failed to dispatch materialization task"
-            )
+            tc["result"] = error_response(INTERNAL_ERROR, "Failed to dispatch materialization task")
             return tc["result"]
         job_id = getattr(job, "id", job) if not isinstance(job, int) else job
 
@@ -633,8 +630,7 @@ async def run_materialization(
                 "status": "started",
                 "thread_job_id": str(tj.id),
                 "message": (
-                    "Materialization started in background. "
-                    "I'll continue when it finishes."
+                    "Materialization started in background. I'll continue when it finishes."
                 ),
             },
             schema="",

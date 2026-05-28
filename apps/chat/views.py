@@ -123,8 +123,7 @@ async def chat_view(request):
     except Exception:
         existing_thread = None
     if existing_thread is not None and (
-        existing_thread.user_id != user.pk
-        or existing_thread.workspace_id != workspace.pk
+        existing_thread.user_id != user.pk or existing_thread.workspace_id != workspace.pk
     ):
         return JsonResponse({"error": "Thread not found"}, status=404)
 

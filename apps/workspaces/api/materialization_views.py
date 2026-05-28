@@ -42,9 +42,7 @@ async def materialization_cancel_view(request, workspace_id):
 
     active_runs = [
         r
-        async for r in MaterializationRun.objects.select_related(
-            "tenant_schema__tenant"
-        ).filter(
+        async for r in MaterializationRun.objects.select_related("tenant_schema__tenant").filter(
             tenant_schema__tenant__in=workspace.tenants.all(),
             state__in=list(MaterializationRun.ACTIVE_STATES),
         )
@@ -105,11 +103,13 @@ async def materialization_cancel_view(request, workspace_id):
         for procrastinate_job_id in orphan_job_ids:
             try:
                 await current_app.job_manager.cancel_job_by_id_async(
-                    procrastinate_job_id, abort=True,
+                    procrastinate_job_id,
+                    abort=True,
                 )
             except Exception:
                 logger.warning(
-                    "Failed to abort procrastinate job %s", procrastinate_job_id,
+                    "Failed to abort procrastinate job %s",
+                    procrastinate_job_id,
                     exc_info=True,
                 )
 
