@@ -11,6 +11,8 @@ import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-re
 import { SLASH_COMMANDS } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+import { ChatEmptyState } from "@/components/ChatEmptyState"
+import { TopBarSlot } from "@/components/TopBar"
 
 function threadStorageKey(domainId: string) {
   return `scout:thread:${domainId}`
@@ -276,39 +278,42 @@ export function ChatPanel() {
     )
   }
 
+  if (messages.length === 0) {
+    return (
+      <ChatEmptyState
+        input={input}
+        setInput={setInput}
+        onSend={(text) => sendMessage({ text })}
+        disabled={isStreaming}
+      />
+    )
+  }
+
   return (
     <div className="flex flex-col h-full">
-      {/* Header with share */}
-      {messages.length > 0 && (
-        <div className="flex items-center justify-end border-b px-4 py-2">
-          <div className="relative">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowShareMenu(!showShareMenu)}
-              data-testid="chat-share-btn"
-            >
-              <Share2 className="mr-1 h-4 w-4" />
-              Share
-            </Button>
-            {showShareMenu && activeDomainId && (
-              <ShareMenu
-                threadId={threadId}
-                workspaceId={activeDomainId}
-                onClose={() => setShowShareMenu(false)}
-              />
-            )}
-          </div>
+      <TopBarSlot>
+        <div className="relative">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowShareMenu(!showShareMenu)}
+            data-testid="chat-share-btn"
+          >
+            <Share2 className="mr-1 h-4 w-4" />
+            Share
+          </Button>
+          {showShareMenu && activeDomainId && (
+            <ShareMenu
+              threadId={threadId}
+              workspaceId={activeDomainId}
+              onClose={() => setShowShareMenu(false)}
+            />
+          )}
         </div>
-      )}
+      </TopBarSlot>
 
       {/* Message list */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.length === 0 && (
-          <div className="text-center text-muted-foreground mt-20">
-            Ask a question about your data to get started.
-          </div>
-        )}
         {messages.map((msg: UIMessage, msgIdx: number) => (
           <ChatMessage
             key={msg.id}
