@@ -258,7 +258,15 @@ async def test_transformation_aware_no_assets_fallback(tenant):
     """No transformation assets → falls back to pipeline_list_tables."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    mock_tables = [{"name": "raw_cases", "type": "table", "description": "", "row_count": 10}]
+    mock_tables = [
+        {
+            "name": "raw_cases",
+            "type": "table",
+            "description": "",
+            "materialized_row_count": 10,
+            "row_count_verified": False,
+        }
+    ]
 
     with patch(
         "mcp_server.services.metadata.pipeline_list_tables",
@@ -296,8 +304,20 @@ async def test_transformation_aware_terminal_replaces_raw(tenant):
     )
 
     mock_raw_tables = [
-        {"name": "raw_cases", "type": "table", "description": "Cases", "row_count": 100},
-        {"name": "raw_forms", "type": "table", "description": "Forms", "row_count": 50},
+        {
+            "name": "raw_cases",
+            "type": "table",
+            "description": "Cases",
+            "materialized_row_count": 100,
+            "row_count_verified": False,
+        },
+        {
+            "name": "raw_forms",
+            "type": "table",
+            "description": "Forms",
+            "materialized_row_count": 50,
+            "row_count_verified": False,
+        },
     ]
 
     with patch(
@@ -335,8 +355,20 @@ async def test_transformation_aware_mixed(tenant):
     )
 
     mock_raw_tables = [
-        {"name": "raw_cases", "type": "table", "description": "Cases", "row_count": 100},
-        {"name": "raw_forms", "type": "table", "description": "Forms", "row_count": 50},
+        {
+            "name": "raw_cases",
+            "type": "table",
+            "description": "Cases",
+            "materialized_row_count": 100,
+            "row_count_verified": False,
+        },
+        {
+            "name": "raw_forms",
+            "type": "table",
+            "description": "Forms",
+            "materialized_row_count": 50,
+            "row_count_verified": False,
+        },
     ]
 
     with patch(
@@ -371,8 +403,20 @@ async def test_transformation_aware_no_duplicates(tenant):
     )
 
     mock_raw_tables = [
-        {"name": "raw_cases", "type": "table", "description": "Cases", "row_count": 100},
-        {"name": "stg_cases", "type": "table", "description": "Staged", "row_count": 80},
+        {
+            "name": "raw_cases",
+            "type": "table",
+            "description": "Cases",
+            "materialized_row_count": 100,
+            "row_count_verified": False,
+        },
+        {
+            "name": "stg_cases",
+            "type": "table",
+            "description": "Staged",
+            "materialized_row_count": 80,
+            "row_count_verified": False,
+        },
     ]
 
     with patch(

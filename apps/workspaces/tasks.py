@@ -553,7 +553,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     ``{
         "tenant": "...",
         "state": "partial",          # the MaterializationRun state
-        "row_counts": {"users": 100, ...},  # only sources that committed
+        "materialized_row_counts": {"users": 100, ...},  # only sources that committed
         "sources": {
             "users":   {"state": "completed", "rows": 100},
             "visits":  {"state": "completed", "rows": 98869},
@@ -579,7 +579,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
-        row_counts: dict = {}
+        materialized_row_counts: dict = {}
         sources_detail: dict = {}
         if isinstance(r.result, dict):
             for source, info in (r.result.get("sources") or {}).items():
@@ -587,7 +587,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                     continue
                 src_state = info.get("state")
                 if src_state == "completed" and "rows" in info:
-                    row_counts[source] = info["rows"]
+                    materialized_row_counts[source] = info["rows"]
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
@@ -603,7 +603,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             {
                 "tenant": tenant_id,
                 "state": r.state,
-                "row_counts": row_counts,
+                "materialized_row_counts": materialized_row_counts,
                 "sources": sources_detail,
             }
         )

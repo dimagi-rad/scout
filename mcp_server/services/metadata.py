@@ -47,7 +47,12 @@ async def pipeline_list_tables(
 
     Returns an empty list if no eligible run exists or none of the recorded
     sources are still queryable. Each entry includes name, type, description,
-    row_count, and materialized_at.
+    materialized_row_count, row_count_verified, and materialized_at.
+
+    The row count is labelled ``materialized_row_count`` and paired with
+    ``row_count_verified: False`` because it is the count recorded at
+    materialization time — not a live count. The agent must not surface
+    this number to users as an answer; see ``base_system.py`` for the rule.
     """
     run = (
         await MaterializationRun.objects.filter(
@@ -82,7 +87,8 @@ async def pipeline_list_tables(
                 "name": physical_name,
                 "type": "table",
                 "description": source_descriptions.get(source_name, ""),
-                "row_count": source_data.get("rows"),
+                "materialized_row_count": source_data.get("rows"),
+                "row_count_verified": False,
                 "materialized_at": materialized_at,
             }
         )
@@ -97,7 +103,8 @@ async def pipeline_list_tables(
                 "name": model_name,
                 "type": "table",
                 "description": "",
-                "row_count": None,
+                "materialized_row_count": None,
+                "row_count_verified": False,
                 "materialized_at": materialized_at,
             }
         )
@@ -170,7 +177,8 @@ async def workspace_list_tables(ctx: QueryContext) -> list[dict]:
             "name": row[0],
             "type": "view",
             "description": "",
-            "row_count": None,
+            "materialized_row_count": None,
+            "row_count_verified": False,
             "materialized_at": None,
         }
         for row in (result.get("rows") or [])
@@ -308,7 +316,8 @@ async def transformation_aware_list_tables(
                 "name": asset.name,
                 "type": "table",
                 "description": asset.description,
-                "row_count": None,
+                "materialized_row_count": None,
+                "row_count_verified": False,
                 "materialized_at": None,
             }
         )

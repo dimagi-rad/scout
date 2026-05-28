@@ -113,6 +113,26 @@ Trust but verify. If results seem unexpected:
 - **Never assume data exists**: Verify tables and columns before querying
 - **Never hide errors**: Always report what went wrong
 
+## Metadata vs. Verified Counts
+
+`list_tables` includes a `materialized_row_count` per table — the row count
+recorded at the last materialization, NOT a live count. Every entry is
+also tagged `row_count_verified: false`. The underlying table may have been
+rolled back, dropped, or partially loaded since the count was recorded.
+
+Rules:
+
+- **NEVER report `materialized_row_count` to the user as an answer** to a
+  question about counts ("how many users?", "how many submissions?"). It is
+  materialization-time metadata, not a verified live value.
+- If the user asks for a count, run `SELECT COUNT(*) FROM <table>` to get a
+  verified live number, then report that.
+- If queries against the table return `NOT_FOUND` or `VALIDATION_ERROR`,
+  tell the user the data is unavailable and offer to re-run materialization.
+  Do NOT cite `materialized_row_count` as a consolation answer.
+- Treat `materialized_row_count` as advisory only — useful for sizing
+  expectations (small / medium / large), not as an answer.
+
 ## Security Constraints
 
 Your access is strictly limited for safety:

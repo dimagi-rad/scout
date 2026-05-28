@@ -226,7 +226,8 @@ class TestListTablesTool:
                 "name": "cases",
                 "type": "table",
                 "description": "CommCare cases",
-                "row_count": 100,
+                "materialized_row_count": 100,
+                "row_count_verified": False,
                 "materialized_at": "2026-02-24T10:00:00Z",
             }
         ]
@@ -250,7 +251,8 @@ class TestListTablesTool:
 
         assert result["success"] is True
         assert len(result["data"]["tables"]) == 1
-        assert result["data"]["tables"][0]["row_count"] == 100
+        assert result["data"]["tables"][0]["materialized_row_count"] == 100
+        assert result["data"]["tables"][0]["row_count_verified"] is False
         assert result["data"]["note"] is None
 
     async def test_empty_tables_when_no_completed_run(self, tenant_id, tenant_context):
