@@ -2,7 +2,7 @@
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db.models import Count
+from django.db.models import Count, OuterRef, Subquery
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -38,12 +39,22 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        latest_run = (
+            MaterializationRun.objects.filter(
+                state=MaterializationRun.RunState.COMPLETED,
+                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
+            )
+            .order_by("-completed_at")
+            .values("completed_at")[:1]
+        )
+
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
             .prefetch_related("workspace__workspace_tenants__tenant")
             .annotate(
                 member_count=Count("workspace__memberships", distinct=True),
+                last_synced_at=Subquery(latest_run),
             )
         )
         results = []
@@ -65,6 +76,7 @@ class WorkspaceListView(APIView):
                     "role": m.role,
                     "tenants": tenants,
                     "member_count": m.member_count,
+                    "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
                     "created_at": m.workspace.created_at.isoformat(),
                 }
             )
