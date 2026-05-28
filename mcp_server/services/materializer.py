@@ -1,10 +1,11 @@
 """Three-phase materialization orchestrator: Discover → Load → Transform.
 
 Design notes:
-- Each source is loaded inside its own psycopg connection and committed
-  independently. A failure on source N+1 does NOT roll back rows source N
-  already committed. The writer (``_write_*``) DDL+INSERT sequence stays
-  internally atomic — it runs inside a single transaction per source.
+- Each source is loaded inside its own psycopg connection. Non-resumable
+  sources commit once at the end inside ``_load_and_commit_source``;
+  resumable sources (issue #187) commit per page from inside the writer.
+  A failure on source N+1 does NOT roll back rows source N already
+  committed.
 - A mid-pipeline failure marks the run PARTIAL (if at least one source
   committed) or FAILED (if none did) and short-circuits the remaining
   sources, recording them as ``skipped`` in ``result["sources"]``.
@@ -22,10 +23,18 @@ Design notes:
   (an unconditional ``run.save`` would silently clobber it). The
   TRANSFORMING→COMPLETED CAS also preserves PARTIAL.
 - ``result["sources"][name]`` records one of ``completed``, ``failed``,
-  ``skipped``, ``cancelled``. Never ``loaded`` — that string indicated rows
-  written but un-committed, which was a lie when the transaction rolled back.
-- The per-source dict reserves a ``cursor_state`` field (currently always
-  ``None``) for future page-level resumable materialization (issue #187).
+  ``skipped``, ``cancelled``, or ``in_progress``. Never ``loaded`` — that
+  string indicated rows written but un-committed, which was a lie when the
+  transaction rolled back.
+  ``in_progress`` is the per-page state for a resumable source whose load
+  is mid-flight: its physical table may be partially populated, and the
+  catalog (``pipeline_list_tables``) must hide that table until the source
+  flips to ``completed``.
+- For resumable sources, ``cursor_state = {"last_id": int,
+  "last_committed_at": iso}`` records the watermark advanced after each
+  committed page. A crash leaves a recoverable watermark; the next run
+  reads the prior MaterializationRun and continues from ``last_id`` with
+  no DROP TABLE. For non-resumable sources, ``cursor_state`` is ``None``.
 - A step count check at the end guards against total_steps / report() drift.
 """
 
@@ -67,6 +76,13 @@ logger = logging.getLogger(__name__)
 
 ProgressUpdater = Callable[[dict], None]
 OnPage = Callable[[int, int | None], None]
+# Called by resumable writers after each per-page commit with
+# ``(last_id, rows_committed_so_far)``. The materializer persists last_id
+# to ``MaterializationRun.result["sources"][name].cursor_state`` so a
+# crash leaves a recoverable watermark for the next run, and rolls
+# ``rows_committed_so_far`` into the in-progress source entry so the
+# resume-prompt and catalog observers see partial progress.
+CursorCallback = Callable[[int, int], None]
 
 
 class MaterializationCancelled(Exception):
@@ -205,11 +221,47 @@ def run_pipeline(
             raise MaterializationCancelled()
         run.state = MaterializationRun.RunState.LOADING
 
+        # Read the most recent non-terminal-success prior run on this tenant
+        # schema so we can resume each resumable source from its last
+        # committed cursor (issue #187). PARTIAL or FAILED runs are the only
+        # ones that can carry usable ``cursor_state``; COMPLETED runs are
+        # whole-history checkpoints (out of scope for this issue).
+        prior_cursors = _load_prior_resume_cursors(tenant_schema, exclude_run_id=run.id)
+
+        # The resumable code path (start_cursor + per-page cursor_callback) is
+        # currently implemented only for Connect writers. Other providers
+        # ignore ``source.resumable`` until their writers are migrated.
+        is_resumable_provider = pipeline.provider == "commcare_connect"
+
         sources_list = list(pipeline.sources)
         for idx, source in enumerate(sources_list):
             current_source = source.name
             load_message = f"Loading {source.name} from {pipeline.provider} API..."
             report(load_message)
+            source_is_resumable = is_resumable_provider and source.resumable
+            start_cursor = prior_cursors.get(source.name) if source_is_resumable else None
+            if source_is_resumable:
+                # Surface ``in_progress`` immediately so a fresh crash mid-resume
+                # leaves an observable state. The catalog (pipeline_list_tables)
+                # treats this as "do not surface this table yet".
+                source_results[source.name] = {
+                    "state": "in_progress",
+                    "rows": 0,
+                    "cursor_state": (
+                        {
+                            "last_id": start_cursor,
+                            "last_committed_at": None,
+                        }
+                        if start_cursor is not None
+                        else None
+                    ),
+                }
+                _persist_source_results(run, pipeline, source_results)
+            cursor_callback = (
+                _make_cursor_callback(run, pipeline, source_results, source.name)
+                if source_is_resumable
+                else None
+            )
             try:
                 rows = _load_and_commit_source(
                     source.name,
@@ -218,15 +270,19 @@ def run_pipeline(
                     schema_name,
                     provider=pipeline.provider,
                     on_page=make_on_page(source.name, load_message),
+                    resumable=source_is_resumable,
+                    start_cursor=start_cursor,
+                    cursor_callback=cursor_callback,
                 )
             except MaterializationCancelled:
                 # Earlier sources stay committed; this in-flight source rolled
                 # back inside _load_and_commit_source. Record per-source state
                 # before bubbling the cancellation up.
+                prior_cursor = (source_results.get(source.name) or {}).get("cursor_state")
                 source_results[source.name] = {
                     "state": "cancelled",
                     "rows": 0,
-                    "cursor_state": None,
+                    "cursor_state": prior_cursor,
                 }
                 for remaining in sources_list[idx + 1 :]:
                     source_results[remaining.name] = {
@@ -241,13 +297,16 @@ def run_pipeline(
                     source.name,
                     schema_name,
                 )
+                # Preserve any cursor_state advanced by per-page commits so the
+                # next run can resume from the last durable watermark (#187).
+                prior_cursor = (source_results.get(source.name) or {}).get("cursor_state")
                 source_results[source.name] = {
                     "state": "failed",
-                    "rows": 0,
+                    "rows": (source_results.get(source.name) or {}).get("rows", 0),
                     "error": _summarize_error(e),
                     "attempts": getattr(e, "attempts", 1),
                     "failed_at": datetime.now(UTC).isoformat(),
-                    "cursor_state": None,
+                    "cursor_state": prior_cursor,
                 }
                 for remaining in sources_list[idx + 1 :]:
                     source_results[remaining.name] = {
@@ -255,7 +314,14 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                any_committed = any(s.get("state") == "completed" for s in source_results.values())
+                # A resumable source whose per-page commits advanced the cursor
+                # has committed rows even though the source as a whole failed;
+                # treat that as PARTIAL too so the next run resumes from the
+                # watermark.
+                any_committed = any(
+                    s.get("state") == "completed" or _has_committed_cursor(s)
+                    for s in source_results.values()
+                )
                 final_state = (
                     MaterializationRun.RunState.PARTIAL
                     if any_committed
@@ -269,12 +335,18 @@ def run_pipeline(
                 }
                 run.save(update_fields=["state", "completed_at", "result"])
                 raise
+            # Preserve the final cursor watermark (resumable sources only) so a
+            # future incremental-update feature can read it; non-resumable keep
+            # ``None``.
+            final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
             source_results[source.name] = {
                 "state": "completed",
                 "rows": rows,
                 "committed_at": datetime.now(UTC).isoformat(),
-                "cursor_state": None,
+                "cursor_state": final_cursor if source_is_resumable else None,
             }
+            if source_is_resumable:
+                _persist_source_results(run, pipeline, source_results)
             logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
         current_source = None
 
@@ -432,6 +504,105 @@ def _run_discover_phase(
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
 
 
+def _load_prior_resume_cursors(tenant_schema: Any, exclude_run_id: Any) -> dict[str, int]:
+    """Return ``{source_name: last_id}`` for the most recent prior run, if any.
+
+    Only PARTIAL or FAILED runs carry a usable per-source ``cursor_state``
+    (a COMPLETED run is a whole-history checkpoint, not a resume target).
+    A source's cursor is returned only when its prior ``state`` was
+    ``in_progress`` or ``failed`` AND ``cursor_state.last_id`` is set,
+    matching the resume-eligibility rules in issue #187.
+
+    Crucially, we look at the **most recent** prior run regardless of its
+    run-level state, and only use cursors when *that* run is PARTIAL or FAILED.
+    This prevents a stale PARTIAL run from being surfaced after an intervening
+    COMPLETED run, which would re-insert rows already present in the table and
+    cause duplicate-key errors (for tables with a PK) or silent row duplication
+    (for tables without one).
+
+    Returns an empty dict if no eligible prior run exists or none of its
+    sources have a usable cursor.
+    """
+    prior = (
+        MaterializationRun.objects.filter(tenant_schema=tenant_schema)
+        .exclude(id=exclude_run_id)
+        .order_by("-started_at")
+        .first()
+    )
+    if prior is None or prior.state not in (
+        MaterializationRun.RunState.PARTIAL,
+        MaterializationRun.RunState.FAILED,
+    ):
+        return {}
+    if not isinstance(prior.result, dict):
+        return {}
+    cursors: dict[str, int] = {}
+    for name, info in (prior.result.get("sources") or {}).items():
+        if not isinstance(info, dict):
+            continue
+        if info.get("state") not in ("in_progress", "failed"):
+            continue
+        last_id = (info.get("cursor_state") or {}).get("last_id")
+        if isinstance(last_id, int):
+            cursors[name] = last_id
+    return cursors
+
+
+def _persist_source_results(run: Any, pipeline: PipelineConfig, source_results: dict) -> None:
+    """Write the current ``source_results`` snapshot to ``run.result``.
+
+    The CAS-scoped update preserves a concurrent CANCELLED (set externally
+    by the cancel endpoint) from being clobbered by per-page checkpoints.
+    Failures here are logged but never raise — a checkpoint write that
+    fails must not break the in-flight load.
+    """
+    try:
+        MaterializationRun.objects.filter(
+            id=run.id,
+            state__in=MaterializationRun.ACTIVE_STATES,
+        ).update(
+            result={
+                "pipeline": pipeline.name,
+                "sources": source_results,
+            }
+        )
+    except Exception:
+        logger.warning(
+            "Failed to persist source_results checkpoint for run %s", run.id, exc_info=True
+        )
+
+
+def _make_cursor_callback(
+    run: Any, pipeline: PipelineConfig, source_results: dict, source_name: str
+) -> CursorCallback:
+    """Return a callback the writer invokes after each per-page commit.
+
+    The callback advances ``source_results[source_name].cursor_state.last_id``
+    and persists the snapshot to ``MaterializationRun.result``. A crash
+    after this point leaves a recoverable watermark on disk.
+    """
+
+    def _on_page_committed(last_id: int, rows_committed: int) -> None:
+        entry = source_results.setdefault(
+            source_name, {"state": "in_progress", "rows": 0, "cursor_state": None}
+        )
+        entry["state"] = "in_progress"
+        entry["rows"] = rows_committed
+        entry["cursor_state"] = {
+            "last_id": last_id,
+            "last_committed_at": datetime.now(UTC).isoformat(),
+        }
+        _persist_source_results(run, pipeline, source_results)
+
+    return _on_page_committed
+
+
+def _has_committed_cursor(entry: dict) -> bool:
+    """True when this source has any durably-committed pages (cursor_state set)."""
+    cs = entry.get("cursor_state") if isinstance(entry, dict) else None
+    return isinstance(cs, dict) and isinstance(cs.get("last_id"), int)
+
+
 def _summarize_error(exc: BaseException) -> str:
     """Return a short, single-line error description for ``result["sources"][n].error``.
 
@@ -452,13 +623,21 @@ def _load_and_commit_source(
     schema_name: str,
     provider: str,
     on_page: OnPage | None = None,
+    resumable: bool = False,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Open a fresh psycopg connection, run the writer, commit, and close.
 
-    Each source loads inside its own transaction so a later source's failure
-    cannot roll back rows this source already committed. The writer functions
-    (``_write_*``) still depend on ``autocommit=False`` and a caller-controlled
-    commit — that contract is preserved here.
+    Non-resumable path (``resumable=False``): the writer runs inside one
+    transaction; this function calls ``conn.commit()`` once at the end.
+
+    Resumable path (``resumable=True``): the writer commits per page
+    internally (using the shared ``conn``) and calls ``cursor_callback``
+    after each commit. This function does NOT call an outer commit — the
+    writer's per-page commits are the source of durability. On a mid-page
+    crash, pages already committed are durable; the next run resumes from
+    ``cursor_state.last_id`` recorded by the callback.
     """
     conn = get_managed_db_connection()
     conn.autocommit = False
@@ -471,8 +650,11 @@ def _load_and_commit_source(
             conn,
             provider=provider,
             on_page=on_page,
+            start_cursor=start_cursor,
+            cursor_callback=cursor_callback,
         )
-        conn.commit()
+        if not resumable:
+            conn.commit()
         return rows
     except Exception:
         try:
@@ -498,10 +680,19 @@ def _load_source(
     conn: Any,
     provider: str = "commcare",
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     if provider == "commcare_connect":
         return _load_connect_source(
-            source_name, tenant_membership, credential, schema_name, conn, on_page
+            source_name,
+            tenant_membership,
+            credential,
+            schema_name,
+            conn,
+            on_page,
+            start_cursor=start_cursor,
+            cursor_callback=cursor_callback,
         )
     if provider == "ocs":
         return _load_ocs_source(
@@ -518,6 +709,14 @@ def _load_source(
     raise ValueError(f"Unknown source '{source_name}'. Known sources: cases, forms")
 
 
+# Connect sources that the materializer should drive in resumable mode.
+# ``users`` is intentionally excluded — its rows are mutable, so a partial
+# resume could miss in-place updates behind the cursor (issue #187).
+_RESUMABLE_CONNECT_SOURCES = frozenset(
+    {"visits", "completed_works", "payments", "invoices", "assessments", "completed_modules"}
+)
+
+
 def _load_connect_source(
     source_name: str,
     tenant_membership: Any,
@@ -525,6 +724,8 @@ def _load_connect_source(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     opp_id = int(tenant_membership.tenant.external_id)
     loader_map = {
@@ -542,6 +743,17 @@ def _load_connect_source(
 
     loader_cls, writer_fn = loader_map[source_name]
     loader = loader_cls(opportunity_id=opp_id, credential=credential)
+    if source_name in _RESUMABLE_CONNECT_SOURCES:
+        pages = loader.load_pages(start_last_id=start_cursor)
+        return writer_fn(
+            pages,
+            schema_name,
+            conn,
+            on_page=on_page,
+            start_cursor=start_cursor,
+            cursor_callback=cursor_callback,
+        )
+    # users: full DROP/CREATE/INSERT, single commit at end (caller-driven).
     return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
 
 
@@ -954,6 +1166,19 @@ def _write_forms(
 # ── Connect table writers ──────────────────────────────────────────────────────
 
 
+def _max_id(page: list[dict], field: str) -> int | None:
+    """Return the maximum integer value of ``field`` over ``page`` rows.
+
+    Used by resumable Connect writers to advance the per-page cursor
+    watermark. Rows with missing or non-integer ids are skipped; if no
+    row has a usable id the function returns ``None`` and the caller
+    will not record a checkpoint for this page.
+    """
+    ids = [r.get(field) for r in page]
+    valid = [i for i in ids if isinstance(i, int)]
+    return max(valid) if valid else None
+
+
 def _json_or_none(value: Any) -> str | None:
     """Serialize a value to a JSON string, or return None for SQL NULL.
 
@@ -1094,8 +1319,20 @@ def _write_connect_visits(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the visits table and bulk-insert all pages. Returns total row count.
+
+    When ``start_cursor`` is None this is a clean run (DROP + CREATE +
+    INSERT). When ``start_cursor`` is set this is a resume: skip the DROP,
+    run an idempotent ``CREATE TABLE IF NOT EXISTS``, and continue
+    inserting at the prior watermark. The page-iterator is expected to
+    already be positioned past ``start_cursor`` (the caller passes
+    ``start_last_id`` to the loader).
+
+    Resumable writers commit per page (rather than once per source) so a
+    mid-source crash leaves a partial table the next run can continue.
 
     Column types mirror the Django model + DRF serializer output:
     - ``flag_reason`` is a JSONField, serialized as a dict → JSONB
@@ -1108,11 +1345,12 @@ def _write_connect_visits(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_visits CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_visits CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_visits (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_visits (
             visit_id BIGINT PRIMARY KEY,
             opportunity_id BIGINT,
             username TEXT,
@@ -1139,6 +1377,7 @@ def _write_connect_visits(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_VISITS_INSERT.format(schema=sid)
     total = 0
@@ -1177,6 +1416,10 @@ def _write_connect_visits(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "visit_id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1262,8 +1505,14 @@ def _write_connect_completed_works(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the completed_works table and bulk-insert all pages. Returns total row count.
+
+    Resumable: when ``start_cursor`` is set, skip DROP and use
+    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
+    ``cursor_callback`` with the page's max ``id``.
 
     Counts become INTEGER, accrued amounts become NUMERIC money, all
     date/datetime fields become TIMESTAMPTZ, opportunity_id becomes BIGINT.
@@ -1271,11 +1520,12 @@ def _write_connect_completed_works(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_works CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_works CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_completed_works (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_completed_works (
             username TEXT,
             opportunity_id BIGINT,
             payment_unit_id BIGINT,
@@ -1297,6 +1547,7 @@ def _write_connect_completed_works(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_COMPLETED_WORKS_INSERT.format(schema=sid)
     total = 0
@@ -1330,6 +1581,10 @@ def _write_connect_completed_works(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1341,8 +1596,14 @@ def _write_connect_payments(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the payments table and bulk-insert all pages. Returns total row count.
+
+    Resumable: when ``start_cursor`` is set, skip DROP and use
+    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
+    ``cursor_callback`` with the page's max ``id``.
 
     ``amount``/``amount_usd`` become NUMERIC(14,2), ``confirmed`` becomes
     BOOLEAN, all date/datetime fields become TIMESTAMPTZ, ``opportunity_id``
@@ -1351,11 +1612,12 @@ def _write_connect_payments(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_payments CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_payments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_payments (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_payments (
             username TEXT,
             opportunity_id BIGINT,
             created_at TIMESTAMPTZ,
@@ -1373,6 +1635,7 @@ def _write_connect_payments(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_PAYMENTS_INSERT.format(schema=sid)
     total = 0
@@ -1402,6 +1665,10 @@ def _write_connect_payments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1413,8 +1680,14 @@ def _write_connect_invoices(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the invoices table and bulk-insert all pages. Returns total row count.
+
+    Resumable: when ``start_cursor`` is set, skip DROP and use
+    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
+    ``cursor_callback`` with the page's max ``id``.
 
     Money fields are NUMERIC(14,2), ``date`` is DATE, ``opportunity_id`` is
     BIGINT. ``service_delivery`` is a BooleanField (not a text label as the
@@ -1424,11 +1697,12 @@ def _write_connect_invoices(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_invoices CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_invoices CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_invoices (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_invoices (
             opportunity_id BIGINT,
             amount NUMERIC(14, 2),
             amount_usd NUMERIC(14, 2),
@@ -1440,6 +1714,7 @@ def _write_connect_invoices(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_INVOICES_INSERT.format(schema=sid)
     total = 0
@@ -1463,6 +1738,10 @@ def _write_connect_invoices(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1474,8 +1753,14 @@ def _write_connect_assessments(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the assessments table and bulk-insert all pages. Returns total row count.
+
+    Resumable: when ``start_cursor`` is set, skip DROP and use
+    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
+    ``cursor_callback`` with the page's max ``id``.
 
     Scores become INTEGER, ``passed`` becomes BOOLEAN, ``date`` becomes
     TIMESTAMPTZ, ``opportunity_id`` becomes BIGINT.
@@ -1483,11 +1768,12 @@ def _write_connect_assessments(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_assessments CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_assessments CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_assessments (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_assessments (
             username TEXT,
             app BIGINT,
             opportunity_id BIGINT,
@@ -1499,6 +1785,7 @@ def _write_connect_assessments(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_ASSESSMENTS_INSERT.format(schema=sid)
     total = 0
@@ -1522,6 +1809,10 @@ def _write_connect_assessments(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
@@ -1533,8 +1824,14 @@ def _write_connect_completed_modules(
     schema_name: str,
     conn: Any,
     on_page: OnPage | None = None,
+    start_cursor: int | None = None,
+    cursor_callback: CursorCallback | None = None,
 ) -> int:
     """Create the completed_modules table and bulk-insert all pages. Returns total row count.
+
+    Resumable: when ``start_cursor`` is set, skip DROP and use
+    ``CREATE TABLE IF NOT EXISTS``. Commits per page; calls
+    ``cursor_callback`` with the page's max ``id``.
 
     ``duration`` becomes INTEGER (seconds), ``date`` becomes TIMESTAMPTZ,
     ``opportunity_id`` becomes BIGINT.
@@ -1542,11 +1839,12 @@ def _write_connect_completed_modules(
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
-    cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_modules CASCADE").format(sid))
+    if start_cursor is None:
+        cur.execute(psql.SQL("DROP TABLE IF EXISTS {}.raw_completed_modules CASCADE").format(sid))
     cur.execute(
         psql.SQL(
             """
-        CREATE TABLE {schema}.raw_completed_modules (
+        CREATE TABLE IF NOT EXISTS {schema}.raw_completed_modules (
             username TEXT,
             module BIGINT,
             opportunity_id BIGINT,
@@ -1556,6 +1854,7 @@ def _write_connect_completed_modules(
         """
         ).format(schema=sid)
     )
+    conn.commit()
 
     ins_sql = _CONNECT_COMPLETED_MODULES_INSERT.format(schema=sid)
     total = 0
@@ -1577,6 +1876,10 @@ def _write_connect_completed_modules(
         ]
         cur.executemany(ins_sql, rows)
         total += len(page)
+        max_id = _max_id(page, "id")
+        conn.commit()
+        if cursor_callback is not None and max_id is not None:
+            cursor_callback(max_id, total)
         if on_page is not None:
             on_page(total, rows_total)
 
