@@ -280,6 +280,12 @@ DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
 
+# Hard ceiling on the materialization-resume agent.ainvoke. The agent's
+# recursion_limit is 50; 120s is generous for any sane follow-up response.
+# Beyond this, the user sees a synthetic "took too long" message instead of
+# a forever-spinner. Override per-test to exercise the timeout path.
+AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=120)
+
 # Langfuse observability (optional)
 LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
 LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")
@@ -337,3 +343,9 @@ EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 
 SCHEMA_TTL_HOURS = 24  # schemas inactive longer than this are expired
+
+# Agent recursion limit for the post-materialization resume path. A healthy
+# resume is 2-5 tool calls; 20 leaves headroom for follow-up exploration
+# without giving a panic-looping agent runway for ~25 cycles. The user-facing
+# chat path keeps its own (higher) limit.
+AGENT_RESUME_RECURSION_LIMIT = env.int("AGENT_RESUME_RECURSION_LIMIT", default=20)

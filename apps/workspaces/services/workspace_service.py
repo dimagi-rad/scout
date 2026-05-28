@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
-from apps.workspaces.tasks import rebuild_workspace_view_schema
+from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_view_schema_task
 
 
 def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
@@ -30,12 +30,17 @@ def add_workspace_tenant(workspace, tenant) -> tuple[WorkspaceTenant, bool]:
 
 
 def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
-    """Remove a tenant from a workspace and mark the view schema for rebuild.
+    """Remove a tenant from a workspace and reconcile the view schema.
 
-    Deletes the WorkspaceTenant record and marks any existing WorkspaceViewSchema
-    as PROVISIONING, then dispatches a rebuild task as part of the transaction
-    (procrastinate's defer is transaction-safe — the row is only visible to
-    workers after commit).
+    Deletes the WorkspaceTenant record. If the workspace remains multi-tenant
+    (>=2 tenants left), marks any existing WorkspaceViewSchema as PROVISIONING
+    and dispatches a rebuild. If the workspace drops to single-tenant (or zero),
+    routing moves to the tenant schema and any active view schema becomes an
+    orphan — mark it TEARDOWN and dispatch teardown so the physical
+    ``ws_<hash>`` schema is dropped.
+
+    Both ``defer`` calls are transaction-safe — the procrastinate row is only
+    visible to workers after commit.
 
     Raises ValidationError if wt is the last tenant in the workspace.
     """
@@ -50,10 +55,19 @@ def remove_workspace_tenant(workspace, wt: WorkspaceTenant) -> None:
         if len(tenant_ids) <= 1:
             raise ValidationError("Cannot remove the last tenant from a workspace.")
         wt.delete()
-        WorkspaceViewSchema.objects.filter(workspace=workspace).update(
-            state=SchemaState.PROVISIONING
-        )
-        rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
+        remaining = len(tenant_ids) - 1
+        if remaining <= 1:
+            for vs in WorkspaceViewSchema.objects.filter(
+                workspace=workspace, state=SchemaState.ACTIVE
+            ):
+                vs.state = SchemaState.TEARDOWN
+                vs.save(update_fields=["state"])
+                teardown_view_schema_task.defer(view_schema_id=str(vs.id))
+        else:
+            WorkspaceViewSchema.objects.filter(workspace=workspace).update(
+                state=SchemaState.PROVISIONING
+            )
+            rebuild_workspace_view_schema.defer(workspace_id=str(workspace.id))
 
 
 async def touch_workspace_schemas(workspace) -> None:

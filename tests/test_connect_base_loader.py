@@ -1,8 +1,14 @@
+import io
+from unittest.mock import MagicMock, patch
+
 import pytest
 import requests_mock as rm
+from urllib3.connectionpool import HTTPSConnectionPool
+from urllib3.response import HTTPResponse
 
 from mcp_server.loaders.connect_base import (
     EXPORT_ACCEPT_HEADER,
+    RETRY_TOTAL,
     ConnectAuthError,
     ConnectBaseLoader,
     ConnectExportError,
@@ -236,3 +242,124 @@ class TestPaginateExportPages:
             # requests preserves Authorization on same-host http→https upgrades.
             redirected_request = next(req for req in m.request_history if req.url == next_https)
             assert redirected_request.headers["Authorization"] == "Bearer test-token-123"
+
+
+def _make_urllib3_response(status, body=b"", headers=None):
+    return HTTPResponse(
+        body=io.BytesIO(body),
+        headers=headers or {},
+        status=status,
+        version=11,
+        version_string="HTTP/1.1",
+        reason="",
+        preload_content=False,
+        decode_content=False,
+    )
+
+
+def _drive_with_statuses(loader, scripted):
+    """Patch urllib3's connection pool so the loader's real Retry adapter
+    sees a scripted sequence of responses.
+
+    ``requests-mock`` replaces the session's adapter and so completely
+    bypasses urllib3's Retry logic. Patching ``HTTPSConnectionPool._make_request``
+    instead lets the real configured Retry on the adapter drive the retry
+    loop, which is what we actually want to test.
+
+    ``scripted`` is a list of ``(status, body_bytes, headers_dict)`` tuples
+    consumed in order; the last entry is reused if the loader makes more
+    requests than scripted.
+    """
+    queue = list(scripted)
+    calls: list[dict] = []
+
+    def fake_make_request(self, conn, method, url, **kwargs):
+        spec = queue.pop(0) if len(queue) > 1 else queue[0]
+        status, body, headers = spec
+        calls.append({"method": method, "url": url, "status": status})
+        return _make_urllib3_response(status, body, headers)
+
+    return patch.multiple(
+        HTTPSConnectionPool,
+        _make_request=fake_make_request,
+        _get_conn=lambda self, timeout=None: MagicMock(),
+        _put_conn=lambda self, conn: None,
+    ), calls
+
+
+@pytest.fixture
+def fast_retry_loader(loader):
+    """Loader with backoff_factor=0 so retry tests are not timing-bound.
+
+    Connect 5xx retry semantics are what we test here; the actual sleep
+    between retries is urllib3's responsibility and not our code under test.
+    """
+    adapter = loader._session.get_adapter("https://connect.example.com/")
+    adapter.max_retries.backoff_factor = 0
+    return loader
+
+
+class TestConnectRetryBehaviour:
+    def test_retries_on_5xx_then_succeeds(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[
+                (500, b"", {}),
+                (500, b"", {}),
+                (
+                    200,
+                    b'{"next": null, "results": [{"id": 1}, {"id": 2}], "count": 2}',
+                    {"Content-Type": "application/json"},
+                ),
+            ],
+        )
+        with ctx:
+            pages = list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert pages == [([{"id": 1}, {"id": 2}], 2)]
+        assert len(calls) == 3
+
+    def test_raises_after_max_retries(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[(500, b"", {})],
+        )
+        with ctx, pytest.raises(ConnectExportError) as exc:
+            list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert exc.value.status == 500
+        assert exc.value.attempts == RETRY_TOTAL + 1 == 4
+        assert len(calls) == 4
+
+    def test_captures_sentry_trace_header_on_failure(self, fast_retry_loader):
+        sentry_trace_value = "1234567890abcdef1234567890abcdef-abcd-1"
+        ctx, _ = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[(503, b"", {"sentry-trace": sentry_trace_value})],
+        )
+        with ctx, pytest.raises(ConnectExportError) as exc:
+            list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert exc.value.sentry_trace == sentry_trace_value
+        assert exc.value.status == 503
+        assert exc.value.attempts == RETRY_TOTAL + 1
+
+    def test_does_not_retry_on_401(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[(401, b"", {})],
+        )
+        with ctx, pytest.raises(ConnectAuthError):
+            list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert len(calls) == 1
+
+    def test_does_not_retry_on_403(self, fast_retry_loader):
+        ctx, calls = _drive_with_statuses(
+            fast_retry_loader,
+            scripted=[(403, b"", {})],
+        )
+        with ctx, pytest.raises(ConnectAuthError):
+            list(fast_retry_loader._paginate_export_pages("user_visits/"))
+
+        assert len(calls) == 1

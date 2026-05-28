@@ -80,6 +80,49 @@ DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TEMPERATURE = 0
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
 
+# Circuit-breaker thresholds for the escalation node. If the last N tool
+# messages all carry one of these error codes, the agent has drifted from
+# self-correction into a panic loop — route to the escalation node so the
+# turn ends with an explicit ask instead of consuming the recursion budget.
+ESCALATION_ERROR_CODES = ('"code": "NOT_FOUND"', '"code": "VALIDATION_ERROR"')
+ESCALATION_TRIGGER_COUNT = 3
+
+ESCALATION_MESSAGE = (
+    "I've encountered repeated schema errors — the tables I expected to "
+    "find aren't queryable. The data may need to be re-materialized. "
+    "Would you like me to run materialization?"
+)
+
+
+def _should_escalate(messages: list) -> bool:
+    """Detect a panic loop: last N tool messages all returned an error code.
+
+    Looks only at trailing ``ToolMessage``s — a successful tool call in
+    between resets the streak. Substring matches the error envelope's
+    ``"code": "..."`` field rather than parsing JSON, since tool content
+    may be a string, list of content blocks, or other shapes.
+    """
+    streak: list[ToolMessage] = []
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            streak.append(msg)
+            if len(streak) >= ESCALATION_TRIGGER_COUNT:
+                break
+        elif isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            continue
+        else:
+            break
+
+    if len(streak) < ESCALATION_TRIGGER_COUNT:
+        return False
+
+    for tm in streak:
+        content = tm.content if isinstance(tm.content, str) else str(tm.content)
+        if not any(code in content for code in ESCALATION_ERROR_CODES):
+            return False
+    return True
+
+
 # Simple TTL cache for system prompts
 _system_prompt_cache: dict[str, tuple[str, float]] = {}
 _SYSTEM_PROMPT_TTL = 60  # 60 seconds — short to limit staleness from knowledge/schema changes
@@ -556,12 +599,33 @@ async def build_agent_graph(
 
         return END
 
+    def post_tools_router(state: AgentState) -> Literal["agent", "escalate"]:
+        """Route post-tools: escalate if the agent is in a panic loop, else agent.
+
+        See ``_should_escalate`` for the loop-detection rule. The escalation
+        node ends the turn with a fixed message — no further tool calls.
+        """
+        if _should_escalate(state.get("messages", [])):
+            logger.warning(
+                "agent graph: routing to escalation node after %d consecutive "
+                "tool errors (workspace=%s)",
+                ESCALATION_TRIGGER_COUNT,
+                workspace.id,
+            )
+            return "escalate"
+        return "agent"
+
+    def escalation_node(state: AgentState) -> dict[str, Any]:
+        """Terminal node that emits a fixed escalation message and ends the turn."""
+        return {"messages": [AIMessage(content=ESCALATION_MESSAGE)]}
+
     # --- Build the graph ---
     graph = StateGraph(AgentState)
 
     # Add nodes
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
+    graph.add_node("escalate", escalation_node)
 
     # Set entry point
     graph.set_entry_point("agent")
@@ -577,8 +641,16 @@ async def build_agent_graph(
         },
     )
 
-    # tools -> agent (the LLM sees error ToolMessages and self-corrects)
-    graph.add_edge("tools", "agent")
+    # tools -> agent (normal) or -> escalate (panic loop detected, terminal)
+    graph.add_conditional_edges(
+        "tools",
+        post_tools_router,
+        {
+            "agent": "agent",
+            "escalate": "escalate",
+        },
+    )
+    graph.add_edge("escalate", END)
 
     # --- Compile and return ---
     compiled = graph.compile(checkpointer=checkpointer)
@@ -713,5 +785,8 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
 
 __all__ = [
+    "ESCALATION_MESSAGE",
+    "ESCALATION_TRIGGER_COUNT",
+    "_should_escalate",
     "build_agent_graph",
 ]

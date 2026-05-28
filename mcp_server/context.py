@@ -86,6 +86,13 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
     - Single-tenant workspace (1 tenant): delegates to load_tenant_context(tenant.external_id).
     - Multi-tenant workspace (2+ tenants): uses the WorkspaceViewSchema.
 
+    Invariant: for a workspace, exactly one routing target exists at a time —
+    the tenant schema (``t_<id>``) for single-tenant workspaces or the view
+    schema (``ws_<hash>``) for multi-tenant. Any orphan WorkspaceViewSchema
+    rows are marked TEARDOWN and their physical schemas dropped when the
+    tenant count falls to <=1 (see
+    ``apps.workspaces.services.workspace_service.remove_workspace_tenant``).
+
     Raises ValueError if the workspace has no tenants, or if multi-tenant and
     no active WorkspaceViewSchema exists.
     """
