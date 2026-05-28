@@ -435,6 +435,71 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
+    """A PARTIAL MaterializationRun must surface per-source state in the
+    resume prompt so the agent can disclose what failed.
+    """
+    user = await sync_to_async(User.objects.create_user)(email="psrc@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-psrc", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-psrc",
+        provider="commcare_connect",
+        canonical_name="Conn Tenant",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant,
+        schema_name="s_psrc",
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=12345,
+        tool_call_id="tc-psrc",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_connect",
+        state=MaterializationRun.RunState.PARTIAL,
+        procrastinate_job_id=12345,
+        result={
+            "pipeline": "commcare_connect",
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "completed", "rows": 98869},
+                "completed_works": {
+                    "state": "failed",
+                    "rows": 0,
+                    "error": "RuntimeError: Connect 500",
+                },
+                "payments": {"state": "skipped", "rows": 0},
+            },
+        },
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    # The prompt must call out PARTIAL state and include per-source detail.
+    assert "PARTIAL" in body or "partial" in body
+    # Per-source state must be present so the agent knows what's queryable.
+    assert "completed_works" in body
+    assert "failed" in body
+    # And the resume terminal state for partial is FAILED (matches existing behavior).
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_resume_cas_rejects_already_running_threadjob():
     """If a ThreadJob is already in RUNNING state (a concurrent resume
     claimed it first), a second invocation must NOT proceed to ainvoke."""

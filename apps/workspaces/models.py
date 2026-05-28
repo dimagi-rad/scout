@@ -65,8 +65,10 @@ class MaterializationRun(models.Model):
         LOADING = "loading"
         TRANSFORMING = "transforming"
         COMPLETED = "completed"
+        PARTIAL = "partial"
         FAILED = "failed"
         CANCELLED = "cancelled"
+        STALE = "stale"
 
     ACTIVE_STATES = frozenset(
         {

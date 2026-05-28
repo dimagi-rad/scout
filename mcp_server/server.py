@@ -148,7 +148,10 @@ async def list_tables(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema=ts,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()
@@ -196,7 +199,10 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
             last_run = (
                 await MaterializationRun.objects.filter(
                     tenant_schema=ts,
-                    state=MaterializationRun.RunState.COMPLETED,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
                 )
                 .order_by("-completed_at")
                 .afirst()
@@ -251,7 +257,10 @@ async def get_metadata(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema=ts,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()
@@ -692,7 +701,10 @@ async def get_schema_status(workspace_id: str = "") -> dict:
             last_run = (
                 await MaterializationRun.objects.filter(
                     tenant_schema=ts,
-                    state=MaterializationRun.RunState.COMPLETED,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
                 )
                 .order_by("-completed_at")
                 .afirst()
@@ -737,7 +749,10 @@ async def get_schema_status(workspace_id: str = "") -> dict:
         last_run = (
             await MaterializationRun.objects.filter(
                 tenant_schema__tenant_id__in=tenant_ids,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .afirst()

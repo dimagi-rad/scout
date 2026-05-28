@@ -357,6 +357,14 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
     Handles both TenantSchema and WorkspaceViewSchema records.
     Schemas with null last_accessed_at are never auto-expired.
 
+    The data-bearing MaterializationRun rows are NOT touched here. A schema in
+    TEARDOWN is already unreachable via the catalog (load_tenant_context only
+    resolves ACTIVE/MATERIALIZING schemas), so flipping runs to STALE before the
+    physical DROP succeeds buys nothing — and if teardown_schema later fails the
+    DROP and reverts the schema to ACTIVE, prematurely-staled runs would strand
+    the (still-present) data as invisible. teardown_schema marks the runs STALE
+    only after manager.teardown actually drops the schema.
+
     `timestamp` is supplied by the procrastinate periodic deferrer; the default
     lets tests invoke this task directly.
     """
@@ -450,10 +458,27 @@ async def teardown_schema(schema_id: str) -> None:
         # teardown() only raises when DROP SCHEMA itself fails — role-cleanup
         # failures are logged and swallowed there — so reaching this branch
         # means the physical schema is still present and the record should go
-        # back to ACTIVE rather than being stranded in TEARDOWN.
+        # back to ACTIVE rather than being stranded in TEARDOWN. The
+        # data-bearing runs are deliberately left in their terminal
+        # COMPLETED/PARTIAL state: the physical tables still exist, so the
+        # catalog must keep surfacing them once the schema is ACTIVE again.
         schema.state = SchemaState.ACTIVE
         await schema.asave(update_fields=["state"])
         raise
+
+    # The physical schema (and its tables) is now dropped. Flip the data-bearing
+    # runs to STALE so pipeline_list_tables stops returning ghost entries for
+    # tables that no longer exist. This is done here — after the DROP succeeds —
+    # rather than at TEARDOWN-flip time, so a failed DROP never strands intact
+    # data as invisible. CANCELLED/FAILED runs are already terminal and excluded
+    # from the catalog query, so they're left alone.
+    await MaterializationRun.objects.filter(
+        tenant_schema=schema,
+        state__in=[
+            MaterializationRun.RunState.COMPLETED,
+            MaterializationRun.RunState.PARTIAL,
+        ],
+    ).aupdate(state=MaterializationRun.RunState.STALE)
 
     try:
         schema.state = SchemaState.EXPIRED
@@ -624,7 +649,25 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
 
 
 async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[str, list[dict]]:
-    """Inspect MaterializationRun rows for this job, return (status, per-tenant summary)."""
+    """Inspect MaterializationRun rows for this job, return (status, per-tenant summary).
+
+    Per-tenant summary entries include per-source detail so the resume prompt
+    can tell the agent which sources are queryable and which are unavailable:
+
+    ``{
+        "tenant": "...",
+        "state": "partial",          # the MaterializationRun state
+        "row_counts": {"users": 100, ...},  # only sources that committed
+        "sources": {
+            "users":   {"state": "completed", "rows": 100},
+            "visits":  {"state": "completed", "rows": 98869},
+            "completed_works": {"state": "failed",  "rows": 0,
+                                "error": "ConnectionError: 500 ..."},
+            "payments": {"state": "skipped", "rows": 0},
+            ...
+        },
+    }``
+    """
     runs = [
         r
         async for r in MaterializationRun.objects.filter(
@@ -636,19 +679,29 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     summary: list[dict] = []
     any_cancelled = False
     any_failed = False
+    any_partial = False
     all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
         row_counts: dict = {}
+        sources_detail: dict = {}
         if isinstance(r.result, dict):
             for source, info in (r.result.get("sources") or {}).items():
-                if isinstance(info, dict) and "rows" in info:
+                if not isinstance(info, dict):
+                    continue
+                src_state = info.get("state")
+                if src_state == "completed" and "rows" in info:
                     row_counts[source] = info["rows"]
+                detail = {"state": src_state, "rows": info.get("rows", 0)}
+                if "error" in info:
+                    detail["error"] = info["error"]
+                sources_detail[source] = detail
         summary.append(
             {
                 "tenant": tenant_id,
                 "state": r.state,
                 "row_counts": row_counts,
+                "sources": sources_detail,
             }
         )
         if r.state == MaterializationRun.RunState.CANCELLED:
@@ -657,13 +710,25 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         elif r.state == MaterializationRun.RunState.FAILED:
             any_failed = True
             all_completed = False
+        elif r.state == MaterializationRun.RunState.PARTIAL:
+            any_partial = True
+            all_completed = False
         elif r.state != MaterializationRun.RunState.COMPLETED:
             all_completed = False
-    status = (
-        "cancelled"
-        if any_cancelled
-        else ("failed" if any_failed else ("completed" if all_completed else "partial"))
-    )
+    if any_cancelled:
+        status = "cancelled"
+    elif any_failed:
+        status = "failed"
+    elif all_completed:
+        status = "completed"
+    elif any_partial:
+        # At least one tenant has some sources committed; the agent can answer
+        # questions about what loaded and must disclose what didn't.
+        status = "partial"
+    else:
+        # Runs still in flight (LOADING/TRANSFORMING) — surface as partial so
+        # the agent does not falsely claim "all data loaded".
+        status = "partial"
     return status, summary
 
 
@@ -723,6 +788,14 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"pipelines. This typically means the workspace's tenants have no "
             f"pipeline configured or no credentials set up. Please tell the user "
             f"what happened and suggest checking the workspace's connection."
+        )
+    elif status == "partial":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization completed with PARTIAL data "
+            f"(some sources loaded, others failed or were skipped). Answer what "
+            f"you can from the available data and tell the user which sources are "
+            f"unavailable. Do NOT claim that data is loaded for sources marked "
+            f"failed or skipped. Per-tenant: {summary}"
         )
     else:
         body = (

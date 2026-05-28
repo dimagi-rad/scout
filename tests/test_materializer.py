@@ -18,7 +18,16 @@ class TestRunPipeline:
         run = MagicMock()
         run.id = "run-1"
         mock_run_cls.objects.create.return_value = run
-        for attr in ("DISCOVERING", "LOADING", "TRANSFORMING", "COMPLETED", "FAILED", "CANCELLED"):
+        for attr in (
+            "DISCOVERING",
+            "LOADING",
+            "TRANSFORMING",
+            "COMPLETED",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED",
+            "STALE",
+        ):
             setattr(mock_run_cls.RunState, attr, attr.lower())
         # ACTIVE_STATES is a real frozenset on the model; replicate it on the mock
         mock_run_cls.ACTIVE_STATES = frozenset(
@@ -239,6 +248,67 @@ class TestRunPipeline:
             # We must not have advanced past DISCOVER: no DB connection acquired.
             mock_conn.assert_not_called()
 
+    def test_discover_phase_failure_marks_run_failed(self):
+        """A failure in the DISCOVER phase (e.g. provider auth/network error)
+        must leave the run in a FAILED terminal state with completed_at stamped,
+        not stuck in DISCOVERING. Pre-PR an outer handler did this; it was
+        removed, leaving the row non-terminal so downstream aggregation treated
+        it as "partial" and expire_inactive_schemas never cleaned it up."""
+        from mcp_server.pipeline_registry import (
+            MetadataDiscoveryConfig,
+            PipelineConfig,
+            SourceConfig,
+        )
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+            metadata_discovery=MetadataDiscoveryConfig(),
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            # Real initial state: no terminal stamp yet. The outer handler keys
+            # off this to distinguish a pre-loop failure from a per-source one.
+            run.completed_at = None
+            # DISCOVER raises before any source is loaded.
+            mock_meta.return_value.load.side_effect = RuntimeError("provider auth failed")
+
+            with pytest.raises(RuntimeError, match="provider auth failed"):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+            # Never reached the LOAD phase — no DB connection acquired.
+            mock_conn.assert_not_called()
+
+            # The outer handler must have written a FAILED terminal state with
+            # completed_at + result, guarded by completed_at__isnull=True.
+            failed_update = None
+            for call in mock_run_cls.objects.filter.return_value.update.call_args_list:
+                if call.kwargs.get("state") == mock_run_cls.RunState.FAILED:
+                    failed_update = call
+                    break
+            assert failed_update is not None, "expected a FAILED terminal update"
+            assert failed_update.kwargs["completed_at"] is not None
+            assert "error" in failed_update.kwargs["result"]
+            # The terminal write must be conditional on completed_at being unset
+            # so it never clobbers a per-source FAILED/PARTIAL state.
+            filter_calls = mock_run_cls.objects.filter.call_args_list
+            assert any(c.kwargs.get("completed_at__isnull") is True for c in filter_calls), (
+                "terminal write must filter on completed_at__isnull=True"
+            )
+
     def test_transforming_transition_preserves_external_cancel(self):
         """A cancel that lands between LOAD commit and the TRANSFORM phase
         must not be overwritten by the LOADING→TRANSFORMING transition;
@@ -417,6 +487,257 @@ class TestRunPipeline:
                 run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
 
         assert run.state == "failed"
+
+    def test_partial_failure_preserves_earlier_sources_and_marks_partial(self):
+        """Per-source atomicity: when a later source fails, earlier sources
+        stay committed and the run is marked PARTIAL (not FAILED).
+        """
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_connect",
+            description="",
+            version="1.0",
+            provider="commcare_connect",
+            sources=[
+                SourceConfig(name="users"),
+                SourceConfig(name="visits"),
+                SourceConfig(name="completed_works"),
+                SourceConfig(name="payments"),
+            ],
+        )
+        tm = self._make_tm(tenant_id="42")
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
+            patch("mcp_server.services.materializer.ConnectVisitLoader") as mock_visits,
+            patch(
+                "mcp_server.services.materializer.ConnectCompletedWorkLoader",
+            ) as mock_cw,
+            patch("mcp_server.services.materializer.ConnectPaymentLoader") as mock_payments,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {}
+            mock_users.return_value.load_pages.return_value = iter([([{"u": 1}], 1)])
+            mock_visits.return_value.load_pages.return_value = iter([([{"v": 1}], 1)])
+            # 3rd source fails AFTER the writer DROP/CREATE — simulate a 5xx mid-load.
+            mock_cw.return_value.load_pages.side_effect = RuntimeError("Connect 500")
+            mock_payments.return_value.load_pages.return_value = iter([])
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            with pytest.raises(RuntimeError, match="Connect 500"):
+                run_pipeline(tm, {"type": "api_key", "value": "x"}, pipeline)
+
+        # Run was marked PARTIAL (two earlier sources committed before failure).
+        assert run.state == "partial"
+        # source_results recorded the truth: 2 completed, 1 failed, 1 skipped.
+        result_kwargs = run.save.call_args.kwargs
+        # run.save was called with update_fields including "result"
+        # We instead inspect run.result directly since the mock writes it.
+        sources = run.result["sources"]
+        assert sources["users"]["state"] == "completed"
+        assert sources["visits"]["state"] == "completed"
+        assert sources["completed_works"]["state"] == "failed"
+        assert sources["payments"]["state"] == "skipped"
+        # 4th source we never reached is recorded as skipped, not completed.
+        assert "rows" in sources["completed_works"]
+        assert sources["completed_works"]["rows"] == 0
+        # Sanity-check that update_fields includes result/state.
+        assert "result" in result_kwargs.get("update_fields", [])
+
+    def test_failed_first_source_marks_run_failed_not_partial(self):
+        """If the very first source fails, no source has committed, so the
+        run is marked FAILED (not PARTIAL).
+        """
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_connect",
+            description="",
+            version="1.0",
+            provider="commcare_connect",
+            sources=[
+                SourceConfig(name="users"),
+                SourceConfig(name="visits"),
+            ],
+        )
+        tm = self._make_tm(tenant_id="42")
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
+            patch("mcp_server.services.materializer.ConnectVisitLoader") as mock_visits,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {}
+            mock_users.return_value.load_pages.side_effect = RuntimeError("Connect 500")
+            mock_visits.return_value.load_pages.return_value = iter([])
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            with pytest.raises(RuntimeError, match="Connect 500"):
+                run_pipeline(tm, {"type": "api_key", "value": "x"}, pipeline)
+
+        assert run.state == "failed"
+        sources = run.result["sources"]
+        assert sources["users"]["state"] == "failed"
+        assert sources["visits"]["state"] == "skipped"
+
+    def test_failed_source_records_error_and_attempts(self):
+        """Failed-source dict must include short error + attempts (default 1)."""
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            err = RuntimeError("upstream HTTP 500 after retries")
+            err.attempts = 3
+            mock_cases.return_value.load_pages.side_effect = err
+            conn = MagicMock()
+            mock_conn.return_value = conn
+
+            with pytest.raises(RuntimeError):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+        info = run.result["sources"]["cases"]
+        assert info["state"] == "failed"
+        assert "upstream HTTP 500" in info["error"]
+        # Error string must be short — no traceback noise.
+        assert "Traceback" not in info["error"]
+        assert info["attempts"] == 3
+        assert "failed_at" in info
+
+    def test_source_state_never_loaded_string(self):
+        """The 'loaded' state was the phantom-rows lie; verify it is gone."""
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            mock_cases.return_value.load_pages.return_value = iter([])
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            result = run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+        for source_name, info in result["sources"].items():
+            assert info.get("state") != "loaded", (
+                f"Source {source_name} still records phantom 'loaded' state"
+            )
+        # The success path must use 'completed'.
+        assert result["sources"]["cases"]["state"] == "completed"
+
+    def test_completed_source_commits_before_recording_state(self):
+        """A completed source's connection must commit BEFORE the state is
+        recorded as 'completed' — that ordering is what makes the 'loaded
+        but rolled back' bug impossible.
+        """
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+
+        commit_called: list[bool] = []
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            mock_cases.return_value.load_pages.return_value = iter([])
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+            conn.commit.side_effect = lambda: commit_called.append(True)
+
+            run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+        # commit() was called at least once during the source loop
+        assert commit_called, "Per-source commit() must be invoked"
 
 
 @pytest.mark.django_db

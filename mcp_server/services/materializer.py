@@ -1,20 +1,31 @@
 """Three-phase materialization orchestrator: Discover → Load → Transform.
 
 Design notes:
-- All source writes share a single psycopg connection, committed in one
-  transaction. A mid-run failure rolls back all sources atomically.
+- Each source is loaded inside its own psycopg connection and committed
+  independently. A failure on source N+1 does NOT roll back rows source N
+  already committed. The writer (``_write_*``) DDL+INSERT sequence stays
+  internally atomic — it runs inside a single transaction per source.
+- A mid-pipeline failure marks the run PARTIAL (if at least one source
+  committed) or FAILED (if none did) and short-circuits the remaining
+  sources, recording them as ``skipped`` in ``result["sources"]``.
 - Loaders expose ``load_pages()`` iterators yielding ``(page, total_count|None)``
   tuples; rows are written page-by-page so the full dataset is never held in
   memory. Inserts use ``executemany`` for efficiency.
 - Transform failures are isolated — run is marked COMPLETED; error stored in result.
 - ``progress_updater`` is also the cancellation checkpoint. Between pages it
   may raise ``MaterializationCancelled`` (e.g. when the worker observes
-  ``MaterializationRun.state == CANCELLED``); the open psycopg transaction
-  rolls back, leaving no partial data.
+  ``MaterializationRun.state == CANCELLED``); the in-flight source's
+  transaction rolls back. Sources committed before the cancel survive.
 - Phase transitions (DISCOVERING→LOADING, LOADING→TRANSFORMING, TRANSFORMING→
   COMPLETED) are written via conditional UPDATEs that filter on the prior
   state, so a concurrent CANCELLED set by the cancel endpoint is preserved
-  (an unconditional ``run.save`` would silently clobber it).
+  (an unconditional ``run.save`` would silently clobber it). The
+  TRANSFORMING→COMPLETED CAS also preserves PARTIAL.
+- ``result["sources"][name]`` records one of ``completed``, ``failed``,
+  ``skipped``, ``cancelled``. Never ``loaded`` — that string indicated rows
+  written but un-committed, which was a lie when the transaction rolled back.
+- The per-source dict reserves a ``cursor_state`` field (currently always
+  ``None``) for future page-level resumable materialization (issue #187).
 - A step count check at the end guards against total_steps / report() drift.
 """
 
@@ -194,48 +205,120 @@ def run_pipeline(
             raise MaterializationCancelled()
         run.state = MaterializationRun.RunState.LOADING
 
-        conn = get_managed_db_connection()
-        conn.autocommit = False
-        try:
-            for source in pipeline.sources:
-                current_source = source.name
-                load_message = f"Loading {source.name} from {pipeline.provider} API..."
-                report(load_message)
-                rows = _load_source(
+        sources_list = list(pipeline.sources)
+        for idx, source in enumerate(sources_list):
+            current_source = source.name
+            load_message = f"Loading {source.name} from {pipeline.provider} API..."
+            report(load_message)
+            try:
+                rows = _load_and_commit_source(
                     source.name,
                     tenant_membership,
                     credential,
                     schema_name,
-                    conn,
                     provider=pipeline.provider,
                     on_page=make_on_page(source.name, load_message),
                 )
-                source_results[source.name] = {"state": "loaded", "rows": rows}
-                logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
-            current_source = None
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            except MaterializationCancelled:
+                # Earlier sources stay committed; this in-flight source rolled
+                # back inside _load_and_commit_source. Record per-source state
+                # before bubbling the cancellation up.
+                source_results[source.name] = {
+                    "state": "cancelled",
+                    "rows": 0,
+                    "cursor_state": None,
+                }
+                for remaining in sources_list[idx + 1 :]:
+                    source_results[remaining.name] = {
+                        "state": "skipped",
+                        "rows": 0,
+                        "cursor_state": None,
+                    }
+                raise
+            except Exception as e:
+                logger.exception(
+                    "Source %s failed for schema %s; earlier sources stay committed",
+                    source.name,
+                    schema_name,
+                )
+                source_results[source.name] = {
+                    "state": "failed",
+                    "rows": 0,
+                    "error": _summarize_error(e),
+                    "attempts": getattr(e, "attempts", 1),
+                    "failed_at": datetime.now(UTC).isoformat(),
+                    "cursor_state": None,
+                }
+                for remaining in sources_list[idx + 1 :]:
+                    source_results[remaining.name] = {
+                        "state": "skipped",
+                        "rows": 0,
+                        "cursor_state": None,
+                    }
+                any_committed = any(s.get("state") == "completed" for s in source_results.values())
+                final_state = (
+                    MaterializationRun.RunState.PARTIAL
+                    if any_committed
+                    else MaterializationRun.RunState.FAILED
+                )
+                run.state = final_state
+                run.completed_at = datetime.now(UTC)
+                run.result = {
+                    "pipeline": pipeline.name,
+                    "sources": source_results,
+                }
+                run.save(update_fields=["state", "completed_at", "result"])
+                raise
+            source_results[source.name] = {
+                "state": "completed",
+                "rows": rows,
+                "committed_at": datetime.now(UTC).isoformat(),
+                "cursor_state": None,
+            }
+            logger.info("Loaded %d rows into %s.%s", rows, schema_name, source.name)
+        current_source = None
 
     except MaterializationCancelled:
         # Run state is already CANCELLED (set by the canceller before raising
         # via progress_updater). Stamp completed_at and exit cleanly so the
-        # caller can distinguish cancellation from failure.
+        # caller can distinguish cancellation from failure. Sources that
+        # committed before the cancel survive in source_results as "completed".
         now = datetime.now(UTC)
         MaterializationRun.objects.filter(id=run.id).update(
             completed_at=now,
-            result={"cancelled": True, "sources": source_results},
+            result={
+                "cancelled": True,
+                "pipeline": pipeline.name,
+                "sources": source_results,
+            },
         )
-        logger.info("Run %s cancelled; partial data rolled back", run.id)
+        logger.info("Run %s cancelled; in-flight source rolled back", run.id)
         raise
-    except Exception:
-        run.state = MaterializationRun.RunState.FAILED
-        run.completed_at = datetime.now(UTC)
-        run.result = {"error": "Pipeline failed", "sources": source_results}
-        run.save(update_fields=["state", "completed_at", "result"])
+
+    except Exception as e:
+        # Pre-loop failures (DISCOVER phase, system-asset generation re-raise,
+        # or the DISCOVERING→LOADING CAS) would otherwise escape with the run
+        # row stuck in DISCOVERING — no terminal state, no completed_at — which
+        # downstream aggregation treats as "partial" and expire_inactive_schemas
+        # never cleans up. Stamp a FAILED terminal state here so every
+        # non-cancellation failure path produces a terminal run.
+        #
+        # Per-source load failures are handled inside the loop above (which
+        # records FAILED/PARTIAL and re-raises). This handler is idempotent
+        # w.r.t. that path: if completed_at was already stamped there, we leave
+        # the recorded state untouched and just re-raise.
+        if run.completed_at is None:
+            logger.exception("Materialization run %s failed before any source committed", run.id)
+            now = datetime.now(UTC)
+            MaterializationRun.objects.filter(id=run.id, completed_at__isnull=True).update(
+                state=MaterializationRun.RunState.FAILED,
+                completed_at=now,
+                result={
+                    "pipeline": pipeline.name,
+                    "sources": source_results,
+                    "error": _summarize_error(e),
+                },
+            )
         raise
 
     # ── 4. TRANSFORM ──────────────────────────────────────────────────────────
@@ -347,6 +430,64 @@ def _run_discover_phase(
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
+
+
+def _summarize_error(exc: BaseException) -> str:
+    """Return a short, single-line error description for ``result["sources"][n].error``.
+
+    The string is surfaced to the agent in the resume prompt and (eventually)
+    to the end user, so it must be safe to display: no stack trace, no
+    sensitive headers, just the exception type and message.
+    """
+    msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+    if len(msg) > 200:
+        msg = msg[:197] + "..."
+    return f"{exc.__class__.__name__}: {msg}"
+
+
+def _load_and_commit_source(
+    source_name: str,
+    tenant_membership: Any,
+    credential: dict[str, str],
+    schema_name: str,
+    provider: str,
+    on_page: OnPage | None = None,
+) -> int:
+    """Open a fresh psycopg connection, run the writer, commit, and close.
+
+    Each source loads inside its own transaction so a later source's failure
+    cannot roll back rows this source already committed. The writer functions
+    (``_write_*``) still depend on ``autocommit=False`` and a caller-controlled
+    commit — that contract is preserved here.
+    """
+    conn = get_managed_db_connection()
+    conn.autocommit = False
+    try:
+        rows = _load_source(
+            source_name,
+            tenant_membership,
+            credential,
+            schema_name,
+            conn,
+            provider=provider,
+            on_page=on_page,
+        )
+        conn.commit()
+        return rows
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            logger.exception(
+                "Rollback failed for source %s; connection may be in a broken state",
+                source_name,
+            )
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("Failed to close connection for source %s", source_name, exc_info=True)
 
 
 def _load_source(

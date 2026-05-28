@@ -253,7 +253,10 @@ class DataDictionaryView(APIView):
         last_run = (
             MaterializationRun.objects.filter(
                 tenant_schema=tenant_schema,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .first()
@@ -431,7 +434,10 @@ class TableDetailView(APIView):
         last_run = (
             MaterializationRun.objects.filter(
                 tenant_schema=tenant_schema,
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
             .order_by("-completed_at")
             .first()

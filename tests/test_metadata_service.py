@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mcp_server.services.metadata import _live_tables_in_schema
+
 
 def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
     """Build a minimal PipelineConfig for testing."""
@@ -44,6 +46,7 @@ class TestPipelineListTables:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
             qs = mock_run_cls.objects.filter.return_value.order_by.return_value
             qs.afirst = AsyncMock(return_value=None)
 
@@ -56,6 +59,7 @@ class TestPipelineListTables:
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
         pipeline_config = _make_pipeline_config(
             sources=[("cases", "CommCare case records"), ("forms", "CommCare form records")]
         )
@@ -65,13 +69,20 @@ class TestPipelineListTables:
         mock_run.completed_at = completed_at
         mock_run.result = {
             "sources": {
-                "cases": {"rows": 4823},
-                "forms": {"rows": 1200},
+                "cases": {"state": "completed", "rows": 4823},
+                "forms": {"state": "completed", "rows": 1200},
             }
         }
 
-        with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_cases", "raw_forms"}),
+            ),
+        ):
             mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
             qs = mock_run_cls.objects.filter.return_value.order_by.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
@@ -89,16 +100,24 @@ class TestPipelineListTables:
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
         pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
         pipeline_config = _set_dbt_models(pipeline_config, ["stg_cases", "stg_forms"])
 
         completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
         mock_run = MagicMock()
         mock_run.completed_at = completed_at
-        mock_run.result = {"sources": {"cases": {"rows": 100}}}
+        mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
 
-        with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_cases", "stg_cases", "stg_forms"}),
+            ),
+        ):
             mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
             qs = mock_run_cls.objects.filter.return_value.order_by.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
@@ -110,6 +129,131 @@ class TestPipelineListTables:
         stg = next(t for t in result if t["name"] == "stg_cases")
         assert stg["row_count"] is None
         assert stg["materialized_at"] == completed_at.isoformat()
+
+    @pytest.mark.asyncio
+    async def test_excludes_failed_and_skipped_sources(self):
+        """A PARTIAL run must only surface sources whose state == 'completed'."""
+        from mcp_server.services.metadata import pipeline_list_tables
+
+        mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
+        pipeline_config = _make_pipeline_config(
+            sources=[
+                ("users", "Connect users"),
+                ("visits", "Connect visits"),
+                ("completed_works", "Connect completed works"),
+                ("payments", "Connect payments"),
+            ]
+        )
+
+        completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
+        mock_run = MagicMock()
+        mock_run.completed_at = completed_at
+        mock_run.result = {
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "completed", "rows": 98869},
+                "completed_works": {"state": "failed", "rows": 0, "error": "Connect 500"},
+                "payments": {"state": "skipped", "rows": 0},
+            }
+        }
+
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_users", "raw_visits"}),
+            ),
+        ):
+            mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
+
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
+
+        names = {t["name"] for t in result}
+        assert names == {"raw_users", "raw_visits"}, (
+            "Failed/skipped sources must not appear in the catalog"
+        )
+
+    @pytest.mark.asyncio
+    async def test_excludes_dropped_physical_tables(self):
+        """COMPLETED run, but the physical table is gone — exclude it.
+        This is the "ghost catalog after teardown" defect.
+        """
+        from mcp_server.services.metadata import pipeline_list_tables
+
+        mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
+        pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
+
+        completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
+        mock_run = MagicMock()
+        mock_run.completed_at = completed_at
+        mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
+
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value=set()),  # schema was torn down
+            ),
+        ):
+            mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
+
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
+
+        assert result == [], (
+            "Catalog must be empty when the schema has been dropped, "
+            "even if the COMPLETED run record still exists"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_run_surfaces_committed_sources(self):
+        """A PARTIAL run is queryable for its committed sources."""
+        from mcp_server.services.metadata import pipeline_list_tables
+
+        mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
+        pipeline_config = _make_pipeline_config(sources=[("users", "Users"), ("visits", "Visits")])
+
+        completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
+        mock_run = MagicMock()
+        mock_run.completed_at = completed_at
+        mock_run.result = {
+            "sources": {
+                "users": {"state": "completed", "rows": 100},
+                "visits": {"state": "failed", "rows": 0, "error": "Connect 500"},
+            }
+        }
+        # PARTIAL run: ensure the metadata service looks at it (not just COMPLETED).
+        mock_run.state = "partial"
+
+        with (
+            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_users"}),
+            ),
+        ):
+            mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
+            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
+            qs.afirst = AsyncMock(return_value=mock_run)
+
+            result = await pipeline_list_tables(mock_ts, pipeline_config)
+
+        # The filter passed state__in [COMPLETED, PARTIAL]
+        filter_call = mock_run_cls.objects.filter.call_args.kwargs
+        assert "state__in" in filter_call
+        assert "partial" in filter_call["state__in"]
+        # Result has only the completed source.
+        names = {t["name"] for t in result}
+        assert names == {"raw_users"}
 
 
 class TestPipelineDescribeTable:
@@ -286,6 +430,7 @@ class TestPipelineGetMetadata:
 
         with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
             mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
             qs = mock_run_cls.objects.filter.return_value.order_by.return_value
             qs.afirst = AsyncMock(return_value=None)
 
@@ -299,6 +444,7 @@ class TestPipelineGetMetadata:
 
         ctx = self._make_ctx()
         mock_ts = MagicMock()
+        mock_ts.schema_name = "t_test"
         pipeline_config = _make_pipeline_config(
             sources=[("cases", "Cases")],
             relationships=[
@@ -315,10 +461,14 @@ class TestPipelineGetMetadata:
         completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
         mock_run = MagicMock()
         mock_run.completed_at = completed_at
-        mock_run.result = {"sources": {"cases": {"rows": 100}}}
+        mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
 
         with (
             patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
+            patch(
+                "mcp_server.services.metadata._live_tables_in_schema",
+                AsyncMock(return_value={"raw_cases"}),
+            ),
             patch(
                 "mcp_server.services.metadata._execute_async_parameterized",
                 new=AsyncMock(
@@ -330,6 +480,7 @@ class TestPipelineGetMetadata:
             ),
         ):
             mock_run_cls.RunState.COMPLETED = "completed"
+            mock_run_cls.RunState.PARTIAL = "partial"
             qs = mock_run_cls.objects.filter.return_value.order_by.return_value
             qs.afirst = AsyncMock(return_value=mock_run)
 
@@ -341,3 +492,51 @@ class TestPipelineGetMetadata:
         assert rel["from_table"] == "forms"
         assert rel["to_table"] == "cases"
         assert rel["description"] == "Forms reference cases"
+
+
+class TestLiveTablesInSchema:
+    """Exercise the connection_params plumbing, not just the mocked result.
+
+    Regression guard: _live_tables_in_schema previously built a QueryContext
+    with connection_params={}, which expands to a parameterless
+    psycopg.AsyncConnection.connect() that falls back to (unset) libpq env-var
+    defaults in the MCP container — so every healthy run surfaced zero tables.
+    These tests assert the ctx handed to the executor carries real host/db/user
+    connection params derived from MANAGED_DATABASE_URL.
+    """
+
+    MANAGED_URL = "postgresql://scout_user:secret@db.internal:5432/scout"
+
+    @pytest.mark.asyncio
+    async def test_passes_populated_connection_params_to_executor(self):
+        captured = {}
+
+        async def fake_exec(ctx, sql, params, _timeout):
+            captured["ctx"] = ctx
+            return {"rows": [["raw_cases"], ["raw_forms"]]}
+
+        with (
+            patch("mcp_server.services.metadata.settings.MANAGED_DATABASE_URL", self.MANAGED_URL),
+            patch(
+                "mcp_server.services.metadata._execute_async_parameterized",
+                new=AsyncMock(side_effect=fake_exec),
+            ),
+        ):
+            result = await _live_tables_in_schema("t_acme")
+
+        assert result == {"raw_cases", "raw_forms"}
+        ctx = captured["ctx"]
+        # The defect was an empty connection_params dict; assert it is populated
+        # with the libpq fields parsed from MANAGED_DATABASE_URL.
+        assert ctx.connection_params, "connection_params must not be empty"
+        assert ctx.connection_params["host"] == "db.internal"
+        assert ctx.connection_params["dbname"] == "scout"
+        assert ctx.connection_params["user"] == "scout_user"
+        assert ctx.connection_params["password"] == "secret"
+        assert "search_path=t_acme" in ctx.connection_params["options"]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_set_when_managed_url_unset(self):
+        with patch("mcp_server.services.metadata.settings.MANAGED_DATABASE_URL", ""):
+            result = await _live_tables_in_schema("t_acme")
+        assert result == set()

@@ -10,17 +10,18 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from django.conf import settings
 from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.workspaces.models import MaterializationRun
+from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
 
 if TYPE_CHECKING:
     from apps.workspaces.models import TenantMetadata, TenantSchema
-    from mcp_server.context import QueryContext
 
 logger = logging.getLogger(__name__)
 
@@ -29,15 +30,29 @@ async def pipeline_list_tables(
     tenant_schema: TenantSchema,
     pipeline_config: PipelineConfig,
 ) -> list[dict]:
-    """Return enriched table list from the last completed MaterializationRun.
+    """Return enriched table list from the last terminal MaterializationRun.
 
-    Returns an empty list if no completed run exists.
-    Each entry includes name, type, description, row_count, and materialized_at.
+    Considers both ``COMPLETED`` and ``PARTIAL`` runs as data sources (a partial
+    run still has some committed sources worth surfacing). ``STALE``, ``FAILED``,
+    and ``CANCELLED`` runs are ignored.
+
+    To prevent the "phantom rows" defect (issue #185), the result is reconciled
+    with ``information_schema.tables`` for the tenant schema:
+
+    - sources with ``state != "completed"`` in the run record are excluded
+    - sources whose physical table is no longer present in the DB are excluded
+
+    Returns an empty list if no eligible run exists or none of the recorded
+    sources are still queryable. Each entry includes name, type, description,
+    row_count, and materialized_at.
     """
     run = (
         await MaterializationRun.objects.filter(
             tenant_schema=tenant_schema,
-            state=MaterializationRun.RunState.COMPLETED,
+            state__in=[
+                MaterializationRun.RunState.COMPLETED,
+                MaterializationRun.RunState.PARTIAL,
+            ],
         )
         .order_by("-completed_at")
         .afirst()
@@ -50,11 +65,18 @@ async def pipeline_list_tables(
     source_descriptions = {s.name: s.description for s in pipeline_config.sources}
     source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
 
+    live_table_names = await _live_tables_in_schema(tenant_schema.schema_name)
+
     tables = []
     for source_name, source_data in sources_result.items():
+        if (source_data or {}).get("state") != "completed":
+            continue
+        physical_name = source_physical_names.get(source_name, f"raw_{source_name}")
+        if physical_name not in live_table_names:
+            continue
         tables.append(
             {
-                "name": source_physical_names.get(source_name, f"raw_{source_name}"),
+                "name": physical_name,
                 "type": "table",
                 "description": source_descriptions.get(source_name, ""),
                 "row_count": source_data.get("rows"),
@@ -63,6 +85,10 @@ async def pipeline_list_tables(
         )
 
     for model_name in pipeline_config.dbt_models:
+        if live_table_names and model_name not in live_table_names:
+            # If we were able to query information_schema, only surface dbt
+            # models that physically exist; otherwise list them optimistically.
+            continue
         tables.append(
             {
                 "name": model_name,
@@ -74,6 +100,52 @@ async def pipeline_list_tables(
         )
 
     return tables
+
+
+async def _live_tables_in_schema(schema_name: str) -> set[str]:
+    """Return the set of table names that actually exist in ``schema_name``.
+
+    Used by ``pipeline_list_tables`` to reconcile the catalog with reality.
+    Returns an empty set on query failure (treated as "nothing live"), so a
+    transient DB error surfaces as an empty list rather than phantom rows.
+
+    Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
+    ``load_tenant_context``/``load_workspace_context`` do. Constructing the
+    QueryContext with an empty ``connection_params={}`` would make the
+    underlying ``psycopg.AsyncConnection.connect`` fall back to libpq env-var
+    defaults (unset in the MCP container), so the query would raise and every
+    healthy run would surface zero source tables.
+    """
+    url = settings.MANAGED_DATABASE_URL
+    if not url:
+        logger.warning(
+            "MANAGED_DATABASE_URL is not configured; cannot enumerate live tables in schema %s",
+            schema_name,
+        )
+        return set()
+
+    ctx = QueryContext(
+        tenant_id="",
+        schema_name=schema_name,
+        max_rows_per_query=10_000,
+        max_query_timeout_seconds=10,
+        connection_params=_parse_db_url(url, schema_name),
+    )
+    try:
+        result = await _execute_async_parameterized(
+            ctx,
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+            (schema_name,),
+            ctx.max_query_timeout_seconds,
+        )
+    except Exception:
+        logger.warning(
+            "Could not enumerate live tables in schema %s; catalog will be empty",
+            schema_name,
+            exc_info=True,
+        )
+        return set()
+    return {row[0] for row in (result.get("rows") or [])}
 
 
 async def workspace_list_tables(ctx: QueryContext) -> list[dict]:
