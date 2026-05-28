@@ -18,6 +18,11 @@ class SourceConfig:
     name: str
     description: str = ""
     table_name: str = ""  # Explicit override; empty = use default
+    # Whether this source supports page-level resume on retry (issue #187).
+    # Append-mostly Connect resources (visits, completed_works, etc.) keep the
+    # default True. Mutable rows like Connect ``users`` set this to False so
+    # the writer always does a full DROP/CREATE/INSERT.
+    resumable: bool = True
 
     @property
     def physical_table_name(self) -> str:
@@ -112,6 +117,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             name=s["name"],
             description=s.get("description", ""),
             table_name=s.get("table_name", ""),
+            resumable=s.get("resumable", True),
         )
         for s in data.get("sources", [])
     ]

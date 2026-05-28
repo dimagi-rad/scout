@@ -121,6 +121,52 @@ relationships:
         assert all(t.startswith("raw_") for t in rel_from_tables)
         assert all(t.startswith("raw_") for t in rel_to_tables)
 
+    def test_source_config_resumable_defaults_to_true(self):
+        """Issue #187: ``resumable`` defaults to True so most append-mostly
+        sources opt in automatically; non-resumable ones set it false."""
+        from mcp_server.pipeline_registry import SourceConfig
+
+        assert SourceConfig(name="visits").resumable is True
+        assert SourceConfig(name="users", resumable=False).resumable is False
+
+    def test_pipeline_yaml_can_override_resumable(self, tmp_path):
+        """The YAML ``resumable: false`` key flows through to SourceConfig."""
+        yml = tmp_path / "pipeline.yml"
+        yml.write_text("""
+pipeline: test_pipeline
+description: ""
+version: "1.0"
+provider: commcare_connect
+sources:
+  - name: visits
+  - name: users
+    resumable: false
+""")
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        config = registry.get("test_pipeline")
+        by_name = {s.name: s for s in config.sources}
+        assert by_name["visits"].resumable is True
+        assert by_name["users"].resumable is False
+
+    def test_connect_sync_users_is_non_resumable(self):
+        """The real connect_sync.yml must mark ``users`` non-resumable."""
+        registry = PipelineRegistry()
+        config = registry.get("connect_sync")
+        by_name = {s.name: s for s in config.sources}
+        assert by_name["users"].resumable is False
+        # The other six are resumable.
+        for src_name in (
+            "visits",
+            "completed_works",
+            "payments",
+            "invoices",
+            "assessments",
+            "completed_modules",
+        ):
+            assert by_name[src_name].resumable is True, (
+                f"{src_name} should default to resumable=True"
+            )
+
     def test_relationships_defaults_to_empty(self, tmp_path):
         yml = tmp_path / "no_rel.yml"
         yml.write_text(
