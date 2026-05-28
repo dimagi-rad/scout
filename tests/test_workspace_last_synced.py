@@ -112,3 +112,23 @@ def test_list_only_users_workspaces_get_field(client, user, workspace, tenant_sc
     resp = client.get("/api/workspaces/")
     ids = [w["id"] for w in resp.json()]
     assert str(other_ws.id) not in ids
+
+
+@pytest.mark.django_db
+def test_detail_returns_null_when_no_completed_runs(client, user, workspace):
+    client.force_login(user)
+    resp = client.get(f"/api/workspaces/{workspace.id}/")
+    assert resp.status_code == 200
+    assert resp.json()["last_synced_at"] is None
+
+
+@pytest.mark.django_db
+def test_detail_returns_latest_completed_run(client, user, workspace, tenant_schema):
+    now = timezone.now()
+    older = now - timedelta(hours=2)
+    _make_run(tenant_schema, MaterializationRun.RunState.COMPLETED, older)
+    latest = _make_run(tenant_schema, MaterializationRun.RunState.COMPLETED, now)
+
+    client.force_login(user)
+    resp = client.get(f"/api/workspaces/{workspace.id}/")
+    assert resp.json()["last_synced_at"] == latest.completed_at.isoformat()

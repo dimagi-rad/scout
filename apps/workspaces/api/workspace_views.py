@@ -184,6 +184,17 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 schema_status = "provisioning"
 
+        latest_completed = (
+            MaterializationRun.objects.filter(
+                state=MaterializationRun.RunState.COMPLETED,
+                tenant_schema__tenant__in=tenants,
+            )
+            .order_by("-completed_at")
+            .values_list("completed_at", flat=True)
+            .first()
+        )
+        last_synced_at = latest_completed.isoformat() if latest_completed else None
+
         first_tenant = tenants[0] if tenants else None
         display_name = (
             first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
@@ -201,6 +212,7 @@ class WorkspaceDetailView(APIView):
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),
                 "updated_at": workspace.updated_at.isoformat(),
+                "last_synced_at": last_synced_at,
             }
         )
 
