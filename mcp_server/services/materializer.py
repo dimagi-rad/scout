@@ -145,10 +145,14 @@ def run_pipeline(
                 }
             )
 
-    def make_on_page(source_name: str, message: str) -> OnPage:
+    def make_on_page(source_name: str, message: str, known_total: int | None = None) -> OnPage:
         def _on_page(rows_loaded: int, rows_total: int | None) -> None:
             if progress_updater is None:
                 return
+            # Prefer a total the loader itself reports (page envelope ``count``);
+            # otherwise fall back to a count discovered up front (e.g. the
+            # opportunity's ``visit_count``) so the bar can show a real percent.
+            effective_total = rows_total if rows_total is not None else known_total
             progress_updater(
                 {
                     "run_id": run_id_holder["id"],
@@ -157,7 +161,7 @@ def run_pipeline(
                     "source": source_name,
                     "message": message,
                     "rows_loaded": rows_loaded,
-                    "rows_total": rows_total,
+                    "rows_total": effective_total,
                 }
             )
 
@@ -186,7 +190,16 @@ def run_pipeline(
     try:
         # ── 2. DISCOVER ───────────────────────────────────────────────────────
         report(f"Discovering tenant metadata from {pipeline.provider}...")
-        _run_discover_phase(tenant_membership, credential, pipeline)
+        discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
+
+        # The visits export is keyset-paginated and returns no total, but the
+        # discovery payload already carries the opportunity's visit_count — use
+        # it as the visits progress denominator.
+        visit_total: int | None = None
+        if pipeline.provider == "commcare_connect":
+            visit_total = _connect_visit_total(
+                discovered_metadata, int(tenant_membership.tenant.external_id)
+            )
 
         # Generate system staging assets from discovered metadata.
         # Failures are logged but do not fail the pipeline — the discover phase
@@ -262,6 +275,12 @@ def run_pipeline(
                 if source_is_resumable
                 else None
             )
+            # The discovered visit_count counts *all* visits, so it's only a
+            # valid denominator on a fresh load. On resume, rows_loaded counts
+            # just this run's new rows, so leave the bar indeterminate.
+            source_total = (
+                visit_total if source.name == "visits" and start_cursor is None else None
+            )
             try:
                 rows = _load_and_commit_source(
                     source.name,
@@ -269,7 +288,7 @@ def run_pipeline(
                     credential,
                     schema_name,
                     provider=pipeline.provider,
-                    on_page=make_on_page(source.name, load_message),
+                    on_page=make_on_page(source.name, load_message, known_total=source_total),
                     resumable=source_is_resumable,
                     start_cursor=start_cursor,
                     cursor_callback=cursor_callback,
@@ -476,10 +495,15 @@ def run_pipeline(
 
 def _run_discover_phase(
     tenant_membership: Any, credential: dict[str, str], pipeline: PipelineConfig
-) -> None:
-    """Fetch provider metadata and upsert into TenantMetadata."""
+) -> dict | None:
+    """Fetch provider metadata, upsert into TenantMetadata, and return it.
+
+    The returned dict lets the LOAD phase read counts that the discovery
+    payload already carries (e.g. the opportunity's ``visit_count``) without a
+    second API call. Returns ``None`` when the pipeline has no discovery step.
+    """
     if not pipeline.has_metadata_discovery:
-        return
+        return None
 
     if pipeline.provider == "commcare_connect":
         loader = ConnectMetadataLoader(
@@ -502,6 +526,24 @@ def _run_discover_phase(
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
+    return metadata
+
+
+def _connect_visit_total(metadata: dict | None, opportunity_id: int) -> int | None:
+    """Pull the opportunity's all-visits count from discovered Connect metadata.
+
+    ``/export/opp_org_program_list/`` (fetched during DISCOVER) annotates each
+    opportunity with ``visit_count``. We use it as the denominator for the
+    visits progress bar, since the keyset-paginated visits export returns no
+    total of its own. Returns ``None`` when the count is absent or non-positive.
+    """
+    if not metadata:
+        return None
+    for opp in metadata.get("all_opportunities", []) or []:
+        if isinstance(opp, dict) and opp.get("id") == opportunity_id:
+            count = opp.get("visit_count")
+            return count if isinstance(count, int) and count > 0 else None
+    return None
 
 
 def _load_prior_resume_cursors(tenant_schema: Any, exclude_run_id: Any) -> dict[str, int]:
@@ -1222,52 +1264,47 @@ _CONNECT_USERS_INSERT = psql.SQL(
 _CONNECT_COMPLETED_WORKS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_completed_works
-        (id, username, opportunity_id, payment_unit_id, status, last_modified,
+        (username, opportunity_id, payment_unit_id, status, last_modified,
          entity_id, entity_name, reason, status_modified_date, payment_date,
          date_created, saved_completed_count, saved_approved_count,
          saved_payment_accrued, saved_payment_accrued_usd,
          saved_org_payment_accrued, saved_org_payment_accrued_usd)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 )
 
 _CONNECT_PAYMENTS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_payments
-        (id, username, opportunity_id, created_at, amount, amount_usd, date_paid,
+        (username, opportunity_id, created_at, amount, amount_usd, date_paid,
          payment_unit, confirmed, confirmation_date, organization, invoice_id,
          payment_method, payment_operator)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 )
 
 _CONNECT_INVOICES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_invoices
-        (id, opportunity_id, amount, amount_usd, date, invoice_number,
+        (opportunity_id, amount, amount_usd, date, invoice_number,
          service_delivery, exchange_rate)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
 )
 
 _CONNECT_ASSESSMENTS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_assessments
-        (id, username, app, opportunity_id, date, score, passing_score, passed)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+        (username, app, opportunity_id, date, score, passing_score, passed)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     """
 )
 
 _CONNECT_COMPLETED_MODULES_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_completed_modules
-        (id, username, module, opportunity_id, date, duration)
-    VALUES (%s, %s, %s, %s, %s, %s)
-    ON CONFLICT (id) DO NOTHING
+        (username, module, opportunity_id, date, duration)
+    VALUES (%s, %s, %s, %s, %s)
     """
 )
 
@@ -1531,7 +1568,7 @@ def _write_connect_completed_works(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_completed_works (
-            id BIGINT PRIMARY KEY,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
             payment_unit_id BIGINT,
@@ -1565,7 +1602,6 @@ def _write_connect_completed_works(
             rows_total = page_total
         rows = [
             (
-                r.get("id"),
                 r.get("username", ""),
                 r.get("opportunity_id"),
                 r.get("payment_unit_id"),
@@ -1625,7 +1661,7 @@ def _write_connect_payments(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_payments (
-            id BIGINT PRIMARY KEY,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             opportunity_id BIGINT,
             created_at TIMESTAMPTZ,
@@ -1655,7 +1691,6 @@ def _write_connect_payments(
             rows_total = page_total
         rows = [
             (
-                r.get("id"),
                 r.get("username", ""),
                 r.get("opportunity_id"),
                 r.get("created_at"),
@@ -1712,7 +1747,7 @@ def _write_connect_invoices(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_invoices (
-            id BIGINT PRIMARY KEY,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             opportunity_id BIGINT,
             amount NUMERIC(14, 2),
             amount_usd NUMERIC(14, 2),
@@ -1736,7 +1771,6 @@ def _write_connect_invoices(
             rows_total = page_total
         rows = [
             (
-                r.get("id"),
                 r.get("opportunity_id"),
                 r.get("amount"),
                 r.get("amount_usd"),
@@ -1785,7 +1819,7 @@ def _write_connect_assessments(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_assessments (
-            id BIGINT PRIMARY KEY,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             app BIGINT,
             opportunity_id BIGINT,
@@ -1809,7 +1843,6 @@ def _write_connect_assessments(
             rows_total = page_total
         rows = [
             (
-                r.get("id"),
                 r.get("username", ""),
                 r.get("app"),
                 r.get("opportunity_id"),
@@ -1858,7 +1891,7 @@ def _write_connect_completed_modules(
         psql.SQL(
             """
         CREATE TABLE IF NOT EXISTS {schema}.raw_completed_modules (
-            id BIGINT PRIMARY KEY,
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             username TEXT,
             module BIGINT,
             opportunity_id BIGINT,
@@ -1880,7 +1913,6 @@ def _write_connect_completed_modules(
             rows_total = page_total
         rows = [
             (
-                r.get("id"),
                 r.get("username", ""),
                 r.get("module"),
                 r.get("opportunity_id"),

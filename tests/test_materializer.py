@@ -2,6 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mcp_server.services.materializer import _connect_visit_total
+
 
 class TestRunPipeline:
     def _make_schema(self, name="dimagi"):
@@ -1169,11 +1171,17 @@ class TestWriteForms:
 
 @pytest.mark.django_db
 class TestConnectPageReplayIdempotency:
-    """Regression tests for bot comment #3315357471.
+    """Regression tests guarding against row duplication in the Connect writers.
 
-    Verifies that re-inserting the same page (simulating a crash between
-    conn.commit() and cursor_callback()) does NOT duplicate rows in the
-    five Connect tables that previously lacked a primary key.
+    ``visits`` is resumable (real integer ``visit_id`` PK) and dedupes a page
+    replay via ON CONFLICT DO UPDATE.
+
+    ``completed_works`` and ``payments`` are non-resumable: the v2 export
+    serializers omit a per-row ``id``, so they use a surrogate identity PK and
+    do a full DROP/CREATE/INSERT every run. The tests below feed **id-less**
+    records (matching the real serializer shape — see the production tenant-765
+    NotNullViolation on ``id``) and verify a re-run reloads cleanly without
+    duplication, rather than relying on a primary key the API never sends.
     """
 
     def _get_db_url(self):
@@ -1188,9 +1196,11 @@ class TestConnectPageReplayIdempotency:
             cur.execute(f"CREATE SCHEMA {schema_name}")
         conn.autocommit = False
 
-    def test_payments_page_replay_no_duplication(self, django_db_setup, db):
-        """Re-inserting a page of payments (simulating crash before watermark
-        persist) must not duplicate rows — ON CONFLICT (id) DO NOTHING applies.
+    def test_payments_idless_full_reload_no_duplication(self, django_db_setup, db):
+        """payments records carry no ``id`` in the v2 export. They must insert
+        via the surrogate identity PK (no NotNullViolation), and because the
+        source is non-resumable a re-run does a full DROP/CREATE/INSERT — so the
+        row count stays stable instead of duplicating.
         """
         import psycopg
 
@@ -1205,9 +1215,9 @@ class TestConnectPageReplayIdempotency:
         try:
             self._make_schema(conn, test_schema)
 
+            # id-less: mirrors PaymentDataSerializer, which omits `id`.
             page = [
                 {
-                    "id": 101,
                     "username": "user1",
                     "opportunity_id": 1,
                     "created_at": "2026-01-01T00:00:00Z",
@@ -1223,7 +1233,6 @@ class TestConnectPageReplayIdempotency:
                     "payment_operator": "op1",
                 },
                 {
-                    "id": 102,
                     "username": "user2",
                     "opportunity_id": 1,
                     "created_at": "2026-01-02T00:00:00Z",
@@ -1240,21 +1249,18 @@ class TestConnectPageReplayIdempotency:
                 },
             ]
 
-            # First write — clean run, no cursor yet.
+            # First full load (non-resumable → start_cursor is always None).
             _write_connect_payments(
                 pages=iter([(page, 2)]),
                 schema_name=test_schema,
                 conn=conn,
             )
 
-            # Simulate crash: conn already committed the page, but cursor_callback
-            # was never called. Re-run from the prior watermark by writing the
-            # same page again (start_cursor is set to skip DROP/CREATE).
+            # Re-run: a fresh full load drops and recreates the table.
             _write_connect_payments(
                 pages=iter([(page, 2)]),
                 schema_name=test_schema,
                 conn=conn,
-                start_cursor=100,  # any non-None value triggers the resume path
             )
 
             with conn.cursor() as cur:
@@ -1262,8 +1268,8 @@ class TestConnectPageReplayIdempotency:
                 (count,) = cur.fetchone()
 
             assert count == 2, (
-                f"Expected 2 rows after page replay, got {count} — "
-                "ON CONFLICT (id) DO NOTHING must be present"
+                f"Expected 2 rows after a full reload, got {count} — "
+                "non-resumable writers must DROP/CREATE each run"
             )
         finally:
             conn.rollback()
@@ -1272,8 +1278,11 @@ class TestConnectPageReplayIdempotency:
                 cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
             conn.close()
 
-    def test_completed_works_page_replay_no_duplication(self, django_db_setup, db):
-        """Re-inserting a page of completed_works must not duplicate rows."""
+    def test_completed_works_idless_full_reload_no_duplication(self, django_db_setup, db):
+        """completed_works records carry no ``id`` in the v2 export (the exact
+        production failure on tenant 765). They must insert via the surrogate
+        identity PK, and a non-resumable re-run reloads without duplication.
+        """
         import psycopg
 
         from mcp_server.services.materializer import _write_connect_completed_works
@@ -1287,9 +1296,9 @@ class TestConnectPageReplayIdempotency:
         try:
             self._make_schema(conn, test_schema)
 
+            # id-less: mirrors CompletedWorkDataSerializer, which omits `id`.
             page = [
                 {
-                    "id": 201,
                     "username": "user1",
                     "opportunity_id": 1,
                     "payment_unit_id": 10,
@@ -1310,19 +1319,18 @@ class TestConnectPageReplayIdempotency:
                 },
             ]
 
-            # First write — clean run.
+            # First full load.
             _write_connect_completed_works(
                 pages=iter([(page, 1)]),
                 schema_name=test_schema,
                 conn=conn,
             )
 
-            # Replay the same page (crash scenario — watermark not advanced).
+            # Re-run: fresh full load drops and recreates the table.
             _write_connect_completed_works(
                 pages=iter([(page, 1)]),
                 schema_name=test_schema,
                 conn=conn,
-                start_cursor=200,
             )
 
             with conn.cursor() as cur:
@@ -1330,8 +1338,8 @@ class TestConnectPageReplayIdempotency:
                 (count,) = cur.fetchone()
 
             assert count == 1, (
-                f"Expected 1 row after page replay, got {count} — "
-                "ON CONFLICT (id) DO NOTHING must be present"
+                f"Expected 1 row after a full reload, got {count} — "
+                "non-resumable writers must DROP/CREATE each run"
             )
         finally:
             conn.rollback()
@@ -1414,3 +1422,30 @@ class TestConnectPageReplayIdempotency:
             with conn.cursor() as cur:
                 cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
             conn.close()
+
+
+class TestConnectVisitTotal:
+    """`_connect_visit_total` pulls the opportunity's all-visits count from the
+    discovery payload so the keyset-paginated visits bar can show a real percent.
+    """
+
+    def test_returns_visit_count_for_matching_opportunity(self):
+        meta = {
+            "all_opportunities": [
+                {"id": 1, "visit_count": 5},
+                {"id": 765, "visit_count": 99130},
+            ]
+        }
+        assert _connect_visit_total(meta, 765) == 99130
+
+    def test_returns_none_when_opportunity_absent(self):
+        meta = {"all_opportunities": [{"id": 1, "visit_count": 5}]}
+        assert _connect_visit_total(meta, 765) is None
+
+    def test_returns_none_for_zero_or_missing_count(self):
+        assert _connect_visit_total({"all_opportunities": [{"id": 765, "visit_count": 0}]}, 765) is None
+        assert _connect_visit_total({"all_opportunities": [{"id": 765}]}, 765) is None
+
+    def test_returns_none_for_no_metadata(self):
+        assert _connect_visit_total(None, 765) is None
+        assert _connect_visit_total({}, 765) is None
