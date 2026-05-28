@@ -32,12 +32,11 @@ from apps.agents.graph.base import (
     _render_full_schema,
 )
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
+from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
 from mcp_server.services.metadata import pipeline_list_tables
 
 
 def _make_pipeline_config(sources):
-    from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
-
     return PipelineConfig(
         name="commcare_sync",
         description="Test pipeline",
