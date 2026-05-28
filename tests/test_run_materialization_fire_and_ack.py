@@ -64,9 +64,11 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     job_mock = MagicMock(id=8888)
     cancel_mock = AsyncMock(return_value=None)
 
-    with patch("mcp_server.server.materialize_workspace") as mw, \
-         patch("mcp_server.server.ThreadJob.objects.acreate", side_effect=Exception("DB down")), \
-         patch("mcp_server.server._procrastinate_app") as proc_app:
+    with (
+        patch("mcp_server.server.materialize_workspace") as mw,
+        patch("mcp_server.server.ThreadJob.objects.acreate", side_effect=Exception("DB down")),
+        patch("mcp_server.server._procrastinate_app") as proc_app,
+    ):
         mw.defer_async = AsyncMock(return_value=job_mock)
         proc_app.job_manager.cancel_job_by_id_async = cancel_mock
         result = await run_materialization(
@@ -95,13 +97,16 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
     user_b = await sync_to_async(User.objects.create_user)(email="userb@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-cross", created_by=user_a)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="tx", provider="commcare", canonical_name="X Tenant",
+        external_id="tx",
+        provider="commcare",
+        canonical_name="X Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_a)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_b)
     foreign_thread = await sync_to_async(Thread.objects.create)(
-        workspace=ws, user=user_a,
+        workspace=ws,
+        user=user_a,
     )
 
     result = await run_materialization(
@@ -125,7 +130,9 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
     user = await sync_to_async(User.objects.create_user)(email="dup@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-dup", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="tdup", provider="commcare", canonical_name="Dup Tenant",
+        external_id="tdup",
+        provider="commcare",
+        canonical_name="Dup Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
@@ -133,8 +140,10 @@ async def test_run_materialization_returns_already_in_progress_if_active_in_same
     # Same thread holds the in-progress job and is also the caller.
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     existing_tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=11111, tool_call_id="tc-existing",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=11111,
+        tool_call_id="tc-existing",
         state=ThreadJob.State.PENDING,
     )
 
@@ -161,7 +170,9 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     user = await sync_to_async(User.objects.create_user)(email="parallel@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-parallel", created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="tparallel", provider="commcare", canonical_name="Parallel Tenant",
+        external_id="tparallel",
+        provider="commcare",
+        canonical_name="Parallel Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
@@ -169,8 +180,10 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     # Thread 1 has an in-progress job.
     thread1 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     await sync_to_async(ThreadJob.objects.create)(
-        thread=thread1, job_type="materialization",
-        procrastinate_job_id=22222, tool_call_id="tc-thread1",
+        thread=thread1,
+        job_type="materialization",
+        procrastinate_job_id=22222,
+        tool_call_id="tc-thread1",
         state=ThreadJob.State.PENDING,
     )
 

@@ -26,28 +26,39 @@ async def test_active_jobs_returns_pending_job_with_progress():
     user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t1", provider="commcare", canonical_name="Test Tenant",
+        external_id="t1",
+        provider="commcare",
+        canonical_name="Test Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(
-        tenant=tenant, schema_name="s_t1",
+        tenant=tenant,
+        schema_name="s_t1",
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=1001, tool_call_id="tc1",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=1001,
+        tool_call_id="tc1",
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=1001,
         progress={
-            "step": 3, "total_steps": 5,
-            "source": "cases", "message": "Loading cases...",
-            "rows_loaded": 64000, "rows_total": 100000,
+            "step": 3,
+            "total_steps": 5,
+            "source": "cases",
+            "message": "Loading cases...",
+            "rows_loaded": 64000,
+            "rows_total": 100000,
             "run_id": str(schema.id),
         },
     )
@@ -73,7 +84,9 @@ async def test_active_jobs_empty_when_none_running():
     user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     client = AsyncClient()
     await sync_to_async(client.login)(email="a@b.c", password="x")
@@ -110,30 +123,35 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
     user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id="t1", provider="commcare", canonical_name="Test Tenant",
+        external_id="t1",
+        provider="commcare",
+        canonical_name="Test Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t1")
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=2002, tool_call_id="tc2",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=2002,
+        tool_call_id="tc2",
         state=ThreadJob.State.RUNNING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
+        tenant_schema=schema,
+        pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=2002,
     )
     client = AsyncClient()
     await sync_to_async(client.login)(email="a@b.c", password="x")
 
-    with patch(
-        "apps.workspaces.api.jobs_cancel.current_app"
-    ) as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 200
@@ -153,15 +171,21 @@ async def test_cancel_job_cross_user_blocked():
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=owner)
     # Both users are workspace members so aresolve_workspace lets them through.
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=owner, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=owner,
+        role=WorkspaceRole.READ_WRITE,
     )
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=other, role=WorkspaceRole.READ,
+        workspace=ws,
+        user=other,
+        role=WorkspaceRole.READ,
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=owner)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=3030, tool_call_id="tcX",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=3030,
+        tool_call_id="tcX",
         state=ThreadJob.State.RUNNING,
     )
     client = AsyncClient()
@@ -178,12 +202,16 @@ async def test_cancel_job_double_cancel_is_idempotent():
     user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=4040, tool_call_id="tc4",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=4040,
+        tool_call_id="tc4",
         state=ThreadJob.State.CANCELLED,
     )
     client = AsyncClient()
@@ -201,18 +229,20 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
     user = await sync_to_async(User.objects.create_user)(email="cancel-race@b.c", password="x")
     ws = await sync_to_async(Workspace.objects.create)(name="W-race", created_by=user)
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE,
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=9090, tool_call_id="tc-race",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=9090,
+        tool_call_id="tc-race",
         state=ThreadJob.State.COMPLETED,  # Already terminal — resume just finished
     )
     # Call cancel_thread_job directly to exercise the race window
-    with patch(
-        "apps.workspaces.api.jobs_cancel.current_app"
-    ) as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         await cancel_thread_job(tj)
 

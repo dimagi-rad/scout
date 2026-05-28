@@ -29,6 +29,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app
+from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
     MaterializationCancelled,
@@ -46,9 +47,7 @@ RESUME_TIMEOUT_MESSAGE = (
     "The agent took too long to respond after materialization completed. "
     "Please re-ask your question."
 )
-RESUME_EXCEPTION_MESSAGE = (
-    "Sorry, something went wrong while preparing your answer. Please retry."
-)
+RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
 RESUME_STUCK_RUNNING_MESSAGE = (
     "Your materialization completed but the follow-up response was interrupted "
     "(likely a server restart). Please re-ask your question."
@@ -161,9 +160,9 @@ async def materialize_workspace(
         qs = TenantMembership.objects.select_related("user", "tenant").filter(
             tenant_id__in=[
                 wt.tenant_id
-                async for wt in WorkspaceTenant.objects.filter(
-                    workspace=workspace
-                ).select_related("tenant")
+                async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
+                    "tenant"
+                )
             ]
         )
         if user_id:
@@ -215,11 +214,27 @@ async def materialize_workspace(
                 tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
                 # Stop processing remaining tenants — the user has cancelled.
                 break
+            except ConnectExportError as e:
+                # Upstream Connect failure after retry exhaustion. Capture
+                # the response's sentry-trace header so support can correlate
+                # with Connect's Sentry in a single hop. sentry_sdk.set_tag
+                # is a no-op when the SDK was never initialised (no DSN).
+                logger.exception(
+                    "Materialization failed for tenant %s on pipeline %s: "
+                    "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
+                    tenant_id,
+                    pipeline_name,
+                    e.status,
+                    e.attempts,
+                    e.last_id,
+                    e.sentry_trace,
+                )
+                sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
+                sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
+                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
             except Exception as e:
                 logger.exception("Materialization failed for tenant %s", tenant_id)
-                tenant_results.append(
-                    {"tenant": tenant_id, "success": False, "error": str(e)}
-                )
+                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
 
         all_succeeded = all(r.get("success") for r in tenant_results)
 
@@ -484,7 +499,8 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     cutoff = timezone.now() - STALE_JOB_THRESHOLD
     flipped = 0
     async for tj in ThreadJob.objects.select_related(
-        "thread__workspace", "thread__user",
+        "thread__workspace",
+        "thread__user",
     ).filter(
         state__in=list(ThreadJob.ACTIVE_STATES),
         created_at__lt=cutoff,
@@ -503,7 +519,8 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
             # Marking FAILED directly avoids deferring a duplicate resume that
             # could race with a still-running first invocation.
             updated = await ThreadJob.objects.filter(
-                id=tj.id, state=ThreadJob.State.RUNNING,
+                id=tj.id,
+                state=ThreadJob.State.RUNNING,
             ).aupdate(state=ThreadJob.State.FAILED, completed_at=timezone.now())
             if updated:
                 flipped += 1
@@ -524,7 +541,8 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
         except Exception:
             logger.exception("Janitor: failed to defer resume for %s", tj.id)
             await ThreadJob.objects.filter(id=tj.id).aupdate(
-                state=ThreadJob.State.FAILED, completed_at=timezone.now(),
+                state=ThreadJob.State.FAILED,
+                completed_at=timezone.now(),
             )
     return {"flipped": flipped}
 
@@ -589,11 +607,13 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
     """
     try:
         agent, _ = await _build_agent_for_resume(
-            thread_job.thread.workspace, thread_job.thread.user,
+            thread_job.thread.workspace,
+            thread_job.thread.user,
         )
         config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
         await agent.aupdate_state(
-            config, {"messages": [AIMessage(content=text)]},
+            config,
+            {"messages": [AIMessage(content=text)]},
         )
     except Exception:
         logger.warning(
@@ -624,11 +644,13 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             for source, info in (r.result.get("sources") or {}).items():
                 if isinstance(info, dict) and "rows" in info:
                     row_counts[source] = info["rows"]
-        summary.append({
-            "tenant": tenant_id,
-            "state": r.state,
-            "row_counts": row_counts,
-        })
+        summary.append(
+            {
+                "tenant": tenant_id,
+                "state": r.state,
+                "row_counts": row_counts,
+            }
+        )
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
             all_completed = False
@@ -638,7 +660,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         elif r.state != MaterializationRun.RunState.COMPLETED:
             all_completed = False
     status = (
-        "cancelled" if any_cancelled
+        "cancelled"
+        if any_cancelled
         else ("failed" if any_failed else ("completed" if all_completed else "partial"))
     )
     return status, summary
@@ -670,7 +693,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # message even for cancelled materializations.
     CLAIMABLE_STATES = [ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
     claimed = await ThreadJob.objects.filter(
-        id=tj.id, state__in=CLAIMABLE_STATES,
+        id=tj.id,
+        state__in=CLAIMABLE_STATES,
     ).aupdate(state=ThreadJob.State.RUNNING)
     if not claimed:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
@@ -691,7 +715,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         logger.warning(
             "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
             "invoking agent with explanation so the user is not left with a spinner",
-            thread_job_id, tj.procrastinate_job_id,
+            thread_job_id,
+            tj.procrastinate_job_id,
         )
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization finished without running any "
@@ -717,7 +742,11 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     logger.info(
         "resume: ainvoke start tj=%s thread=%s workspace=%s status=%s timeout=%ds",
-        thread_job_id, tj.thread.id, workspace.id, status, timeout_s,
+        thread_job_id,
+        tj.thread.id,
+        workspace.id,
+        status,
+        timeout_s,
     )
     start = time.monotonic()
     try:
@@ -740,16 +769,20 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             status=status,
         ):
             await asyncio.wait_for(
-                agent.ainvoke(input_state, config), timeout=timeout_s,
+                agent.ainvoke(input_state, config),
+                timeout=timeout_s,
             )
     except TimeoutError:
         elapsed = time.monotonic() - start
         logger.exception(
             "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
-            elapsed, timeout_s, thread_job_id,
+            elapsed,
+            timeout_s,
+            thread_job_id,
         )
         sentry_sdk.add_breadcrumb(
-            category="resume", message="ainvoke_timeout",
+            category="resume",
+            message="ainvoke_timeout",
             data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
         )
         await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE)
@@ -762,10 +795,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         elapsed = time.monotonic() - start
         logger.exception(
             "resume: agent build or invoke failed for thread_job %s after %.2fs",
-            thread_job_id, elapsed,
+            thread_job_id,
+            elapsed,
         )
         sentry_sdk.add_breadcrumb(
-            category="resume", message="ainvoke_exception",
+            category="resume",
+            message="ainvoke_exception",
             data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
         )
         await _persist_synthetic_failure_message(tj, RESUME_EXCEPTION_MESSAGE)
@@ -778,10 +813,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         elapsed = time.monotonic() - start
         logger.info(
             "resume: ainvoke complete tj=%s elapsed=%.2fs",
-            thread_job_id, elapsed,
+            thread_job_id,
+            elapsed,
         )
     sentry_sdk.add_breadcrumb(
-        category="resume", message="ainvoke_complete",
+        category="resume",
+        message="ainvoke_complete",
         data={"thread_job_id": str(tj.id), "elapsed_s": time.monotonic() - start},
     )
 
@@ -793,15 +830,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         await Thread.objects.filter(id=tj.thread_id).aupdate(updated_at=timezone.now())
     except Exception:
         logger.warning(
-            "resume: Thread.updated_at bump failed for thread %s; "
-            "green-dot indicator may not fire",
-            tj.thread_id, exc_info=True,
+            "resume: Thread.updated_at bump failed for thread %s; green-dot indicator may not fire",
+            tj.thread_id,
+            exc_info=True,
         )
 
     terminal = (
-        ThreadJob.State.CANCELLED if status == "cancelled"
+        ThreadJob.State.CANCELLED
+        if status == "cancelled"
         else (
-            ThreadJob.State.FAILED if status in ("failed", "partial", "no_runs")
+            ThreadJob.State.FAILED
+            if status in ("failed", "partial", "no_runs")
             else ThreadJob.State.COMPLETED
         )
     )
@@ -812,16 +851,24 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # actual persisted state so the return value reflects reality, not the
     # value we *would have* written.
     updated = await ThreadJob.objects.filter(
-        id=tj.id, state=ThreadJob.State.RUNNING,
+        id=tj.id,
+        state=ThreadJob.State.RUNNING,
     ).aupdate(state=terminal, completed_at=timezone.now())
     if not updated:
-        actual_state = await ThreadJob.objects.filter(id=tj.id).values_list(
-            "state", flat=True,
-        ).afirst()
+        actual_state = (
+            await ThreadJob.objects.filter(id=tj.id)
+            .values_list(
+                "state",
+                flat=True,
+            )
+            .afirst()
+        )
         logger.info(
             "resume: ThreadJob %s state changed during ainvoke; not clobbering "
             "(intended terminal=%s, actual=%s)",
-            thread_job_id, terminal, actual_state,
+            thread_job_id,
+            terminal,
+            actual_state,
         )
         return {"status": "resumed", "terminal_state": actual_state or terminal}
     return {"status": "resumed", "terminal_state": terminal}

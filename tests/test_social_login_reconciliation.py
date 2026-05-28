@@ -70,7 +70,10 @@ def test_no_collision_backfills_user_email():
 def test_collision_merges_user_and_redirects_session():
     canonical = User.objects.create(email="brian@y.com", username="canon")
     EmailAddress.objects.create(
-        user=canonical, email="brian@y.com", verified=True, primary=True,
+        user=canonical,
+        email="brian@y.com",
+        verified=True,
+        primary=True,
     )
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
@@ -97,7 +100,10 @@ def test_collision_merges_user_and_redirects_session():
 def test_collision_match_is_case_insensitive():
     canonical = User.objects.create(email="Brian@Y.com", username="canon")
     EmailAddress.objects.create(
-        user=canonical, email="Brian@Y.com", verified=True, primary=True,
+        user=canonical,
+        email="Brian@Y.com",
+        verified=True,
+        primary=True,
     )
     duplicate = User.objects.create(email=None, username="dup")
     dup_account = SocialAccount.objects.create(
@@ -118,7 +124,10 @@ def test_collision_match_is_case_insensitive():
 def test_merge_failure_does_not_break_login(caplog):
     canonical = User.objects.create(email="brian@y.com", username="canon")
     EmailAddress.objects.create(
-        user=canonical, email="brian@y.com", verified=True, primary=True,
+        user=canonical,
+        email="brian@y.com",
+        verified=True,
+        primary=True,
     )
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
@@ -152,7 +161,9 @@ def test_collision_refuses_merge_when_canonical_email_not_verified(caplog):
     canonical = User.objects.create(email="brian@y.com", username="canon")
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
-        user=duplicate, provider="commcare_connect", uid="999",
+        user=duplicate,
+        provider="commcare_connect",
+        uid="999",
         extra_data={"email": "brian@y.com"},
     )
     sl = SimpleNamespace(user=duplicate, account=dup_account)
@@ -165,8 +176,7 @@ def test_collision_refuses_merge_when_canonical_email_not_verified(caplog):
     assert sl.user == duplicate
     # Logged at WARNING
     assert any(
-        r.levelname == "WARNING" and "Refusing auto-merge" in r.message
-        for r in caplog.records
+        r.levelname == "WARNING" and "Refusing auto-merge" in r.message for r in caplog.records
     )
 
 
@@ -176,11 +186,16 @@ def test_collision_allows_merge_when_canonical_email_verified(caplog):
     proceeds as normal."""
     canonical = User.objects.create(email="brian@y.com", username="canon")
     EmailAddress.objects.create(
-        user=canonical, email="brian@y.com", verified=True, primary=True,
+        user=canonical,
+        email="brian@y.com",
+        verified=True,
+        primary=True,
     )
     duplicate = User.objects.create(email=None, username="connect-user")
     dup_account = SocialAccount.objects.create(
-        user=duplicate, provider="commcare_connect", uid="999",
+        user=duplicate,
+        provider="commcare_connect",
+        uid="999",
         extra_data={"email": "brian@y.com"},
     )
     sl = SimpleNamespace(user=duplicate, account=dup_account)

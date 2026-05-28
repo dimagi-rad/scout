@@ -7,6 +7,7 @@ import { OfflineBanner } from "@/components/OfflineBanner/OfflineBanner"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useAppStore } from "@/store/store"
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
+import { TopBarProvider } from "@/components/TopBar"
 
 export function AppLayout() {
   const { isOnline } = useNetworkStatus()
@@ -50,11 +51,15 @@ export function AppLayout() {
     <WorkspaceJobsProvider workspaceId={activeDomainId}>
       <div className="flex h-screen">
         <Sidebar />
-        <main className="flex-1 min-w-0 overflow-auto">
-          <ErrorBoundary>
-            <Outlet />
-          </ErrorBoundary>
-        </main>
+        <div className="flex flex-1 min-w-0 flex-col">
+          <TopBarProvider>
+            <main className="flex-1 min-w-0 overflow-auto">
+              <ErrorBoundary>
+                <Outlet />
+              </ErrorBoundary>
+            </main>
+          </TopBarProvider>
+        </div>
         <ArtifactPanel />
         <OfflineBanner />
       </div>
