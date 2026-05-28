@@ -207,7 +207,9 @@ async def thread_viewed_view(request, workspace_id, thread_id):
         return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
 
     updated = await Thread.objects.filter(
-        id=thread_id, user=user, workspace=workspace,
+        id=thread_id,
+        user=user,
+        workspace=workspace,
     ).aupdate(last_viewed_at=datetime.now(UTC))
     if not updated:
         return JsonResponse({"error": "Thread not found"}, status=404)

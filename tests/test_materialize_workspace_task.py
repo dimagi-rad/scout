@@ -434,7 +434,9 @@ async def test_cancel_endpoint_requires_workspace_membership(workspace, other_us
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_defers_resume_on_no_memberships_early_return(
-    workspace, user, context_with_job_id,
+    workspace,
+    user,
+    context_with_job_id,
 ):
     """Finding #4: the early-return path (no memberships) must still defer
     the resume task. Otherwise the user is left with a phantom spinner —
@@ -442,7 +444,8 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
     # Workspace exists, but the workspace has no tenants → no memberships.
     # Build a fresh workspace with no tenants/memberships.
     bare_ws = await sync_to_async(Workspace.objects.create)(
-        name="bare-no-memberships", created_by=user,
+        name="bare-no-memberships",
+        created_by=user,
     )
     # Create a ThreadJob bound to context_with_job_id.job.id so the resume
     # finally-block can locate it.
@@ -471,7 +474,9 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_materialize_workspace_defers_resume_on_workspace_not_found(
-    workspace, user, context_with_job_id,
+    workspace,
+    user,
+    context_with_job_id,
 ):
     """Even when the workspace lookup fails, the resume must be deferred so
     the user is not stuck with a spinner. The _defer_resume_for_job helper
@@ -502,7 +507,8 @@ async def test_materialize_workspace_defers_resume_on_workspace_not_found(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
-    workspace, user,
+    workspace,
+    user,
 ):
     """Finding #11: MCP commits the ThreadJob after defer_async returns the
     procrastinate job id; under load the worker can finish before the row
@@ -611,8 +617,10 @@ async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, us
     client = AsyncClient()
     await sync_to_async(client.login)(email=user.email, password="testpass123")
 
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
-         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+    with (
+        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+    ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
@@ -633,7 +641,10 @@ async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, us
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
-    workspace, user, other_user, tenant,
+    workspace,
+    user,
+    other_user,
+    tenant,
 ):
     """A workspace member must NOT be able to cancel another member's
     chat-driven materialization via the legacy
@@ -645,10 +656,14 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
     filter so only the caller's own ThreadJobs are cancelled."""
     # Make other_user a member of the workspace (peer with access).
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=workspace, user=other_user, role=WorkspaceRole.READ_WRITE,
+        workspace=workspace,
+        user=other_user,
+        role=WorkspaceRole.READ_WRITE,
     )
     schema = await TenantSchema.objects.acreate(
-        tenant=tenant, schema_name="test_xuser_cancel", state=SchemaState.ACTIVE,
+        tenant=tenant,
+        schema_name="test_xuser_cancel",
+        state=SchemaState.ACTIVE,
     )
     # Active run owned by `user`'s thread.
     active_run = await MaterializationRun.objects.acreate(
@@ -669,8 +684,10 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
     # other_user (a workspace peer) attempts to cancel via the legacy endpoint.
     client = AsyncClient()
     await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
-         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+    with (
+        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+    ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
@@ -702,7 +719,10 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_legacy_cancel_orphan_path_skips_other_users_runs(
-    workspace, user, other_user, tenant,
+    workspace,
+    user,
+    other_user,
+    tenant,
 ):
     """When user A calls the legacy cancel endpoint and user B has a
     chat-driven materialization (with ThreadJob) in the same workspace, only
@@ -713,10 +733,14 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     computed against the caller-scoped tracked set, so other users' jobs
     leaked into the orphan branch and were aborted."""
     await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=workspace, user=other_user, role=WorkspaceRole.READ_WRITE,
+        workspace=workspace,
+        user=other_user,
+        role=WorkspaceRole.READ_WRITE,
     )
     schema = await TenantSchema.objects.acreate(
-        tenant=tenant, schema_name="test_orphan_skip_other", state=SchemaState.ACTIVE,
+        tenant=tenant,
+        schema_name="test_orphan_skip_other",
+        state=SchemaState.ACTIVE,
     )
 
     # Run #1: belongs to user B's chat (has a ThreadJob).
@@ -746,8 +770,10 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     # User A (other_user) calls cancel.
     client = AsyncClient()
     await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app, \
-         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app:
+    with (
+        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+    ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
@@ -770,5 +796,6 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     assert orphan_run.state == MaterializationRun.RunState.CANCELLED
     assert orphan_run.completed_at is not None
     mock_orphan_app.job_manager.cancel_job_by_id_async.assert_awaited_once_with(
-        1002, abort=True,
+        1002,
+        abort=True,
     )

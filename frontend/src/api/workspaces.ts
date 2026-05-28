@@ -19,6 +19,7 @@ export interface WorkspaceListItem {
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
   member_count: number
+  last_synced_at: string | null
   created_at: string
 }
 
@@ -32,6 +33,7 @@ export interface WorkspaceDetail {
   schema_status: "available" | "provisioning" | "unavailable"
   tenant_count: number
   member_count: number
+  last_synced_at: string | null
   created_at: string
   updated_at: string
 }

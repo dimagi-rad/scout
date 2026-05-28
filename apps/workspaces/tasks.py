@@ -1,12 +1,15 @@
 """Background tasks for schema lifecycle management."""
 
 import asyncio
+import contextlib
 import logging
+import time
 from datetime import timedelta
 
+import sentry_sdk
 from django.conf import settings
 from django.utils import timezone
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.procrastinate_app import current_app
 
 from apps.agents.graph.base import build_agent_graph
@@ -26,10 +29,28 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app
+from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
     MaterializationCancelled,
     run_pipeline,
+)
+
+try:
+    from langfuse import Langfuse
+except ImportError:  # langfuse is an optional observability dependency
+    Langfuse = None
+
+# User-facing failure copy. The frontend renders these straight from the
+# checkpointer (apps/chat/thread_views.py:_load_thread_messages → AIMessage).
+RESUME_TIMEOUT_MESSAGE = (
+    "The agent took too long to respond after materialization completed. "
+    "Please re-ask your question."
+)
+RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your answer. Please retry."
+RESUME_STUCK_RUNNING_MESSAGE = (
+    "Your materialization completed but the follow-up response was interrupted "
+    "(likely a server restart). Please re-ask your question."
 )
 
 logger = logging.getLogger(__name__)
@@ -193,6 +214,24 @@ async def materialize_workspace(
                 tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
                 # Stop processing remaining tenants — the user has cancelled.
                 break
+            except ConnectExportError as e:
+                # Upstream Connect failure after retry exhaustion. Capture
+                # the response's sentry-trace header so support can correlate
+                # with Connect's Sentry in a single hop. sentry_sdk.set_tag
+                # is a no-op when the SDK was never initialised (no DSN).
+                logger.exception(
+                    "Materialization failed for tenant %s on pipeline %s: "
+                    "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
+                    tenant_id,
+                    pipeline_name,
+                    e.status,
+                    e.attempts,
+                    e.last_id,
+                    e.sentry_trace,
+                )
+                sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
+                sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
+                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
             except Exception as e:
                 logger.exception("Materialization failed for tenant %s", tenant_id)
                 tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
@@ -452,7 +491,7 @@ async def teardown_schema(schema_id: str) -> None:
         raise
 
 
-STALE_JOB_THRESHOLD = timedelta(hours=1)
+STALE_JOB_THRESHOLD = timedelta(minutes=10)
 
 
 async def _procrastinate_job_active(job_id: int) -> bool | None:
@@ -484,7 +523,10 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     """
     cutoff = timezone.now() - STALE_JOB_THRESHOLD
     flipped = 0
-    async for tj in ThreadJob.objects.filter(
+    async for tj in ThreadJob.objects.select_related(
+        "thread__workspace",
+        "thread__user",
+    ).filter(
         state__in=list(ThreadJob.ACTIVE_STATES),
         created_at__lt=cutoff,
     ):
@@ -511,6 +553,10 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
                     "Janitor: ThreadJob %s stuck in RUNNING (worker crash?); marked FAILED",
                     tj.id,
                 )
+                # Surface the crash to the user via a synthetic AIMessage; the
+                # checkpointer write tolerates failure so a sick worker
+                # doesn't block the FAILED transition.
+                await _persist_synthetic_failure_message(tj, RESUME_STUCK_RUNNING_MESSAGE)
             continue
         # PENDING stuck job — never claimed by any worker. Safe to defer a fresh
         # resume so the user gets an agent follow-up.
@@ -542,6 +588,64 @@ async def _build_agent_for_resume(workspace, user):
         oauth_tokens=oauth_tokens,
     )
     return agent, oauth_tokens
+
+
+def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
+    """Open a Langfuse span around the resume ainvoke. No-op when Langfuse is
+    not configured so worker boots without LANGFUSE_* env vars stay quiet."""
+    if Langfuse is None:
+        return contextlib.nullcontext()
+    secret_key = getattr(settings, "LANGFUSE_SECRET_KEY", "")
+    public_key = getattr(settings, "LANGFUSE_PUBLIC_KEY", "")
+    host = getattr(settings, "LANGFUSE_BASE_URL", "")
+    if not all([secret_key, public_key, host]):
+        return contextlib.nullcontext()
+    try:
+        client = Langfuse(secret_key=secret_key, public_key=public_key, host=host)
+        return client.start_as_current_span(
+            name="resume_thread_after_materialization",
+            input={
+                "thread_job_id": thread_job_id,
+                "thread_id": thread_id,
+                "status": status,
+            },
+        )
+    except Exception:
+        logger.warning("resume: failed to open Langfuse span", exc_info=True)
+        return contextlib.nullcontext()
+
+
+async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
+    """Append a plain-text AIMessage to the LangGraph checkpointer for
+    ``thread_job.thread`` so the chat UI shows a user-visible explanation when
+    the agent never produced one.
+
+    The frontend (apps/chat/thread_views.py:_load_thread_messages) reads
+    assistant responses from the checkpointer, so a failure message that
+    bypasses this path would never appear. We reuse build_agent_graph because
+    aupdate_state requires a compiled graph carrying the AgentState schema and
+    the same checkpointer as a normal turn.
+
+    Failures here are logged but never re-raised — the caller has already
+    decided this is a terminal failure and a synthetic message is a UX nicety,
+    not a correctness invariant.
+    """
+    try:
+        agent, _ = await _build_agent_for_resume(
+            thread_job.thread.workspace,
+            thread_job.thread.user,
+        )
+        config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
+        await agent.aupdate_state(
+            config,
+            {"messages": [AIMessage(content=text)]},
+        )
+    except Exception:
+        logger.warning(
+            "resume: failed to persist synthetic failure message for tj=%s",
+            thread_job.id,
+            exc_info=True,
+        )
 
 
 async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[str, list[dict]]:
@@ -591,6 +695,13 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
+                # Expose ``cursor_state.last_id`` so the resume prompt can
+                # tell the agent "completed_works partially loaded up to
+                # id=X — the next materialization will continue from there"
+                # (issue #187).
+                cursor_state = info.get("cursor_state")
+                if isinstance(cursor_state, dict) and isinstance(cursor_state.get("last_id"), int):
+                    detail["resume_last_id"] = cursor_state["last_id"]
                 sources_detail[source] = detail
         summary.append(
             {
@@ -691,7 +802,10 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"(some sources loaded, others failed or were skipped). Answer what "
             f"you can from the available data and tell the user which sources are "
             f"unavailable. Do NOT claim that data is loaded for sources marked "
-            f"failed or skipped. Per-tenant: {summary}"
+            f"failed or skipped. A source with state=in_progress or state=failed "
+            f"and a non-null resume_last_id has partially-loaded rows that the "
+            f"next materialization will continue from — do NOT query its table "
+            f"as if it were complete. Per-tenant: {summary}"
         )
     else:
         body = (
@@ -703,6 +817,21 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     workspace = tj.thread.workspace
     user = tj.thread.user
 
+    timeout_s = getattr(settings, "AGENT_RESUME_TIMEOUT_S", 120)
+    sentry_sdk.add_breadcrumb(
+        category="resume",
+        message="ainvoke_start",
+        data={"thread_job_id": str(tj.id), "status": status, "timeout_s": timeout_s},
+    )
+    logger.info(
+        "resume: ainvoke start tj=%s thread=%s workspace=%s status=%s timeout=%ds",
+        thread_job_id,
+        tj.thread.id,
+        workspace.id,
+        status,
+        timeout_s,
+    )
+    start = time.monotonic()
     try:
         agent, oauth_tokens = await _build_agent_for_resume(workspace, user)
         input_state = {
@@ -717,14 +846,64 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             "recursion_limit": 50,
             "oauth_tokens": oauth_tokens,
         }
-        await agent.ainvoke(input_state, config)
+        with _resume_langfuse_span(
+            thread_job_id=thread_job_id,
+            thread_id=str(tj.thread.id),
+            status=status,
+        ):
+            await asyncio.wait_for(
+                agent.ainvoke(input_state, config),
+                timeout=timeout_s,
+            )
+    except TimeoutError:
+        elapsed = time.monotonic() - start
+        logger.exception(
+            "resume: ainvoke timed out after %.2fs (limit=%ds, tj=%s)",
+            elapsed,
+            timeout_s,
+            thread_job_id,
+        )
+        sentry_sdk.add_breadcrumb(
+            category="resume",
+            message="ainvoke_timeout",
+            data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
+        )
+        await _persist_synthetic_failure_message(tj, RESUME_TIMEOUT_MESSAGE)
+        await ThreadJob.objects.filter(id=tj.id).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+        )
+        return {"status": "agent_timeout"}
     except Exception:
-        logger.exception("resume: agent build or invoke failed for thread_job %s", thread_job_id)
+        elapsed = time.monotonic() - start
+        logger.exception(
+            "resume: agent build or invoke failed for thread_job %s after %.2fs",
+            thread_job_id,
+            elapsed,
+        )
+        sentry_sdk.add_breadcrumb(
+            category="resume",
+            message="ainvoke_exception",
+            data={"thread_job_id": str(tj.id), "elapsed_s": elapsed},
+        )
+        await _persist_synthetic_failure_message(tj, RESUME_EXCEPTION_MESSAGE)
         await ThreadJob.objects.filter(id=tj.id).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
         )
         return {"status": "agent_failed"}
+    finally:
+        elapsed = time.monotonic() - start
+        logger.info(
+            "resume: ainvoke complete tj=%s elapsed=%.2fs",
+            thread_job_id,
+            elapsed,
+        )
+    sentry_sdk.add_breadcrumb(
+        category="resume",
+        message="ainvoke_complete",
+        data={"thread_job_id": str(tj.id), "elapsed_s": time.monotonic() - start},
+    )
 
     # Bump Thread.updated_at so the sidebar's "newer than last_viewed" check
     # fires the green-dot indicator after a successful background resume.

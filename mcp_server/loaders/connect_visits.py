@@ -69,9 +69,13 @@ def _normalize_visit(raw: dict, opportunity_id: int) -> dict:
 class ConnectVisitLoader(ConnectBaseLoader):
     """Fetch and normalize user visit data from Connect (v2 paginated JSON)."""
 
-    def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
+    def load_pages(
+        self, start_last_id: int | None = None
+    ) -> Iterator[tuple[list[dict], int | None]]:
         total = 0
-        for page, page_total in self._paginate_export_pages("user_visits/"):
+        for page, page_total in self._paginate_export_pages(
+            "user_visits/", start_last_id=start_last_id
+        ):
             if not page:
                 continue
             normalized = [_normalize_visit(r, self.opportunity_id) for r in page]

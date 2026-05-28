@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+from urllib.parse import parse_qs, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +28,75 @@ HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 # unaffected.
 EXPORT_ACCEPT_HEADER = "application/json; version=2.0"
 
+# Bounded retry policy for transient upstream failures. backoff_factor=2.0
+# yields waits of 0s, 2s, 4s, 8s between the 4 total attempts (~14s worst case).
+# raise_on_status=False lets us inspect the final response (headers, status)
+# so we can surface upstream Sentry trace IDs rather than just propagating
+# the raw requests.HTTPError.
+RETRY_TOTAL = 3
+RETRY_STATUS_FORCELIST = (500, 502, 503, 504, 408, 429)
+
+
+def _extract_last_id(url: str, params: dict | None) -> int | None:
+    """Best-effort recovery of the cursor value at the time of failure.
+
+    On the first page, the cursor (if any) is in ``params``; on subsequent
+    pages the server-built ``next`` URL embeds it as a query string.
+    """
+    if params and "last_id" in params:
+        try:
+            return int(params["last_id"])
+        except (TypeError, ValueError):
+            return None
+    qs = parse_qs(urlparse(url).query)
+    values = qs.get("last_id")
+    if not values:
+        return None
+    try:
+        return int(values[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_retry() -> Retry:
+    return Retry(
+        total=RETRY_TOTAL,
+        backoff_factor=2.0,
+        status_forcelist=list(RETRY_STATUS_FORCELIST),
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+        raise_on_status=False,
+    )
+
 
 class ConnectAuthError(Exception):
     """Raised when Connect returns a 401 or 403 response."""
 
 
 class ConnectExportError(Exception):
-    """Raised when a v2 export response is malformed (missing 'results', invalid JSON)."""
+    """Raised on unrecoverable Connect export failures.
+
+    Covers both malformed responses (missing ``results`` key, invalid JSON)
+    and non-2xx responses that survived the retry policy. When raised after
+    retry exhaustion, ``status``, ``attempts``, ``sentry_trace``, and
+    ``last_id`` are populated so the materializer can log structured context
+    and operators can correlate with upstream traces.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        sentry_trace: str | None = None,
+        attempts: int = 1,
+        last_id: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.sentry_trace = sentry_trace
+        self.attempts = attempts
+        self.last_id = last_id
 
 
 class ConnectBaseLoader:
@@ -60,6 +125,9 @@ class ConnectBaseLoader:
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
+        adapter = HTTPAdapter(max_retries=_build_retry())
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising ConnectAuthError on 401/403."""
@@ -80,12 +148,18 @@ class ConnectBaseLoader:
         self,
         suffix: str,
         params: dict | None = None,
+        start_last_id: int | None = None,
     ) -> Iterator[tuple[list[dict], int | None]]:
         """Yield ``(page, total_count)`` from a v2 paginated JSON export endpoint.
 
         Calls ``_opp_url(suffix)`` first, then follows the server-provided
         ``next`` URL until it is null. ``params`` are sent only on the first
         request — the ``next`` URL already includes preserved query params.
+
+        When ``start_last_id`` is provided, the initial request includes
+        ``last_id=<start_last_id>`` so Connect's keyset pagination resumes
+        with records strictly greater than that id (forward order). This
+        supports the resumable-materialization path in issue #187.
 
         Each yielded ``page`` is the ``results`` list from one response
         (bounded server-side, default ~1000 records). ``total_count`` is the
@@ -95,12 +169,17 @@ class ConnectBaseLoader:
 
         Raises:
             ConnectAuthError: on 401/403.
-            ConnectExportError: when the response is not valid JSON or is
-                missing the ``results`` key.
-            requests.HTTPError: on any other non-2xx response.
+            ConnectExportError: when the response is not valid JSON, is
+                missing the ``results`` key, or returns a non-2xx status
+                that survives the configured retry policy. On retry
+                exhaustion, ``status``, ``attempts``, ``sentry_trace``, and
+                ``last_id`` are populated for structured logging.
         """
         url: str | None = self._opp_url(suffix)
-        request_params: dict | None = params
+        request_params: dict | None = dict(params) if params else None
+        if start_last_id is not None:
+            request_params = request_params or {}
+            request_params["last_id"] = start_last_id
         headers = {"Accept": EXPORT_ACCEPT_HEADER}
         first_page = True
 
@@ -121,7 +200,19 @@ class ConnectBaseLoader:
                     f"Connect auth failed for opportunity {self.opportunity_id}: "
                     f"HTTP {resp.status_code}"
                 )
-            resp.raise_for_status()
+            if not resp.ok:
+                # A status in the forcelist means the urllib3 Retry policy
+                # ran to exhaustion (RETRY_TOTAL retries on top of the initial
+                # attempt). Anything else short-circuited on the first try.
+                attempts = RETRY_TOTAL + 1 if resp.status_code in RETRY_STATUS_FORCELIST else 1
+                raise ConnectExportError(
+                    f"Connect export request failed for opportunity "
+                    f"{self.opportunity_id}: HTTP {resp.status_code} for {url}",
+                    status=resp.status_code,
+                    sentry_trace=resp.headers.get("sentry-trace"),
+                    attempts=attempts,
+                    last_id=_extract_last_id(url, request_params),
+                )
 
             try:
                 payload = resp.json()
