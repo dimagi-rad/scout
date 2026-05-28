@@ -70,15 +70,11 @@ class ThreadJob(models.Model):
     ACTIVE_STATES = frozenset({State.PENDING, State.RUNNING})
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    thread = models.ForeignKey(
-        "chat.Thread", on_delete=models.CASCADE, related_name="jobs"
-    )
+    thread = models.ForeignKey("chat.Thread", on_delete=models.CASCADE, related_name="jobs")
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     procrastinate_job_id = models.BigIntegerField(unique=True, db_index=True)
     tool_call_id = models.CharField(max_length=64)
-    state = models.CharField(
-        max_length=16, choices=State.choices, default=State.PENDING
-    )
+    state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 

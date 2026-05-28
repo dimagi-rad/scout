@@ -23,19 +23,20 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
     ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=9999, tool_call_id="tc9",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=9999,
+        tool_call_id="tc9",
         state=ThreadJob.State.PENDING,
     )
     # Backdate to before the threshold (cron runs every 15 min;
     # STALE_JOB_THRESHOLD is 1 hour per the plan).
-    await ThreadJob.objects.filter(id=tj.id).aupdate(
-        created_at=timezone.now() - timedelta(hours=2)
-    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(created_at=timezone.now() - timedelta(hours=2))
 
-    with patch("apps.workspaces.tasks._procrastinate_job_active",
-               new=AsyncMock(return_value=False)), \
-         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+    with (
+        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
         resume.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
@@ -56,17 +57,18 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
     ws = await sync_to_async(Workspace.objects.create)(name="W2", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=8888, tool_call_id="tc8",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=8888,
+        tool_call_id="tc8",
         state=ThreadJob.State.PENDING,
     )
-    await ThreadJob.objects.filter(id=tj.id).aupdate(
-        created_at=timezone.now() - timedelta(hours=2)
-    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(created_at=timezone.now() - timedelta(hours=2))
 
-    with patch("apps.workspaces.tasks._procrastinate_job_active",
-               new=AsyncMock(return_value=False)), \
-         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+    with (
+        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
         resume.defer_async = AsyncMock(side_effect=RuntimeError("queue unavailable"))
         result = await expire_stale_thread_jobs()
 
@@ -89,18 +91,23 @@ async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
     ws = await sync_to_async(Workspace.objects.create)(name="W-unknown", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=24242, tool_call_id="tc-unknown",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=24242,
+        tool_call_id="tc-unknown",
         state=ThreadJob.State.PENDING,
     )
     await ThreadJob.objects.filter(id=tj.id).aupdate(
         created_at=timezone.now() - timedelta(hours=2),
     )
 
-    with patch(
-        "apps.workspaces.tasks._procrastinate_job_active",
-        new=AsyncMock(return_value=None),  # status unknown
-    ), patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_active",
+            new=AsyncMock(return_value=None),  # status unknown
+        ),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
         resume.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
@@ -122,17 +129,20 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
     ws = await sync_to_async(Workspace.objects.create)(name="W-stuck", created_by=user)
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=12345, tool_call_id="tc-stuck",
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=12345,
+        tool_call_id="tc-stuck",
         state=ThreadJob.State.RUNNING,
     )
     await ThreadJob.objects.filter(id=tj.id).aupdate(
         created_at=timezone.now() - timedelta(hours=2),
     )
 
-    with patch("apps.workspaces.tasks._procrastinate_job_active",
-               new=AsyncMock(return_value=False)), \
-         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume:
+    with (
+        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
         resume.defer_async = AsyncMock(return_value=None)
         result = await expire_stale_thread_jobs()
 
