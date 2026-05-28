@@ -132,3 +132,17 @@ def test_detail_returns_latest_completed_run(client, user, workspace, tenant_sch
     client.force_login(user)
     resp = client.get(f"/api/workspaces/{workspace.id}/")
     assert resp.json()["last_synced_at"] == latest.completed_at.isoformat()
+
+
+@pytest.mark.django_db
+def test_detail_ignores_in_flight_and_failed_runs(client, user, workspace, tenant_schema):
+    now = timezone.now()
+    completed = _make_run(
+        tenant_schema, MaterializationRun.RunState.COMPLETED, now - timedelta(hours=1)
+    )
+    _make_run(tenant_schema, MaterializationRun.RunState.LOADING, now)
+    _make_run(tenant_schema, MaterializationRun.RunState.FAILED, now)
+
+    client.force_login(user)
+    resp = client.get(f"/api/workspaces/{workspace.id}/")
+    assert resp.json()["last_synced_at"] == completed.completed_at.isoformat()
