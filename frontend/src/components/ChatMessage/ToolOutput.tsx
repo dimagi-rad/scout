@@ -247,7 +247,13 @@ export function DescribeTableOutput({ output }: { output: DescribeTableOutput })
 export interface ListTablesOutput {
   success: boolean
   data?: {
-    tables: Array<{ name: string; type?: string; description?: string; row_count?: number }>
+    tables: Array<{
+      name: string
+      type?: string
+      description?: string
+      materialized_row_count?: number | null
+      row_count_verified?: boolean
+    }>
     note?: string
   }
   timing_ms?: number
@@ -277,8 +283,13 @@ export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
             className="text-[11px] font-mono bg-muted/50 border border-border/40 rounded px-1.5 py-0.5 text-foreground/70"
           >
             {t.name}
-            {t.row_count != null && (
-              <span className="text-muted-foreground/50 ml-1">({t.row_count.toLocaleString()})</span>
+            {t.materialized_row_count != null && (
+              <span
+                className="text-muted-foreground/50 ml-1"
+                title="Row count at last materialization (not verified live)"
+              >
+                (~{t.materialized_row_count.toLocaleString()})
+              </span>
             )}
           </span>
         ))}

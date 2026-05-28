@@ -108,13 +108,19 @@ def _render_compact_schema(tables: list[dict], last_materialized_at: str | None)
         lines.append("Data is loaded and ready.\n")
 
     lines.append("### Available Tables\n")
-    lines.append("| Table | Description | Rows |")
+    lines.append("| Table | Description | Materialized Rows |")
     lines.append("|---|---|---|")
     for t in tables:
-        row_count = f"{t['row_count']:,}" if t.get("row_count") is not None else "unknown"
+        materialized = t.get("materialized_row_count")
+        row_count = f"{materialized:,}" if materialized is not None else "unknown"
         desc = t.get("description") or ""
         lines.append(f"| {t['name']} | {desc} | {row_count} |")
 
+    lines.append(
+        "\nThe `Materialized Rows` column is the count at the last "
+        "materialization — not a live count. Do not quote it as an answer; "
+        "run `SELECT COUNT(*)` to get a verified value."
+    )
     lines.append("\nUse the `describe_table` tool for column details.")
     return "\n".join(lines)
 
@@ -133,12 +139,13 @@ def _render_full_schema(
 
     lines.append("### Available Tables\n")
     for t in tables:
-        row_count = f"{t['row_count']:,}" if t.get("row_count") is not None else "unknown"
+        materialized = t.get("materialized_row_count")
+        row_count = f"{materialized:,}" if materialized is not None else "unknown"
         desc = t.get("description") or ""
         header = f"**{t['name']}**"
         if desc:
             header += f" — {desc}"
-        header += f" ({row_count} rows)"
+        header += f" ({row_count} rows at last materialization)"
         lines.append(header)
 
         cols = column_map.get(t["name"], [])
