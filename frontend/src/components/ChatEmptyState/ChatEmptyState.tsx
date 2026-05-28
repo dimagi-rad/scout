@@ -34,7 +34,7 @@ export function ChatEmptyState({
     onSend(trimmed)
   }
 
-  function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     submit(input)
   }
