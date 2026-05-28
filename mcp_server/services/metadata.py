@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from django.conf import settings
 from django.db import models
 
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.lineage import aget_terminal_assets
 from apps.workspaces.models import MaterializationRun
-from mcp_server.context import QueryContext
+from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
 from mcp_server.services.query import _execute_async_parameterized
 
@@ -110,13 +111,28 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
     Used by ``pipeline_list_tables`` to reconcile the catalog with reality.
     Returns an empty set on query failure (treated as "nothing live"), so a
     transient DB error surfaces as an empty list rather than phantom rows.
+
+    Builds ``connection_params`` from ``MANAGED_DATABASE_URL`` the same way
+    ``load_tenant_context``/``load_workspace_context`` do. Constructing the
+    QueryContext with an empty ``connection_params={}`` would make the
+    underlying ``psycopg.AsyncConnection.connect`` fall back to libpq env-var
+    defaults (unset in the MCP container), so the query would raise and every
+    healthy run would surface zero source tables.
     """
+    url = settings.MANAGED_DATABASE_URL
+    if not url:
+        logger.warning(
+            "MANAGED_DATABASE_URL is not configured; cannot enumerate live tables in schema %s",
+            schema_name,
+        )
+        return set()
+
     ctx = QueryContext(
         tenant_id="",
         schema_name=schema_name,
         max_rows_per_query=10_000,
         max_query_timeout_seconds=10,
-        connection_params={},
+        connection_params=_parse_db_url(url, schema_name),
     )
     try:
         result = await _execute_async_parameterized(

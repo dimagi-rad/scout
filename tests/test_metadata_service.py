@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mcp_server.services.metadata import _live_tables_in_schema
+
 
 def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
     """Build a minimal PipelineConfig for testing."""
@@ -546,3 +548,51 @@ class TestPipelineGetMetadata:
         assert rel["from_table"] == "forms"
         assert rel["to_table"] == "cases"
         assert rel["description"] == "Forms reference cases"
+
+
+class TestLiveTablesInSchema:
+    """Exercise the connection_params plumbing, not just the mocked result.
+
+    Regression guard: _live_tables_in_schema previously built a QueryContext
+    with connection_params={}, which expands to a parameterless
+    psycopg.AsyncConnection.connect() that falls back to (unset) libpq env-var
+    defaults in the MCP container — so every healthy run surfaced zero tables.
+    These tests assert the ctx handed to the executor carries real host/db/user
+    connection params derived from MANAGED_DATABASE_URL.
+    """
+
+    MANAGED_URL = "postgresql://scout_user:secret@db.internal:5432/scout"
+
+    @pytest.mark.asyncio
+    async def test_passes_populated_connection_params_to_executor(self):
+        captured = {}
+
+        async def fake_exec(ctx, sql, params, _timeout):
+            captured["ctx"] = ctx
+            return {"rows": [["raw_cases"], ["raw_forms"]]}
+
+        with (
+            patch("mcp_server.services.metadata.settings.MANAGED_DATABASE_URL", self.MANAGED_URL),
+            patch(
+                "mcp_server.services.metadata._execute_async_parameterized",
+                new=AsyncMock(side_effect=fake_exec),
+            ),
+        ):
+            result = await _live_tables_in_schema("t_acme")
+
+        assert result == {"raw_cases", "raw_forms"}
+        ctx = captured["ctx"]
+        # The defect was an empty connection_params dict; assert it is populated
+        # with the libpq fields parsed from MANAGED_DATABASE_URL.
+        assert ctx.connection_params, "connection_params must not be empty"
+        assert ctx.connection_params["host"] == "db.internal"
+        assert ctx.connection_params["dbname"] == "scout"
+        assert ctx.connection_params["user"] == "scout_user"
+        assert ctx.connection_params["password"] == "secret"
+        assert "search_path=t_acme" in ctx.connection_params["options"]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_set_when_managed_url_unset(self):
+        with patch("mcp_server.services.metadata.settings.MANAGED_DATABASE_URL", ""):
+            result = await _live_tables_in_schema("t_acme")
+        assert result == set()

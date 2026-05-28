@@ -367,6 +367,32 @@ def run_pipeline(
         logger.info("Run %s cancelled; in-flight source rolled back", run.id)
         raise
 
+    except Exception as e:
+        # Pre-loop failures (DISCOVER phase, system-asset generation re-raise,
+        # or the DISCOVERING→LOADING CAS) would otherwise escape with the run
+        # row stuck in DISCOVERING — no terminal state, no completed_at — which
+        # downstream aggregation treats as "partial" and expire_inactive_schemas
+        # never cleans up. Stamp a FAILED terminal state here so every
+        # non-cancellation failure path produces a terminal run.
+        #
+        # Per-source load failures are handled inside the loop above (which
+        # records FAILED/PARTIAL and re-raises). This handler is idempotent
+        # w.r.t. that path: if completed_at was already stamped there, we leave
+        # the recorded state untouched and just re-raise.
+        if run.completed_at is None:
+            logger.exception("Materialization run %s failed before any source committed", run.id)
+            now = datetime.now(UTC)
+            MaterializationRun.objects.filter(id=run.id, completed_at__isnull=True).update(
+                state=MaterializationRun.RunState.FAILED,
+                completed_at=now,
+                result={
+                    "pipeline": pipeline.name,
+                    "sources": source_results,
+                    "error": _summarize_error(e),
+                },
+            )
+        raise
+
     # ── 4. TRANSFORM ──────────────────────────────────────────────────────────
     # Transform errors are isolated — failure here does NOT mark the run FAILED.
     # Compare-and-swap, same reasoning as the LOADING transition: a cancel that

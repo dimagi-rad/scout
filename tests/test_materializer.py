@@ -248,6 +248,67 @@ class TestRunPipeline:
             # We must not have advanced past DISCOVER: no DB connection acquired.
             mock_conn.assert_not_called()
 
+    def test_discover_phase_failure_marks_run_failed(self):
+        """A failure in the DISCOVER phase (e.g. provider auth/network error)
+        must leave the run in a FAILED terminal state with completed_at stamped,
+        not stuck in DISCOVERING. Pre-PR an outer handler did this; it was
+        removed, leaving the row non-terminal so downstream aggregation treated
+        it as "partial" and expire_inactive_schemas never cleaned it up."""
+        from mcp_server.pipeline_registry import (
+            MetadataDiscoveryConfig,
+            PipelineConfig,
+            SourceConfig,
+        )
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+            metadata_discovery=MetadataDiscoveryConfig(),
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            # Real initial state: no terminal stamp yet. The outer handler keys
+            # off this to distinguish a pre-loop failure from a per-source one.
+            run.completed_at = None
+            # DISCOVER raises before any source is loaded.
+            mock_meta.return_value.load.side_effect = RuntimeError("provider auth failed")
+
+            with pytest.raises(RuntimeError, match="provider auth failed"):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+            # Never reached the LOAD phase — no DB connection acquired.
+            mock_conn.assert_not_called()
+
+            # The outer handler must have written a FAILED terminal state with
+            # completed_at + result, guarded by completed_at__isnull=True.
+            failed_update = None
+            for call in mock_run_cls.objects.filter.return_value.update.call_args_list:
+                if call.kwargs.get("state") == mock_run_cls.RunState.FAILED:
+                    failed_update = call
+                    break
+            assert failed_update is not None, "expected a FAILED terminal update"
+            assert failed_update.kwargs["completed_at"] is not None
+            assert "error" in failed_update.kwargs["result"]
+            # The terminal write must be conditional on completed_at being unset
+            # so it never clobbers a per-source FAILED/PARTIAL state.
+            filter_calls = mock_run_cls.objects.filter.call_args_list
+            assert any(c.kwargs.get("completed_at__isnull") is True for c in filter_calls), (
+                "terminal write must filter on completed_at__isnull=True"
+            )
+
     def test_transforming_transition_preserves_external_cancel(self):
         """A cancel that lands between LOAD commit and the TRANSFORM phase
         must not be overwritten by the LOADING→TRANSFORMING transition;

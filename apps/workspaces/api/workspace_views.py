@@ -2,7 +2,7 @@
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db.models import Count
+from django.db.models import Count, OuterRef, Subquery
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -11,6 +11,7 @@ from rest_framework.views import APIView
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -38,12 +39,22 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        latest_run = (
+            MaterializationRun.objects.filter(
+                state=MaterializationRun.RunState.COMPLETED,
+                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
+            )
+            .order_by("-completed_at")
+            .values("completed_at")[:1]
+        )
+
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
             .prefetch_related("workspace__workspace_tenants__tenant")
             .annotate(
                 member_count=Count("workspace__memberships", distinct=True),
+                last_synced_at=Subquery(latest_run),
             )
         )
         results = []
@@ -65,6 +76,7 @@ class WorkspaceListView(APIView):
                     "role": m.role,
                     "tenants": tenants,
                     "member_count": m.member_count,
+                    "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
                     "created_at": m.workspace.created_at.isoformat(),
                 }
             )
@@ -172,6 +184,17 @@ class WorkspaceDetailView(APIView):
             except WorkspaceViewSchema.DoesNotExist:
                 schema_status = "provisioning"
 
+        latest_completed = (
+            MaterializationRun.objects.filter(
+                state=MaterializationRun.RunState.COMPLETED,
+                tenant_schema__tenant__in=tenants,
+            )
+            .order_by("-completed_at")
+            .values_list("completed_at", flat=True)
+            .first()
+        )
+        last_synced_at = latest_completed.isoformat() if latest_completed else None
+
         first_tenant = tenants[0] if tenants else None
         display_name = (
             first_tenant.format_display_name(workspace.name) if first_tenant else workspace.name
@@ -189,6 +212,7 @@ class WorkspaceDetailView(APIView):
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),
                 "updated_at": workspace.updated_at.isoformat(),
+                "last_synced_at": last_synced_at,
             }
         )
 

@@ -13,6 +13,7 @@ Tests cover security-critical functionality:
 
 import pytest
 
+from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 
@@ -500,3 +501,40 @@ class TestEdgeCases:
         tables = validator.get_tables_accessed(statement)
         assert isinstance(tables, list)
         assert "users" in tables
+
+
+class TestPromptValidatorAlignment:
+    """Meta-tests ensuring the system prompt matches the validator's real behavior."""
+
+    def test_information_schema_qualified_is_rejected(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="information_schema"):
+            validator.validate("SELECT * FROM information_schema.columns")
+
+    def test_unqualified_pg_catalog_views_are_allowed(self):
+        validator = SQLValidator(schema="ws_demo")
+        for sql in (
+            "SELECT schemaname, tablename FROM pg_tables",
+            "SELECT schemaname, viewname FROM pg_views",
+            "SELECT nspname FROM pg_namespace",
+            "SELECT relname FROM pg_class",
+        ):
+            validator.validate(sql)
+
+    def test_prompt_mentions_information_schema_restriction(self):
+        prompt = BASE_SYSTEM_PROMPT.lower()
+        assert "information_schema" in prompt
+        assert "describe_table" in prompt
+        assert "list_tables" in prompt
+
+    def test_prompt_does_not_claim_pg_catalog_is_blocked(self):
+        prompt = BASE_SYSTEM_PROMPT
+        forbidden_phrases = [
+            "cannot query pg_catalog",
+            "cannot access pg_catalog",
+        ]
+        for phrase in forbidden_phrases:
+            assert phrase.lower() not in prompt.lower(), (
+                f"Prompt still claims pg_catalog is blocked ({phrase!r}), but the "
+                "validator allows unqualified pg_* views."
+            )
