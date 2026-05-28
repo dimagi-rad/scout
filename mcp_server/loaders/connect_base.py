@@ -148,12 +148,18 @@ class ConnectBaseLoader:
         self,
         suffix: str,
         params: dict | None = None,
+        start_last_id: int | None = None,
     ) -> Iterator[tuple[list[dict], int | None]]:
         """Yield ``(page, total_count)`` from a v2 paginated JSON export endpoint.
 
         Calls ``_opp_url(suffix)`` first, then follows the server-provided
         ``next`` URL until it is null. ``params`` are sent only on the first
         request — the ``next`` URL already includes preserved query params.
+
+        When ``start_last_id`` is provided, the initial request includes
+        ``last_id=<start_last_id>`` so Connect's keyset pagination resumes
+        with records strictly greater than that id (forward order). This
+        supports the resumable-materialization path in issue #187.
 
         Each yielded ``page`` is the ``results`` list from one response
         (bounded server-side, default ~1000 records). ``total_count`` is the
@@ -170,7 +176,10 @@ class ConnectBaseLoader:
                 ``last_id`` are populated for structured logging.
         """
         url: str | None = self._opp_url(suffix)
-        request_params: dict | None = params
+        request_params: dict | None = dict(params) if params else None
+        if start_last_id is not None:
+            request_params = request_params or {}
+            request_params["last_id"] = start_last_id
         headers = {"Accept": EXPORT_ACCEPT_HEADER}
         first_page = True
 

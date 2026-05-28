@@ -40,6 +40,9 @@ async def pipeline_list_tables(
     with ``information_schema.tables`` for the tenant schema:
 
     - sources with ``state != "completed"`` in the run record are excluded
+      (this includes ``in_progress`` from issue #187 — a source mid-resume
+      may have a partially-populated physical table that must not be surfaced
+      until the source flips to ``completed``)
     - sources whose physical table is no longer present in the DB are excluded
 
     Returns an empty list if no eligible run exists or none of the recorded

@@ -159,6 +159,52 @@ class TestPaginateExportPages:
             with pytest.raises(ConnectExportError):
                 list(loader._paginate_export_pages("user_visits/"))
 
+    def test_paginate_export_pages_starts_from_provided_cursor(self, loader):
+        """Issue #187: when ``start_last_id`` is set, the first GET URL
+        includes ``last_id=<id>`` so Connect's keyset pagination resumes
+        with records strictly greater than that id.
+        """
+        with rm.Mocker() as m:
+            m.get(
+                "https://connect.example.com/export/opportunity/814/completed_works/",
+                json={"next": None, "previous": None, "results": [{"id": 101}], "count": 1},
+            )
+            list(loader._paginate_export_pages("completed_works/", start_last_id=100))
+            assert m.last_request.qs.get("last_id") == ["100"]
+
+    def test_paginate_export_pages_no_start_cursor_uses_default_url(self, loader):
+        """Regression: omitting ``start_last_id`` makes the first request
+        carry no ``last_id`` query param — identical to pre-#187 behavior.
+        """
+        with rm.Mocker() as m:
+            m.get(
+                "https://connect.example.com/export/opportunity/814/user_visits/",
+                json={"next": None, "previous": None, "results": [], "count": 0},
+            )
+            list(loader._paginate_export_pages("user_visits/"))
+            assert "last_id" not in m.last_request.qs
+
+    def test_paginate_export_pages_start_cursor_combines_with_params(self, loader):
+        """``start_last_id`` is merged into caller-supplied ``params`` —
+        both are sent on the first request, and the original ``params``
+        dict is not mutated.
+        """
+        with rm.Mocker() as m:
+            m.get(
+                "https://connect.example.com/export/opportunity/814/user_visits/",
+                json={"next": None, "previous": None, "results": []},
+            )
+            original_params = {"images": "true"}
+            list(
+                loader._paginate_export_pages(
+                    "user_visits/", params=original_params, start_last_id=500
+                )
+            )
+            assert m.last_request.qs.get("last_id") == ["500"]
+            assert m.last_request.qs.get("images") == ["true"]
+            # Caller's dict must NOT be mutated.
+            assert "last_id" not in original_params
+
     def test_follows_http_to_https_redirect_on_next_url(self, loader):
         """Regression test for dimagi/commcare-connect#1109.
 

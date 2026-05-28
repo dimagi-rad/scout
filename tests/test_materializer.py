@@ -740,6 +740,339 @@ class TestRunPipeline:
         assert commit_called, "Per-source commit() must be invoked"
 
 
+class TestResumableMaterialization:
+    """Issue #187: per-page cursor watermark for resumable Connect sources."""
+
+    def _make_schema(self, name="dimagi"):
+        s = MagicMock()
+        s.schema_name = name
+        return s
+
+    def _make_tm(self, tenant_id="42"):
+        tm = MagicMock()
+        tm.tenant.external_id = tenant_id
+        return tm
+
+    def _setup_run_mock(self, mock_run_cls, prior_run=None):
+        run = MagicMock()
+        run.id = "run-1"
+        mock_run_cls.objects.create.return_value = run
+        for attr in (
+            "DISCOVERING",
+            "LOADING",
+            "TRANSFORMING",
+            "COMPLETED",
+            "PARTIAL",
+            "FAILED",
+            "CANCELLED",
+            "STALE",
+        ):
+            setattr(mock_run_cls.RunState, attr, attr.lower())
+        mock_run_cls.ACTIVE_STATES = frozenset(
+            {"started", "discovering", "loading", "transforming"}
+        )
+        # _load_prior_resume_cursors uses .filter().exclude().order_by().first()
+        # — wire it up to return ``prior_run`` (or None when absent).
+        chain = mock_run_cls.objects.filter.return_value
+        chain.exclude.return_value.order_by.return_value.first.return_value = prior_run
+        return run
+
+    def _run_connect_pipeline(
+        self,
+        sources,
+        loader_mocks,
+        prior_run=None,
+        completed_works_side_effect=None,
+    ):
+        """Run a Connect pipeline with mocked loaders. Returns the run mock."""
+        from mcp_server.pipeline_registry import PipelineConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="connect_sync",
+            description="",
+            version="1.0",
+            provider="commcare_connect",
+            sources=sources,
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
+            patch(
+                "mcp_server.services.materializer.ConnectVisitLoader",
+                loader_mocks.get("visits", MagicMock()),
+            ) as mock_visits,
+            patch(
+                "mcp_server.services.materializer.ConnectUserLoader",
+                loader_mocks.get("users", MagicMock()),
+            ) as mock_users,
+            patch(
+                "mcp_server.services.materializer.ConnectCompletedWorkLoader",
+                loader_mocks.get("completed_works", MagicMock()),
+            ) as mock_cw,
+            patch(
+                "mcp_server.services.materializer.ConnectPaymentLoader",
+                loader_mocks.get("payments", MagicMock()),
+            ),
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls, prior_run=prior_run)
+            mock_meta.return_value.load.return_value = {}
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            invocations = {
+                "visits": mock_visits,
+                "users": mock_users,
+                "completed_works": mock_cw,
+            }
+            if completed_works_side_effect is not None:
+                mock_cw.return_value.load_pages.side_effect = completed_works_side_effect
+            try:
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+            except Exception:
+                pass
+            return run, invocations
+
+    def test_resumes_from_cursor_when_prior_run_partial(self):
+        """When a prior PARTIAL run recorded cursor_state.last_id for a
+        resumable source whose state was in_progress/failed, the next run
+        passes that id as ``start_last_id`` to the loader.
+        """
+        from mcp_server.pipeline_registry import SourceConfig
+
+        prior = MagicMock()
+        prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
+        prior.result = {
+            "sources": {
+                "completed_works": {
+                    "state": "in_progress",
+                    "rows": 100,
+                    "cursor_state": {"last_id": 1500, "last_committed_at": "2026-05-27T00:00:00Z"},
+                }
+            }
+        }
+
+        cw_loader_cls = MagicMock()
+        cw_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="completed_works", resumable=True)],
+            loader_mocks={"completed_works": cw_loader_cls},
+            prior_run=prior,
+        )
+
+        # load_pages must have been called with start_last_id=1500.
+        call = invocations["completed_works"].return_value.load_pages.call_args
+        assert call.kwargs.get("start_last_id") == 1500, (
+            f"Expected start_last_id=1500, got {call.kwargs}"
+        )
+
+    def test_clean_run_ignores_cursor_state_for_non_resumable_source(self):
+        """Non-resumable sources (e.g. users) MUST do a clean full reload
+        regardless of any cursor_state present on a prior run.
+        """
+        from mcp_server.pipeline_registry import SourceConfig
+
+        prior = MagicMock()
+        prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
+        prior.result = {
+            "sources": {
+                "users": {
+                    "state": "in_progress",
+                    "rows": 50,
+                    "cursor_state": {"last_id": 999, "last_committed_at": "2026-05-27T00:00:00Z"},
+                }
+            }
+        }
+        users_loader_cls = MagicMock()
+        users_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="users", resumable=False)],
+            loader_mocks={"users": users_loader_cls},
+            prior_run=prior,
+        )
+
+        call = invocations["users"].return_value.load_pages.call_args
+        # The users loader must be called with NO start_last_id (it doesn't
+        # even accept the kwarg). It is called positionally with nothing.
+        assert "start_last_id" not in (call.kwargs or {}), (
+            "Non-resumable source must not receive a resume cursor"
+        )
+
+    def test_cursor_advances_after_each_page_commit(self):
+        """Each per-page commit must update cursor_state.last_id to the
+        max id of the page just committed (and rows count too).
+        """
+        from mcp_server.services.materializer import _make_cursor_callback
+
+        run = MagicMock()
+        run.id = "run-1"
+        # Wire ACTIVE_STATES into the patched MaterializationRun so the CAS
+        # update inside _persist_source_results doesn't blow up.
+        with patch("mcp_server.services.materializer.MaterializationRun") as mock_rc:
+            mock_rc.ACTIVE_STATES = frozenset({"started", "loading"})
+            pipeline = MagicMock(name="connect_sync")
+            pipeline.name = "connect_sync"
+            source_results = {}
+            cb = _make_cursor_callback(run, pipeline, source_results, "completed_works")
+            cb(100, 50)
+            assert source_results["completed_works"]["state"] == "in_progress"
+            assert source_results["completed_works"]["rows"] == 50
+            assert source_results["completed_works"]["cursor_state"]["last_id"] == 100
+            cb(250, 100)
+            assert source_results["completed_works"]["cursor_state"]["last_id"] == 250
+            assert source_results["completed_works"]["rows"] == 100
+        # The _persist_source_results CAS update was called once per page.
+        # We don't pin the exact call count to the mock here because the
+        # callback re-imports MaterializationRun via the module under test,
+        # not via our local patch — covered by the integration test below.
+
+    def test_resume_does_not_drop_table_when_start_cursor_present(self):
+        """The resumable writer skips DROP and uses CREATE IF NOT EXISTS."""
+        from mcp_server.services.materializer import _write_connect_completed_works
+
+        conn = MagicMock()
+        cur = MagicMock()
+        conn.cursor.return_value = cur
+        _write_connect_completed_works(
+            pages=iter([]),
+            schema_name="t_x",
+            conn=conn,
+            start_cursor=1234,
+        )
+        executed_sql = [str(c.args[0]) for c in cur.execute.call_args_list]
+        joined = "\n".join(executed_sql)
+        assert "DROP TABLE" not in joined, "Resume path must not DROP the partially-loaded table"
+        assert "CREATE TABLE IF NOT EXISTS" in joined or "IF NOT EXISTS" in joined
+
+    def test_no_prior_cursor_means_clean_start(self):
+        """First-ever run (no PARTIAL/FAILED history) behaves like pre-#187."""
+        from mcp_server.pipeline_registry import SourceConfig
+
+        cw_loader_cls = MagicMock()
+        cw_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="completed_works", resumable=True)],
+            loader_mocks={"completed_works": cw_loader_cls},
+            prior_run=None,
+        )
+
+        call = invocations["completed_works"].return_value.load_pages.call_args
+        # start_last_id is None on a clean run.
+        assert call.kwargs.get("start_last_id") is None
+
+    def test_completed_run_after_partial_invalidates_stale_cursor(self):
+        """Regression test for stale-cursor bug: when a COMPLETED run follows an
+        older PARTIAL run, the next run (Run C) must NOT resume from the PARTIAL
+        run's cursor — it must do a clean full reload.
+
+        Scenario:
+          Run A → PARTIAL, cursor_state.last_id = 1500
+          Run B → COMPLETED (full reload, table now complete)
+          Run C → must start clean (start_last_id=None), not from 1500
+
+        Without the fix, _load_prior_resume_cursors would skip Run B (COMPLETED)
+        and return Run A's stale cursor, causing duplicate-key errors or silent
+        row duplication depending on whether the table has a PK.
+        """
+        from mcp_server.pipeline_registry import SourceConfig
+
+        # The most-recent prior run (Run B) is COMPLETED — its state must
+        # invalidate the older PARTIAL cursor from Run A.
+        prior_completed = MagicMock()
+        prior_completed.state = "completed"  # matches RunState.COMPLETED mock value
+        prior_completed.result = {
+            "sources": {
+                "completed_works": {
+                    "state": "completed",
+                    "rows": 5000,
+                    "cursor_state": None,
+                }
+            }
+        }
+
+        cw_loader_cls = MagicMock()
+        cw_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="completed_works", resumable=True)],
+            loader_mocks={"completed_works": cw_loader_cls},
+            prior_run=prior_completed,
+        )
+
+        call = invocations["completed_works"].return_value.load_pages.call_args
+        assert call.kwargs.get("start_last_id") is None, (
+            "A COMPLETED prior run must cause a clean full reload, "
+            f"not a resume from a stale cursor; got start_last_id={call.kwargs.get('start_last_id')}"
+        )
+
+    def test_failed_resumable_source_records_cursor_state_for_next_run(self):
+        """A resumable source that fails mid-load must preserve its cursor
+        watermark in MaterializationRun.result so the next run can resume.
+        """
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline_cfg_sources = [SourceConfig(name="completed_works", resumable=True)]
+
+        pipeline = PipelineConfig(
+            name="connect_sync",
+            description="",
+            version="1.0",
+            provider="commcare_connect",
+            sources=pipeline_cfg_sources,
+        )
+
+        def fake_writer_side_effect(*args, **kwargs):
+            # Simulate one successful page-commit then a failure.
+            cursor_callback = kwargs.get("cursor_callback")
+            if cursor_callback is not None:
+                cursor_callback(777, 42)
+            raise RuntimeError("Connect 500 mid-load")
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.ConnectCompletedWorkLoader") as mock_cw,
+            patch(
+                "mcp_server.services.materializer._write_connect_completed_works",
+                side_effect=fake_writer_side_effect,
+            ),
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {}
+            mock_cw.return_value.load_pages.return_value = iter([])
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            with pytest.raises(RuntimeError, match="Connect 500"):
+                run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+        # The final saved result must show the source failed with cursor_state
+        # preserved so the next run resumes from id=777.
+        sources = run.result["sources"]
+        assert sources["completed_works"]["state"] == "failed"
+        assert sources["completed_works"]["cursor_state"]["last_id"] == 777
+        # And because the cursor advanced (some pages committed), the run is
+        # PARTIAL — not FAILED — so the next run knows it has resume work.
+        assert run.state == "partial"
+
+
 @pytest.mark.django_db
 class TestWriteCases:
     """Real DB tests for _write_cases using psycopg."""
@@ -828,6 +1161,255 @@ class TestWriteForms:
             conn.commit()
             assert count == 1
         finally:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
+
+@pytest.mark.django_db
+class TestConnectPageReplayIdempotency:
+    """Regression tests for bot comment #3315357471.
+
+    Verifies that re-inserting the same page (simulating a crash between
+    conn.commit() and cursor_callback()) does NOT duplicate rows in the
+    five Connect tables that previously lacked a primary key.
+    """
+
+    def _get_db_url(self):
+        import os
+
+        return os.environ.get("MANAGED_DATABASE_URL") or os.environ.get("DATABASE_URL")
+
+    def _make_schema(self, conn, schema_name):
+        # autocommit=True is set before calling this method (via psycopg.connect autocommit=True)
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE")
+            cur.execute(f"CREATE SCHEMA {schema_name}")
+        conn.autocommit = False
+
+    def test_payments_page_replay_no_duplication(self, django_db_setup, db):
+        """Re-inserting a page of payments (simulating crash before watermark
+        persist) must not duplicate rows — ON CONFLICT (id) DO NOTHING applies.
+        """
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_payments
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_payments"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "id": 101,
+                    "username": "user1",
+                    "opportunity_id": 1,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "amount": "10.00",
+                    "amount_usd": "10.00",
+                    "date_paid": None,
+                    "payment_unit": 1,
+                    "confirmed": False,
+                    "confirmation_date": None,
+                    "organization": "org1",
+                    "invoice_id": None,
+                    "payment_method": "mobile_money",
+                    "payment_operator": "op1",
+                },
+                {
+                    "id": 102,
+                    "username": "user2",
+                    "opportunity_id": 1,
+                    "created_at": "2026-01-02T00:00:00Z",
+                    "amount": "20.00",
+                    "amount_usd": "20.00",
+                    "date_paid": None,
+                    "payment_unit": 2,
+                    "confirmed": True,
+                    "confirmation_date": "2026-01-03T00:00:00Z",
+                    "organization": "org1",
+                    "invoice_id": 5,
+                    "payment_method": "mobile_money",
+                    "payment_operator": "op2",
+                },
+            ]
+
+            # First write — clean run, no cursor yet.
+            _write_connect_payments(
+                pages=iter([(page, 2)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Simulate crash: conn already committed the page, but cursor_callback
+            # was never called. Re-run from the prior watermark by writing the
+            # same page again (start_cursor is set to skip DROP/CREATE).
+            _write_connect_payments(
+                pages=iter([(page, 2)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=100,  # any non-None value triggers the resume path
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {test_schema}.raw_payments")
+                (count,) = cur.fetchone()
+
+            assert count == 2, (
+                f"Expected 2 rows after page replay, got {count} — "
+                "ON CONFLICT (id) DO NOTHING must be present"
+            )
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
+    def test_completed_works_page_replay_no_duplication(self, django_db_setup, db):
+        """Re-inserting a page of completed_works must not duplicate rows."""
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_completed_works
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_completed_works"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "id": 201,
+                    "username": "user1",
+                    "opportunity_id": 1,
+                    "payment_unit_id": 10,
+                    "status": "approved",
+                    "last_modified": "2026-01-01T00:00:00Z",
+                    "entity_id": "e1",
+                    "entity_name": "Entity 1",
+                    "reason": "",
+                    "status_modified_date": "2026-01-01T00:00:00Z",
+                    "payment_date": None,
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "saved_completed_count": 5,
+                    "saved_approved_count": 5,
+                    "saved_payment_accrued": "50.00",
+                    "saved_payment_accrued_usd": "50.00",
+                    "saved_org_payment_accrued": "50.00",
+                    "saved_org_payment_accrued_usd": "50.00",
+                },
+            ]
+
+            # First write — clean run.
+            _write_connect_completed_works(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Replay the same page (crash scenario — watermark not advanced).
+            _write_connect_completed_works(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=200,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {test_schema}.raw_completed_works")
+                (count,) = cur.fetchone()
+
+            assert count == 1, (
+                f"Expected 1 row after page replay, got {count} — "
+                "ON CONFLICT (id) DO NOTHING must be present"
+            )
+        finally:
+            conn.rollback()
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
+            conn.close()
+
+    def test_visits_page_replay_no_duplication(self, django_db_setup, db):
+        """Verify raw_visits remains safe: visit_id PK + ON CONFLICT DO UPDATE
+        means a page replay updates existing rows rather than duplicating them.
+        """
+        import psycopg
+
+        from mcp_server.services.materializer import _write_connect_visits
+
+        db_url = self._get_db_url()
+        if not db_url:
+            pytest.skip("No MANAGED_DATABASE_URL/DATABASE_URL for writer test")
+
+        test_schema = "test_cpr_visits"
+        conn = psycopg.connect(db_url, autocommit=True)
+        try:
+            self._make_schema(conn, test_schema)
+
+            page = [
+                {
+                    "visit_id": 301,
+                    "opportunity_id": 1,
+                    "username": "user1",
+                    "deliver_unit": None,
+                    "entity_id": "e1",
+                    "entity_name": "Entity 1",
+                    "visit_date": "2026-01-01T00:00:00Z",
+                    "status": "pending",
+                    "reason": "",
+                    "location": "",
+                    "flagged": False,
+                    "flag_reason": None,
+                    "form_json": {},
+                    "completed_work": None,
+                    "status_modified_date": None,
+                    "review_status": "",
+                    "review_created_on": None,
+                    "justification": "",
+                    "date_created": "2026-01-01T00:00:00Z",
+                    "completed_work_id": None,
+                    "deliver_unit_id": None,
+                    "images": [],
+                },
+            ]
+
+            # First write — clean run.
+            _write_connect_visits(
+                pages=iter([(page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+            )
+
+            # Replay with an updated status (DO UPDATE should apply the change).
+            updated_page = [{**page[0], "status": "approved"}]
+            _write_connect_visits(
+                pages=iter([(updated_page, 1)]),
+                schema_name=test_schema,
+                conn=conn,
+                start_cursor=300,
+            )
+
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*), MAX(status) FROM {test_schema}.raw_visits")
+                count, status = cur.fetchone()
+
+            assert count == 1, f"Expected 1 row after visit page replay, got {count}"
+            assert status == "approved", (
+                f"Expected status='approved' after DO UPDATE, got '{status}'"
+            )
+        finally:
+            conn.rollback()
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(f"DROP SCHEMA IF EXISTS {test_schema} CASCADE")
