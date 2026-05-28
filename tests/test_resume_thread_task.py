@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
+from django.conf import settings as dj_settings
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 from langchain_core.messages import AIMessage
@@ -26,8 +27,14 @@ User = get_user_model()
 
 
 async def _make_thread_job_ready_to_resume(
-    *, email: str, ws_name: str, ext_id: str, schema_name: str, pj_id: int,
-    tool_call: str, run_state=None,
+    *,
+    email: str,
+    ws_name: str,
+    ext_id: str,
+    schema_name: str,
+    pj_id: int,
+    tool_call: str,
+    run_state=None,
 ):
     """Create a fully wired ThreadJob + MaterializationRun for resume tests."""
     if run_state is None:
@@ -35,21 +42,28 @@ async def _make_thread_job_ready_to_resume(
     user = await sync_to_async(User.objects.create_user)(email=email, password="x")
     ws = await sync_to_async(Workspace.objects.create)(name=ws_name, created_by=user)
     tenant = await sync_to_async(Tenant.objects.create)(
-        external_id=ext_id, provider="commcare", canonical_name="Tenant",
+        external_id=ext_id,
+        provider="commcare",
+        canonical_name="Tenant",
     )
     await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
     schema = await sync_to_async(TenantSchema.objects.create)(
-        tenant=tenant, schema_name=schema_name,
+        tenant=tenant,
+        schema_name=schema_name,
     )
     thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
     tj = await sync_to_async(ThreadJob.objects.create)(
-        thread=thread, job_type="materialization",
-        procrastinate_job_id=pj_id, tool_call_id=tool_call,
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=pj_id,
+        tool_call_id=tool_call,
         state=ThreadJob.State.PENDING,
     )
     await sync_to_async(MaterializationRun.objects.create)(
-        tenant_schema=schema, pipeline="commcare_sync",
-        state=run_state, procrastinate_job_id=pj_id,
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=run_state,
+        procrastinate_job_id=pj_id,
     )
     return user, ws, thread, tj
 
@@ -542,6 +556,51 @@ async def test_resume_cas_rejects_already_running_threadjob():
     mock_agent.ainvoke.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_recursion_limit_is_lowered_from_default():
+    """Regression pin for issue #190: the resume path's recursion_limit must
+    be lower than the chat default (50) so a panic-looping agent gets cut
+    off before it can run 18+ tool calls."""
+    user = await sync_to_async(User.objects.create_user)(email="rl@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-rl", created_by=user)
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="t-rl", provider="commcare", canonical_name="RL Tenant"
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_rl")
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=9999,
+        tool_call_id="tc-rl",
+        state=ThreadJob.State.PENDING,
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=9999,
+        result={"rows": 100},
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    config = mock_agent.ainvoke.await_args.args[1]
+    # Must read from the AGENT_RESUME_RECURSION_LIMIT setting (so ops can
+    # tune it without code change) and must be lower than the chat default
+    # of 50.
+    assert config["recursion_limit"] == dj_settings.AGENT_RESUME_RECURSION_LIMIT
+    assert config["recursion_limit"] < 50
+
+
 # ---------------------------------------------------------------------------
 # Timeout / exception / observability coverage for the resume task (issue #188)
 # ---------------------------------------------------------------------------
@@ -555,8 +614,12 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
     in FAILED and a synthetic AIMessage is persisted via aupdate_state so the
     user sees a friendly explanation instead of a forever-spinner."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
-        email="timeout@b.c", ws_name="W-timeout", ext_id="t-timeout",
-        schema_name="s_timeout", pj_id=10001, tool_call="tc-timeout",
+        email="timeout@b.c",
+        ws_name="W-timeout",
+        ext_id="t-timeout",
+        schema_name="s_timeout",
+        pj_id=10001,
+        tool_call="tc-timeout",
     )
 
     async def _sleeping_invoke(*_args, **_kwargs):
@@ -594,8 +657,12 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
     """When agent.ainvoke raises (non-timeout), the ThreadJob lands in FAILED
     and a synthetic AIMessage with the generic-exception copy is persisted."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
-        email="boom@b.c", ws_name="W-boom", ext_id="t-boom",
-        schema_name="s_boom", pj_id=10002, tool_call="tc-boom",
+        email="boom@b.c",
+        ws_name="W-boom",
+        ext_id="t-boom",
+        schema_name="s_boom",
+        pj_id=10002,
+        tool_call="tc-boom",
     )
 
     mock_agent = MagicMock()
@@ -624,8 +691,12 @@ async def test_successful_ainvoke_logs_bookends(caplog):
     """On the success path both 'ainvoke start' and 'ainvoke complete' lines
     bracket the call so 26-minute silent hangs become trivially detectable."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
-        email="bookend@b.c", ws_name="W-bookend", ext_id="t-bookend",
-        schema_name="s_bookend", pj_id=10003, tool_call="tc-bookend",
+        email="bookend@b.c",
+        ws_name="W-bookend",
+        ext_id="t-bookend",
+        schema_name="s_bookend",
+        pj_id=10003,
+        tool_call="tc-bookend",
     )
 
     mock_agent = MagicMock()
@@ -651,8 +722,12 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     timeout, and exception paths so traces are emitted on every terminal
     outcome (the production bug was a silent ainvoke with no trace)."""
     _, _, _, tj = await _make_thread_job_ready_to_resume(
-        email="lf@b.c", ws_name="W-lf", ext_id="t-lf",
-        schema_name="s_lf", pj_id=10004, tool_call="tc-lf",
+        email="lf@b.c",
+        ws_name="W-lf",
+        ext_id="t-lf",
+        schema_name="s_lf",
+        pj_id=10004,
+        tool_call="tc-lf",
     )
 
     mock_agent = MagicMock()
@@ -662,12 +737,16 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     span_cm.__enter__ = MagicMock(return_value=MagicMock())
     span_cm.__exit__ = MagicMock(return_value=False)
 
-    with patch(
-        "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
-    ), patch(
-        "apps.workspaces.tasks._resume_langfuse_span", return_value=span_cm,
-    ) as span_helper:
+    with (
+        patch(
+            "apps.workspaces.tasks._build_agent_for_resume",
+            AsyncMock(return_value=(mock_agent, {})),
+        ),
+        patch(
+            "apps.workspaces.tasks._resume_langfuse_span",
+            return_value=span_cm,
+        ) as span_helper,
+    ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
     span_helper.assert_called_once()

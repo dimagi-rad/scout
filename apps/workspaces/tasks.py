@@ -843,7 +843,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         }
         config = {
             "configurable": {"thread_id": str(tj.thread.id)},
-            "recursion_limit": 50,
+            "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
             "oauth_tokens": oauth_tokens,
         }
         with _resume_langfuse_span(

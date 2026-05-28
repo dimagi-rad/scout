@@ -343,3 +343,9 @@ EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 
 SCHEMA_TTL_HOURS = 24  # schemas inactive longer than this are expired
+
+# Agent recursion limit for the post-materialization resume path. A healthy
+# resume is 2-5 tool calls; 20 leaves headroom for follow-up exploration
+# without giving a panic-looping agent runway for ~25 cycles. The user-facing
+# chat path keeps its own (higher) limit.
+AGENT_RESUME_RECURSION_LIMIT = env.int("AGENT_RESUME_RECURSION_LIMIT", default=20)
