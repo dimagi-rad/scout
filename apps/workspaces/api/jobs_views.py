@@ -1,8 +1,10 @@
 """Async API views for ThreadJob status (polled by the frontend)."""
 
 import logging
+from datetime import timedelta
 
 from django.http import JsonResponse
+from django.utils import timezone
 
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
@@ -11,6 +13,12 @@ from apps.workspaces.models import MaterializationRun
 from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
+
+# How far back to surface terminated ThreadJobs in the active-jobs response.
+# The frontend polls active jobs every few seconds; this window lets the
+# failure card render for users who were away from the tab when the
+# materialization failed but have come back within the window.
+RECENT_TERMINATION_WINDOW = timedelta(minutes=30)
 
 
 def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
@@ -45,12 +53,37 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
     }
 
 
+def _termination_to_dict(job: ThreadJob) -> dict:
+    """Serialize a terminal ThreadJob for the ``recent_terminations`` payload.
+
+    ``retry_available`` is True only for FAILED/CANCELLED — a COMPLETED job
+    has no failure to retry from and we surface it in the payload only so the
+    frontend can clear any stale failure card it had previously rendered.
+    """
+    return {
+        "thread_job_id": str(job.id),
+        "thread_id": str(job.thread_id),
+        "tool_call_id": job.tool_call_id,
+        "state": job.state,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "error_summary": job.error_summary or "",
+        "retry_available": job.state
+        in {
+            ThreadJob.State.FAILED,
+            ThreadJob.State.CANCELLED,
+        },
+    }
+
+
 @async_login_required
 async def active_jobs_view(request, workspace_id):
     """GET /api/workspaces/<workspace_id>/jobs/active/
 
     Returns ThreadJobs in non-terminal states for the current user, enriched
-    with the latest MaterializationRun.progress. Polled by useWorkspaceJobs.
+    with the latest MaterializationRun.progress. Also returns ThreadJobs that
+    transitioned to a terminal state within RECENT_TERMINATION_WINDOW so the
+    frontend can render an inline failure card for jobs that have already
+    vanished from the active list. Polled by useWorkspaceJobs.
     """
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -79,8 +112,22 @@ async def active_jobs_view(request, workspace_id):
         # Last wins; per workspace this is "the currently active tenant_schema run".
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
 
+    cutoff = timezone.now() - RECENT_TERMINATION_WINDOW
+    recent_terminations = [
+        _termination_to_dict(j)
+        async for j in ThreadJob.objects.filter(
+            thread__workspace=workspace,
+            thread__user=user,
+            state__in=list(ThreadJob.TERMINAL_STATES),
+            completed_at__gte=cutoff,
+        ).order_by("-completed_at")
+    ]
+
     return JsonResponse(
-        {"jobs": [_job_to_dict(j, runs_by_job.get(j.procrastinate_job_id)) for j in jobs]}
+        {
+            "jobs": [_job_to_dict(j, runs_by_job.get(j.procrastinate_job_id)) for j in jobs],
+            "recent_terminations": recent_terminations,
+        }
     )
 
 

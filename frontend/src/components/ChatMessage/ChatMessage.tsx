@@ -5,7 +5,8 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
-import type { ActiveJob } from "@/api/jobs"
+import type { ActiveJob, RecentTermination } from "@/api/jobs"
+import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
 import {
   QueryToolOutput,
@@ -73,7 +74,10 @@ interface ChatMessageProps {
   message: UIMessage
   isActiveMessage: boolean
   workspaceId?: string
+  threadId?: string
   activeMaterializationJob?: ActiveJob | null
+  recentTerminationsByToolCallId?: Record<string, RecentTermination>
+  onRetryDispatched?: () => void
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -138,10 +142,13 @@ interface ToolCallPartProps {
   isLatest: boolean
   isActiveMessage: boolean
   workspaceId?: string
+  threadId?: string
   activeMaterializationJob?: ActiveJob | null
+  recentTermination?: RecentTermination | null
+  onRetryDispatched?: () => void
 }
 
-function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, activeMaterializationJob }: ToolCallPartProps) {
+function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
@@ -157,13 +164,31 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
       ? activeMaterializationJob
       : null
 
+  // For run_materialization, prefer the live job. Only treat the termination
+  // as a "show failure card" signal when there's no active job AND the
+  // termination is FAILED/CANCELLED (we don't render a completed-state card —
+  // the tool output handles success display).
+  const matchingFailure =
+    toolName === "run_materialization"
+    && !matchingJob
+    && recentTermination
+    && (recentTermination.state === "failed" || recentTermination.state === "cancelled")
+      ? recentTermination
+      : null
+
   // Auto-expand while actively streaming; collapsed by default for historical messages.
   // User overrides tied to isLatest reset automatically when a part is superseded.
   // run_materialization stays expanded as long as there is an active job
   // FOR THIS CARD, regardless of whether the SSE stream is still active.
+  // Also stay expanded when we have a failure card to show so the user can
+  // see the error inline rather than having to expand a collapsed card.
   const autoExpanded =
     AUTO_EXPAND_TOOLS.has(toolName)
-    && (isLatest || isLoading || (toolName === "run_materialization" && !!matchingJob))
+    && (
+      isLatest
+      || isLoading
+      || (toolName === "run_materialization" && (!!matchingJob || !!matchingFailure))
+    )
     && (isActiveMessage || toolName === "run_materialization")
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
@@ -237,7 +262,11 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
           </button>
         )}
       </div>
-      {expanded && (toolName === "run_materialization" && matchingJob || richOutput || fallbackText) && (
+      {expanded && (
+        toolName === "run_materialization" && (matchingJob || matchingFailure)
+        || richOutput
+        || fallbackText
+      ) && (
         <div className="border-t px-3 py-2.5">
           {toolName === "run_materialization" && matchingJob && (
             <div className="text-xs text-muted-foreground mb-2">
@@ -255,6 +284,17 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, act
               )}
             </div>
           )}
+          {toolName === "run_materialization"
+            && matchingFailure
+            && workspaceId
+            && threadId && (
+              <MaterializationFailure
+                termination={matchingFailure}
+                workspaceId={workspaceId}
+                threadId={threadId}
+                onRetryDispatched={onRetryDispatched}
+              />
+            )}
           {richOutput ?? (
             fallbackText && (
               <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
@@ -308,7 +348,7 @@ function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; 
   )
 }
 
-export function ChatMessage({ message, isActiveMessage, workspaceId, activeMaterializationJob }: ChatMessageProps) {
+export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
@@ -368,7 +408,13 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, activeMater
               }
             }
 
-            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} activeMaterializationJob={activeMaterializationJob} />
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const toolCallId = (part as any).toolCallId
+            const recentTermination =
+              toolCallId && recentTerminationsByToolCallId
+                ? recentTerminationsByToolCallId[toolCallId] ?? null
+                : null
+            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} />
           }
 
           return null
