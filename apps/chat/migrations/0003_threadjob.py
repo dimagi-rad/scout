@@ -7,27 +7,58 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('chat', '0002_initial'),
+        ("chat", "0002_initial"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='ThreadJob',
+            name="ThreadJob",
             fields=[
-                ('id', models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
-                ('job_type', models.CharField(choices=[('materialization', 'Materialization')], max_length=32)),
-                ('procrastinate_job_id', models.BigIntegerField(db_index=True, unique=True)),
-                ('tool_call_id', models.CharField(max_length=64)),
-                ('state', models.CharField(choices=[('pending', 'Pending'), ('running', 'Running'), ('completed', 'Completed'), ('failed', 'Failed'), ('cancelled', 'Cancelled')], default='pending', max_length=16)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('completed_at', models.DateTimeField(blank=True, null=True)),
-                ('thread', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='jobs', to='chat.thread')),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
+                (
+                    "job_type",
+                    models.CharField(
+                        choices=[("materialization", "Materialization")], max_length=32
+                    ),
+                ),
+                ("procrastinate_job_id", models.BigIntegerField(db_index=True, unique=True)),
+                ("tool_call_id", models.CharField(max_length=64)),
+                (
+                    "state",
+                    models.CharField(
+                        choices=[
+                            ("pending", "Pending"),
+                            ("running", "Running"),
+                            ("completed", "Completed"),
+                            ("failed", "Failed"),
+                            ("cancelled", "Cancelled"),
+                        ],
+                        default="pending",
+                        max_length=16,
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("completed_at", models.DateTimeField(blank=True, null=True)),
+                (
+                    "thread",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="jobs",
+                        to="chat.thread",
+                    ),
+                ),
             ],
             options={
-                'ordering': ['-created_at'],
-                'indexes': [models.Index(fields=['thread', 'state'], name='chat_threadjob_th_state')],
+                "ordering": ["-created_at"],
+                "indexes": [
+                    models.Index(fields=["thread", "state"], name="chat_threadjob_th_state")
+                ],
             },
         ),
     ]

@@ -264,9 +264,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
-            patch(
-                "mcp_server.services.materializer._run_transform_phase"
-            ) as mock_transform,
+            patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
         ):
             schema = self._make_schema()
             mock_mgr.return_value.provision.return_value = schema
