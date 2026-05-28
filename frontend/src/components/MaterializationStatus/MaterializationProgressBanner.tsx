@@ -11,7 +11,9 @@ interface Props {
 /**
  * Full-width sticky banner that appears at the bottom of the chat thread
  * whenever a materialization job is active. Designed to be impossible to miss:
- * distinct background, large text, and a prominent Stop button.
+ * solid amber background that pops against the neutral chat palette, large
+ * percentage counter, thick progress bar, and a solid red Stop button with
+ * maximum contrast.
  *
  * Rendered by ChatPanel below the message list and above the input area.
  * The inline tool-call card still exists for history; this banner is the
@@ -43,92 +45,96 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   const step = progress?.step ?? null
   const totalSteps = progress?.total_steps ?? null
 
-  // Build the progress description
-  let progressText: string
+  // Build the count display: "27,000 / 50,000 (54%)" or "27,000 rows"
+  let countText: string
   if (rowsLoaded > 0) {
     const rowsStr = rowsLoaded.toLocaleString()
-    if (rowsTotal != null && rowsTotal > 0) {
-      progressText = `${rowsStr} / ${rowsTotal.toLocaleString()} rows`
+    if (rowsTotal != null && rowsTotal > 0 && percent != null) {
+      countText = `${rowsStr} / ${rowsTotal.toLocaleString()} (${percent}%)`
+    } else if (rowsTotal != null && rowsTotal > 0) {
+      countText = `${rowsStr} / ${rowsTotal.toLocaleString()}`
     } else {
-      progressText = `${rowsStr} rows fetched`
+      countText = `${rowsStr} rows`
     }
   } else if (sourceName) {
-    progressText = `Loading ${sourceName}…`
+    countText = `Loading ${sourceName}…`
   } else {
-    progressText = "Preparing…"
+    countText = "Preparing…"
   }
 
   const stepText = step != null && totalSteps != null ? `Step ${step} of ${totalSteps}` : null
 
   return (
     <div
-      className="border-t-2 border-primary/30 bg-primary/5 px-4 py-3 flex items-center gap-3"
+      className="bg-amber-500 shadow-lg px-5 py-4 flex items-center gap-4"
       data-testid="materialization-progress-banner"
       role="status"
       aria-live="polite"
     >
       {/* Spinner */}
       <Loader2
-        className="h-5 w-5 shrink-0 animate-spin text-primary"
+        className="h-6 w-6 shrink-0 animate-spin text-amber-900"
         aria-hidden="true"
       />
 
       {/* Progress text block */}
       <div className="flex-1 min-w-0">
+        {/* Source label + step info */}
         <div className="flex items-baseline gap-2 flex-wrap">
           <span
-            className="font-semibold text-sm text-foreground"
+            className="font-semibold text-base text-amber-950"
             data-testid="materialization-banner-source"
           >
             {sourceName ? `Fetching ${sourceName}` : "Materializing data"}
           </span>
+          {stepText && (
+            <span className="text-sm text-amber-800 font-medium opacity-80">
+              · {stepText}
+            </span>
+          )}
+        </div>
+
+        {/* Percentage (dominant) + count */}
+        <div className="flex items-baseline gap-3 mt-0.5 flex-wrap">
           {percent != null && (
             <span
-              className="text-sm font-bold text-primary"
+              className="text-2xl font-extrabold text-amber-950 leading-none"
               data-testid="materialization-banner-percent"
             >
               {percent}%
             </span>
           )}
-        </div>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
           <span
-            className="text-xs text-muted-foreground"
+            className="text-sm font-medium text-amber-900"
             data-testid="materialization-banner-rows"
           >
-            {progressText}
+            {countText}
           </span>
-          {stepText && (
-            <span className="text-xs text-muted-foreground opacity-70">
-              · {stepText}
-            </span>
-          )}
         </div>
-        {/* Progress bar (only shown when percent is known) */}
-        {percent != null && (
+
+        {/* Progress bar — 5px tall, always visible, fills smoothly */}
+        <div
+          className="mt-2 h-[5px] rounded-full bg-amber-200 overflow-hidden"
+          data-testid="materialization-banner-progress-bar"
+        >
           <div
-            className="mt-1.5 h-1.5 rounded-full bg-primary/20 overflow-hidden"
-            data-testid="materialization-banner-progress-bar"
-          >
-            <div
-              className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
-              style={{ width: `${Math.min(percent, 100)}%` }}
-            />
-          </div>
-        )}
+            className="h-full rounded-full bg-amber-900 transition-all duration-500 ease-out"
+            style={{ width: percent != null ? `${Math.min(percent, 100)}%` : "100%" }}
+          />
+        </div>
       </div>
 
-      {/* Stop button — prominent, clearly labeled */}
+      {/* Stop button — solid red fill, white text, large hit target */}
       <button
         type="button"
         onClick={handleCancel}
         disabled={cancelState === "pending"}
-        className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium border transition-colors shrink-0 ${
+        className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-base font-bold transition-colors shrink-0 shadow-md ${
           cancelState === "error"
-            ? "border-red-500 bg-red-500/10 text-red-600"
+            ? "bg-red-700 text-white cursor-default"
             : cancelState === "pending"
-              ? "border-border bg-muted text-muted-foreground cursor-not-allowed"
-              : "border-red-500/50 bg-red-500/10 text-red-600 hover:bg-red-500/20 hover:border-red-500"
+              ? "bg-red-300 text-white cursor-not-allowed"
+              : "bg-red-600 text-white hover:bg-red-700 active:bg-red-800"
         }`}
         data-testid="materialization-banner-stop-btn"
         title={
@@ -140,7 +146,7 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
         }
       >
         <Square
-          className={`h-3.5 w-3.5 ${cancelState === "pending" ? "animate-pulse" : ""}`}
+          className={`h-4 w-4 ${cancelState === "pending" ? "animate-pulse" : ""}`}
           aria-hidden="true"
         />
         <span>
