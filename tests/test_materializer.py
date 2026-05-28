@@ -787,6 +787,7 @@ class TestResumableMaterialization:
         from mcp_server.pipeline_registry import SourceConfig
 
         prior = MagicMock()
+        prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
         prior.result = {
             "sources": {
                 "completed_works": {
@@ -819,6 +820,7 @@ class TestResumableMaterialization:
         from mcp_server.pipeline_registry import SourceConfig
 
         prior = MagicMock()
+        prior.state = "partial"  # must match RunState.PARTIAL set in _setup_run_mock
         prior.result = {
             "sources": {
                 "users": {
@@ -906,6 +908,51 @@ class TestResumableMaterialization:
         call = invocations["completed_works"].return_value.load_pages.call_args
         # start_last_id is None on a clean run.
         assert call.kwargs.get("start_last_id") is None
+
+    def test_completed_run_after_partial_invalidates_stale_cursor(self):
+        """Regression test for stale-cursor bug: when a COMPLETED run follows an
+        older PARTIAL run, the next run (Run C) must NOT resume from the PARTIAL
+        run's cursor — it must do a clean full reload.
+
+        Scenario:
+          Run A → PARTIAL, cursor_state.last_id = 1500
+          Run B → COMPLETED (full reload, table now complete)
+          Run C → must start clean (start_last_id=None), not from 1500
+
+        Without the fix, _load_prior_resume_cursors would skip Run B (COMPLETED)
+        and return Run A's stale cursor, causing duplicate-key errors or silent
+        row duplication depending on whether the table has a PK.
+        """
+        from mcp_server.pipeline_registry import SourceConfig
+
+        # The most-recent prior run (Run B) is COMPLETED — its state must
+        # invalidate the older PARTIAL cursor from Run A.
+        prior_completed = MagicMock()
+        prior_completed.state = "completed"  # matches RunState.COMPLETED mock value
+        prior_completed.result = {
+            "sources": {
+                "completed_works": {
+                    "state": "completed",
+                    "rows": 5000,
+                    "cursor_state": None,
+                }
+            }
+        }
+
+        cw_loader_cls = MagicMock()
+        cw_loader_cls.return_value.load_pages.return_value = iter([])
+
+        _, invocations = self._run_connect_pipeline(
+            sources=[SourceConfig(name="completed_works", resumable=True)],
+            loader_mocks={"completed_works": cw_loader_cls},
+            prior_run=prior_completed,
+        )
+
+        call = invocations["completed_works"].return_value.load_pages.call_args
+        assert call.kwargs.get("start_last_id") is None, (
+            "A COMPLETED prior run must cause a clean full reload, "
+            f"not a resume from a stale cursor; got start_last_id={call.kwargs.get('start_last_id')}"
+        )
 
     def test_failed_resumable_source_records_cursor_state_for_next_run(self):
         """A resumable source that fails mid-load must preserve its cursor

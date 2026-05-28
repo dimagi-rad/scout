@@ -487,22 +487,28 @@ def _load_prior_resume_cursors(tenant_schema: Any, exclude_run_id: Any) -> dict[
     ``in_progress`` or ``failed`` AND ``cursor_state.last_id`` is set,
     matching the resume-eligibility rules in issue #187.
 
+    Crucially, we look at the **most recent** prior run regardless of its
+    run-level state, and only use cursors when *that* run is PARTIAL or FAILED.
+    This prevents a stale PARTIAL run from being surfaced after an intervening
+    COMPLETED run, which would re-insert rows already present in the table and
+    cause duplicate-key errors (for tables with a PK) or silent row duplication
+    (for tables without one).
+
     Returns an empty dict if no eligible prior run exists or none of its
     sources have a usable cursor.
     """
     prior = (
-        MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.PARTIAL,
-                MaterializationRun.RunState.FAILED,
-            ],
-        )
+        MaterializationRun.objects.filter(tenant_schema=tenant_schema)
         .exclude(id=exclude_run_id)
         .order_by("-started_at")
         .first()
     )
-    if prior is None or not isinstance(prior.result, dict):
+    if prior is None or prior.state not in (
+        MaterializationRun.RunState.PARTIAL,
+        MaterializationRun.RunState.FAILED,
+    ):
+        return {}
+    if not isinstance(prior.result, dict):
         return {}
     cursors: dict[str, int] = {}
     for name, info in (prior.result.get("sources") or {}).items():
