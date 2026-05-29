@@ -547,7 +547,7 @@ function SettingsTab({
   }
 
   return (
-    <div className="space-y-8" data-testid="settings-tab">
+    <div className="max-w-2xl space-y-8" data-testid="settings-tab">
       {/* Rename */}
       <section>
         <h3 className="mb-3 text-sm font-medium">Workspace name</h3>
@@ -689,7 +689,7 @@ export function WorkspaceDetailPage() {
   const isManager = workspace.role === "manage"
 
   return (
-    <div className="mx-auto max-w-2xl px-6 py-8">
+    <div className="p-6">
       {/* Header */}
       <div className="mb-6">
         <Link
