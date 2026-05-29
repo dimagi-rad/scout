@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { Link, useParams, useNavigate } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
-import { authApi } from "@/api/auth"
+import {
+  getUserTenantsCached,
+  refreshUserTenants,
+} from "@/api/userTenantsCache"
 import type { WorkspaceDetail, WorkspaceMember, WorkspaceTenant, UserTenant } from "@/api/workspaces"
 import { ApiError } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   Select,
   SelectContent,
@@ -15,8 +19,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { ChevronLeft } from "lucide-react"
+import { ChevronLeft, Plus, RefreshCw } from "lucide-react"
 import { RoleBadge } from "@/components/RoleBadge"
+import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
+import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 
 // ── Members Tab ─────────────────────────────────────────────────────────────
 
@@ -290,41 +296,94 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
 // ── Tenants Tab ─────────────────────────────────────────────────────────────
 
+type AvailableStatus = "idle" | "loading" | "ready" | "error"
+
 function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
+  const userId = useAppStore((s) => s.user?.id)
+
+  // Connected sources — fast local-DB query, gates only its own section.
   const [tenants, setTenants] = useState<WorkspaceTenant[]>([])
+  const [connectedLoading, setConnectedLoading] = useState(true)
+  const [connectedError, setConnectedError] = useState<string | null>(null)
+
+  // Available sources — lazily fetched (potentially slow external refresh),
+  // memoized for the session via the user-tenants cache.
   const [userTenants, setUserTenants] = useState<UserTenant[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [availableStatus, setAvailableStatus] = useState<AvailableStatus>("idle")
+  const [availableError, setAvailableError] = useState<string | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+
   const [addingId, setAddingId] = useState<string | null>(null)
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [query, setQuery] = useState("")
+  const [providerFilter, setProviderFilter] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
 
-  // Reset search when the add panel is closed manually.
+  // Reset search + filter when the add panel is closed manually.
   useEffect(() => {
-    if (!showAdd) setQuery("")
+    if (!showAdd) {
+      setQuery("")
+      setProviderFilter(null)
+    }
   }, [showAdd])
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError(null)
+  // Load the connected sources (fast). Never blocked on the available list.
+  const loadConnected = useCallback(async () => {
+    setConnectedLoading(true)
+    setConnectedError(null)
     try {
-      const [wsTenants, allTenants] = await Promise.all([
-        workspaceApi.getTenants(workspaceId),
-        authApi.getUserTenants(),
-      ])
+      const wsTenants = await workspaceApi.getTenants(workspaceId)
       setTenants(wsTenants)
-      setUserTenants(allTenants)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to load tenants")
+      setConnectedError(err instanceof ApiError ? err.message : "Failed to load data sources")
     } finally {
-      setLoading(false)
+      setConnectedLoading(false)
     }
   }, [workspaceId])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void loadConnected() }, [loadConnected])
+
+  // Load the available list from the session cache. Resolves instantly after
+  // the first successful fetch (the first fetch may take a moment because the
+  // server refreshes from the external provider APIs).
+  const loadAvailable = useCallback(async () => {
+    if (!userId) return
+    setAvailableStatus("loading")
+    setAvailableError(null)
+    try {
+      const all = await getUserTenantsCached(userId)
+      setUserTenants(all)
+      setAvailableStatus("ready")
+    } catch (err) {
+      setAvailableError(err instanceof ApiError ? err.message : "Failed to load available sources")
+      setAvailableStatus("error")
+    }
+  }, [userId])
+
+  // Kick off the available-list fetch in the background after first paint so a
+  // session cache is warm by the time the user opens the add panel — but the
+  // connected-sources view is never blocked on it.
+  useEffect(() => {
+    if (isManager) void loadAvailable()
+  }, [isManager, loadAvailable])
+
+  async function handleRefreshAvailable() {
+    if (!userId) return
+    setRefreshing(true)
+    setAvailableError(null)
+    try {
+      const all = await refreshUserTenants(userId)
+      setUserTenants(all)
+      setAvailableStatus("ready")
+    } catch (err) {
+      setAvailableError(err instanceof ApiError ? err.message : "Failed to refresh available sources")
+      setAvailableStatus("error")
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   // Tenants the user has access to that are not already in this workspace
   const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
@@ -333,20 +392,58 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
-  const normalizedQuery = query.trim().replace(/^#/, "").toLowerCase()
-  const filteredAvailable = normalizedQuery
-    ? available.filter(
-        (t) =>
-          t.tenant_name.toLowerCase().includes(normalizedQuery) ||
-          t.tenant_id.toLowerCase().includes(normalizedQuery),
-      )
-    : available
+  // Provider filter pills, reusing the Workspaces page filter design.
+  // Only shown when more than one provider is present in the available set;
+  // a single-provider set renders just the search box (no "All" + one pill).
+  const providerFilterGroups = useMemo((): FilterGroup[] => {
+    const counts = new Map<string, number>()
+    for (const t of available) {
+      counts.set(t.provider, (counts.get(t.provider) ?? 0) + 1)
+    }
+    if (counts.size <= 1) return []
+    return [
+      {
+        name: "provider",
+        options: [...counts.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([value, count]) => ({
+            value,
+            label: getProviderMeta(value).label,
+            count,
+          })),
+      },
+    ]
+  }, [available])
 
-  async function handleAdd(tenantUuid: string) {
-    setAddingId(tenantUuid)
+  const normalizedQuery = query.trim().replace(/^#/, "").toLowerCase()
+  const filteredAvailable = available.filter((t) => {
+    if (providerFilter && t.provider !== providerFilter) return false
+    if (
+      normalizedQuery &&
+      !t.tenant_name.toLowerCase().includes(normalizedQuery) &&
+      !t.tenant_id.toLowerCase().includes(normalizedQuery)
+    ) {
+      return false
+    }
+    return true
+  })
+
+  async function handleAdd(tenant: UserTenant) {
+    setAddingId(tenant.tenant_uuid)
+    setMutationError(null)
     try {
-      await workspaceApi.addTenant(workspaceId, tenantUuid)
-      await load()
+      const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
+      // Optimistically reflect the new connection without a round-trip; the
+      // backend returns the internal tenant UUID as `tenant_id`.
+      setTenants((prev) => [
+        ...prev,
+        {
+          id: created.id,
+          tenant_id: tenant.tenant_uuid,
+          tenant_name: tenant.tenant_name,
+          provider: tenant.provider,
+        },
+      ])
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to add data source")
     } finally {
@@ -356,9 +453,10 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
   async function handleRemove(wt: WorkspaceTenant) {
     setRemovingId(wt.id)
+    setMutationError(null)
     try {
       await workspaceApi.removeTenant(workspaceId, wt.id)
-      await load()  // consistent with handleAdd
+      setTenants((prev) => prev.filter((t) => t.id !== wt.id))
       setConfirmRemoveId(null)
     } catch (err) {
       setMutationError(err instanceof ApiError ? err.message : "Failed to remove data source")
@@ -367,58 +465,140 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
-  if (loading) return <div className="py-8 text-center text-muted-foreground">Loading…</div>
-  if (error) return <div className="py-8 text-center text-destructive">{error}</div>
+  const canShowAddButton = isManager && (availableStatus !== "ready" || available.length > 0)
 
   return (
     <div data-testid="tenants-tab">
       <div className="mb-4 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
-          {tenants.length} connected {tenants.length === 1 ? "source" : "sources"}
+          {connectedLoading
+            ? "Loading data sources…"
+            : `${tenants.length} connected ${tenants.length === 1 ? "source" : "sources"}`}
         </span>
-        {isManager && available.length > 0 && (
-          <Button size="sm" variant="outline" onClick={() => setShowAdd((v) => !v)} data-testid="add-tenant-btn">
-            + Add data source
+        {canShowAddButton && (
+          <Button
+            size="sm"
+            variant={showAdd ? "secondary" : "outline"}
+            onClick={() => setShowAdd((v) => !v)}
+            data-testid="add-tenant-btn"
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            Add data source
           </Button>
         )}
       </div>
 
-      {showAdd && available.length > 0 && (
-        <div className="mb-4 rounded-lg border bg-muted/30 p-4">
-          <p className="mb-2 text-sm font-medium">Available data sources</p>
-          <Input
-            type="search"
-            placeholder="Search by name or opportunity ID…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="mb-3"
-            data-testid="tenant-search-input"
-          />
-          {filteredAvailable.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No data sources match &ldquo;{normalizedQuery}&rdquo;.
+      {showAdd && isManager && (
+        <div className="mb-4 rounded-lg border bg-muted/30 p-4" data-testid="add-tenant-panel">
+          <div className="mb-3 flex items-center justify-between">
+            <p className="text-sm font-medium">Available data sources</p>
+            {availableStatus === "ready" && (
+              <button
+                type="button"
+                onClick={handleRefreshAvailable}
+                disabled={refreshing}
+                className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                data-testid="refresh-available-sources"
+              >
+                <RefreshCw className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`} />
+                {refreshing ? "Refreshing…" : "Refresh"}
+              </button>
+            )}
+          </div>
+
+          {availableStatus === "loading" ? (
+            <div data-testid="available-sources-loading">
+              <p className="mb-3 text-xs text-muted-foreground">
+                Fetching available sources from CommCare, Connect &amp; OCS — the first load can
+                take a moment.
+              </p>
+              <div className="space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <div
+                    key={i}
+                    className="flex items-center justify-between rounded-md border bg-background px-3 py-2.5"
+                  >
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-4 w-40" />
+                      <Skeleton className="h-3 w-24" />
+                    </div>
+                    <Skeleton className="h-8 w-16 rounded-md" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : availableStatus === "error" ? (
+            <div className="rounded-md border border-destructive/30 bg-background p-4 text-center">
+              <p className="text-sm text-destructive">{availableError}</p>
+              <button
+                type="button"
+                onClick={() => void loadAvailable()}
+                className="mt-2 text-sm text-muted-foreground underline hover:text-foreground"
+                data-testid="retry-available-sources"
+              >
+                Try again
+              </button>
+            </div>
+          ) : available.length === 0 ? (
+            <p
+              className="rounded-md border border-dashed bg-background py-6 text-center text-sm text-muted-foreground"
+              data-testid="available-sources-none"
+            >
+              All of your data sources are already connected.
             </p>
           ) : (
-            <div className="space-y-2">
-              {filteredAvailable.map((t) => (
-                <div key={t.tenant_uuid} className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-medium">{t.tenant_name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      #{t.tenant_id} · {t.provider}
-                    </div>
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => handleAdd(t.tenant_uuid)}
-                    disabled={addingId === t.tenant_uuid}
-                    data-testid={`add-tenant-${t.tenant_uuid}`}
-                  >
-                    {addingId === t.tenant_uuid ? "Adding…" : "Add"}
-                  </Button>
+            <>
+              <div className="mb-3">
+                <SearchFilterBar
+                  search={query}
+                  onSearchChange={setQuery}
+                  placeholder="Search by name or opportunity ID…"
+                  filters={providerFilterGroups}
+                  activeFilters={{ provider: providerFilter }}
+                  onFilterChange={(_group, value) => setProviderFilter(value)}
+                />
+              </div>
+              {filteredAvailable.length === 0 ? (
+                <p
+                  className="rounded-md border border-dashed bg-background py-6 text-center text-sm text-muted-foreground"
+                  data-testid="available-sources-empty"
+                >
+                  No data sources match your filters.
+                </p>
+              ) : (
+                <div className="space-y-1.5" data-testid="available-sources-list">
+                  {filteredAvailable.map((t) => {
+                    const { label, Icon } = getProviderMeta(t.provider)
+                    return (
+                      <div
+                        key={t.tenant_uuid}
+                        className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2.5"
+                      >
+                        <div className="flex min-w-0 items-center gap-3">
+                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                            <Icon className="h-4 w-4" />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">{t.tenant_name}</div>
+                            <div className="truncate text-xs text-muted-foreground">
+                              #{t.tenant_id} · {label}
+                            </div>
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          onClick={() => handleAdd(t)}
+                          disabled={addingId === t.tenant_uuid}
+                          data-testid={`add-tenant-${t.tenant_uuid}`}
+                        >
+                          {addingId === t.tenant_uuid ? "Adding…" : "Add"}
+                        </Button>
+                      </div>
+                    )
+                  })}
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
         </div>
       )}
@@ -427,57 +607,102 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
         <p className="mb-3 text-sm text-destructive">{mutationError}</p>
       )}
 
-      {tenants.length === 0 ? (
-        <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
-          No data sources connected.
-        </div>
-      ) : (
-        <div className="rounded-lg border">
-          {tenants.map((t, i) => (
+      {connectedLoading ? (
+        <div className="rounded-lg border" data-testid="connected-sources-loading">
+          {[0, 1, 2].map((i) => (
             <div
-              key={t.id}
-              className={`flex items-center justify-between px-4 py-3 ${i < tenants.length - 1 ? "border-b" : ""}`}
-              data-testid={`tenant-row-${t.id}`}
+              key={i}
+              className={`flex items-center justify-between px-4 py-3 ${i < 2 ? "border-b" : ""}`}
             >
-              <div>
-                <div className="font-medium">{t.tenant_name}</div>
-                <div className="text-xs text-muted-foreground">
-                  {externalIdByUuid.has(t.tenant_id)
-                    ? `#${externalIdByUuid.get(t.tenant_id)} · ${t.provider}`
-                    : t.provider}
-                </div>
+              <div className="space-y-1.5">
+                <Skeleton className="h-4 w-44" />
+                <Skeleton className="h-3 w-28" />
               </div>
-              {isManager && tenants.length > 1 && (
-                confirmRemoveId === t.id ? (
-                  <div className="flex items-center justify-end gap-2">
-                    <span className="text-xs text-muted-foreground">Remove?</span>
-                    <Button variant="ghost" size="sm" onClick={() => setConfirmRemoveId(null)}>
-                      Cancel
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => handleRemove(t)}
-                      disabled={removingId === t.id}
-                      data-testid={`confirm-remove-tenant-${t.id}`}
-                    >
-                      {removingId === t.id ? "Removing…" : "Confirm"}
-                    </Button>
-                  </div>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => setConfirmRemoveId(t.id)}
-                    data-testid={`remove-tenant-${t.id}`}
-                  >
-                    Remove
-                  </Button>
-                )
-              )}
             </div>
           ))}
+        </div>
+      ) : connectedError ? (
+        <div className="rounded-lg border border-destructive/30 p-6 text-center">
+          <p className="text-sm text-destructive">{connectedError}</p>
+          <button
+            type="button"
+            onClick={() => void loadConnected()}
+            className="mt-2 text-sm text-muted-foreground underline hover:text-foreground"
+            data-testid="retry-connected-sources"
+          >
+            Try again
+          </button>
+        </div>
+      ) : tenants.length === 0 ? (
+        <div className="rounded-lg border border-dashed p-10 text-center" data-testid="connected-sources-empty">
+          <p className="text-sm text-muted-foreground">No data sources connected yet.</p>
+          {isManager && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-4"
+              onClick={() => setShowAdd(true)}
+              data-testid="add-tenant-empty-btn"
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              Add data source
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="overflow-hidden rounded-lg border">
+          {tenants.map((t, i) => {
+            const { label, Icon } = getProviderMeta(t.provider)
+            const externalId = externalIdByUuid.get(t.tenant_id)
+            return (
+              <div
+                key={t.id}
+                className={`flex items-center justify-between gap-3 px-4 py-3 transition-colors hover:bg-muted/40 ${i < tenants.length - 1 ? "border-b" : ""}`}
+                data-testid={`tenant-row-${t.id}`}
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="truncate font-medium">{t.tenant_name}</div>
+                    <div className="truncate text-xs text-muted-foreground">
+                      {externalId ? `#${externalId} · ${label}` : label}
+                    </div>
+                  </div>
+                </div>
+                {isManager && tenants.length > 1 && (
+                  confirmRemoveId === t.id ? (
+                    <div className="flex items-center justify-end gap-2">
+                      <span className="text-xs text-muted-foreground">Remove?</span>
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmRemoveId(null)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => handleRemove(t)}
+                        disabled={removingId === t.id}
+                        data-testid={`confirm-remove-tenant-${t.id}`}
+                      >
+                        {removingId === t.id ? "Removing…" : "Confirm"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setConfirmRemoveId(t.id)}
+                      data-testid={`remove-tenant-${t.id}`}
+                    >
+                      Remove
+                    </Button>
+                  )
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -712,7 +937,7 @@ export function WorkspaceDetailPage() {
       <Tabs defaultValue="members">
         <TabsList data-testid="workspace-tabs">
           <TabsTrigger value="members" data-testid="tab-members">Members</TabsTrigger>
-          <TabsTrigger value="tenants" data-testid="tab-tenants">Tenants</TabsTrigger>
+          <TabsTrigger value="tenants" data-testid="tab-tenants">Data sources</TabsTrigger>
           <TabsTrigger value="settings" data-testid="tab-settings">Settings</TabsTrigger>
         </TabsList>
 
