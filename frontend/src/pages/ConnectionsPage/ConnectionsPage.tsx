@@ -264,7 +264,7 @@ export function ConnectionsPage() {
               <SearchFilterBar
                 search={search}
                 onSearchChange={setSearch}
-                placeholder="Search tenants..."
+                placeholder="Search data sources..."
                 filters={
                   providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
                 }
@@ -278,7 +278,7 @@ export function ConnectionsPage() {
                 <p className="text-muted-foreground">
                   {connections.length === 0
                     ? "No API key connections."
-                    : "No tenants match your search."}
+                    : "No data sources match your search."}
                 </p>
               </div>
             ) : (
@@ -287,7 +287,7 @@ export function ConnectionsPage() {
                   <TableRow>
                     <TableHead>Name</TableHead>
                     <TableHead>Provider</TableHead>
-                    <TableHead>Tenant ID</TableHead>
+                    <TableHead>Data source ID</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>

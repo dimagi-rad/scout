@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback, useRef, useMemo } from "react"
 import { Link, useParams, useNavigate } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
 import { authApi } from "@/api/auth"
@@ -17,6 +17,8 @@ import {
 } from "@/components/ui/select"
 import { ChevronLeft } from "lucide-react"
 import { RoleBadge } from "@/components/RoleBadge"
+import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
+import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 
 // ── Members Tab ─────────────────────────────────────────────────────────────
 
@@ -299,12 +301,16 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [removingId, setRemovingId] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [query, setQuery] = useState("")
+  const [providerFilter, setProviderFilter] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
 
-  // Reset search when the add panel is closed manually.
+  // Reset search + filter when the add panel is closed manually.
   useEffect(() => {
-    if (!showAdd) setQuery("")
+    if (!showAdd) {
+      setQuery("")
+      setProviderFilter(null)
+    }
   }, [showAdd])
 
   const load = useCallback(async () => {
@@ -318,7 +324,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
       setTenants(wsTenants)
       setUserTenants(allTenants)
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to load tenants")
+      setError(err instanceof ApiError ? err.message : "Failed to load data sources")
     } finally {
       setLoading(false)
     }
@@ -333,14 +339,39 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
+  // Provider filter pills, reusing the Workspaces page filter design.
+  const providerFilterGroups = useMemo((): FilterGroup[] => {
+    const counts = new Map<string, number>()
+    for (const t of available) {
+      counts.set(t.provider, (counts.get(t.provider) ?? 0) + 1)
+    }
+    if (counts.size <= 1) return []
+    return [
+      {
+        name: "provider",
+        options: [...counts.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([value, count]) => ({
+            value,
+            label: getProviderMeta(value).label,
+            count,
+          })),
+      },
+    ]
+  }, [available])
+
   const normalizedQuery = query.trim().replace(/^#/, "").toLowerCase()
-  const filteredAvailable = normalizedQuery
-    ? available.filter(
-        (t) =>
-          t.tenant_name.toLowerCase().includes(normalizedQuery) ||
-          t.tenant_id.toLowerCase().includes(normalizedQuery),
-      )
-    : available
+  const filteredAvailable = available.filter((t) => {
+    if (providerFilter && t.provider !== providerFilter) return false
+    if (
+      normalizedQuery &&
+      !t.tenant_name.toLowerCase().includes(normalizedQuery) &&
+      !t.tenant_id.toLowerCase().includes(normalizedQuery)
+    ) {
+      return false
+    }
+    return true
+  })
 
   async function handleAdd(tenantUuid: string) {
     setAddingId(tenantUuid)
@@ -385,27 +416,29 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
       {showAdd && available.length > 0 && (
         <div className="mb-4 rounded-lg border bg-muted/30 p-4">
-          <p className="mb-2 text-sm font-medium">Available data sources</p>
-          <Input
-            type="search"
-            placeholder="Search by name or opportunity ID…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="mb-3"
-            data-testid="tenant-search-input"
-          />
+          <p className="mb-3 text-sm font-medium">Available data sources</p>
+          <div className="mb-3">
+            <SearchFilterBar
+              search={query}
+              onSearchChange={setQuery}
+              placeholder="Search by name or opportunity ID…"
+              filters={providerFilterGroups}
+              activeFilters={{ provider: providerFilter }}
+              onFilterChange={(_group, value) => setProviderFilter(value)}
+            />
+          </div>
           {filteredAvailable.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No data sources match &ldquo;{normalizedQuery}&rdquo;.
+            <p className="text-sm text-muted-foreground" data-testid="available-sources-empty">
+              No data sources match your filters.
             </p>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-2" data-testid="available-sources-list">
               {filteredAvailable.map((t) => (
                 <div key={t.tenant_uuid} className="flex items-center justify-between">
                   <div>
                     <div className="text-sm font-medium">{t.tenant_name}</div>
                     <div className="text-xs text-muted-foreground">
-                      #{t.tenant_id} · {t.provider}
+                      #{t.tenant_id} · {getProviderMeta(t.provider).label}
                     </div>
                   </div>
                   <Button
@@ -443,8 +476,8 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
                 <div className="font-medium">{t.tenant_name}</div>
                 <div className="text-xs text-muted-foreground">
                   {externalIdByUuid.has(t.tenant_id)
-                    ? `#${externalIdByUuid.get(t.tenant_id)} · ${t.provider}`
-                    : t.provider}
+                    ? `#${externalIdByUuid.get(t.tenant_id)} · ${getProviderMeta(t.provider).label}`
+                    : getProviderMeta(t.provider).label}
                 </div>
               </div>
               {isManager && tenants.length > 1 && (
@@ -712,7 +745,7 @@ export function WorkspaceDetailPage() {
       <Tabs defaultValue="members">
         <TabsList data-testid="workspace-tabs">
           <TabsTrigger value="members" data-testid="tab-members">Members</TabsTrigger>
-          <TabsTrigger value="tenants" data-testid="tab-tenants">Tenants</TabsTrigger>
+          <TabsTrigger value="tenants" data-testid="tab-tenants">Data sources</TabsTrigger>
           <TabsTrigger value="settings" data-testid="tab-settings">Settings</TabsTrigger>
         </TabsList>
 
