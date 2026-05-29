@@ -1,5 +1,63 @@
 # Workspace Switcher Redesign
 
+## v2 — design polish + live indicator
+
+Two follow-up issues surfaced after the first cut:
+
+### 1. Horizontal scroll in the filter row (fixed)
+
+The segmented row (`Recent · All · CommCare Connect · Open Chat Studio · …` + a
+text "Has data" pill) lived in a single `overflow-x-auto` flex row inside a
+320px popover. With several providers it overflowed and scrolled sideways,
+clipping the trailing providers and the "Has data" button.
+
+**Solution (no horizontal scroll, no new dependency, no nested overlay):**
+
+- The pills now **wrap** (`flex-wrap`) instead of scrolling — nothing is ever
+  clipped. Typical 2-provider accounts stay on one tidy line; accounts with many
+  providers wrap to a second/third line, all fully visible.
+- **"Has data" became a compact round icon toggle** (an emerald dot, `aria-label`
+  / `title` "Show only workspaces with data") pinned to the top-right of the
+  control block, so it no longer competes with the pills for width.
+- The popover widened modestly from `w-80` (320px) to `w-[22rem]` (352px) to give
+  the wrapped pills more breathing room.
+
+This keeps the recents-first + provider-filtering capability the user liked,
+just uncramped and elegant.
+
+### 2. Per-row indicator: historical → **live** (changed semantics)
+
+The old dot used `workspaceHasData(ws) = last_synced_at != null`, a **historical**
+"was synced at least once" signal. It never disappeared when a workspace's
+schema/data was torn down, so it could lie about current availability.
+
+The indicator is now driven by the **live** `schema_status`
+(`"available" | "provisioning" | "unavailable"`) and has **three states**:
+
+| State      | `schema_status`      | Visual                              | Tooltip / aria              |
+|------------|----------------------|-------------------------------------|-----------------------------|
+| loading    | `provisioning`       | `Loader2` spinner (`animate-spin`)  | "Loading data…"             |
+| ready      | `available`          | emerald dot                         | "Has data — synced <ago>"   |
+| empty      | `unavailable`        | hollow muted dot                    | "No data"                   |
+
+`schema_status` is computed from `TenantSchema` / `WorkspaceViewSchema` state, so
+when data is torn down the row correctly returns to the hollow "No data" dot.
+
+- **Backend:** `schema_status` is now returned by the **list** endpoint, not just
+  detail. The computation was factored into shared helpers in
+  `apps/workspaces/api/workspace_views.py` — `_derive_schema_status(...)` (pure
+  logic) used by both detail and the list; `_schema_status_for_workspaces(...)`
+  computes it for many workspaces with two bulk queries (per-tenant
+  `TenantSchema` states + multi-tenant `WorkspaceViewSchema` states), avoiding
+  N+1. `last_synced_at` is still returned for the "synced X ago" tooltip.
+- **Frontend:** `workspaces.ts` adds `workspaceDataState(ws): "loading" | "ready" |
+  "empty"` derived from `schema_status` (falling back to `last_synced_at` when
+  `schema_status` is absent, for safety). `workspaceHasData` is kept and now means
+  "ready". The "Has data" filter means "ready". The switcher renders the
+  three-state `DataIndicator` per row.
+
+No data-model rename or migration — this uses the existing semantics.
+
 ## Problem
 
 The current switcher (`frontend/src/components/Sidebar/Sidebar.tsx`, lines 78–154) is a

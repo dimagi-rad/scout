@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
-import { Check, ChevronDown, Plus, Search, Settings } from "lucide-react"
+import { Check, ChevronDown, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { workspaceHasData } from "@/api/workspaces"
+import { workspaceDataState, workspaceHasData } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds, recordWorkspaceUse } from "@/lib/recentWorkspaces"
@@ -44,17 +44,57 @@ interface RowProps {
   onHover: () => void
 }
 
+/**
+ * Live, three-state data indicator. Reflects the workspace's current
+ * `schema_status` (not the historical `last_synced_at`):
+ *   - loading → spinner ("Loading data…")
+ *   - ready   → emerald dot ("Has data" + relative sync time when known)
+ *   - empty   → hollow dot ("No data")
+ */
+function DataIndicator({ ws }: { ws: TenantMembership }) {
+  const state = workspaceDataState(ws)
+  const label =
+    state === "loading"
+      ? "Loading data…"
+      : state === "ready"
+        ? `Has data${ws.last_synced_at ? ` — synced ${formatRelativeTime(ws.last_synced_at)}` : ""}`
+        : "No data"
+
+  return (
+    <span
+      title={label}
+      aria-label={label}
+      role="img"
+      data-testid={`workspace-data-indicator-${ws.id}`}
+      data-data-state={state}
+      className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+    >
+      {state === "loading" ? (
+        <Loader2 className="h-3 w-3 animate-spin text-primary" aria-hidden />
+      ) : (
+        <span
+          className={cn(
+            "h-2 w-2 rounded-full",
+            state === "ready"
+              ? "bg-emerald-500"
+              : "border border-muted-foreground/40 bg-transparent",
+          )}
+          aria-hidden
+        />
+      )}
+    </span>
+  )
+}
+
 function WorkspaceRow({ ws, active, highlighted, onSelect, onHover }: RowProps) {
   const { Icon } = getProviderMeta(firstProvider(ws))
-  const dataPresent = workspaceHasData(ws)
-  const dataLabel = dataPresent
-    ? `Has data${ws.last_synced_at ? ` — synced ${formatRelativeTime(ws.last_synced_at)}` : ""}`
-    : "No data yet"
+  const dataState = workspaceDataState(ws)
 
   return (
     <button
       data-testid={`domain-item-${ws.id}`}
-      data-has-data={dataPresent}
+      data-has-data={dataState === "ready"}
+      data-data-state={dataState}
       onClick={onSelect}
       onMouseMove={onHover}
       style={{ height: ROW_HEIGHT }}
@@ -66,17 +106,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover }: RowProps) 
     >
       <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <span className="flex-1 truncate">{ws.display_name}</span>
-      <span
-        title={dataLabel}
-        aria-label={dataLabel}
-        data-testid={`workspace-data-indicator-${ws.id}`}
-        className={cn(
-          "h-2 w-2 shrink-0 rounded-full",
-          dataPresent
-            ? "bg-emerald-500"
-            : "border border-muted-foreground/40 bg-transparent",
-        )}
-      />
+      <DataIndicator ws={ws} />
       {active ? (
         <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
       ) : (
@@ -286,7 +316,7 @@ export function WorkspaceSwitcher() {
             <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-80 p-0" align="start" onKeyDown={onKeyDown}>
+        <PopoverContent className="w-[22rem] p-0" align="start" onKeyDown={onKeyDown}>
           {/* Search */}
           <div className="border-b p-2">
             <div className="relative">
@@ -302,10 +332,12 @@ export function WorkspaceSwitcher() {
             </div>
           </div>
 
-          {/* Segmented controls (provider tabs + recent/all) and has-data filter */}
+          {/* Filter controls. Pills wrap instead of scrolling sideways, so no
+              provider is ever clipped; "Has data" is a compact icon toggle
+              pinned to the right so it never competes for horizontal space. */}
           {showSegments && (
-            <div className="flex items-center justify-between gap-2 border-b px-2 py-1.5">
-              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+            <div className="flex items-start gap-2 border-b px-2 py-1.5">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
                 {segmentKeys.map((key) => {
                   const count = segmentCount(key)
                   const isActive = !search && segment === key
@@ -315,7 +347,7 @@ export function WorkspaceSwitcher() {
                       data-testid={`workspace-seg-${key}`}
                       onClick={() => changeSegment(key)}
                       className={cn(
-                        "shrink-0 rounded-full px-2 py-0.5 text-xs transition-colors",
+                        "max-w-full truncate rounded-full px-2 py-0.5 text-xs transition-colors",
                         isActive
                           ? "bg-primary text-primary-foreground"
                           : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
@@ -330,17 +362,24 @@ export function WorkspaceSwitcher() {
               <button
                 data-testid="workspace-filter-hasdata"
                 aria-pressed={hasDataOnly}
+                aria-label={
+                  hasDataOnly ? "Showing only workspaces with data" : "Show only workspaces with data"
+                }
                 onClick={toggleHasData}
-                title="Show only workspaces that have data"
+                title="Show only workspaces with data"
                 className={cn(
-                  "flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors",
+                  "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors",
                   hasDataOnly
-                    ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                    ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
                     : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                 )}
               >
-                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                Has data
+                <span
+                  className={cn(
+                    "h-2 w-2 rounded-full",
+                    hasDataOnly ? "bg-emerald-500" : "border border-current bg-transparent",
+                  )}
+                />
               </button>
             </div>
           )}
