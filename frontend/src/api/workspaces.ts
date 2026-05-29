@@ -54,6 +54,16 @@ export interface WorkspaceTenant {
   provider: string
 }
 
+/**
+ * Whether a workspace has materialized data. `last_synced_at` is populated by
+ * the backend only when a MaterializationRun has COMPLETED for one of the
+ * workspace's tenants, so a non-null value is the authoritative "has data"
+ * signal. Single source of truth for the UI's has-data indicator.
+ */
+export function workspaceHasData(ws: { last_synced_at: string | null }): boolean {
+  return ws.last_synced_at != null
+}
+
 // ── Workspace CRUD ─────────────────────────────────────────────────────────
 
 export const workspaceApi = {
