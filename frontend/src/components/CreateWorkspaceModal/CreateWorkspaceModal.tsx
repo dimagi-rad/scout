@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { workspaceApi } from "@/api/workspaces"
-import { authApi, type UserTenant } from "@/api/auth"
+import { type UserTenant } from "@/api/auth"
+import { getUserTenantsCached } from "@/api/userTenantsCache"
 import { ApiError } from "@/api/client"
 import {
   Dialog,
@@ -29,6 +30,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const navigate = useNavigate()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+  const userId = useAppStore((s) => s.user?.id)
 
   const [name, setName] = useState("")
   const [loading, setLoading] = useState(false)
@@ -42,11 +44,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!userId) return
     let cancelled = false
     async function loadSources() {
       setSourcesLoading(true)
       try {
-        const data = await authApi.getUserTenants()
+        const data = await getUserTenantsCached(userId!)
         if (!cancelled) setSources(data)
       } catch {
         // Non-fatal: workspace can still be created without a data source.
@@ -59,7 +62,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [userId])
 
   const providerFilterGroups = useMemo((): FilterGroup[] => {
     const counts = new Map<string, number>()
