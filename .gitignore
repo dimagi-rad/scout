@@ -82,3 +82,6 @@ node_modules/
 bun.lockb
 .superpowers/
 .gstack/
+
+# playwright-cli session/config/output dirs
+.playwright*/
