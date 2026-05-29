@@ -26,3 +26,20 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     },
   },
 ]
+
+/**
+ * Resolve raw input text into the prompt that should actually be sent.
+ *
+ * If the text begins with a recognized slash command (e.g. `/refresh-data foo`),
+ * returns the command's built prompt. Otherwise returns the original text
+ * unchanged. Shared by both the active-thread input and the empty-state input so
+ * slash commands behave identically in both.
+ */
+export function resolveSlashCommand(text: string): string {
+  if (!text.startsWith("/")) return text
+  const spaceIdx = text.indexOf(" ")
+  const cmdName = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)
+  const args = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim()
+  const cmd = SLASH_COMMANDS.find((c) => c.name === cmdName)
+  return cmd ? cmd.buildPrompt(args) : text
+}

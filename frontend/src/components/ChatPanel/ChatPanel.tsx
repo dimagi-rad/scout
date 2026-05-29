@@ -9,7 +9,7 @@ import { MaterializationProgressBanner } from "@/components/MaterializationStatu
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
-import { SLASH_COMMANDS } from "./slashCommands"
+import { SLASH_COMMANDS, resolveSlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
@@ -245,20 +245,8 @@ export function ChatPanel() {
     const text = input.trim()
     if (!text || isStreaming) return
 
-    if (text.startsWith("/")) {
-      const spaceIdx = text.indexOf(" ")
-      const cmdName = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)
-      const args = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim()
-      const cmd = SLASH_COMMANDS.find((c) => c.name === cmdName)
-      if (cmd) {
-        setInput("")
-        sendMessage({ text: cmd.buildPrompt(args) })
-        return
-      }
-    }
-
     setInput("")
-    sendMessage({ text })
+    sendMessage({ text: resolveSlashCommand(text) })
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
