@@ -69,7 +69,12 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">
-        <NavItem to={`${pathPrefix}/`} icon={MessageSquare} label="Chat" />
+        <NavItem
+          to={activeDomainId ? `${pathPrefix}/workspaces/${activeDomainId}/chat` : `${pathPrefix}/`}
+          icon={MessageSquare}
+          label="Chat"
+          isActivePath={(p) => /\/workspaces\/[^/]+\/chat(\/|$)/.test(p)}
+        />
         <NavItem to={`${pathPrefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
         <NavItem to={`${pathPrefix}/knowledge`} icon={BookOpen} label="Knowledge" />
         <NavItem to={`${pathPrefix}/recipes`} icon={ChefHat} label="Recipes" />
@@ -86,7 +91,14 @@ export function Sidebar() {
             variant="ghost"
             size="icon"
             className="h-6 w-6"
-            onClick={() => { newThread(); navigate(`${pathPrefix}/chat`) }}
+            onClick={() => {
+              newThread()
+              navigate(
+                activeDomainId
+                  ? `${pathPrefix}/workspaces/${activeDomainId}/chat`
+                  : `${pathPrefix}/chat`,
+              )
+            }}
             data-testid="sidebar-new-chat"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -103,7 +115,14 @@ export function Sidebar() {
             return (
               <button
                 key={thread.id}
-                onClick={() => { selectThread(thread.id); navigate(`${pathPrefix}/chat`) }}
+                onClick={() => {
+                  selectThread(thread.id)
+                  navigate(
+                    activeDomainId
+                      ? `${pathPrefix}/workspaces/${activeDomainId}/chat/${thread.id}`
+                      : `${pathPrefix}/chat`,
+                  )
+                }}
                 data-testid={`sidebar-thread-${thread.id}`}
                 className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                   thread.id === threadId

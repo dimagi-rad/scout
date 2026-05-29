@@ -9,15 +9,12 @@ import { MaterializationProgressBanner } from "@/components/MaterializationStatu
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Send, Square, Share2, Users, Globe, Link, Copy, Check } from "lucide-react"
-import { SLASH_COMMANDS } from "./slashCommands"
+import { SLASH_COMMANDS, resolveSlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { TopBarSlot } from "@/components/TopBar"
-
-function threadStorageKey(domainId: string) {
-  return `scout:thread:${domainId}`
-}
+import { writeSavedThreadId } from "./threadStorage"
 
 function getPublicUrl(token: string): string {
   return `${window.location.origin}/shared/threads/${token}/`
@@ -119,7 +116,6 @@ function ShareMenu({
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
-  const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState("")
@@ -170,23 +166,14 @@ export function ChatPanel() {
     setSlashMenuIndex(0)
   }
 
-  // Persist threadId to localStorage when it changes
+  // Persist threadId to localStorage when it changes, so a bare /chat visit can
+  // restore the last-viewed thread for this workspace. The URL is the source of
+  // truth for which thread is active; this is just a "last seen" fallback.
   useEffect(() => {
-    if (activeDomainId) {
-      localStorage.setItem(threadStorageKey(activeDomainId), threadId)
+    if (activeDomainId && threadId) {
+      writeSavedThreadId(activeDomainId, threadId)
     }
   }, [threadId, activeDomainId])
-
-  // Restore threadId from localStorage when domain changes
-  useEffect(() => {
-    if (!activeDomainId) return
-    const saved = localStorage.getItem(threadStorageKey(activeDomainId))
-    if (saved && saved !== threadId) {
-      selectThread(saved)
-    }
-    // Only run when domain changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDomainId])
 
   // Load messages from backend when threadId changes (or after a background job completes)
   useEffect(() => {
@@ -245,20 +232,8 @@ export function ChatPanel() {
     const text = input.trim()
     if (!text || isStreaming) return
 
-    if (text.startsWith("/")) {
-      const spaceIdx = text.indexOf(" ")
-      const cmdName = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx)
-      const args = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim()
-      const cmd = SLASH_COMMANDS.find((c) => c.name === cmdName)
-      if (cmd) {
-        setInput("")
-        sendMessage({ text: cmd.buildPrompt(args) })
-        return
-      }
-    }
-
     setInput("")
-    sendMessage({ text })
+    sendMessage({ text: resolveSlashCommand(text) })
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {

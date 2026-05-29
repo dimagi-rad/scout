@@ -1,5 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api, ApiError } from "@/api/client"
+import { clearUserTenantsCache } from "@/api/userTenantsCache"
 
 export type AuthStatus = "idle" | "loading" | "authenticated" | "unauthenticated"
 
@@ -61,6 +62,7 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
       try {
         await api.post("/api/auth/logout/")
       } finally {
+        clearUserTenantsCache()
         set({ user: null, authStatus: "unauthenticated", authError: null })
       }
     },
