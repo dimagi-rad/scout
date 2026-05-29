@@ -134,7 +134,7 @@ export function ChatEmptyState({
             placeholder="Ask about your data..."
             disabled={disabled}
             rows={1}
-            className="resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
+            className="min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
           />
           <Button
             type="submit"
