@@ -18,7 +18,7 @@ from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import TenantMembership
-from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
+from apps.users.services.credential_resolver import aresolve_credential
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -149,8 +149,10 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         await new_schema.asave(update_fields=["state"])
         return {"error": "Failed to create schema"}
 
-    # Step 2: Resolve credential and run materialization pipeline
-    credential = resolve_credential(membership)
+    # Step 2: Resolve credential and run materialization pipeline. This task
+    # runs as an async job, so it must use the async resolver — the sync one
+    # issues ORM queries that raise SynchronousOnlyOperation here.
+    credential = await aresolve_credential(membership)
     if credential is None:
         await _drop_schema_and_fail(new_schema)
         return {"error": "No credential available"}

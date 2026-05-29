@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from apps.users.adapters import encrypt_credential
+from apps.users.models import TenantCredential
 from apps.workspaces.models import SchemaState, TenantSchema
 
 
@@ -61,8 +63,8 @@ async def test_refresh_task_marks_schema_active_on_success(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.resolve_credential",
-            return_value={"type": "api_key", "value": "tok"},
+            "apps.workspaces.tasks.aresolve_credential",
+            new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
             "apps.workspaces.tasks.get_registry",
@@ -97,8 +99,8 @@ async def test_refresh_task_schedules_old_schema_teardown(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.resolve_credential",
-            return_value={"type": "api_key", "value": "tok"},
+            "apps.workspaces.tasks.aresolve_credential",
+            new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
             "apps.workspaces.tasks.get_registry",
@@ -154,7 +156,7 @@ async def test_refresh_task_marks_failed_on_no_credential(
             "apps.workspaces.services.schema_manager.get_managed_db_connection",
             return_value=_mock_conn(),
         ),
-        patch("apps.workspaces.tasks.resolve_credential", return_value=None),
+        patch("apps.workspaces.tasks.aresolve_credential", new=AsyncMock(return_value=None)),
         patch("apps.workspaces.services.schema_manager.SchemaManager.teardown"),
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
@@ -180,8 +182,8 @@ async def test_refresh_task_marks_failed_on_materialization_error(
             return_value=_mock_conn(),
         ),
         patch(
-            "apps.workspaces.tasks.resolve_credential",
-            return_value={"type": "api_key", "value": "tok"},
+            "apps.workspaces.tasks.aresolve_credential",
+            new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
         ),
         patch(
             "apps.workspaces.tasks.get_registry",
@@ -203,6 +205,48 @@ async def test_refresh_task_marks_failed_on_materialization_error(
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.FAILED
     assert "error" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_resolves_credential_in_async_context(
+    provisioning_schema, tenant_membership_obj
+):
+    """Regression: the task must resolve credentials via the async ORM path.
+
+    The task runs as an ``async def`` procrastinate job, so it must use
+    ``aresolve_credential``. Calling the sync ``resolve_credential`` here ran
+    sync ORM queries in an async context and raised ``SynchronousOnlyOperation``
+    in production. This test exercises the *real* resolver (no mock) against a
+    stored API-key credential to catch that regression.
+    """
+    await TenantCredential.objects.acreate(
+        tenant_membership=tenant_membership_obj,
+        credential_type=TenantCredential.API_KEY,
+        encrypted_credential=encrypt_credential("secret-key"),
+    )
+
+    with (
+        patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=_mock_conn(),
+        ),
+        patch(
+            "apps.workspaces.tasks.get_registry",
+            return_value=_mock_registry(),
+        ),
+        patch("apps.workspaces.tasks.run_pipeline"),
+    ):
+        from apps.workspaces.tasks import refresh_tenant_schema
+
+        result = await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
+
+    await provisioning_schema.arefresh_from_db()
+    assert provisioning_schema.state == SchemaState.ACTIVE
+    assert result["status"] == "active"
 
 
 @pytest.mark.asyncio
