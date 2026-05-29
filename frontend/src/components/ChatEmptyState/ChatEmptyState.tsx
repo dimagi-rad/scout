@@ -1,9 +1,13 @@
 // frontend/src/components/ChatEmptyState/ChatEmptyState.tsx
+import { useState } from "react"
 import { ArrowUp, ArrowRight } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { formatRelativeTime } from "@/lib/relativeTime"
+import { SLASH_COMMANDS, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
+import type { SlashCommand } from "@/components/ChatPanel/slashCommands"
+import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
 import { getStarterQuestions } from "./starterQuestions"
 
 interface ChatEmptyStateProps {
@@ -22,16 +26,31 @@ export function ChatEmptyState({
   const workspace = useAppStore((s) =>
     s.domains.find((d) => d.id === s.activeDomainId),
   )
+  const [slashMenuIndex, setSlashMenuIndex] = useState(0)
 
   const provider = workspace?.tenants[0]?.provider
   const starters = getStarterQuestions(provider)
   const lastSyncedAt = workspace?.last_synced_at ?? null
 
+  // Slash command menu state — mirrors ChatPanel's active-thread input so
+  // slash commands work identically here.
+  const showSlashMenu =
+    !disabled && input.startsWith("/") && !input.slice(1).includes(" ")
+  const slashQuery = showSlashMenu ? input.slice(1) : ""
+  const filteredCommands = SLASH_COMMANDS.filter((cmd) =>
+    cmd.name.startsWith(slashQuery),
+  )
+
+  function selectSlashCommand(cmd: SlashCommand) {
+    setInput(`/${cmd.name} `)
+    setSlashMenuIndex(0)
+  }
+
   function submit(text: string) {
     const trimmed = text.trim()
     if (!trimmed || disabled) return
     setInput("")
-    onSend(trimmed)
+    onSend(resolveSlashCommand(trimmed))
   }
 
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
@@ -40,6 +59,26 @@ export function ChatEmptyState({
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (showSlashMenu && filteredCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i + 1) % filteredCommands.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashMenuIndex(
+          (i) => (i - 1 + filteredCommands.length) % filteredCommands.length,
+        )
+        return
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault()
+        selectSlashCommand(filteredCommands[slashMenuIndex])
+        return
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       submit(input)
@@ -78,10 +117,19 @@ export function ChatEmptyState({
         </div>
 
         <form onSubmit={handleSubmit} className="relative mt-10">
+          <SlashCommandMenu
+            query={slashQuery}
+            onSelect={selectSlashCommand}
+            visible={showSlashMenu}
+            selectedIndex={slashMenuIndex}
+          />
           <Textarea
             data-testid="chat-input-prominent"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value)
+              setSlashMenuIndex(0)
+            }}
             onKeyDown={handleKeyDown}
             placeholder="Ask about your data..."
             disabled={disabled}
