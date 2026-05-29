@@ -10,6 +10,8 @@ export interface WorkspaceListTenant {
   provider: string
 }
 
+export type SchemaStatus = "available" | "provisioning" | "unavailable"
+
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
   id: string
@@ -19,6 +21,7 @@ export interface WorkspaceListItem {
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
   member_count: number
+  schema_status: SchemaStatus
   last_synced_at: string | null
   created_at: string
 }
@@ -30,7 +33,7 @@ export interface WorkspaceDetail {
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   system_prompt: string
-  schema_status: "available" | "provisioning" | "unavailable"
+  schema_status: SchemaStatus
   tenant_count: number
   member_count: number
   last_synced_at: string | null
@@ -52,6 +55,45 @@ export interface WorkspaceTenant {
   tenant_id: string   // internal Tenant UUID
   tenant_name: string
   provider: string
+}
+
+/** Live data-availability state for a workspace's indicator. */
+export type WorkspaceDataState = "loading" | "ready" | "empty"
+
+/**
+ * Live data-availability state, derived from the backend's `schema_status`:
+ *
+ * - "ready"   — schema is `available`: the workspace currently has queryable data.
+ * - "loading" — schema is `provisioning`/`materializing`: data is being set up.
+ * - "empty"   — schema is `unavailable`: never synced, expired, or torn down.
+ *
+ * Unlike `last_synced_at` (a *historical* "was synced at least once" signal),
+ * `schema_status` reflects the live schema and correctly returns to "empty"
+ * when a workspace's data is torn down. We fall back to `last_synced_at` only
+ * when `schema_status` is absent (e.g. an older cached payload), so the UI
+ * degrades safely rather than showing nothing.
+ */
+export function workspaceDataState(ws: {
+  schema_status?: SchemaStatus
+  last_synced_at?: string | null
+}): WorkspaceDataState {
+  if (ws.schema_status === "available") return "ready"
+  if (ws.schema_status === "provisioning") return "loading"
+  if (ws.schema_status === "unavailable") return "empty"
+  // No live signal available — fall back to the historical sync marker.
+  return ws.last_synced_at != null ? "ready" : "empty"
+}
+
+/**
+ * Whether a workspace currently has queryable data. Prefers the live
+ * `schema_status`; treats only the "ready" state as having data.
+ * Single source of truth for the UI's has-data filter.
+ */
+export function workspaceHasData(ws: {
+  schema_status?: SchemaStatus
+  last_synced_at?: string | null
+}): boolean {
+  return workspaceDataState(ws) === "ready"
 }
 
 // ── Workspace CRUD ─────────────────────────────────────────────────────────

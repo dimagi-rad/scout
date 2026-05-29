@@ -30,6 +30,80 @@ def _is_last_manager(workspace, membership):
     return workspace.memberships.filter(role=WorkspaceRole.MANAGE).count() <= 1
 
 
+def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
+    """Derive a workspace's live schema status from precomputed schema state.
+
+    Returns one of "available" | "provisioning" | "unavailable". This is the
+    single source of truth shared by the list and detail endpoints so they
+    never drift apart.
+
+    - Single-tenant (or no view schema): available iff every tenant has an
+      ACTIVE schema; provisioning if any schema is mid-provisioning; otherwise
+      unavailable (never synced, expired, torn down, or failed).
+    - Multi-tenant: readiness is tracked by the workspace's view schema, which
+      unions the per-tenant schemas. ACTIVE view schema ⇒ available, anything
+      else ⇒ provisioning.
+    """
+    if tenant_count > 1:
+        if view_schema_state == SchemaState.ACTIVE:
+            return "available"
+        return "provisioning"
+
+    if active_count == tenant_count and tenant_count > 0:
+        return "available"
+    if provisioning:
+        return "provisioning"
+    return "unavailable"
+
+
+def _schema_status_for_workspaces(workspaces):
+    """Compute schema_status for many workspaces with bulk queries (no N+1).
+
+    ``workspaces`` must have ``workspace_tenants__tenant`` prefetched. Returns a
+    dict mapping workspace id -> status string.
+    """
+    workspace_ids = [w.id for w in workspaces]
+    if not workspace_ids:
+        return {}
+
+    # All tenant ids across these workspaces.
+    tenant_ids = {
+        wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()
+    }
+
+    # Per-tenant schema states (one bulk query).
+    active_tenants = set()
+    provisioning_tenants = set()
+    if tenant_ids:
+        for tenant_id, state in TenantSchema.objects.filter(
+            tenant_id__in=tenant_ids
+        ).values_list("tenant_id", "state"):
+            if state == SchemaState.ACTIVE:
+                active_tenants.add(tenant_id)
+            elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
+                provisioning_tenants.add(tenant_id)
+
+    # Multi-tenant workspaces' view schema states (one bulk query).
+    view_states = dict(
+        WorkspaceViewSchema.objects.filter(workspace_id__in=workspace_ids).values_list(
+            "workspace_id", "state"
+        )
+    )
+
+    statuses = {}
+    for w in workspaces:
+        ws_tenant_ids = [wt.tenant_id for wt in w.workspace_tenants.all()]
+        active_count = sum(1 for tid in ws_tenant_ids if tid in active_tenants)
+        provisioning = any(tid in provisioning_tenants for tid in ws_tenant_ids)
+        statuses[w.id] = _derive_schema_status(
+            tenant_count=len(ws_tenant_ids),
+            active_count=active_count,
+            provisioning=provisioning,
+            view_schema_state=view_states.get(w.id),
+        )
+    return statuses
+
+
 class WorkspaceListView(APIView):
     """
     GET  /api/workspaces/  — list workspaces the authenticated user is a member of.
@@ -57,6 +131,9 @@ class WorkspaceListView(APIView):
                 last_synced_at=Subquery(latest_run),
             )
         )
+        memberships = list(memberships)
+        schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
+
         results = []
         for m in memberships:
             tenants = [
@@ -76,6 +153,7 @@ class WorkspaceListView(APIView):
                     "role": m.role,
                     "tenants": tenants,
                     "member_count": m.member_count,
+                    "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
                     "created_at": m.workspace.created_at.isoformat(),
                 }
@@ -169,20 +247,19 @@ class WorkspaceDetailView(APIView):
             state__in=[SchemaState.PROVISIONING, SchemaState.MATERIALIZING],
         ).exists()
 
-        if active_schemas == len(tenants) and len(tenants) > 0:
-            schema_status = "available"
-        elif provisioning:
-            schema_status = "provisioning"
-        else:
-            schema_status = "unavailable"
-
-        # Multi-tenant workspaces track readiness via WorkspaceViewSchema
+        view_schema_state = None
         if len(tenants) > 1:
             try:
-                vs = workspace.view_schema
-                schema_status = "available" if vs.state == SchemaState.ACTIVE else "provisioning"
+                view_schema_state = workspace.view_schema.state
             except WorkspaceViewSchema.DoesNotExist:
-                schema_status = "provisioning"
+                view_schema_state = None
+
+        schema_status = _derive_schema_status(
+            tenant_count=len(tenants),
+            active_count=active_schemas,
+            provisioning=provisioning,
+            view_schema_state=view_schema_state,
+        )
 
         latest_completed = (
             MaterializationRun.objects.filter(

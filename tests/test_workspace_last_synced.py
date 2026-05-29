@@ -146,3 +146,41 @@ def test_detail_ignores_in_flight_and_failed_runs(client, user, workspace, tenan
     client.force_login(user)
     resp = client.get(f"/api/workspaces/{workspace.id}/")
     assert resp.json()["last_synced_at"] == completed.completed_at.isoformat()
+
+
+# ── Live schema_status on the LIST endpoint ──────────────────────────────────
+
+
+def _list_entry(client, user, workspace):
+    client.force_login(user)
+    resp = client.get("/api/workspaces/")
+    assert resp.status_code == 200
+    return next(w for w in resp.json() if w["id"] == str(workspace.id))
+
+
+@pytest.mark.django_db
+def test_list_schema_status_unavailable_without_schema(client, user, workspace):
+    # No TenantSchema at all → live state is unavailable.
+    assert _list_entry(client, user, workspace)["schema_status"] == "unavailable"
+
+
+@pytest.mark.django_db
+def test_list_schema_status_available_when_active(client, user, workspace, tenant_schema):
+    # tenant_schema fixture is ACTIVE for the workspace's single tenant.
+    assert _list_entry(client, user, workspace)["schema_status"] == "available"
+
+
+@pytest.mark.django_db
+def test_list_schema_status_provisioning(client, user, workspace, tenant):
+    TenantSchema.objects.create(
+        tenant=tenant, schema_name="prov_schema", state=SchemaState.PROVISIONING
+    )
+    assert _list_entry(client, user, workspace)["schema_status"] == "provisioning"
+
+
+@pytest.mark.django_db
+def test_list_schema_status_matches_detail(client, user, workspace, tenant_schema):
+    """List and detail endpoints must agree on schema_status."""
+    list_status = _list_entry(client, user, workspace)["schema_status"]
+    detail = client.get(f"/api/workspaces/{workspace.id}/").json()
+    assert list_status == detail["schema_status"] == "available"
