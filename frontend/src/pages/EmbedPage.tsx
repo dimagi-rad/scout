@@ -5,7 +5,8 @@ import { useAppStore } from "@/store/store"
 import { LoginForm } from "@/components/LoginForm/LoginForm"
 import { Skeleton } from "@/components/ui/skeleton"
 import { EmbedLayout } from "@/components/EmbedLayout/EmbedLayout"
-import { ChatPanel } from "@/components/ChatPanel/ChatPanel"
+import { ChatRoute } from "@/components/ChatPanel/ChatRoute"
+import { ChatRedirect } from "@/components/ChatPanel/ChatRedirect"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
@@ -21,8 +22,10 @@ const embedRouter = createBrowserRouter([
     path: "/embed",
     element: <EmbedLayout />,
     children: [
-      { index: true, element: <ChatPanel /> },
-      { path: "chat", element: <ChatPanel /> },
+      { index: true, element: <ChatRedirect /> },
+      { path: "chat", element: <ChatRedirect /> },
+      { path: "workspaces/:workspaceId/chat", element: <ChatRoute /> },
+      { path: "workspaces/:workspaceId/chat/:threadId", element: <ChatRoute /> },
       { path: "artifacts", element: <ArtifactsPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
