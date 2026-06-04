@@ -96,9 +96,9 @@ async def test_resolve_credential_with_team_id(user, mocker):
     assert cred_b["type"] == "api_key"
     assert cred_b["value"] == test_key_b
 
-    # Test fallback when team_id doesn't exist
+    # Test that non-existent team_id returns None (fail closed)
     cred_fallback = await aresolve_credential(tm, team_id="nonexistent_team")
-    assert cred_fallback is not None  # Should fall back to first credential
+    assert cred_fallback is None  # Explicit team_id not found → None (don't use wrong team)
 
 
 @pytest.mark.asyncio
@@ -119,16 +119,16 @@ async def test_oauth_credential_unique_per_membership(user):
     await TenantCredential.objects.acreate(
         tenant_membership=tm,
         credential_type=TenantCredential.OAUTH,
-        team_id=None,
+        team_id="",
     )
 
-    # Attempting to add another OAuth credential with team_id=NULL should fail
+    # Attempting to add another OAuth credential with team_id="" should fail
     # due to unique constraint
     with pytest.raises(IntegrityError):
         await TenantCredential.objects.acreate(
             tenant_membership=tm,
             credential_type=TenantCredential.OAUTH,
-            team_id=None,
+            team_id="",
         )
 
 
@@ -150,7 +150,7 @@ async def test_mixed_oauth_and_api_key_credentials(user, mocker):
     await TenantCredential.objects.acreate(
         tenant_membership=tm,
         credential_type=TenantCredential.OAUTH,
-        team_id=None,
+        team_id="",
     )
 
     # Add API key credential for Team A
