@@ -261,6 +261,15 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setActiveDomain(ws.id)
     newThread()
     close()
+    // If we're on a workspace detail/settings page, follow the selection to the
+    // newly chosen workspace's page rather than staying on the previous one.
+    const wsDetailPrefix = `${pathPrefix}/workspaces/`
+    if (
+      location.pathname.startsWith(wsDetailPrefix) &&
+      location.pathname.length > wsDetailPrefix.length
+    ) {
+      navigate(`${pathPrefix}/workspaces/${ws.id}`)
+    }
   }
 
   function manage(ws: TenantMembership) {
