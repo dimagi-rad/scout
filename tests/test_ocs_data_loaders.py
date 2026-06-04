@@ -150,29 +150,72 @@ def test_message_loader_flattens_messages_with_composite_pk():
         ]
 
 
-def test_participant_loader_dedupes_by_identifier():
+def test_participant_loader_maps_dedicated_endpoint_fields():
+    """Uses the dedicated /api/participants endpoint with rich fields + custom data."""
     loader = OCSParticipantLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     page = MagicMock(status_code=200)
     page.json.return_value = {
         "results": [
             {
-                "id": "sess-1",
-                "participant": {"identifier": "p1", "platform": "web", "remote_id": "r1"},
+                "id": "11111111-1111-1111-1111-111111111111",
+                "identifier": "p1",
+                "name": "John",
+                "platform": "api",
+                "remote_id": "r1",
+                "data": [
+                    {
+                        "chatbot": "Support Bot",
+                        "chatbot_id": "exp-1",
+                        "data": {"name": "John", "timezone": "Africa/Johannesburg"},
+                    }
+                ],
             },
             {
-                "id": "sess-2",
-                "participant": {"identifier": "p1", "platform": "web", "remote_id": "r1"},
-            },
-            {
-                "id": "sess-3",
-                "participant": {"identifier": "p2", "platform": "whatsapp", "remote_id": "r2"},
+                "id": "22222222-2222-2222-2222-222222222222",
+                "identifier": "p2",
+                "name": "",
+                "platform": "whatsapp",
+                "remote_id": "",
+                "data": [],
             },
         ],
         "next": None,
     }
     with patch.object(loader._session, "get", return_value=page):
         rows = [r for pg, _ in loader.load_pages() for r in pg]
-        assert sorted(rows, key=lambda r: r["identifier"]) == [
-            {"identifier": "p1", "platform": "web", "remote_id": "r1"},
-            {"identifier": "p2", "platform": "whatsapp", "remote_id": "r2"},
+        assert rows == [
+            {
+                "participant_id": "11111111-1111-1111-1111-111111111111",
+                "identifier": "p1",
+                "name": "John",
+                "platform": "api",
+                "remote_id": "r1",
+                "data": [
+                    {
+                        "chatbot": "Support Bot",
+                        "chatbot_id": "exp-1",
+                        "data": {"name": "John", "timezone": "Africa/Johannesburg"},
+                    }
+                ],
+            },
+            {
+                "participant_id": "22222222-2222-2222-2222-222222222222",
+                "identifier": "p2",
+                "name": "",
+                "platform": "whatsapp",
+                "remote_id": "",
+                "data": [],
+            },
         ]
+
+
+def test_participant_loader_queries_chatbot_scoped_endpoint():
+    """The loader hits /api/participants filtered by the tenant's chatbot."""
+    loader = OCSParticipantLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    page = MagicMock(status_code=200)
+    page.json.return_value = {"results": [], "next": None}
+    with patch.object(loader._session, "get", return_value=page) as mock_get:
+        list(loader.load_pages())
+    args, kwargs = mock_get.call_args
+    assert args[0] == f"{BASE_URL}/api/participants"
+    assert kwargs["params"] == {"chatbot": "exp-1"}

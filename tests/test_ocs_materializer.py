@@ -155,12 +155,54 @@ def test_write_ocs_participants_creates_table_and_rows(tenant_schema):
     conn.autocommit = False
     try:
         n = _write_ocs_participants(
-            iter([([{"identifier": "p1", "platform": "web", "remote_id": "r1"}], None)]),
+            iter(
+                [
+                    (
+                        [
+                            {
+                                "participant_id": "11111111-1111-1111-1111-111111111111",
+                                "identifier": "p1",
+                                "name": "John",
+                                "platform": "api",
+                                "remote_id": "r1",
+                                "data": [
+                                    {
+                                        "chatbot": "Support Bot",
+                                        "chatbot_id": "exp-uuid-1",
+                                        "data": {"timezone": "Africa/Johannesburg"},
+                                    }
+                                ],
+                            }
+                        ],
+                        None,
+                    )
+                ]
+            ),
             tenant_schema.schema_name,
             conn,
         )
         conn.commit()
         assert n == 1
         assert _row_count(conn, tenant_schema.schema_name, "raw_participants") == 1
+        with conn.cursor() as cur:
+            cur.execute(
+                psql.SQL(
+                    "SELECT participant_id, identifier, name, platform, remote_id, data "
+                    "FROM {}.raw_participants"
+                ).format(psql.Identifier(tenant_schema.schema_name))
+            )
+            row = cur.fetchone()
+        assert row[0] == "11111111-1111-1111-1111-111111111111"
+        assert row[1] == "p1"
+        assert row[2] == "John"
+        assert row[3] == "api"
+        assert row[4] == "r1"
+        assert row[5] == [
+            {
+                "chatbot": "Support Bot",
+                "chatbot_id": "exp-uuid-1",
+                "data": {"timezone": "Africa/Johannesburg"},
+            }
+        ]
     finally:
         conn.close()

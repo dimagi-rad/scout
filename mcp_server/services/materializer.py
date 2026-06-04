@@ -999,9 +999,12 @@ def _write_ocs_participants(
         psql.SQL(
             """
         CREATE TABLE {schema}.raw_participants (
-            identifier TEXT PRIMARY KEY,
+            participant_id TEXT PRIMARY KEY,
+            identifier TEXT,
+            name TEXT,
             platform TEXT,
-            remote_id TEXT
+            remote_id TEXT,
+            data JSONB
         )
         """
         ).format(schema=sid)
@@ -1017,9 +1020,12 @@ def _write_ocs_participants(
             rows_total = page_total
         rows = [
             (
+                r.get("participant_id", ""),
                 r.get("identifier", ""),
+                r.get("name", ""),
                 r.get("platform", ""),
                 r.get("remote_id", ""),
+                json.dumps(r.get("data") or []),
             )
             for r in page
         ]
@@ -1348,10 +1354,12 @@ _OCS_MESSAGES_INSERT = psql.SQL(
 _OCS_PARTICIPANTS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_participants
-        (identifier, platform, remote_id)
-    VALUES (%s, %s, %s)
-    ON CONFLICT (identifier) DO UPDATE SET
-        platform=EXCLUDED.platform, remote_id=EXCLUDED.remote_id
+        (participant_id, identifier, name, platform, remote_id, data)
+    VALUES (%s, %s, %s, %s, %s, %s)
+    ON CONFLICT (participant_id) DO UPDATE SET
+        identifier=EXCLUDED.identifier, name=EXCLUDED.name,
+        platform=EXCLUDED.platform, remote_id=EXCLUDED.remote_id,
+        data=EXCLUDED.data
     """
 )
 
