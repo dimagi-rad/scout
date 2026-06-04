@@ -15,7 +15,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Check } from "lucide-react"
+import { AlertTriangle, Check } from "lucide-react"
 import {
   SearchFilterBar,
   type FilterGroup,
@@ -31,6 +31,8 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const userId = useAppStore((s) => s.user?.id)
+  const domains = useAppStore((s) => s.domains)
+  const domainsStatus = useAppStore((s) => s.domainsStatus)
 
   const [name, setName] = useState("")
   const [loading, setLoading] = useState(false)
@@ -42,6 +44,8 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState("")
   const [providerFilter, setProviderFilter] = useState<string | null>(null)
+  // Set once the user opts to "Create anyway" past the duplicate warning.
+  const [duplicateAcknowledged, setDuplicateAcknowledged] = useState(false)
 
   useEffect(() => {
     if (!userId) return
@@ -64,6 +68,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     }
   }, [userId])
 
+  // Ensure the user's workspace list is loaded so duplicate detection has data
+  // to compare against, even if the modal is opened before the list is fetched.
+  useEffect(() => {
+    if (domainsStatus === "idle") void fetchDomains()
+  }, [domainsStatus, fetchDomains])
+
   const providerFilterGroups = useMemo((): FilterGroup[] => {
     const counts = new Map<string, number>()
     for (const t of sources) {
@@ -84,6 +94,21 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     ]
   }, [sources])
 
+  // A workspace is an exact duplicate when its set of tenant ids matches the
+  // currently selected set, order-independent. Only meaningful for a non-empty
+  // selection — an empty pick shouldn't flag every empty workspace. Detection
+  // is purely client-side: the workspace list already carries each tenant's id.
+  const duplicateWorkspace = useMemo(() => {
+    if (selected.size === 0) return null
+    return (
+      domains.find((ws) => {
+        const ids = ws.tenants?.map((t) => t.id) ?? []
+        if (ids.length !== selected.size) return false
+        return ids.every((id) => selected.has(id))
+      }) ?? null
+    )
+  }, [domains, selected])
+
   const normalizedSearch = search.trim().replace(/^#/, "").toLowerCase()
   const filteredSources = sources.filter((t) => {
     if (providerFilter && t.provider !== providerFilter) return false
@@ -98,6 +123,9 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   })
 
   function toggleSource(uuid: string) {
+    // Changing the selection invalidates a prior "create anyway" decision: the
+    // new set may match a different existing workspace (or none).
+    setDuplicateAcknowledged(false)
     setSelected((prev) => {
       const next = new Set(prev)
       if (next.has(uuid)) next.delete(uuid)
@@ -106,9 +134,19 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     })
   }
 
+  function goToExistingWorkspace() {
+    if (!duplicateWorkspace) return
+    setActiveDomain(duplicateWorkspace.id)
+    onClose()
+    navigate(`/workspaces/${duplicateWorkspace.id}`)
+  }
+
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!name.trim()) return
+    // Hold for an explicit decision when this exact data-source set already
+    // exists, unless the user has chosen to create anyway.
+    if (duplicateWorkspace && !duplicateAcknowledged) return
     setLoading(true)
     setError(null)
     try {
@@ -126,12 +164,12 @@ export function CreateWorkspaceModal({ onClose }: Props) {
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className="sm:max-w-lg" data-testid="create-workspace-modal">
+      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-lg" data-testid="create-workspace-modal">
         <DialogHeader>
           <DialogTitle>New Workspace</DialogTitle>
         </DialogHeader>
-        <form onSubmit={handleSubmit}>
-          <div className="space-y-4 py-4">
+        <form onSubmit={handleSubmit} className="min-w-0">
+          <div className="min-w-0 space-y-4 py-4">
             <div>
               <Label htmlFor="workspace-name">Name</Label>
               <Input
@@ -179,6 +217,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
                     filters={providerFilterGroups}
                     activeFilters={{ provider: providerFilter }}
                     onFilterChange={(_group, value) => setProviderFilter(value)}
+                    orientation="stacked"
                   />
                   <div
                     className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-1"
@@ -226,6 +265,45 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               )}
             </div>
 
+            {duplicateWorkspace && !duplicateAcknowledged && (
+              <div
+                className="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
+                data-testid="create-workspace-duplicate-warning"
+              >
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="min-w-0 space-y-2">
+                  <p>
+                    You already have a workspace with this exact set of data
+                    sources:{" "}
+                    <span className="font-medium">
+                      {duplicateWorkspace.display_name || duplicateWorkspace.name}
+                    </span>
+                    .
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={goToExistingWorkspace}
+                      data-testid="create-workspace-duplicate-goto"
+                    >
+                      Go to that workspace
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setDuplicateAcknowledged(true)}
+                      data-testid="create-workspace-duplicate-continue"
+                    >
+                      Create anyway
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {error && <p className="text-sm text-destructive">{error}</p>}
           </div>
           <DialogFooter>
@@ -234,7 +312,11 @@ export function CreateWorkspaceModal({ onClose }: Props) {
             </Button>
             <Button
               type="submit"
-              disabled={!name.trim() || loading}
+              disabled={
+                !name.trim() ||
+                loading ||
+                (!!duplicateWorkspace && !duplicateAcknowledged)
+              }
               data-testid="create-workspace-submit"
             >
               {loading ? "Creating…" : "Create Workspace"}
