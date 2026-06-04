@@ -60,8 +60,8 @@ def resolve_credential(membership, team_id: str | None = None) -> dict | None:
     Args:
         membership: The TenantMembership to resolve
         team_id: Optional team_id for multi-credential lookups. If specified and not
-                 found, returns None (fail closed). If not provided, uses OAuth credential
-                 if available, else falls back to first API key.
+                 found, returns None (fail closed). If not provided, prefers OAuth
+                 credential; returns None if no OAuth credential exists.
 
     Returns a dict with keys ``type`` (``"api_key"`` or ``"oauth"``) and
     ``value`` (the decrypted key or OAuth token string), or ``None`` if no
@@ -139,11 +139,6 @@ async def aresolve_credential(membership, team_id: str | None = None) -> dict | 
             credential_type=TenantCredential.OAUTH,
             team_id="",
         ).afirst()
-        if not cred_obj:
-            # Fallback to first available credential
-            cred_obj = await TenantCredential.objects.filter(
-                tenant_membership=membership
-            ).afirst()
 
     if not cred_obj:
         return None
