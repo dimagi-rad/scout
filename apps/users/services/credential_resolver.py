@@ -78,16 +78,23 @@ def resolve_credential(membership, team_id: str | None = None) -> dict | None:
             )
         else:
             # No team_id specified: prefer OAuth (team_id="", credential_type=OAUTH)
-            cred_obj = TenantCredential.objects.get(
-                tenant_membership=membership,
-                credential_type=TenantCredential.OAUTH,
-                team_id="",
-            )
+            try:
+                cred_obj = TenantCredential.objects.get(
+                    tenant_membership=membership,
+                    credential_type=TenantCredential.OAUTH,
+                    team_id="",
+                )
+            except TenantCredential.DoesNotExist:
+                # No OAuth found, fall back to first API_KEY credential
+                cred_obj = TenantCredential.objects.filter(
+                    tenant_membership=membership,
+                    credential_type=TenantCredential.API_KEY,
+                ).first()
     except TenantCredential.DoesNotExist:
         if team_id is not None:
-            # Requested team_id was not found - return None
+            # Requested team_id was not found - return None (fail closed)
             return None
-        # No OAuth found, return None (don't fallback to arbitrary credential)
+        # Should not reach here (handled in the else clause above)
         return None
 
     if cred_obj.credential_type == TenantCredential.API_KEY:
@@ -139,6 +146,13 @@ async def aresolve_credential(membership, team_id: str | None = None) -> dict | 
             credential_type=TenantCredential.OAUTH,
             team_id="",
         ).afirst()
+        if not cred_obj:
+            # No OAuth found, fall back to first available API_KEY credential
+            # This allows single-credential workflows (no OAuth) to still work
+            cred_obj = await TenantCredential.objects.filter(
+                tenant_membership=membership,
+                credential_type=TenantCredential.API_KEY,
+            ).afirst()
 
     if not cred_obj:
         return None
