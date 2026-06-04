@@ -30,7 +30,8 @@ export function Sidebar() {
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
   const { jobsByThreadId, recentlyCompletedThreadIds } = useWorkspaceJobs()
   const location = useLocation()
-  const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
+  const isEmbed = location.pathname.startsWith("/embed")
+  const pathPrefix = isEmbed ? "/embed" : ""
 
   // Fetch domains on mount
   useEffect(() => {
@@ -61,11 +62,14 @@ export function Sidebar() {
         </Link>
       </div>
 
-      {/* Workspace Selector */}
-      <div className="border-b p-4">
-        <label className="text-xs font-medium text-muted-foreground">Workspace</label>
-        <WorkspaceSwitcher />
-      </div>
+      {/* Workspace Selector — only in embed mode, which has no TopBar.
+          Outside embed, the workspace switcher lives in the top-right TopBar. */}
+      {isEmbed && (
+        <div className="border-b p-4">
+          <label className="text-xs font-medium text-muted-foreground">Workspace</label>
+          <WorkspaceSwitcher />
+        </div>
+      )}
 
       {/* Navigation */}
       <nav className="space-y-1 p-4">
