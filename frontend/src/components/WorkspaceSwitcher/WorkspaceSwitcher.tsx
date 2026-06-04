@@ -42,6 +42,7 @@ interface RowProps {
   highlighted: boolean
   onSelect: () => void
   onHover: () => void
+  onSettings: () => void
 }
 
 /**
@@ -86,9 +87,18 @@ function DataIndicator({ ws }: { ws: TenantMembership }) {
   )
 }
 
-function WorkspaceRow({ ws, active, highlighted, onSelect, onHover }: RowProps) {
+function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }: RowProps) {
   const { Icon } = getProviderMeta(firstProvider(ws))
   const dataState = workspaceDataState(ws)
+
+  // The gear lives inside the row button, so it can't itself be a <button>
+  // (no nested interactive elements). A role="button" span with keyboard
+  // handling keeps the markup valid while staying accessible.
+  function handleSettings(e: React.MouseEvent | React.KeyboardEvent) {
+    e.stopPropagation()
+    e.preventDefault()
+    onSettings()
+  }
 
   return (
     <button
@@ -107,6 +117,20 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover }: RowProps) 
       <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
       <span className="flex-1 truncate">{ws.display_name}</span>
       <DataIndicator ws={ws} />
+      <span
+        role="button"
+        tabIndex={0}
+        data-testid={`workspace-switcher-settings-${ws.id}`}
+        aria-label={`Manage ${ws.display_name}`}
+        title="Manage workspace"
+        onClick={handleSettings}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") handleSettings(e)
+        }}
+        className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-sm text-muted-foreground/60 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <Settings className="h-3.5 w-3.5" aria-hidden />
+      </span>
       {active ? (
         <Check className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
       ) : (
@@ -226,6 +250,11 @@ export function WorkspaceSwitcher() {
     setActiveDomain(ws.id)
     newThread()
     close()
+  }
+
+  function manage(ws: TenantMembership) {
+    close()
+    navigate(`${pathPrefix}/workspaces/${ws.id}`)
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -419,6 +448,7 @@ export function WorkspaceSwitcher() {
                         highlighted={index === highlight}
                         onSelect={() => select(ws)}
                         onHover={() => setHighlight(index)}
+                        onSettings={() => manage(ws)}
                       />
                     )
                   })}
