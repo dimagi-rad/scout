@@ -66,8 +66,8 @@ async def _extract_ocs_team_info(api_key: str) -> tuple[str | None, str]:
                     team_id = str(team_data["id"])
                     team_name = team_data.get("name", "")
                     return team_id, team_name
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to extract OCS team info from API: %s", e)
     return None, ""
 
 
