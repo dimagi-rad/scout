@@ -55,8 +55,8 @@ export function Sidebar() {
 
   return (
     <aside className="flex h-screen w-64 flex-col border-r bg-background">
-      {/* Logo */}
-      <div className="flex h-14 items-center border-b px-4">
+      {/* Logo — height matches the TopBar (h-11) so their bottom borders align */}
+      <div className="flex h-11 items-center border-b px-4">
         <Link to={`${pathPrefix}/`} className="flex items-center gap-2 font-semibold">
           <span className="text-lg">Scout</span>
         </Link>
