@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react"
-import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Copy, Check, Users, Globe, Eye } from "lucide-react"
+import { ArrowLeft, Save, Play, Loader2, Clock, CheckCircle, XCircle, AlertCircle, Users, Eye } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -60,36 +60,6 @@ function getStatusIcon(status: RecipeRun["status"]) {
     default:
       return <AlertCircle className="h-4 w-4 text-muted-foreground" />
   }
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = useCallback(async () => {
-    await navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }, [text])
-
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={handleCopy}
-      data-testid="copy-share-link"
-    >
-      {copied ? (
-        <Check className="mr-1 h-3 w-3" />
-      ) : (
-        <Copy className="mr-1 h-3 w-3" />
-      )}
-      {copied ? "Copied" : "Copy"}
-    </Button>
-  )
-}
-
-function getPublicUrl(path: string, token: string): string {
-  return `${window.location.origin}${path}${token}/`
 }
 
 export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun, onViewRun }: RecipeDetailProps) {
@@ -371,26 +341,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
                             <Users className="h-3 w-3 text-muted-foreground" />
                             <span className="text-muted-foreground">Project</span>
                           </label>
-                          <label className="flex items-center gap-1.5 cursor-pointer text-xs">
-                            <input
-                              type="checkbox"
-                              checked={run.is_public}
-                              onChange={(e) =>
-                                onUpdateRun(run.id, { is_public: e.target.checked })
-                              }
-                              className="h-3.5 w-3.5 rounded border-gray-300"
-                            />
-                            <Globe className="h-3 w-3 text-muted-foreground" />
-                            <span className="text-muted-foreground">Public</span>
-                          </label>
-                          {run.is_public && run.share_token && (
-                            <CopyButton
-                              text={getPublicUrl(
-                                "/shared/runs/",
-                                run.share_token,
-                              )}
-                            />
-                          )}
                         </div>
                       </div>
                     ))}

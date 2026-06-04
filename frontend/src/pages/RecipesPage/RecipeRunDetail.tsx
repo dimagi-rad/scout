@@ -1,4 +1,3 @@
-import { useState, useCallback } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import {
@@ -8,11 +7,7 @@ import {
   Loader2,
   Clock,
   AlertCircle,
-  Copy,
-  Check,
-  Link,
   Users,
-  Globe,
   FileBarChart,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -67,36 +62,6 @@ function getStatusBadgeClass(status: RecipeRun["status"]): string {
     case "pending":
       return "bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400"
   }
-}
-
-function getPublicUrl(path: string, token: string): string {
-  return `${window.location.origin}${path}${token}/`
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-
-  const handleCopy = useCallback(async () => {
-    await navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }, [text])
-
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={handleCopy}
-      data-testid="copy-share-link"
-    >
-      {copied ? (
-        <Check className="mr-1 h-3 w-3" />
-      ) : (
-        <Copy className="mr-1 h-3 w-3" />
-      )}
-      {copied ? "Copied" : "Copy"}
-    </Button>
-  )
 }
 
 export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunDetailProps) {
@@ -248,35 +213,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
             <Users className="h-4 w-4 text-muted-foreground" />
             <span>Share with project</span>
           </label>
-          <label
-            className="flex items-center gap-1.5 cursor-pointer text-sm"
-            data-testid="run-sharing-public"
-          >
-            <input
-              type="checkbox"
-              checked={run.is_public}
-              onChange={(e) =>
-                onUpdateRun(run.id, { is_public: e.target.checked })
-              }
-              className="h-4 w-4 rounded border-gray-300"
-            />
-            <Globe className="h-4 w-4 text-muted-foreground" />
-            <span>Public link</span>
-          </label>
-          {run.is_public && run.share_token && (
-            <div
-              className="flex items-center gap-2 rounded-md border bg-muted/50 p-2"
-              data-testid="run-share-url"
-            >
-              <Link className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <code className="flex-1 truncate text-xs">
-                {getPublicUrl("/shared/runs/", run.share_token)}
-              </code>
-              <CopyButton
-                text={getPublicUrl("/shared/runs/", run.share_token)}
-              />
-            </div>
-          )}
         </CardContent>
       </Card>
     </div>
