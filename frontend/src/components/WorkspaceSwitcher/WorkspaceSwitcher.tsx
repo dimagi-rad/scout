@@ -6,6 +6,7 @@ import { workspaceDataState, workspaceHasData } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds, recordWorkspaceUse } from "@/lib/recentWorkspaces"
+import { workspacePath } from "@/lib/workspacePath"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -268,13 +269,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       location.pathname.startsWith(wsDetailPrefix) &&
       location.pathname.length > wsDetailPrefix.length
     ) {
-      navigate(`${pathPrefix}/workspaces/${ws.id}`)
+      navigate(`${pathPrefix}${workspacePath(ws)}`)
     }
   }
 
   function manage(ws: TenantMembership) {
     close()
-    navigate(`${pathPrefix}/workspaces/${ws.id}`)
+    navigate(`${pathPrefix}${workspacePath(ws)}`)
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -374,7 +375,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 title="Workspace settings"
                 onClick={(e) => {
                   e.stopPropagation()
-                  navigate(`${pathPrefix}/workspaces/${activeWorkspace.id}`)
+                  navigate(`${pathPrefix}${workspacePath(activeWorkspace)}`)
                 }}
                 className="ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >

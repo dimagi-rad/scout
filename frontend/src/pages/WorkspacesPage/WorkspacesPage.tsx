@@ -5,6 +5,7 @@ import type { TenantMembership } from "@/store/domainSlice"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { workspacePath } from "@/lib/workspacePath"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Users, ChevronRight } from "lucide-react"
@@ -227,7 +228,7 @@ export function WorkspacesPage() {
                 <WorkspaceRow
                   key={ws.id}
                   workspace={ws}
-                  onClick={() => navigate(`/workspaces/${ws.id}`)}
+                  onClick={() => navigate(workspacePath(ws))}
                 />
               ))}
             </div>

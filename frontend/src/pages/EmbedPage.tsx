@@ -37,6 +37,8 @@ const embedRouter = createBrowserRouter([
       { path: "settings/connections", element: <ConnectionsPage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
+      // Pretty URL: cosmetic slug + UUID. Resolution is always by :workspaceId.
+      { path: "workspaces/:slug/:workspaceId", element: <WorkspaceDetailPage /> },
       { path: "*", element: <Navigate to="/embed" replace /> },
     ],
   },

@@ -31,6 +31,10 @@ export const router = createBrowserRouter([
       { path: "settings/connections", element: <ConnectionsPage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
+      // Pretty URL: cosmetic slug + UUID. Resolution is always by :workspaceId;
+      // the :slug segment is ignored for lookup. Bare route above stays for
+      // back-compat with old `/workspaces/<uuid>` links.
+      { path: "workspaces/:slug/:workspaceId", element: <WorkspaceDetailPage /> },
       { path: "*", element: <Navigate to="/" replace /> },
     ],
   },

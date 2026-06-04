@@ -21,6 +21,7 @@ import {
   type FilterGroup,
 } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { workspacePath } from "@/lib/workspacePath"
 
 interface Props {
   onClose: () => void
@@ -138,7 +139,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
     if (!duplicateWorkspace) return
     setActiveDomain(duplicateWorkspace.id)
     onClose()
-    navigate(`/workspaces/${duplicateWorkspace.id}`)
+    navigate(workspacePath(duplicateWorkspace))
   }
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
@@ -154,7 +155,7 @@ export function CreateWorkspaceModal({ onClose }: Props) {
       await fetchDomains()
       setActiveDomain(workspace.id)
       onClose()
-      navigate(`/workspaces/${workspace.id}`)
+      navigate(workspacePath(workspace))
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to create workspace")
     } finally {
