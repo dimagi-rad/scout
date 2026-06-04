@@ -4,6 +4,7 @@ import { useAppStore } from "@/store/store"
 import type { TenantMembership } from "@/store/domainSlice"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
+import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Users, ChevronRight } from "lucide-react"
@@ -46,13 +47,15 @@ function TenantList({ tenants }: { tenants: { id: string; tenant_name: string; p
 
 function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onClick: () => void }) {
   const tenants = workspace.tenants ?? []
+  const { Icon } = getProviderMeta(tenants[0]?.provider)
 
   return (
     <button
       onClick={onClick}
       data-testid={`workspace-row-${workspace.id}`}
-      className="flex w-full items-center justify-between rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent"
+      className="flex w-full items-center justify-between gap-3 rounded-lg border bg-card px-4 py-3 text-left transition-colors hover:bg-accent"
     >
+      <Icon className="h-5 w-5 shrink-0" aria-hidden />
       <div className="min-w-0 flex-1">
         <div className="font-medium">{workspace.display_name}</div>
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
@@ -127,12 +130,19 @@ export function WorkspacesPage() {
         providerCounts.set(p, (providerCounts.get(p) ?? 0) + 1)
       }
     }
-    if (providerCounts.size > 1) {
+    // Show the provider filter whenever any workspace carries a provider, so
+    // users can filter by data source even with a single provider — matching
+    // the segmented "All / <provider>" control in the New Workspace modal.
+    if (providerCounts.size > 0) {
       groups.push({
         name: "provider",
         options: [...providerCounts.entries()]
           .sort(([a], [b]) => a.localeCompare(b))
-          .map(([value, count]) => ({ value, label: value, count })),
+          .map(([value, count]) => ({
+            value,
+            label: getProviderMeta(value).label,
+            count,
+          })),
       })
     }
 
