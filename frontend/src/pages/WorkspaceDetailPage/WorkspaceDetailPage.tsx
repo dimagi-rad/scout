@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react"
-import { Link, useParams, useNavigate } from "react-router-dom"
+import { Link, useParams, useNavigate, useLocation } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -23,6 +23,7 @@ import { ChevronLeft, Plus, RefreshCw } from "lucide-react"
 import { RoleBadge } from "@/components/RoleBadge"
 import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
 
 // ── Members Tab ─────────────────────────────────────────────────────────────
 
@@ -933,11 +934,12 @@ function WorkspaceProviderType({ workspaceId }: { workspaceId: string }) {
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export function WorkspaceDetailPage() {
-  const { workspaceId } = useParams<{ workspaceId: string }>()
+  const { workspaceId, slug } = useParams<{ workspaceId: string; slug?: string }>()
   const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  const location = useLocation()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
 
@@ -973,6 +975,20 @@ export function WorkspaceDetailPage() {
     }
     void fetchWorkspace()
   }, [workspaceId])
+
+  // Canonicalize the address bar to the pretty `/workspaces/<slug>/<uuid>` form
+  // once the display name is loaded. Resolution is always by UUID, so this is
+  // purely cosmetic: old bare `/workspaces/<uuid>` links and stale slugs (e.g.
+  // after a rename) silently rewrite to the current slug. Guarded to only fire
+  // when the workspace is loaded AND the URL slug actually differs, so it can't
+  // loop. Preserves the embed prefix the same way the switcher does.
+  useEffect(() => {
+    if (!workspace || workspace.id !== workspaceId) return
+    const desiredSlug = slugifyWorkspaceName(workspace.display_name)
+    if (!desiredSlug || slug === desiredSlug) return
+    const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
+    navigate(`${pathPrefix}${workspacePath(workspace)}`, { replace: true })
+  }, [workspace, workspaceId, slug, location.pathname, navigate])
 
   if (loading) return <div className="p-8 text-center text-muted-foreground">Loading…</div>
   if (error || !workspace) return <div className="p-8 text-center text-destructive">{error ?? "Workspace not found"}</div>
