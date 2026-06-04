@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from django.db import IntegrityError
+from django.utils import timezone
 
+from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantCredential, TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential
 
@@ -51,8 +55,6 @@ async def test_multiple_api_key_credentials_per_membership(user):
 @pytest.mark.django_db(transaction=True)
 async def test_resolve_credential_with_team_id(user, mocker):
     """Test credential resolution with team_id parameter."""
-    from apps.users.adapters import encrypt_credential
-
     # Create a tenant
     tenant = await Tenant.objects.acreate(
         provider="ocs",
@@ -122,8 +124,6 @@ async def test_oauth_credential_unique_per_membership(user):
 
     # Attempting to add another OAuth credential with team_id=NULL should fail
     # due to unique constraint
-    from django.db import IntegrityError
-
     with pytest.raises(IntegrityError):
         await TenantCredential.objects.acreate(
             tenant_membership=tm,
@@ -136,8 +136,6 @@ async def test_oauth_credential_unique_per_membership(user):
 @pytest.mark.django_db(transaction=True)
 async def test_mixed_oauth_and_api_key_credentials(user, mocker):
     """Test that OAuth and API-key credentials can coexist for same membership."""
-    from apps.users.adapters import encrypt_credential
-
     # Create a tenant
     tenant = await Tenant.objects.acreate(
         provider="ocs",
@@ -170,11 +168,6 @@ async def test_mixed_oauth_and_api_key_credentials(user, mocker):
     assert len(creds) == 2
 
     # Mock the SocialToken lookup for OAuth resolution
-    from datetime import timedelta
-    from unittest.mock import AsyncMock, MagicMock
-
-    from django.utils import timezone
-
     # Create a token that doesn't need refresh
     future_time = timezone.now() + timedelta(hours=10)
     mock_token = MagicMock(token="oauth_token_value", expires_at=future_time)
