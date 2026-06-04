@@ -140,7 +140,18 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
   )
 }
 
-export function WorkspaceSwitcher() {
+interface WorkspaceSwitcherProps {
+  /**
+   * Visual treatment of the popover trigger.
+   * - "sidebar" (default): the full-width bordered button used in the sidebar.
+   * - "topbar": a borderless breadcrumb-style chip (brand icon + name + chevron)
+   *   with an inline settings gear, for the global top bar. Reads like a label,
+   *   not a button, but still opens the switcher on click.
+   */
+  variant?: "sidebar" | "topbar"
+}
+
+export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProps = {}) {
   const navigate = useNavigate()
   const location = useLocation()
   const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
@@ -325,27 +336,70 @@ export function WorkspaceSwitcher() {
           }
         }}
       >
-        <PopoverTrigger asChild>
-          <Button
-            variant="outline"
-            className="mt-1 w-full justify-between font-normal"
-            data-testid="domain-selector"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              {activeWorkspace ? (
-                (() => {
-                  const { Icon } = getProviderMeta(firstProvider(activeWorkspace))
-                  return <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                })()
-              ) : null}
-              <span className="truncate">
-                {activeWorkspace?.display_name ?? "Select workspace"}
+        {variant === "topbar" ? (
+          <div className="flex min-w-0 items-center" data-testid="topbar-workspace">
+            <PopoverTrigger asChild>
+              <button
+                type="button"
+                data-testid="domain-selector"
+                aria-label="Switch workspace"
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-medium text-foreground transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {activeWorkspace ? (
+                  (() => {
+                    const { Icon } = getProviderMeta(firstProvider(activeWorkspace))
+                    return <Icon className="h-4 w-4 shrink-0" aria-hidden />
+                  })()
+                ) : null}
+                <span className="truncate">
+                  {activeWorkspace?.display_name ?? "Select workspace"}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" aria-hidden />
+              </button>
+            </PopoverTrigger>
+            {activeWorkspace && (
+              <button
+                type="button"
+                data-testid="topbar-workspace-settings"
+                aria-label={`Manage ${activeWorkspace.display_name}`}
+                title="Workspace settings"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  navigate(`${pathPrefix}/workspaces/${activeWorkspace.id}`)
+                }}
+                className="ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <Settings className="h-4 w-4" aria-hidden />
+              </button>
+            )}
+          </div>
+        ) : (
+          <PopoverTrigger asChild>
+            <Button
+              variant="outline"
+              className="mt-1 w-full justify-between font-normal"
+              data-testid="domain-selector"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                {activeWorkspace ? (
+                  (() => {
+                    const { Icon } = getProviderMeta(firstProvider(activeWorkspace))
+                    return <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                  })()
+                ) : null}
+                <span className="truncate">
+                  {activeWorkspace?.display_name ?? "Select workspace"}
+                </span>
               </span>
-            </span>
-            <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent className="w-[22rem] p-0" align="start" onKeyDown={onKeyDown}>
+              <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+            </Button>
+          </PopoverTrigger>
+        )}
+        <PopoverContent
+          className="w-[22rem] p-0"
+          align={variant === "topbar" ? "end" : "start"}
+          onKeyDown={onKeyDown}
+        >
           {/* Search */}
           <div className="border-b p-2">
             <div className="relative">
