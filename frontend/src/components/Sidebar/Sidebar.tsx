@@ -13,6 +13,7 @@ import {
 } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
+import { workspacePath } from "@/lib/workspacePath"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
@@ -21,6 +22,7 @@ export function Sidebar() {
   const navigate = useNavigate()
   const user = useAppStore((s) => s.user)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const domains = useAppStore((s) => s.domains)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const logout = useAppStore((s) => s.authActions.logout)
   const threadId = useAppStore((s) => s.threadId)
@@ -32,6 +34,14 @@ export function Sidebar() {
   const location = useLocation()
   const isEmbed = location.pathname.startsWith("/embed")
   const pathPrefix = isEmbed ? "/embed" : ""
+
+  // Pretty chat base for the active workspace: `${pathPrefix}/workspaces/<slug>/<uuid>/chat`.
+  // Falls back to the bare `/workspaces/<uuid>/chat` until the workspace is found
+  // in `domains` (workspacePath degrades to bare when no name is available).
+  const activeWorkspace = domains.find((d) => d.id === activeDomainId)
+  const chatBase = activeDomainId
+    ? `${pathPrefix}${workspacePath(activeWorkspace ?? { id: activeDomainId })}/chat`
+    : null
 
   // Fetch domains on mount
   useEffect(() => {
@@ -74,10 +84,10 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="space-y-1 p-4">
         <NavItem
-          to={activeDomainId ? `${pathPrefix}/workspaces/${activeDomainId}/chat` : `${pathPrefix}/`}
+          to={chatBase ?? `${pathPrefix}/`}
           icon={MessageSquare}
           label="Chat"
-          isActivePath={(p) => /\/workspaces\/[^/]+\/chat(\/|$)/.test(p)}
+          isActivePath={(p) => /\/workspaces\/(?:[^/]+\/)?[^/]+\/chat(\/|$)/.test(p)}
         />
         <NavItem to={`${pathPrefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
         <NavItem to={`${pathPrefix}/knowledge`} icon={BookOpen} label="Knowledge" />
@@ -97,11 +107,7 @@ export function Sidebar() {
             className="h-6 w-6"
             onClick={() => {
               newThread()
-              navigate(
-                activeDomainId
-                  ? `${pathPrefix}/workspaces/${activeDomainId}/chat`
-                  : `${pathPrefix}/chat`,
-              )
+              navigate(chatBase ?? `${pathPrefix}/chat`)
             }}
             data-testid="sidebar-new-chat"
           >
@@ -121,11 +127,7 @@ export function Sidebar() {
                 key={thread.id}
                 onClick={() => {
                   selectThread(thread.id)
-                  navigate(
-                    activeDomainId
-                      ? `${pathPrefix}/workspaces/${activeDomainId}/chat/${thread.id}`
-                      : `${pathPrefix}/chat`,
-                  )
+                  navigate(chatBase ? `${chatBase}/${thread.id}` : `${pathPrefix}/chat`)
                 }}
                 data-testid={`sidebar-thread-${thread.id}`}
                 className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${

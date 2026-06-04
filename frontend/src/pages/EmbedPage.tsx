@@ -26,6 +26,11 @@ const embedRouter = createBrowserRouter([
       { path: "chat", element: <ChatRedirect /> },
       { path: "workspaces/:workspaceId/chat", element: <ChatRoute /> },
       { path: "workspaces/:workspaceId/chat/:threadId", element: <ChatRoute /> },
+      // Pretty chat URL: cosmetic slug + UUID. The uuid keeps the param name
+      // `:workspaceId`; `:slug` is decorative and ignored for lookup. Bare
+      // routes above stay for back-compat.
+      { path: "workspaces/:slug/:workspaceId/chat", element: <ChatRoute /> },
+      { path: "workspaces/:slug/:workspaceId/chat/:threadId", element: <ChatRoute /> },
       { path: "artifacts", element: <ArtifactsPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },
