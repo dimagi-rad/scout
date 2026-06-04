@@ -97,6 +97,9 @@ def resolve_credential(membership, team_id: str | None = None) -> dict | None:
         # Should not reach here (handled in the else clause above)
         return None
 
+    if cred_obj is None:
+        return None
+
     if cred_obj.credential_type == TenantCredential.API_KEY:
         try:
             decrypted = decrypt_credential(cred_obj.encrypted_credential)
