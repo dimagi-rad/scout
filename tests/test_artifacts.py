@@ -214,6 +214,21 @@ class TestArtifactSandboxView:
         assert "React" in content or "react" in content
         assert "root" in content
 
+    def test_sandbox_supports_print_to_pdf(self, authenticated_client, artifact, workspace):
+        """Sandbox HTML wires up print-to-PDF: print CSS and a scout-print listener."""
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+
+        # Print-optimized styling is present.
+        assert "@media print" in content
+        # Parent frame triggers print via a postMessage handler scoped to origin.
+        assert "scout-print" in content
+        assert "window.print()" in content
+
     def test_sandbox_csp_headers(self, authenticated_client, artifact, workspace):
         """Test that CSP headers are set correctly for security."""
         response = authenticated_client.get(

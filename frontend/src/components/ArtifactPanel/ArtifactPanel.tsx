@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useAppStore } from "@/store/store"
-import { X, Eye, Database, RefreshCw, Loader2 } from "lucide-react"
+import { X, Eye, Database, RefreshCw, Loader2, FileDown } from "lucide-react"
 import { api } from "@/api/client"
 
 interface QueryResult {
@@ -37,6 +37,17 @@ export function ArtifactPanel() {
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
+  const iframeRef = useRef<HTMLIFrameElement>(null)
+
+  const handleExportPdf = useCallback(() => {
+    // Trigger print inside the sandboxed iframe so the print job is scoped to
+    // the artifact content, not the surrounding app. The sandbox HTML listens
+    // for this message and calls window.print() (browser "Save as PDF").
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: "scout-print" },
+      window.location.origin,
+    )
+  }, [])
 
   const fetchQueryData = useCallback(async (id: string) => {
     if (!activeDomainId) return
@@ -151,22 +162,36 @@ export function ArtifactPanel() {
                 Data
               </button>
             </div>
-            <button
-              onClick={closeArtifact}
-              className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Close"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={handleExportPdf}
+                disabled={activeTab !== "view"}
+                className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent transition-colors"
+                title={activeTab === "view" ? "Export to PDF" : "Switch to the View tab to export"}
+                data-testid="artifact-export-pdf"
+              >
+                <FileDown className="h-3.5 w-3.5" />
+                Export PDF
+              </button>
+              <button
+                onClick={closeArtifact}
+                className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Close"
+                data-testid="artifact-close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           {/* View tab: iframe */}
           {activeTab === "view" && (
             <iframe
+              ref={iframeRef}
               key={artifactId}
               src={activeDomainId ? `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/` : ""}
               className="flex-1 w-full"
-              sandbox="allow-scripts allow-same-origin"
+              sandbox="allow-scripts allow-same-origin allow-modals"
               title="Artifact"
             />
           )}
