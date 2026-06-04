@@ -195,8 +195,8 @@ class TenantCredential(models.Model):
     team_id = models.CharField(
         max_length=255,
         blank=True,
-        null=True,
-        help_text="OCS team ID or other provider-specific team identifier. NULL for OAuth.",
+        default="",
+        help_text="OCS team ID or other provider-specific team identifier. Empty for OAuth.",
     )
     team_name = models.CharField(
         max_length=255,
@@ -211,7 +211,7 @@ class TenantCredential(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=["tenant_membership"],
-                condition=models.Q(credential_type="oauth", team_id__isnull=True),
+                condition=models.Q(credential_type="oauth", team_id=""),
                 name="unique_oauth_credential_per_membership",
             ),
         ]
