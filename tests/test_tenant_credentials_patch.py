@@ -26,6 +26,8 @@ def _make_ocs_membership(user):
 
 
 def test_patch_ocs_rotates_key(user):
+    from apps.users.models import TenantCredential
+
     tm = _make_ocs_membership(user)
     client = Client()
     client.force_login(user)
@@ -42,8 +44,11 @@ def test_patch_ocs_rotates_key(user):
     assert resp.status_code == 200
     from apps.users.adapters import decrypt_credential
 
-    tm.credential.refresh_from_db()
-    assert decrypt_credential(tm.credential.encrypted_credential) == "new_ocs_key"
+    # Get the first credential from the membership
+    cred = tm.credentials.first()
+    assert cred is not None
+    cred.refresh_from_db()
+    assert decrypt_credential(cred.encrypted_credential) == "new_ocs_key"
 
 
 def test_patch_ocs_rejects_invalid_key(user):

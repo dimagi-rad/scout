@@ -103,22 +103,44 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
     return memberships
 
 
-async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership]:
+async def resolve_ocs_chatbots(user, access_token: str, team_id: str | None = None) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and upsert TenantMembership records.
 
     OCS tokens are team-scoped — every experiment returned belongs to the team
     the user selected during OAuth consent.
+
+    Args:
+        user: The user to associate memberships with
+        access_token: The OCS OAuth access token
+        team_id: Optional team identifier. If not provided, a team context is fetched
+                 from the OCS API (e.g., the workspace the token is scoped to).
     """
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
     url: str | None = f"{base_url}/api/experiments/"
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # If team_id is not provided, try to fetch it from OCS team/workspace endpoint
+    if team_id is None:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                # Try to fetch workspace/team context from OCS
+                team_resp = await client.get(f"{base_url}/api/teams/", headers=headers)
+                if team_resp.status_code == 200:
+                    team_data = team_resp.json()
+                    # OCS may return a list; if so, use the first team
+                    if isinstance(team_data, list) and team_data:
+                        team_id = str(team_data[0].get("id"))
+                    elif isinstance(team_data, dict) and "id" in team_data:
+                        team_id = str(team_data["id"])
+        except Exception:
+            # If team endpoint doesn't exist or fails, continue without team_id
+            logger.debug("Failed to fetch OCS team context; continuing without team_id")
+            team_id = None
 
     experiments: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
+            resp = await client.get(url, headers=headers)
             if resp.status_code in (401, 403):
                 raise OCSAuthError(
                     f"OCS returned {resp.status_code} — access token may have expired"
@@ -136,16 +158,19 @@ async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership
             defaults={"canonical_name": exp.get("name") or str(exp["id"])},
         )
         tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-        await TenantCredential.objects.aget_or_create(
+        # For OAuth, team_id is NULL; all OAuth credentials for a membership are unique
+        await TenantCredential.objects.aupdate_or_create(
             tenant_membership=tm,
+            team_id=None,  # OAuth credentials don't have team_id
             defaults={"credential_type": TenantCredential.OAUTH},
         )
         memberships.append(tm)
 
     logger.info(
-        "Resolved %d OCS chatbots for user %s",
+        "Resolved %d OCS chatbots for user %s (team_id: %s)",
         len(memberships),
         user.email,
+        team_id,
     )
     return memberships
 

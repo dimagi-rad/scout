@@ -167,6 +167,10 @@ class TenantCredential(models.Model):
 
     For credential_type == API_KEY: encrypted_credential holds a Fernet-encrypted
     opaque string. Format is provider-specific, e.g. "username:apikey" for CommCare.
+
+    team_id and team_name are used to distinguish multiple API-key credentials
+    for the same tenant_membership (multi-team support for OCS and other providers).
+    OAuth credentials have team_id=NULL (only one OAuth per membership).
     """
 
     OAUTH = "oauth"
@@ -177,10 +181,10 @@ class TenantCredential(models.Model):
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant_membership = models.OneToOneField(
+    tenant_membership = models.ForeignKey(
         TenantMembership,
         on_delete=models.CASCADE,
-        related_name="credential",
+        related_name="credentials",
     )
     credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     encrypted_credential = models.CharField(
@@ -188,11 +192,30 @@ class TenantCredential(models.Model):
         blank=True,
         help_text="Fernet-encrypted opaque string. Empty for OAuth type.",
     )
+    team_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="OCS team ID or other provider-specific team identifier. NULL for OAuth.",
+    )
+    team_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Display name for the team (e.g., OCS workspace name).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_membership"],
+                condition=models.Q(credential_type="oauth", team_id__isnull=True),
+                name="unique_oauth_credential_per_membership",
+            ),
+        ]
 
     def __str__(self):
-        return f"{self.tenant_membership} ({self.credential_type})"
+        team_info = f" (team {self.team_id})" if self.team_id else ""
+        return f"{self.tenant_membership} ({self.credential_type}){team_info}"

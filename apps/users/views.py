@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 
+import httpx
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.cache import cache
 from django.db import transaction
 from django.http import JsonResponse
@@ -39,11 +41,56 @@ async def _aget_token_value(user, provider: str) -> str | None:
     return token.token if token else None
 
 
+async def _extract_ocs_team_info(api_key: str) -> tuple[str | None, str]:
+    """Extract OCS team ID and name from an API key by querying OCS API.
+
+    Returns (team_id, team_name) where team_id is the workspace/team ID from
+    OCS and team_name is the display name. Returns (None, "") if unable to fetch.
+    """
+    base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Try to fetch workspace/team context from OCS
+            resp = await client.get(
+                f"{base_url}/api/teams/",
+                headers={"X-api-key": api_key},
+            )
+            if resp.status_code == 200:
+                team_data = resp.json()
+                # OCS may return a list; if so, use the first team
+                if isinstance(team_data, list) and team_data:
+                    team_id = str(team_data[0].get("id"))
+                    team_name = team_data[0].get("name", "")
+                    return team_id, team_name
+                elif isinstance(team_data, dict) and "id" in team_data:
+                    team_id = str(team_data["id"])
+                    team_name = team_data.get("name", "")
+                    return team_id, team_name
+    except Exception:
+        pass
+    return None, ""
+
+
 # Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
 # Django doesn't yet expose async-native transaction support, so this is the
 # sanctioned bridge for transactional ORM writes from async views.
 @sync_to_async
-def _persist_api_key_memberships(user, provider, descriptors, encrypted):
+def _persist_api_key_memberships(
+    user, provider, descriptors, encrypted, team_id: str | None = None, team_name: str = ""
+):
+    """Persist API key credentials for multiple tenants.
+
+    For multi-team providers like OCS, team_id is used to distinguish multiple
+    API-key credentials per tenant_membership (one per team).
+
+    Args:
+        user: The user to associate memberships with
+        provider: The provider (e.g., "ocs", "commcare")
+        descriptors: List of TenantDescriptor objects with external_id and canonical_name
+        encrypted: The encrypted credential string
+        team_id: Optional team identifier (for multi-credential support)
+        team_name: Optional team display name
+    """
     rows = []
     with transaction.atomic():
         for desc in descriptors:
@@ -53,11 +100,20 @@ def _persist_api_key_memberships(user, provider, descriptors, encrypted):
                 defaults={"canonical_name": desc.canonical_name},
             )
             tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+
+            # For multi-team support (e.g., OCS with multiple workspaces),
+            # credentials are uniquely identified by (tenant_membership, team_id)
+            cred_query = {"tenant_membership": tm}
+            if team_id is not None:
+                cred_query["team_id"] = team_id
+
             TenantCredential.objects.update_or_create(
-                tenant_membership=tm,
+                **cred_query,
                 defaults={
                     "credential_type": TenantCredential.API_KEY,
                     "encrypted_credential": encrypted,
+                    "team_id": team_id,
+                    "team_name": team_name,
                 },
             )
             rows.append(
@@ -65,6 +121,8 @@ def _persist_api_key_memberships(user, provider, descriptors, encrypted):
                     "membership_id": str(tm.id),
                     "tenant_id": tenant.external_id,
                     "tenant_name": tenant.canonical_name,
+                    "team_id": team_id,
+                    "team_name": team_name,
                 }
             )
     return rows
@@ -186,17 +244,21 @@ async def tenant_credential_list_view(request):
         results = []
         async for tm in TenantMembership.objects.filter(
             user=user,
-            credential__isnull=False,
-        ).select_related("credential", "tenant"):
-            results.append(
-                {
-                    "membership_id": str(tm.id),
-                    "provider": tm.tenant.provider,
-                    "tenant_id": tm.tenant.external_id,
-                    "tenant_name": tm.tenant.canonical_name,
-                    "credential_type": tm.credential.credential_type,
-                }
-            )
+        ).select_related("tenant"):
+            # Each membership can have multiple credentials (for multi-team support)
+            async for cred in tm.credentials.all():
+                results.append(
+                    {
+                        "membership_id": str(tm.id),
+                        "credential_id": str(cred.id),
+                        "provider": tm.tenant.provider,
+                        "tenant_id": tm.tenant.external_id,
+                        "tenant_name": tm.tenant.canonical_name,
+                        "credential_type": cred.credential_type,
+                        "team_id": cred.team_id,
+                        "team_name": cred.team_name,
+                    }
+                )
         return JsonResponse(results, safe=False)
 
     # POST — create API-key-backed membership(s) via strategy registry
@@ -234,9 +296,18 @@ async def tenant_credential_list_view(request):
     except (KeyError, ValueError) as e:
         return JsonResponse({"error": str(e)}, status=500)
 
+    # For OCS, extract team information from the API key
+    team_id = None
+    team_name = ""
+    if provider == "ocs":
+        try:
+            team_id, team_name = await _extract_ocs_team_info(fields.get("api_key", ""))
+        except Exception:
+            logger.debug("Failed to extract OCS team info; continuing without team context")
+
     try:
         memberships_payload = await _persist_api_key_memberships(
-            user, provider, descriptors, encrypted
+            user, provider, descriptors, encrypted, team_id=team_id, team_name=team_name
         )
     except Exception as e:
         logger.exception("Failed to persist memberships for provider %s", provider)
@@ -247,17 +318,52 @@ async def tenant_credential_list_view(request):
 
 @require_http_methods(["DELETE", "PATCH"])
 @async_login_required
-async def tenant_credential_detail_view(request, membership_id):
-    """DELETE /api/auth/tenant-credentials/<membership_id>/ — remove a credential
-    PATCH  /api/auth/tenant-credentials/<membership_id>/ — update credential"""
+async def tenant_credential_detail_view(request, membership_id, credential_id=None):
+    """DELETE /api/auth/tenant-credentials/{credential_id}/ — remove a specific credential
+    PATCH  /api/auth/tenant-credentials/{credential_id}/ — update credential
+
+    For backward compat, if credential_id is not in URL, it's inferred from the body.
+    """
     user = request._authenticated_user
 
     if request.method == "DELETE":
-        try:
+        # Support both /tenant-credentials/{membership_id}/ (legacy) and
+        # /tenant-credentials/{credential_id}/ (new) URL patterns
+        cred_to_delete = None
+        if credential_id:
+            try:
+                cred = await TenantCredential.objects.select_related(
+                    "tenant_membership"
+                ).aget(
+                    id=credential_id,
+                    tenant_membership__user=user,
+                )
+                cred_to_delete = cred
+            except TenantCredential.DoesNotExist:
+                return JsonResponse({"error": "Not found"}, status=404)
+        else:
+            # Legacy: membership_id is actually the credential ID or membership ID
+            # Try credential first, then fall back to membership
+            try:
+                cred = await TenantCredential.objects.aget(
+                    id=membership_id,
+                    tenant_membership__user=user,
+                )
+                cred_to_delete = cred
+            except TenantCredential.DoesNotExist:
+                try:
+                    tm = await TenantMembership.objects.aget(id=membership_id, user=user)
+                    cred_to_delete = None  # Will delete entire membership below
+                except TenantMembership.DoesNotExist:
+                    return JsonResponse({"error": "Not found"}, status=404)
+
+        if cred_to_delete:
+            await cred_to_delete.adelete()
+        else:
+            # Delete entire membership (legacy behavior)
             tm = await TenantMembership.objects.aget(id=membership_id, user=user)
-        except TenantMembership.DoesNotExist:
-            return JsonResponse({"error": "Not found"}, status=404)
-        await tm.adelete()  # cascades to TenantCredential
+            await tm.adelete()
+
         return JsonResponse({"status": "deleted"})
 
     # PATCH — rotate API key via strategy registry
@@ -268,14 +374,41 @@ async def tenant_credential_detail_view(request, membership_id):
 
     fields = body.get("fields") or {}
 
-    try:
-        tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
-            id=membership_id, user=user
-        )
-    except TenantMembership.DoesNotExist:
-        return JsonResponse({"error": "Not found"}, status=404)
-    if not hasattr(tm, "credential"):
-        return JsonResponse({"error": "Not found"}, status=404)
+    # Find the credential to update
+    cred_to_update = None
+    tm = None
+    if credential_id:
+        try:
+            cred_to_update = await TenantCredential.objects.select_related(
+                "tenant_membership__tenant"
+            ).aget(
+                id=credential_id,
+                tenant_membership__user=user,
+            )
+            tm = cred_to_update.tenant_membership
+        except TenantCredential.DoesNotExist:
+            return JsonResponse({"error": "Not found"}, status=404)
+    else:
+        # Legacy: membership_id may actually be credential_id
+        try:
+            cred_to_update = await TenantCredential.objects.select_related(
+                "tenant_membership__tenant"
+            ).aget(
+                id=membership_id,
+                tenant_membership__user=user,
+            )
+            tm = cred_to_update.tenant_membership
+        except TenantCredential.DoesNotExist:
+            try:
+                tm = await TenantMembership.objects.select_related("tenant").aget(
+                    id=membership_id, user=user
+                )
+                # Get first credential if available
+                cred_to_update = await tm.credentials.afirst()
+                if not cred_to_update:
+                    return JsonResponse({"error": "No credential found"}, status=404)
+            except TenantMembership.DoesNotExist:
+                return JsonResponse({"error": "Not found"}, status=404)
 
     strategy = STRATEGIES.get(tm.tenant.provider)
     if strategy is None:
@@ -305,10 +438,11 @@ async def tenant_credential_detail_view(request, membership_id):
     except (KeyError, ValueError) as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    tm.credential.encrypted_credential = encrypted
-    await tm.credential.asave(update_fields=["encrypted_credential"])
+    cred_to_update.encrypted_credential = encrypted
+    await cred_to_update.asave(update_fields=["encrypted_credential"])
     return JsonResponse(
         {
+            "credential_id": str(cred_to_update.id),
             "membership_id": str(tm.id),
             "tenant_id": tm.tenant.external_id,
             "tenant_name": tm.tenant.canonical_name,

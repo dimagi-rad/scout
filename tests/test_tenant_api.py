@@ -117,8 +117,11 @@ class TestTenantCredentialUpdateAPI:
         # canonical_name on the shared Tenant is NOT changed by PATCH
         tm.tenant.refresh_from_db()
         assert tm.tenant.canonical_name == "Dimagi"
-        tm.credential.refresh_from_db()
-        assert tm.credential.encrypted_credential != old_encrypted
+        # Get the first credential from the membership
+        cred = tm.credentials.first()
+        assert cred is not None
+        cred.refresh_from_db()
+        assert cred.encrypted_credential != old_encrypted
 
     def test_patch_rejects_unverified_credential(self, user):
         """PATCH must verify the new credential; invalid key is rejected."""

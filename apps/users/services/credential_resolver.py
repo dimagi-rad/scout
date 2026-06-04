@@ -54,17 +54,35 @@ async def aget_social_token(user, provider: str) -> SocialToken | None:
     return await _social_token_qs(user, provider).afirst()
 
 
-def resolve_credential(membership) -> dict | None:
-    """Resolve a credential dict for a TenantMembership, or return None.
+def resolve_credential(membership, team_id: str | None = None) -> dict | None:
+    """Resolve a credential dict for a TenantMembership, optionally filtered by team_id.
+
+    Args:
+        membership: The TenantMembership to resolve
+        team_id: Optional team_id for multi-credential lookups. If not provided,
+                 falls back to the first available credential (OAuth or API key).
 
     Returns a dict with keys ``type`` (``"api_key"`` or ``"oauth"``) and
     ``value`` (the decrypted key or OAuth token string), or ``None`` if no
     usable credential is found.
     """
     try:
-        cred_obj = TenantCredential.objects.get(tenant_membership=membership)
+        query = {"tenant_membership": membership}
+        if team_id is not None:
+            # Look up API key credential with specific team_id
+            query["team_id"] = team_id
+        cred_obj = TenantCredential.objects.get(**query)
     except TenantCredential.DoesNotExist:
-        return None
+        # If team_id was specified and not found, try fallback (first available)
+        if team_id is not None:
+            try:
+                cred_obj = TenantCredential.objects.filter(tenant_membership=membership).first()
+                if not cred_obj:
+                    return None
+            except TenantCredential.DoesNotExist:
+                return None
+        else:
+            return None
 
     if cred_obj.credential_type == TenantCredential.API_KEY:
         try:
@@ -80,18 +98,46 @@ def resolve_credential(membership) -> dict | None:
     return {"type": "oauth", "value": token_obj.token}
 
 
-async def aresolve_credential(membership) -> dict | None:
+async def aresolve_credential(membership, team_id: str | None = None) -> dict | None:
     """Async version of :func:`resolve_credential` with token refresh.
+
+    Args:
+        membership: The TenantMembership to resolve
+        team_id: Optional team_id for multi-credential lookups. If not provided,
+                 prefers OAuth credential (team_id=NULL, credential_type=OAUTH),
+                 then falls back to first available API key credential.
 
     Like the sync variant, returns a ``{"type": ..., "value": ...}`` dict or
     ``None``.  For OAuth tokens, attempts a refresh when the token is near
     expiry.
     """
-    try:
-        cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
-            tenant_membership=membership
-        )
-    except TenantCredential.DoesNotExist:
+    cred_obj = None
+
+    if team_id is not None:
+        # Look up API key credential with specific team_id
+        try:
+            cred_obj = await TenantCredential.objects.select_related(
+                "tenant_membership"
+            ).aget(tenant_membership=membership, team_id=team_id)
+        except TenantCredential.DoesNotExist:
+            # If team_id was specified and not found, try fallback (first available)
+            cred_obj = await TenantCredential.objects.filter(
+                tenant_membership=membership
+            ).afirst()
+    else:
+        # team_id is None: prefer OAuth credential (team_id=NULL, credential_type=OAUTH)
+        cred_obj = await TenantCredential.objects.filter(
+            tenant_membership=membership,
+            credential_type=TenantCredential.OAUTH,
+            team_id__isnull=True,
+        ).afirst()
+        if not cred_obj:
+            # Fallback to first available credential
+            cred_obj = await TenantCredential.objects.filter(
+                tenant_membership=membership
+            ).afirst()
+
+    if not cred_obj:
         return None
 
     if cred_obj.credential_type == TenantCredential.API_KEY:
