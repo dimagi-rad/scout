@@ -158,11 +158,11 @@ async def resolve_ocs_chatbots(user, access_token: str, team_id: str | None = No
             defaults={"canonical_name": exp.get("name") or str(exp["id"])},
         )
         tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-        # For OAuth, team_id is NULL; all OAuth credentials for a membership are unique
+        # For OAuth, scope to credential_type to avoid matching/corrupting API-key rows
         await TenantCredential.objects.aupdate_or_create(
             tenant_membership=tm,
-            team_id=None,  # OAuth credentials don't have team_id
-            defaults={"credential_type": TenantCredential.OAUTH},
+            credential_type=TenantCredential.OAUTH,
+            team_id="",  # OAuth credentials have empty team_id
         )
         memberships.append(tm)
 

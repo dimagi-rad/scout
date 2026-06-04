@@ -5,6 +5,9 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import Client
 
+from apps.users.adapters import encrypt_credential
+from apps.users.models import Tenant, TenantCredential, TenantMembership
+
 
 @pytest.fixture
 def user(db):
@@ -12,9 +15,6 @@ def user(db):
 
 
 def _make_ocs_membership(user):
-    from apps.users.adapters import encrypt_credential
-    from apps.users.models import Tenant, TenantCredential, TenantMembership
-
     tenant = Tenant.objects.create(provider="ocs", external_id="exp-1", canonical_name="Bot One")
     tm = TenantMembership.objects.create(user=user, tenant=tenant)
     TenantCredential.objects.create(
@@ -26,8 +26,6 @@ def _make_ocs_membership(user):
 
 
 def test_patch_ocs_rotates_key(user):
-    from apps.users.models import TenantCredential
-
     tm = _make_ocs_membership(user)
     client = Client()
     client.force_login(user)

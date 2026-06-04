@@ -102,17 +102,21 @@ def _persist_api_key_memberships(
             tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
 
             # For multi-team support (e.g., OCS with multiple workspaces),
-            # credentials are uniquely identified by (tenant_membership, team_id)
-            cred_query = {"tenant_membership": tm}
+            # scope to API_KEY credentials to avoid matching/overwriting OAuth rows
+            cred_query = {
+                "tenant_membership": tm,
+                "credential_type": TenantCredential.API_KEY,
+            }
             if team_id is not None:
                 cred_query["team_id"] = team_id
+            else:
+                # Default to empty string for team_id when not extracted
+                cred_query["team_id"] = ""
 
             TenantCredential.objects.update_or_create(
                 **cred_query,
                 defaults={
-                    "credential_type": TenantCredential.API_KEY,
                     "encrypted_credential": encrypted,
-                    "team_id": team_id,
                     "team_name": team_name,
                 },
             )
