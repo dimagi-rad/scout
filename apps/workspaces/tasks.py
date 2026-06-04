@@ -687,7 +687,7 @@ def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
         return contextlib.nullcontext()
     try:
         client = Langfuse(secret_key=secret_key, public_key=public_key, host=host)
-        return client.start_as_current_span(
+        return client.start_as_current_observation(
             name="resume_thread_after_materialization",
             input={
                 "thread_job_id": thread_job_id,
