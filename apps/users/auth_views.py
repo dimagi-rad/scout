@@ -70,7 +70,7 @@ async def me_view(request):
 
     onboarding_complete = await TenantMembership.objects.filter(
         user=user,
-        credential__isnull=False,
+        credentials__isnull=False,
     ).aexists()
 
     # If the user just completed CommCare OAuth but tenant resolution hasn't
@@ -117,7 +117,7 @@ def login_view(request):
 
     onboarding_complete = TenantMembership.objects.filter(
         user=user,
-        credential__isnull=False,
+        credentials__isnull=False,
     ).exists()
 
     return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
