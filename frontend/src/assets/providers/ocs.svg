@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#16006D">
+  <!-- Open Chat Studio "three connected nodes" mark, traced from the official
+       favicon (https://www.openchatstudio.com/favicon.ico, brand colour #16006D).
+       Three vertical dumbbells (two circles joined by a neck); middle one raised. -->
+  <g>
+    <!-- left dumbbell -->
+    <circle cx="6.25" cy="10" r="2.4" />
+    <circle cx="6.25" cy="17.25" r="2.4" />
+    <rect x="5.15" y="10" width="2.2" height="7.25" rx="1.1" />
+    <!-- middle dumbbell (raised) -->
+    <circle cx="12" cy="6.5" r="2.4" />
+    <circle cx="12" cy="13.75" r="2.4" />
+    <rect x="10.9" y="6.5" width="2.2" height="7.25" rx="1.1" />
+    <!-- right dumbbell -->
+    <circle cx="17.75" cy="10" r="2.4" />
+    <circle cx="17.75" cy="17.25" r="2.4" />
+    <rect x="16.65" y="10" width="2.2" height="7.25" rx="1.1" />
+  </g>
+</svg>
