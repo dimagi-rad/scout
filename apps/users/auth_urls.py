@@ -38,10 +38,16 @@ urlpatterns = [
     path("tenants/select/", tenant_select_view, name="tenant-select"),
     path("tenants/ensure/", tenant_ensure_view, name="tenant-ensure"),
     path("tenant-credentials/", tenant_credential_list_view, name="tenant-credential-list"),
+    # Support both credential_id (new) and membership_id (legacy) paths for backward compat
     path(
         "tenant-credentials/<str:membership_id>/",
         tenant_credential_detail_view,
         name="tenant-credential-detail",
+    ),
+    path(
+        "tenant-credentials/<str:membership_id>/<str:credential_id>/",
+        tenant_credential_detail_view,
+        name="tenant-credential-detail-with-id",
     ),
     path("api-key-providers/", api_key_providers_view, name="api-key-providers"),
 ]
