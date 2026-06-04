@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from apps.users.models import Tenant, TenantCredential, TenantMembership
-from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
+from apps.users.services.credential_resolver import aresolve_credential
 
 
 @pytest.mark.asyncio
@@ -25,7 +25,7 @@ async def test_multiple_api_key_credentials_per_membership(user):
     tm = await TenantMembership.objects.acreate(user=user, tenant=tenant)
 
     # Add two API key credentials with different team IDs
-    cred1 = await TenantCredential.objects.acreate(
+    await TenantCredential.objects.acreate(
         tenant_membership=tm,
         credential_type=TenantCredential.API_KEY,
         encrypted_credential="encrypted_key_team_a",
@@ -33,7 +33,7 @@ async def test_multiple_api_key_credentials_per_membership(user):
         team_name="Team A Workspace",
     )
 
-    cred2 = await TenantCredential.objects.acreate(
+    await TenantCredential.objects.acreate(
         tenant_membership=tm,
         credential_type=TenantCredential.API_KEY,
         encrypted_credential="encrypted_key_team_b",
@@ -114,7 +114,7 @@ async def test_oauth_credential_unique_per_membership(user):
     tm = await TenantMembership.objects.acreate(user=user, tenant=tenant)
 
     # Add OAuth credential
-    cred1 = await TenantCredential.objects.acreate(
+    await TenantCredential.objects.acreate(
         tenant_membership=tm,
         credential_type=TenantCredential.OAUTH,
         team_id=None,
@@ -122,7 +122,9 @@ async def test_oauth_credential_unique_per_membership(user):
 
     # Attempting to add another OAuth credential with team_id=NULL should fail
     # due to unique constraint
-    with pytest.raises(Exception):
+    from django.db import IntegrityError
+
+    with pytest.raises(IntegrityError):
         await TenantCredential.objects.acreate(
             tenant_membership=tm,
             credential_type=TenantCredential.OAUTH,
@@ -168,7 +170,7 @@ async def test_mixed_oauth_and_api_key_credentials(user, mocker):
     assert len(creds) == 2
 
     # Mock the SocialToken lookup for OAuth resolution
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     from unittest.mock import AsyncMock, MagicMock
 
     from django.utils import timezone
