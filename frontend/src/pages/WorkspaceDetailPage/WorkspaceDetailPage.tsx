@@ -881,6 +881,14 @@ export function WorkspaceDetailPage() {
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+
+  // Keep the top-bar workspace switcher in sync with the workspace being
+  // viewed. On a hard refresh of /workspaces/:id, `activeDomainId` would
+  // otherwise default to domains[0] and show a different workspace there.
+  useEffect(() => {
+    if (workspaceId) setActiveDomain(workspaceId)
+  }, [workspaceId, setActiveDomain])
 
   function handleRename(newName: string) {
     setWorkspace((prev) => prev ? { ...prev, name: newName } : prev)
