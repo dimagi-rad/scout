@@ -134,6 +134,51 @@ class Tenant(models.Model):
             return workspace_name
 
 
+class TenantConnection(models.Model):
+    """A single credential a user added: one OAuth login or one API key.
+
+    A connection is a credential only. The team a chatbot belongs to is recorded
+    on TenantMembership (team_slug/team_name): in v1 a user has at most one OAuth
+    connection per provider, and its team can change when they re-authorize.
+    """
+
+    OAUTH = "oauth"
+    API_KEY = "api_key"
+    TYPE_CHOICES = [
+        (OAUTH, "OAuth Token"),
+        (API_KEY, "API Key"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tenant_connections",
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    encrypted_credential = models.CharField(
+        max_length=2000,
+        blank=True,
+        help_text="Fernet-encrypted opaque string. Empty for OAuth (token lives in allauth).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "provider"],
+                condition=models.Q(credential_type="oauth"),
+                name="unique_oauth_connection_per_user_provider",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.provider}:{self.credential_type}"
+
+
 class TenantMembership(models.Model):
     """Links a user to a verified Tenant."""
 
@@ -148,7 +193,17 @@ class TenantMembership(models.Model):
         on_delete=models.CASCADE,
         related_name="memberships",
     )
+    connection = models.ForeignKey(
+        "TenantConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="memberships",
+    )
+    team_slug = models.CharField(max_length=255, blank=True, default="")
+    team_name = models.CharField(max_length=255, blank=True, default="")
     last_selected_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
