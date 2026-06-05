@@ -4,13 +4,12 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('users', '0007_migrate_credentials_to_connections'),
+        ("users", "0007_migrate_credentials_to_connections"),
     ]
 
     operations = [
         migrations.DeleteModel(
-            name='TenantCredential',
+            name="TenantCredential",
         ),
     ]

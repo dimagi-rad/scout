@@ -34,7 +34,7 @@ def _make_ocs_membership(user):
 
 
 def test_patch_ocs_rotates_key(user):
-    tm, conn = _make_ocs_membership(user)
+    _tm, conn = _make_ocs_membership(user)
     client = Client()
     client.force_login(user)
     with patch(
@@ -54,7 +54,7 @@ def test_patch_ocs_rotates_key(user):
 
 
 def test_patch_ocs_rejects_invalid_key(user):
-    tm, conn = _make_ocs_membership(user)
+    _tm, conn = _make_ocs_membership(user)
     client = Client()
     client.force_login(user)
     with patch(
@@ -71,7 +71,7 @@ def test_patch_ocs_rejects_invalid_key(user):
 
 
 def test_patch_missing_required_editable_field_returns_400(user):
-    tm, conn = _make_ocs_membership(user)
+    _tm, conn = _make_ocs_membership(user)
     client = Client()
     client.force_login(user)
     resp = client.patch(
