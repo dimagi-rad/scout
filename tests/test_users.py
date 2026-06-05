@@ -2,8 +2,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 
-from apps.users.models import TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.api_key_providers import TenantDescriptor
 
 User = get_user_model()
 
@@ -15,51 +17,75 @@ def user(db):
 
 @pytest.fixture
 def membership(user):
-    from apps.users.models import Tenant
-
     tenant = Tenant.objects.create(
         provider="commcare", external_id="test-domain", canonical_name="Test Domain"
     )
     return TenantMembership.objects.create(user=user, tenant=tenant)
 
 
-class TestTenantCredential:
-    def test_api_key_credential_fields(self, membership):
-        cred = TenantCredential.objects.create(
-            tenant_membership=membership,
-            credential_type=TenantCredential.API_KEY,
+class TestTenantConnection:
+    def test_api_key_connection_fields(self, user):
+        conn = TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.API_KEY,
             encrypted_credential="someencryptedvalue",
         )
-        assert cred.pk is not None
-        assert cred.credential_type == "api_key"
+        assert conn.pk is not None
+        assert conn.credential_type == "api_key"
 
-    def test_oauth_credential_fields(self, membership):
-        cred = TenantCredential.objects.create(
-            tenant_membership=membership,
-            credential_type=TenantCredential.OAUTH,
+    def test_oauth_connection_fields(self, user):
+        conn = TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.OAUTH,
         )
-        assert cred.credential_type == "oauth"
-        assert cred.encrypted_credential == ""
+        assert conn.credential_type == "oauth"
+        assert conn.encrypted_credential == ""
 
-    def test_one_to_one_with_membership(self, membership):
-        TenantCredential.objects.create(
-            tenant_membership=membership,
-            credential_type=TenantCredential.OAUTH,
+    def test_one_oauth_connection_per_user_provider(self, user):
+        """At most one OAuth connection per (user, provider) is allowed."""
+        TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.OAUTH,
         )
-        from django.db import IntegrityError
-
         with pytest.raises(IntegrityError):
-            TenantCredential.objects.create(
-                tenant_membership=membership,
-                credential_type=TenantCredential.OAUTH,
+            TenantConnection.objects.create(
+                user=user,
+                provider="commcare",
+                credential_type=TenantConnection.OAUTH,
             )
+
+    def test_multiple_api_key_connections_allowed(self, user):
+        """The partial uniqueness only applies to OAuth; multiple API-key
+        connections per (user, provider) are permitted."""
+        TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.API_KEY,
+            encrypted_credential="key-1",
+        )
+        TenantConnection.objects.create(
+            user=user,
+            provider="commcare",
+            credential_type=TenantConnection.API_KEY,
+            encrypted_credential="key-2",
+        )
+        assert (
+            TenantConnection.objects.filter(
+                user=user, provider="commcare", credential_type=TenantConnection.API_KEY
+            ).count()
+            == 2
+        )
 
 
 @pytest.mark.django_db(transaction=True)
 class TestResolveCommcareDomains:
     @pytest.mark.asyncio
-    async def test_creates_tenant_credential_oauth(self, user):
-        """resolve_commcare_domains must create TenantCredential(type=oauth) for each membership."""
+    async def test_creates_oauth_connection(self, user):
+        """resolve_commcare_domains must create a single OAuth TenantConnection
+        and link every membership it produces to it."""
         from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [
@@ -74,14 +100,23 @@ class TestResolveCommcareDomains:
             memberships = await resolve_commcare_domains(user, "fake-token")
 
         assert len(memberships) == 2
+        # Exactly one OAuth connection for this (user, provider)
+        assert (
+            await TenantConnection.objects.filter(
+                user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+            ).acount()
+            == 1
+        )
+        conn = await TenantConnection.objects.aget(user=user, provider="commcare")
+        assert conn.encrypted_credential == ""
+        # Every membership is linked to that connection
         for tm in memberships:
-            cred = await TenantCredential.objects.aget(tenant_membership=tm)
-            assert cred.credential_type == TenantCredential.OAUTH
-            assert cred.encrypted_credential == ""
+            refreshed = await TenantMembership.objects.select_related("connection").aget(id=tm.id)
+            assert refreshed.connection_id == conn.id
 
     @pytest.mark.asyncio
     async def test_idempotent_on_re_resolve(self, user):
-        """Calling resolve twice does not create duplicate TenantCredentials."""
+        """Calling resolve twice does not create duplicate TenantConnections."""
         from apps.users.services.tenant_resolution import resolve_commcare_domains
 
         fake_domains = [{"domain_name": "domain-a", "project_name": "Domain A"}]
@@ -93,13 +128,11 @@ class TestResolveCommcareDomains:
             await resolve_commcare_domains(user, "fake-token")
             await resolve_commcare_domains(user, "fake-token")
 
-        assert await TenantCredential.objects.filter(tenant_membership__user=user).acount() == 1
+        assert await TenantConnection.objects.filter(user=user).acount() == 1
 
 
-class TestTenantCredentialEndpoints:
-    def test_post_creates_membership_and_credential(self, client, db, user):
-        from apps.users.services.api_key_providers import TenantDescriptor
-
+class TestTenantConnectionEndpoints:
+    def test_post_creates_membership_and_connection(self, client, db, user):
         client.force_login(user)
         with patch(
             "apps.users.services.api_key_providers.commcare.CommCareStrategy.verify_and_discover",
@@ -107,7 +140,7 @@ class TestTenantCredentialEndpoints:
             return_value=[TenantDescriptor("my-domain", "my-domain")],
         ):
             resp = client.post(
-                "/api/auth/tenant-credentials/",
+                "/api/auth/connections/",
                 data={
                     "provider": "commcare",
                     "fields": {
@@ -124,17 +157,15 @@ class TestTenantCredentialEndpoints:
         membership = body["memberships"][0]
         membership_id = membership["membership_id"]
 
-        from apps.users.models import TenantCredential, TenantMembership
-
-        tm = TenantMembership.objects.get(id=membership_id)
+        tm = TenantMembership.objects.select_related("connection", "tenant").get(id=membership_id)
         assert tm.tenant.provider == "commcare"
         assert tm.tenant.external_id == "my-domain"
-        cred = TenantCredential.objects.get(tenant_membership=tm)
-        assert cred.credential_type == TenantCredential.API_KEY
+        assert tm.connection is not None
+        assert tm.connection.credential_type == TenantConnection.API_KEY
 
     def test_api_key_stored_encrypted(self, client, db, user):
         """The raw DB value must not contain the plaintext credential."""
-        from apps.users.services.api_key_providers import TenantDescriptor
+        from apps.users.adapters import decrypt_credential
 
         client.force_login(user)
         plaintext = "user@example.com:supersecretkey"
@@ -144,7 +175,7 @@ class TestTenantCredentialEndpoints:
             return_value=[TenantDescriptor("secure-domain", "secure-domain")],
         ):
             client.post(
-                "/api/auth/tenant-credentials/",
+                "/api/auth/connections/",
                 data={
                     "provider": "commcare",
                     "fields": {
@@ -155,46 +186,55 @@ class TestTenantCredentialEndpoints:
                 },
                 content_type="application/json",
             )
-        from apps.users.models import TenantCredential
-
-        cred = TenantCredential.objects.get(tenant_membership__tenant__external_id="secure-domain")
-        assert plaintext not in cred.encrypted_credential
+        tm = TenantMembership.objects.select_related("connection").get(
+            tenant__external_id="secure-domain"
+        )
+        conn = tm.connection
+        assert plaintext not in conn.encrypted_credential
         # Verify round-trip decryption works
-        from apps.users.adapters import decrypt_credential
+        assert decrypt_credential(conn.encrypted_credential) == plaintext
 
-        assert decrypt_credential(cred.encrypted_credential) == plaintext
-
-    def test_get_lists_credentials(self, client, db, user):
-        from apps.users.models import Tenant, TenantCredential, TenantMembership
-
+    def test_get_lists_connections(self, client, db, user):
         tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
         tm = TenantMembership.objects.create(user=user, tenant=tenant)
-        TenantCredential.objects.create(
-            tenant_membership=tm, credential_type=TenantCredential.OAUTH
+        conn = TenantConnection.objects.create(
+            user=user, provider="commcare", credential_type=TenantConnection.OAUTH
         )
+        tm.connection = conn
+        tm.save(update_fields=["connection"])
+
         client.force_login(user)
-        resp = client.get("/api/auth/tenant-credentials/")
+        resp = client.get("/api/auth/connections/")
         assert resp.status_code == 200
         items = resp.json()
         assert len(items) == 1
         assert items[0]["credential_type"] == "oauth"
+        assert items[0]["connection_id"] == str(conn.id)
         assert "encrypted_credential" not in items[0]  # never exposed
+        # The chatbot it credentials is grouped under it
+        assert len(items[0]["chatbots"]) == 1
+        assert items[0]["chatbots"][0]["tenant_id"] == "d1"
 
-    def test_delete_removes_credential_and_membership(self, client, db, user):
-        from apps.users.models import Tenant, TenantCredential, TenantMembership
-
+    def test_delete_removes_connection_and_archives_membership(self, client, db, user):
+        """DELETE removes the connection and archives its membership (data retained)."""
         tenant = Tenant.objects.create(provider="commcare", external_id="d2", canonical_name="D2")
         tm = TenantMembership.objects.create(user=user, tenant=tenant)
-        TenantCredential.objects.create(
-            tenant_membership=tm, credential_type=TenantCredential.OAUTH
+        conn = TenantConnection.objects.create(
+            user=user, provider="commcare", credential_type=TenantConnection.OAUTH
         )
+        tm.connection = conn
+        tm.save(update_fields=["connection"])
+
         client.force_login(user)
-        resp = client.delete(f"/api/auth/tenant-credentials/{tm.id}/")
+        resp = client.delete(f"/api/auth/connections/{conn.id}/")
         assert resp.status_code == 200
-        assert not TenantMembership.objects.filter(id=tm.id).exists()
+        assert resp.json() == {"status": "removed"}
+        assert not TenantConnection.objects.filter(id=conn.id).exists()
+        # Membership is archived, not deleted
+        tm.refresh_from_db()
+        assert tm.archived_at is not None
+        assert tm.connection is None
 
     def test_unauthenticated_returns_401(self, client, db):
-        resp = client.post(
-            "/api/auth/tenant-credentials/", data={}, content_type="application/json"
-        )
+        resp = client.post("/api/auth/connections/", data={}, content_type="application/json")
         assert resp.status_code == 401

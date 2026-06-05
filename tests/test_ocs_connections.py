@@ -231,3 +231,96 @@ async def test_oauth_import_links_team_and_connection(user, mocker):
     assert all(tm.team_slug == "team-a" and tm.team_name == "Team A" for tm in tms)
     assert all(tm.connection_id == conns[0].id for tm in tms)
     assert all(tm.archived_at is None for tm in tms)
+
+
+# --- connection endpoints ---------------------------------------------------
+
+
+async def _login(user):
+    from asgiref.sync import sync_to_async
+    from django.test import AsyncClient
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email=user.email, password="testpass123")
+    return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_api_key_add_creates_one_connection_with_team(user, mocker):
+    import json
+
+    from apps.users.services.api_key_providers.base import TenantDescriptor
+
+    mocker.patch(
+        "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+        AsyncMock(return_value=[TenantDescriptor("exp-1", "Bot 1")]),
+    )
+    mocker.patch(
+        "apps.users.views.adetect_team_from_api_key", AsyncMock(return_value=("acme", "Acme"))
+    )
+
+    client = await _login(user)
+    resp = await client.post(
+        "/api/auth/connections/",
+        data=json.dumps({"provider": "ocs", "fields": {"api_key": "k"}}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 201
+    conns = [
+        c
+        async for c in TenantConnection.objects.filter(
+            user=user, provider="ocs", credential_type="api_key"
+        )
+    ]
+    assert len(conns) == 1
+    tm = await TenantMembership.objects.select_related("connection").aget(
+        user=user, tenant__external_id="exp-1"
+    )
+    assert tm.team_slug == "acme"
+    assert tm.team_name == "Acme"
+    assert tm.connection_id == conns[0].id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_api_key_add_requires_team_name_when_undetectable(user, mocker):
+    import json
+
+    from apps.users.services.api_key_providers.base import TenantDescriptor
+
+    mocker.patch(
+        "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+        AsyncMock(return_value=[TenantDescriptor("exp-1", "Bot 1")]),
+    )
+    mocker.patch("apps.users.views.adetect_team_from_api_key", AsyncMock(return_value=None))
+
+    client = await _login(user)
+    resp = await client.post(
+        "/api/auth/connections/",
+        data=json.dumps({"provider": "ocs", "fields": {"api_key": "k"}}),
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+    assert not await TenantConnection.objects.filter(user=user).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_remove_connection_archives_memberships(user):
+    conn = await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type="api_key", encrypted_credential="e"
+    )
+    t = await Tenant.objects.acreate(provider="ocs", external_id="exp-9", canonical_name="B")
+    tm = await TenantMembership.objects.acreate(
+        user=user, tenant=t, connection=conn, team_slug="acme"
+    )
+
+    client = await _login(user)
+    resp = await client.delete(f"/api/auth/connections/{conn.id}/")
+    assert resp.status_code == 200
+
+    tm = await TenantMembership.objects.aget(id=tm.id)
+    assert tm.archived_at is not None
+    assert tm.connection_id is None
+    assert not await TenantConnection.objects.filter(id=conn.id).aexists()

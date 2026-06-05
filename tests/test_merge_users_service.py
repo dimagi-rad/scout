@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
 
 from apps.chat.models import Thread
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.merge import merge_users, select_canonical
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
 
@@ -198,10 +198,13 @@ def test_tenantmembership_conflict_keeps_canonical_and_deletes_duplicates():
     shared = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
     only_dup = Tenant.objects.create(provider="ocs", external_id="exp9", canonical_name="Exp9")
     canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared)
-    TenantCredential.objects.create(
-        tenant_membership=canon_tm,
-        credential_type=TenantCredential.OAUTH,
+    canon_conn = TenantConnection.objects.create(
+        user=canonical,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
     )
+    canon_tm.connection = canon_conn
+    canon_tm.save(update_fields=["connection"])
     TenantMembership.objects.create(user=duplicate, tenant=shared)  # conflict
     TenantMembership.objects.create(user=duplicate, tenant=only_dup)
 
@@ -213,6 +216,75 @@ def test_tenantmembership_conflict_keeps_canonical_and_deletes_duplicates():
     assert TenantMembership.objects.filter(user=canonical, tenant=shared).count() == 1
     # canonical now also has only_dup's tenant
     assert TenantMembership.objects.filter(user=canonical, tenant=only_dup).exists()
+
+
+@pytest.mark.django_db
+def test_tenantconnection_repoints_to_canonical_when_no_oauth_overlap():
+    """Duplicate's connection (and its membership) move to canonical when
+    canonical has no competing OAuth connection for that provider."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    tenant = Tenant.objects.create(provider="ocs", external_id="exp1", canonical_name="Bot")
+    conn = TenantConnection.objects.create(
+        user=duplicate,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+    )
+    tm = TenantMembership.objects.create(user=duplicate, tenant=tenant, connection=conn)
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.tenant_connection_repointed == 1
+    assert report.tenant_connection_conflict_merged == 0
+    conn.refresh_from_db()
+    assert conn.user == canonical
+    tm.refresh_from_db()
+    assert tm.user == canonical
+    assert tm.connection_id == conn.id
+
+
+@pytest.mark.django_db
+def test_tenantconnection_oauth_conflict_merges_into_canonical():
+    """Both users hold an OCS OAuth connection. After merge canonical keeps
+    exactly one OCS OAuth connection, the duplicate's is gone, and the
+    duplicate's memberships now point at canonical's connection."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+
+    canon_conn = TenantConnection.objects.create(
+        user=canonical,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+    )
+    dup_conn = TenantConnection.objects.create(
+        user=duplicate,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+    )
+    # A membership on the duplicate's connection that must be repointed.
+    only_dup_tenant = Tenant.objects.create(
+        provider="ocs", external_id="exp-dup", canonical_name="DupBot"
+    )
+    dup_tm = TenantMembership.objects.create(
+        user=duplicate, tenant=only_dup_tenant, connection=dup_conn
+    )
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    assert report.tenant_connection_conflict_merged == 1
+    assert report.tenant_connection_repointed == 0
+    # Canonical owns exactly one OCS OAuth connection — its original one.
+    ocs_oauth = TenantConnection.objects.filter(
+        user=canonical, provider="ocs", credential_type=TenantConnection.OAUTH
+    )
+    assert ocs_oauth.count() == 1
+    assert ocs_oauth.get().id == canon_conn.id
+    # The duplicate's connection is deleted.
+    assert not TenantConnection.objects.filter(id=dup_conn.id).exists()
+    # Its membership was repointed to canonical (user) and canonical's connection.
+    dup_tm.refresh_from_db()
+    assert dup_tm.user == canonical
+    assert dup_tm.connection_id == canon_conn.id
 
 
 @pytest.mark.django_db

@@ -1443,7 +1443,10 @@ class TestConnectVisitTotal:
         assert _connect_visit_total(meta, 765) is None
 
     def test_returns_none_for_zero_or_missing_count(self):
-        assert _connect_visit_total({"all_opportunities": [{"id": 765, "visit_count": 0}]}, 765) is None
+        assert (
+            _connect_visit_total({"all_opportunities": [{"id": 765, "visit_count": 0}]}, 765)
+            is None
+        )
         assert _connect_visit_total({"all_opportunities": [{"id": 765}]}, 765) is None
 
     def test_returns_none_for_no_metadata(self):

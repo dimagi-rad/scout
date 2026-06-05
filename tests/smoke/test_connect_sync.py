@@ -46,7 +46,7 @@ def _get_connect_token(user=None):
 
 def _get_or_create_membership(user, opp_id):
     """Get or create a TenantMembership for a Connect opportunity."""
-    from apps.users.models import TenantCredential, TenantMembership
+    from apps.users.models import TenantConnection, TenantMembership
 
     tm, created = TenantMembership.objects.get_or_create(
         user=user,
@@ -55,10 +55,13 @@ def _get_or_create_membership(user, opp_id):
         defaults={"tenant_name": f"Opportunity {opp_id}"},
     )
     if created:
-        TenantCredential.objects.get_or_create(
-            tenant_membership=tm,
-            defaults={"credential_type": TenantCredential.OAUTH},
+        conn, _ = TenantConnection.objects.get_or_create(
+            user=user,
+            provider="commcare_connect",
+            credential_type=TenantConnection.OAUTH,
         )
+        tm.connection = conn
+        tm.save(update_fields=["connection"])
         logger.info("Created TenantMembership for opportunity %s (user: %s)", opp_id, user.email)
     return tm
 

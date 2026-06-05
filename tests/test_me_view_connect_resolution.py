@@ -7,7 +7,7 @@ from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 
 User = get_user_model()
 
@@ -70,10 +70,13 @@ class TestMeViewResolveBothProviders:
                 defaults={"canonical_name": "Test Domain"},
             )
             tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=t)
-            await TenantCredential.objects.aget_or_create(
-                tenant_membership=tm,
-                defaults={"credential_type": TenantCredential.OAUTH},
+            conn, _ = await TenantConnection.objects.aget_or_create(
+                user=tm.user,
+                provider=t.provider,
+                credential_type=TenantConnection.OAUTH,
             )
+            tm.connection = conn
+            await tm.asave(update_fields=["connection"])
             return [tm]
 
         async def mock_resolve_connect(user, token):
@@ -85,10 +88,13 @@ class TestMeViewResolveBothProviders:
                 defaults={"canonical_name": "Test Opp"},
             )
             tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=t)
-            await TenantCredential.objects.aget_or_create(
-                tenant_membership=tm,
-                defaults={"credential_type": TenantCredential.OAUTH},
+            conn, _ = await TenantConnection.objects.aget_or_create(
+                user=tm.user,
+                provider=t.provider,
+                credential_type=TenantConnection.OAUTH,
             )
+            tm.connection = conn
+            await tm.asave(update_fields=["connection"])
             return [tm]
 
         with (

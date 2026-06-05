@@ -3,7 +3,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.test import Client
 
-from apps.users.models import TenantMembership
+from apps.users.adapters import encrypt_credential
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import (
     CredentialVerificationError,
     TenantDescriptor,
@@ -11,26 +12,33 @@ from apps.users.services.api_key_providers import (
 
 
 def _make_membership(user, external_id="dimagi", canonical_name="Dimagi", provider="commcare"):
-    from apps.users.models import Tenant
-
     tenant = Tenant.objects.create(
         provider=provider, external_id=external_id, canonical_name=canonical_name
     )
     return TenantMembership.objects.create(user=user, tenant=tenant)
 
 
-@pytest.mark.django_db
-class TestTenantCredentialDeleteAPI:
-    def test_delete_removes_domain_from_tenants_list(self, user):
-        """Deleting a credential should remove the domain from GET /api/auth/tenants/."""
-        from apps.users.adapters import encrypt_credential
-        from apps.users.models import TenantCredential
+def _attach_api_key_connection(tm, encrypted="x"):
+    """Create an API-key TenantConnection and link the membership to it."""
+    conn = TenantConnection.objects.create(
+        user=tm.user,
+        provider=tm.tenant.provider,
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypted,
+    )
+    tm.connection = conn
+    tm.save(update_fields=["connection"])
+    return conn
 
+
+@pytest.mark.django_db
+class TestTenantConnectionDeleteAPI:
+    def test_delete_removes_domain_from_tenants_list(self, user):
+        """Deleting a connection should remove its chatbot from GET /api/auth/tenants/
+        (the membership is archived, not deleted) and delete the connection."""
         tm = _make_membership(user, external_id="sk-test", canonical_name="sk-test")
-        TenantCredential.objects.create(
-            tenant_membership=tm,
-            credential_type=TenantCredential.API_KEY,
-            encrypted_credential=encrypt_credential("user@example.com:apikey"),
+        conn = _attach_api_key_connection(
+            tm, encrypted=encrypt_credential("user@example.com:apikey")
         )
 
         client = Client()
@@ -42,15 +50,28 @@ class TestTenantCredentialDeleteAPI:
         tenant_ids = [t["tenant_id"] for t in response.json()]
         assert "sk-test" in tenant_ids
 
-        # Delete it
-        response = client.delete(f"/api/auth/tenant-credentials/{tm.id}/")
+        # Delete the connection
+        response = client.delete(f"/api/auth/connections/{conn.id}/")
         assert response.status_code == 200
+        assert response.json() == {"status": "removed"}
+
+        # The connection is gone and the membership is archived (not deleted)
+        assert not TenantConnection.objects.filter(id=conn.id).exists()
+        tm.refresh_from_db()
+        assert tm.archived_at is not None
+        assert tm.connection is None
 
         # Should no longer appear in the tenants list
         response = client.get("/api/auth/tenants/")
         assert response.status_code == 200
         tenant_ids = [t["tenant_id"] for t in response.json()]
         assert "sk-test" not in tenant_ids
+
+    def test_delete_unknown_connection_returns_404(self, user):
+        client = Client()
+        client.force_login(user)
+        response = client.delete("/api/auth/connections/00000000-0000-0000-0000-000000000000/")
+        assert response.status_code == 404
 
 
 @pytest.mark.django_db
@@ -88,18 +109,13 @@ class TestTenantSelectAPI:
 
 
 @pytest.mark.django_db
-class TestTenantCredentialUpdateAPI:
+class TestTenantConnectionUpdateAPI:
     def test_patch_updates_credential(self, user):
-        from apps.users.adapters import encrypt_credential
-        from apps.users.models import TenantCredential
-
-        tm = _make_membership(user)
+        """PATCH rotates the key on the connection; the encrypted value changes
+        and the shared Tenant's canonical_name is left untouched."""
         old_encrypted = encrypt_credential("old@example.com:oldkey")
-        TenantCredential.objects.create(
-            tenant_membership=tm,
-            credential_type=TenantCredential.API_KEY,
-            encrypted_credential=old_encrypted,
-        )
+        tm = _make_membership(user)
+        conn = _attach_api_key_connection(tm, encrypted=old_encrypted)
 
         client = Client()
         client.force_login(user)
@@ -109,27 +125,24 @@ class TestTenantCredentialUpdateAPI:
             return_value=None,
         ):
             response = client.patch(
-                f"/api/auth/tenant-credentials/{tm.id}/",
+                f"/api/auth/connections/{conn.id}/",
                 data={"fields": {"username": "new@example.com", "api_key": "newkey"}},
                 content_type="application/json",
             )
         assert response.status_code == 200
+        body = response.json()
+        assert body["connection_id"] == str(conn.id)
+        assert body["provider"] == "commcare"
         # canonical_name on the shared Tenant is NOT changed by PATCH
         tm.tenant.refresh_from_db()
         assert tm.tenant.canonical_name == "Dimagi"
-        tm.credential.refresh_from_db()
-        assert tm.credential.encrypted_credential != old_encrypted
+        conn.refresh_from_db()
+        assert conn.encrypted_credential != old_encrypted
 
     def test_patch_rejects_unverified_credential(self, user):
-        """PATCH must verify the new credential; invalid key is rejected."""
-        from apps.users.models import TenantCredential
-
+        """PATCH must verify the new credential; an invalid key is rejected."""
         tm = _make_membership(user)
-        TenantCredential.objects.create(
-            tenant_membership=tm,
-            credential_type=TenantCredential.API_KEY,
-            encrypted_credential="x",
-        )
+        conn = _attach_api_key_connection(tm, encrypted="x")
 
         client = Client()
         client.force_login(user)
@@ -139,7 +152,7 @@ class TestTenantCredentialUpdateAPI:
             side_effect=CredentialVerificationError("Bad key"),
         ):
             response = client.patch(
-                f"/api/auth/tenant-credentials/{tm.id}/",
+                f"/api/auth/connections/{conn.id}/",
                 data={"fields": {"username": "bad@evil.com", "api_key": "badkey"}},
                 content_type="application/json",
             )
@@ -148,7 +161,7 @@ class TestTenantCredentialUpdateAPI:
     def test_patch_requires_auth(self):
         client = Client()
         response = client.patch(
-            "/api/auth/tenant-credentials/00000000-0000-0000-0000-000000000000/",
+            "/api/auth/connections/00000000-0000-0000-0000-000000000000/",
             data={"fields": {"username": "x", "api_key": "y"}},
             content_type="application/json",
         )
@@ -156,6 +169,7 @@ class TestTenantCredentialUpdateAPI:
 
     def test_patch_returns_404_for_wrong_user(self, user, other_user):
         tm = _make_membership(other_user)
+        conn = _attach_api_key_connection(tm, encrypted="x")
         client = Client()
         client.force_login(user)
         with patch(
@@ -164,7 +178,7 @@ class TestTenantCredentialUpdateAPI:
             return_value=None,
         ):
             response = client.patch(
-                f"/api/auth/tenant-credentials/{tm.id}/",
+                f"/api/auth/connections/{conn.id}/",
                 data={"fields": {"username": "a", "api_key": "b"}},
                 content_type="application/json",
             )
@@ -172,11 +186,9 @@ class TestTenantCredentialUpdateAPI:
 
 
 @pytest.mark.django_db
-class TestTenantCredentialCreateAPI:
+class TestTenantConnectionCreateAPI:
     def test_create_with_valid_credential(self, user):
-        """Valid credential creates Tenant + TenantMembership."""
-        from apps.users.models import Tenant, TenantMembership
-
+        """A valid credential creates Tenant + TenantMembership."""
         client = Client()
         client.force_login(user)
 
@@ -186,7 +198,7 @@ class TestTenantCredentialCreateAPI:
             return_value=[TenantDescriptor("dimagi", "dimagi")],
         ):
             response = client.post(
-                "/api/auth/tenant-credentials/",
+                "/api/auth/connections/",
                 data={
                     "provider": "commcare",
                     "fields": {
@@ -202,10 +214,43 @@ class TestTenantCredentialCreateAPI:
         assert Tenant.objects.filter(provider="commcare", external_id="dimagi").exists()
         assert TenantMembership.objects.filter(user=user, tenant__external_id="dimagi").exists()
 
-    def test_create_with_invalid_credential_is_rejected(self, user):
-        """Invalid credential must not create any records."""
-        from apps.users.models import Tenant, TenantMembership
+    def test_create_ocs_detects_team(self, user):
+        """An OCS key auto-detects its team via the network (mocked) and labels
+        the resulting membership with the detected team_slug/team_name."""
+        client = Client()
+        client.force_login(user)
 
+        with (
+            patch(
+                "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+                new_callable=AsyncMock,
+                return_value=[TenantDescriptor("exp-1", "Experiment One")],
+            ),
+            patch(
+                "apps.users.views.adetect_team_from_api_key",
+                new_callable=AsyncMock,
+                return_value=("team-slug", "Team Name"),
+            ),
+        ):
+            response = client.post(
+                "/api/auth/connections/",
+                data={
+                    "provider": "ocs",
+                    "fields": {"api_key": "ocs-key-123"},
+                },
+                content_type="application/json",
+            )
+
+        assert response.status_code == 201
+        tm = TenantMembership.objects.get(user=user, tenant__external_id="exp-1")
+        assert tm.tenant.provider == "ocs"
+        assert tm.team_slug == "team-slug"
+        assert tm.team_name == "Team Name"
+        assert tm.connection is not None
+        assert tm.connection.credential_type == TenantConnection.API_KEY
+
+    def test_create_with_invalid_credential_is_rejected(self, user):
+        """An invalid credential must not create any records."""
         client = Client()
         client.force_login(user)
 
@@ -215,7 +260,7 @@ class TestTenantCredentialCreateAPI:
             side_effect=CredentialVerificationError("Invalid"),
         ):
             response = client.post(
-                "/api/auth/tenant-credentials/",
+                "/api/auth/connections/",
                 data={
                     "provider": "commcare",
                     "fields": {
@@ -230,6 +275,7 @@ class TestTenantCredentialCreateAPI:
         assert response.status_code == 400
         assert not Tenant.objects.filter(external_id="victim-domain").exists()
         assert not TenantMembership.objects.filter(user=user).exists()
+        assert not TenantConnection.objects.filter(user=user).exists()
 
 
 @pytest.mark.django_db
@@ -251,8 +297,6 @@ class TestTenantCrossAccessAPI:
     def test_cross_tenant_access_blocked_by_structure(self, user, other_user):
         """A user who guesses another tenant's external_id cannot gain access
         because they cannot create a TenantMembership without a verified Tenant."""
-        from apps.users.models import Tenant, TenantMembership
-
         # Simulate victim tenant exists (created by other_user via OAuth)
         victim_tenant = Tenant.objects.create(
             provider="commcare", external_id="victim-domain", canonical_name="Victim"
@@ -268,7 +312,7 @@ class TestTenantCrossAccessAPI:
             side_effect=CredentialVerificationError("Invalid"),
         ):
             response = client.post(
-                "/api/auth/tenant-credentials/",
+                "/api/auth/connections/",
                 data={
                     "provider": "commcare",
                     "fields": {
@@ -282,3 +326,4 @@ class TestTenantCrossAccessAPI:
 
         assert response.status_code == 400
         assert not TenantMembership.objects.filter(user=user).exists()
+        assert not TenantConnection.objects.filter(user=user).exists()

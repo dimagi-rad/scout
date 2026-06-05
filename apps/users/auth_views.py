@@ -12,11 +12,12 @@ from django.core.exceptions import ValidationError as _ValidationError
 from django.db import IntegrityError
 from django.http import JsonResponse
 from django.middleware.csrf import get_token
+from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.users.decorators import async_login_required, login_required_json
-from apps.users.models import TenantMembership
+from apps.users.models import TenantConnection, TenantMembership
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aget_social_token
 from apps.users.services.tenant_resolution import (
@@ -70,7 +71,8 @@ async def me_view(request):
 
     onboarding_complete = await TenantMembership.objects.filter(
         user=user,
-        credential__isnull=False,
+        connection__isnull=False,
+        archived_at__isnull=True,
     ).aexists()
 
     # If the user just completed CommCare OAuth but tenant resolution hasn't
@@ -117,7 +119,8 @@ def login_view(request):
 
     onboarding_complete = TenantMembership.objects.filter(
         user=user,
-        credential__isnull=False,
+        connection__isnull=False,
+        archived_at__isnull=True,
     ).exists()
 
     return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
@@ -189,6 +192,19 @@ def disconnect_provider_view(request, provider_id):
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
     tokens.delete()
+
+    # Remove the provider's OAuth connection and archive the chatbots it served
+    # (their conversations/data are retained and restored if reconnected).
+    oauth_conns = TenantConnection.objects.filter(
+        user=request.user,
+        provider=provider_id,
+        credential_type=TenantConnection.OAUTH,
+    )
+    TenantMembership.objects.filter(connection__in=oauth_conns).update(
+        archived_at=timezone.now(), connection=None
+    )
+    oauth_conns.delete()
+
     return JsonResponse({"status": "disconnected"})
 
 
