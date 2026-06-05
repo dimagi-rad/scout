@@ -6,14 +6,6 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
-import {
   SearchFilterBar,
   type FilterGroup,
 } from "@/components/SearchFilterBar/SearchFilterBar"
@@ -48,6 +40,11 @@ function ProviderBadge({ provider }: { provider: string }) {
       {provider}
     </Badge>
   )
+}
+
+function teamLabelFor(conn: ApiKeyConnection): string {
+  const named = conn.chatbots.find((cb) => cb.team_name)
+  return named?.team_name || conn.provider
 }
 
 type DialogState =
@@ -92,10 +89,10 @@ export function ConnectionsPage() {
   const fetchConnections = useCallback(async () => {
     setLoadingConnections(true)
     try {
-      const data = await api.get<ApiKeyConnection[]>("/api/auth/tenant-credentials/")
+      const data = await api.get<ApiKeyConnection[]>("/api/auth/connections/")
       setConnections(data)
     } catch {
-      setError("Failed to load API key connections.")
+      setError("Failed to load connections.")
     } finally {
       setLoadingConnections(false)
     }
@@ -123,12 +120,13 @@ export function ConnectionsPage() {
     const lowerSearch = search.toLowerCase()
     return connections.filter((c) => {
       if (activeFilters.provider && c.provider !== activeFilters.provider) return false
-      if (
-        lowerSearch &&
-        !c.tenant_name.toLowerCase().includes(lowerSearch) &&
-        !c.tenant_id.toLowerCase().includes(lowerSearch)
-      ) {
-        return false
+      if (lowerSearch) {
+        const matches = c.chatbots.some(
+          (cb) =>
+            cb.tenant_name.toLowerCase().includes(lowerSearch) ||
+            cb.tenant_id.toLowerCase().includes(lowerSearch),
+        )
+        if (!matches) return false
       }
       return true
     })
@@ -138,16 +136,20 @@ export function ConnectionsPage() {
     setActiveFilters((prev) => ({ ...prev, [group]: value }))
   }
 
-  async function confirmRemove(membershipId: string) {
-    setRemoving(membershipId)
+  async function confirmRemove(connection: ApiKeyConnection) {
+    const connectionId = connection.connection_id
+    setRemoving(connectionId)
     setConfirmRemoveId(null)
     setError(null)
     try {
-      await api.delete(`/api/auth/tenant-credentials/${membershipId}/`)
+      await api.delete(`/api/auth/connections/${connectionId}/`)
+      const removedMembershipIds = new Set(
+        connection.chatbots.map((cb) => cb.membership_id),
+      )
       await fetchConnections()
       await fetchStoreDomains()
-      if (activeDomainId === membershipId) {
-        const next = storeDomains.find((d) => d.id !== membershipId)
+      if (activeDomainId != null && removedMembershipIds.has(activeDomainId)) {
+        const next = storeDomains.find((d) => !removedMembershipIds.has(d.id))
         if (next) setActiveDomain(next.id)
       }
     } catch {
@@ -242,10 +244,10 @@ export function ConnectionsPage() {
         )}
       </section>
 
-      {/* API Key Connections section */}
+      {/* Connections section */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-medium">API Key Connections</h2>
+          <h2 className="text-lg font-medium">Connections</h2>
           <Button
             size="sm"
             variant="outline"
@@ -264,7 +266,7 @@ export function ConnectionsPage() {
               <SearchFilterBar
                 search={search}
                 onSearchChange={setSearch}
-                placeholder="Search data sources..."
+                placeholder="Search chatbots..."
                 filters={
                   providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
                 }
@@ -277,105 +279,116 @@ export function ConnectionsPage() {
               <div className="rounded-lg border border-dashed p-8 text-center">
                 <p className="text-muted-foreground">
                   {connections.length === 0
-                    ? "No API key connections."
-                    : "No data sources match your search."}
+                    ? "No connections."
+                    : "No connections match your search."}
                 </p>
               </div>
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Provider</TableHead>
-                    <TableHead>Data source ID</TableHead>
-                    <TableHead className="text-right">Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredConnections.map((row) => {
-                    const isConfirming = confirmRemoveId === row.membership_id
+              <div className="space-y-4">
+                {filteredConnections.map((conn) => {
+                  const isApiKey = conn.credential_type === "api_key"
+                  const isConfirming = confirmRemoveId === conn.connection_id
+                  const teamLabel = teamLabelFor(conn)
 
-                    if (isConfirming) {
-                      return (
-                        <TableRow key={row.membership_id}>
-                          <TableCell colSpan={4}>
-                            <div className="flex items-center justify-between">
-                              <p className="text-sm font-medium">
-                                Remove{" "}
-                                <span className="font-semibold">
-                                  {row.tenant_name || row.tenant_id}
-                                </span>
-                                ? This cannot be undone.
+                  return (
+                    <Card
+                      key={conn.connection_id}
+                      data-testid={`connection-card-${conn.connection_id}`}
+                    >
+                      <CardContent className="space-y-4 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <p
+                                className="font-medium"
+                                data-testid={`connection-team-${conn.connection_id}`}
+                              >
+                                {teamLabel}
                               </p>
-                              <div className="flex gap-2">
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => setConfirmRemoveId(null)}
-                                  data-testid={`cancel-remove-${row.tenant_id}`}
-                                >
-                                  Cancel
-                                </Button>
-                                <Button
-                                  variant="destructive"
-                                  size="sm"
-                                  onClick={() => confirmRemove(row.membership_id)}
-                                  disabled={removing === row.membership_id}
-                                  data-testid={`confirm-remove-${row.tenant_id}`}
-                                >
-                                  {removing === row.membership_id
-                                    ? "Removing..."
-                                    : "Confirm Remove"}
-                                </Button>
-                              </div>
                             </div>
-                          </TableCell>
-                        </TableRow>
-                      )
-                    }
-
-                    return (
-                      <TableRow key={row.membership_id}>
-                        <TableCell
-                          className="font-medium"
-                          data-testid={`connection-name-${row.tenant_id}`}
-                        >
-                          {row.tenant_name || row.tenant_id}
-                        </TableCell>
-                        <TableCell>
-                          <ProviderBadge provider={row.provider} />
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {row.tenant_id}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() =>
-                                setDialogState({ mode: "edit", editing: row })
-                              }
-                              data-testid={`edit-connection-${row.tenant_id}`}
-                            >
-                              Edit
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="text-destructive hover:text-destructive"
-                              onClick={() => setConfirmRemoveId(row.membership_id)}
-                              data-testid={`remove-connection-${row.tenant_id}`}
-                            >
-                              Remove
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <ProviderBadge provider={conn.provider} />
+                              <Badge variant="secondary">
+                                {isApiKey ? "API Key" : "OAuth"}
+                              </Badge>
+                            </div>
                           </div>
-                        </TableCell>
-                      </TableRow>
-                    )
-                  })}
-                </TableBody>
-              </Table>
+                          {isApiKey && !isConfirming && (
+                            <div className="flex shrink-0 gap-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() =>
+                                  setDialogState({ mode: "edit", editing: conn })
+                                }
+                                data-testid={`edit-connection-${conn.connection_id}`}
+                              >
+                                Edit
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-destructive hover:text-destructive"
+                                onClick={() => setConfirmRemoveId(conn.connection_id)}
+                                data-testid={`remove-connection-${conn.connection_id}`}
+                              >
+                                Remove
+                              </Button>
+                            </div>
+                          )}
+                        </div>
+
+                        {isConfirming && (
+                          <div className="flex items-center justify-between gap-4 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                            <p className="text-sm font-medium">
+                              Remove{" "}
+                              <span className="font-semibold">{teamLabel}</span>? Its
+                              chatbots will be hidden. This cannot be undone.
+                            </p>
+                            <div className="flex shrink-0 gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setConfirmRemoveId(null)}
+                                data-testid={`cancel-remove-${conn.connection_id}`}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => confirmRemove(conn)}
+                                disabled={removing === conn.connection_id}
+                                data-testid={`confirm-remove-${conn.connection_id}`}
+                              >
+                                {removing === conn.connection_id
+                                  ? "Removing..."
+                                  : "Confirm Remove"}
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+
+                        <ul className="space-y-1 border-t pt-3">
+                          {conn.chatbots.map((cb) => (
+                            <li
+                              key={cb.membership_id}
+                              className="flex items-center justify-between gap-4 text-sm"
+                            >
+                              <span className="font-medium">
+                                {cb.tenant_name || cb.tenant_id}
+                              </span>
+                              <span className="text-muted-foreground">
+                                {cb.tenant_id}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </CardContent>
+                    </Card>
+                  )
+                })}
+              </div>
             )}
           </>
         )}

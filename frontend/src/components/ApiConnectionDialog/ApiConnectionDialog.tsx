@@ -12,12 +12,19 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 
-export interface ApiKeyConnection {
+export interface ConnectionChatbot {
   membership_id: string
-  provider: string
   tenant_id: string
   tenant_name: string
+  team_slug: string
+  team_name: string
+}
+
+export interface ApiKeyConnection {
+  connection_id: string
+  provider: string
   credential_type: string
+  chatbots: ConnectionChatbot[]
 }
 
 interface ProviderField {
@@ -82,12 +89,12 @@ export function ApiConnectionDialog({ open, mode, editing, onClose, onSaved }: P
     try {
       if (mode === "edit" && editing) {
         await api.patch(
-          `/api/auth/tenant-credentials/${editing.membership_id}/`,
+          `/api/auth/connections/${editing.connection_id}/`,
           { fields: values },
         )
       } else {
         await api.post<{ memberships: MembershipResult[] }>(
-          "/api/auth/tenant-credentials/",
+          "/api/auth/connections/",
           { provider: providerId, fields: values },
         )
       }
