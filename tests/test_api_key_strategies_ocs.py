@@ -3,13 +3,16 @@ import pytest
 from apps.users.services.api_key_providers import CredentialVerificationError
 
 
-def test_form_fields_only_api_key():
+def test_form_fields_api_key_and_optional_team_name():
     from apps.users.services.api_key_providers.ocs import OCSStrategy
 
     assert OCSStrategy.provider_id == "ocs"
-    keys = [f["key"] for f in OCSStrategy.form_fields]
-    assert keys == ["api_key"]
-    assert OCSStrategy.form_fields[0]["editable_on_rotate"] is True
+    fields = {f["key"]: f for f in OCSStrategy.form_fields}
+    assert list(fields) == ["api_key", "team_name"]
+    assert fields["api_key"]["editable_on_rotate"] is True
+    # team_name is an optional, add-only fallback (auto-detected when possible)
+    assert fields["team_name"]["required"] is False
+    assert fields["team_name"]["editable_on_rotate"] is False
 
 
 def test_pack_credential_returns_raw_key():

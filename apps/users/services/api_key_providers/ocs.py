@@ -60,6 +60,13 @@ class OCSStrategy(CredentialProviderStrategy):
             "required": True,
             "editable_on_rotate": True,
         },
+        {
+            "key": "team_name",
+            "label": "Team name (auto-detected if left blank)",
+            "type": "text",
+            "required": False,
+            "editable_on_rotate": False,
+        },
     ]
 
     @classmethod

@@ -12,6 +12,16 @@ from django.utils import timezone
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
+from apps.users.services.ocs_team import adetect_team_from_api_key
+
+
+def _mock_async_client(mocker, fake_get):
+    client = mocker.MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=fake_get)
+    mocker.patch("httpx.AsyncClient", return_value=client)
+    return client
 
 
 def _tenant(ext="exp-1"):
@@ -152,3 +162,37 @@ async def test_resolve_oauth_ok_on_team_match(user, mocker):
     )
     _mock_token_qs(mocker, team="team-a")
     assert await aresolve_credential(tm) == {"type": "oauth", "value": "tok"}
+
+
+# --- OCS team detection ----------------------------------------------------
+
+
+def _sessions_response(results):
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": results, "next": None}
+
+    return R()
+
+
+@pytest.mark.asyncio
+async def test_detect_team_from_sessions(mocker):
+    async def fake_get(url, headers=None, params=None):
+        return _sessions_response([{"team": {"name": "Acme", "slug": "acme"}}])
+
+    _mock_async_client(mocker, fake_get)
+    assert await adetect_team_from_api_key("key", "https://ocs.example") == ("acme", "Acme")
+
+
+@pytest.mark.asyncio
+async def test_detect_team_none_when_no_sessions(mocker):
+    async def fake_get(url, headers=None, params=None):
+        return _sessions_response([])
+
+    _mock_async_client(mocker, fake_get)
+    assert await adetect_team_from_api_key("key", "https://ocs.example") is None
