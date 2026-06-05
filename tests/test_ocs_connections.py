@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from django.db import IntegrityError
+from django.utils import timezone
 
+from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
 
 
 def _tenant(ext="exp-1"):
@@ -81,3 +87,68 @@ def test_data_migration_maps_credentials(user):
     # both OAuth memberships collapse into ONE connection per (user, provider)
     assert tm1.connection_id == tm2.connection_id
     assert tm1.connection.credential_type == "oauth"
+
+
+# --- resolution ------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_resolve_none_when_no_connection(user):
+    tm = TenantMembership.objects.create(user=user, tenant=_tenant())
+    assert resolve_credential(tm) is None
+
+
+@pytest.mark.django_db
+def test_resolve_api_key(user):
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.API_KEY,
+        encrypted_credential=encrypt_credential("k"),
+    )
+    tm = TenantMembership.objects.create(
+        user=user, tenant=_tenant(), connection=conn, team_slug="acme", team_name="Acme"
+    )
+    assert resolve_credential(tm) == {"type": "api_key", "value": "k"}
+
+
+def _mock_token_qs(mocker, *, team, token="tok"):
+    account = MagicMock(extra_data={"team": team})
+    tok = MagicMock(
+        token=token,
+        expires_at=timezone.now() + timedelta(hours=5),
+        account=account,
+        token_secret="",
+    )
+    qs = MagicMock()
+    qs.select_related.return_value = qs
+    qs.afirst = AsyncMock(return_value=tok)
+    mocker.patch("apps.users.services.credential_resolver._social_token_qs", return_value=qs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_oauth_fails_closed_on_team_mismatch(user, mocker):
+    conn = await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+    )
+    tenant = await Tenant.objects.acreate(provider="ocs", external_id="x", canonical_name="x")
+    tm = await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=conn, team_slug="team-a"
+    )
+    _mock_token_qs(mocker, team="team-b")
+    assert await aresolve_credential(tm) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_oauth_ok_on_team_match(user, mocker):
+    conn = await TenantConnection.objects.acreate(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+    )
+    tenant = await Tenant.objects.acreate(provider="ocs", external_id="y", canonical_name="y")
+    tm = await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=conn, team_slug="team-a"
+    )
+    _mock_token_qs(mocker, team="team-a")
+    assert await aresolve_credential(tm) == {"type": "oauth", "value": "tok"}
