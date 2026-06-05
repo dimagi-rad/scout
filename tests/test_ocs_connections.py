@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from django.db import IntegrityError
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from asgiref.sync import sync_to_async
+from django.db import IntegrityError, connection
+from django.db.migrations.loader import MigrationLoader
+from django.test import AsyncClient, Client
 from django.utils import timezone
 
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.api_key_providers.base import TenantDescriptor
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import resolve_ocs_chatbots
@@ -83,10 +90,6 @@ def test_data_migration_maps_legacy_credentials(user):
     table (the other tables exist at head and the 0006-state models map to them),
     seed it, run forward(), and drop it again.
     """
-    import importlib
-
-    from django.db import connection
-    from django.db.migrations.loader import MigrationLoader
 
     apps06 = MigrationLoader(connection).project_state(("users", "0006_tenant_connections")).apps
     Tenant06 = apps06.get_model("users", "Tenant")
@@ -236,7 +239,6 @@ async def test_detect_team_none_when_no_sessions(mocker):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_oauth_import_links_team_and_connection(user, mocker):
-    from allauth.socialaccount.models import SocialAccount
 
     await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
@@ -268,8 +270,6 @@ async def test_oauth_import_links_team_and_connection(user, mocker):
 
 
 async def _login(user):
-    from asgiref.sync import sync_to_async
-    from django.test import AsyncClient
 
     client = AsyncClient()
     await sync_to_async(client.login)(email=user.email, password="testpass123")
@@ -279,9 +279,6 @@ async def _login(user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_api_key_add_creates_one_connection_with_team(user, mocker):
-    import json
-
-    from apps.users.services.api_key_providers.base import TenantDescriptor
 
     mocker.patch(
         "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
@@ -316,9 +313,6 @@ async def test_api_key_add_creates_one_connection_with_team(user, mocker):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_api_key_add_requires_team_name_when_undetectable(user, mocker):
-    import json
-
-    from apps.users.services.api_key_providers.base import TenantDescriptor
 
     mocker.patch(
         "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
@@ -367,7 +361,6 @@ async def test_reported_bug_oauth_team_switch_fails_closed(user, mocker):
     team B. The team-A chatbot must resolve to None (NOT the team-B token), while
     the team-B chatbot resolves via its API key. This is the regression that
     motivated the feature."""
-    from allauth.socialaccount.models import SocialAccount
 
     acct = await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
@@ -417,9 +410,6 @@ async def test_reported_bug_oauth_team_switch_fails_closed(user, mocker):
 
 
 async def _add_ocs_key(client, mocker, *, external_id, name, team_slug, team_name, api_key):
-    import json
-
-    from apps.users.services.api_key_providers.base import TenantDescriptor
 
     mocker.patch(
         "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
@@ -502,8 +492,6 @@ async def test_readd_unarchives_and_second_key_is_isolated(user, mocker):
 def test_disconnect_archives_oauth_connection(user):
     """Disconnecting an OAuth provider revokes the token, archives its chatbots,
     and removes the OAuth connection."""
-    from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-    from django.test import Client
 
     app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
     acct = SocialAccount.objects.create(user=user, provider="ocs", uid="u1")
