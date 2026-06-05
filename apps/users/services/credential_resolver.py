@@ -73,8 +73,8 @@ def resolve_credential(membership) -> dict | None:
 
     Resolution is driven by ``membership.connection``. Returns a dict with keys
     ``type`` (``"api_key"`` or ``"oauth"``) and ``value`` (the decrypted key or
-    OAuth token string), or ``None`` if no usable credential is found. Callers
-    must ``select_related("connection")``.
+    OAuth token string), or ``None`` if no usable credential is found. Callers must
+    ``select_related("connection", "user")``.
     """
     conn = membership.connection
     if conn is None:
@@ -98,7 +98,8 @@ async def aresolve_credential(membership) -> dict | None:
     """Async version of :func:`resolve_credential` with token refresh.
 
     Like the sync variant, resolution is driven by ``membership.connection``
-    (callers must ``select_related("connection")``). For OAuth tokens, attempts
+    (callers must
+    ``select_related("connection", "user")``). For OAuth tokens, attempts
     a refresh when the token is near expiry.
     """
     conn = membership.connection
