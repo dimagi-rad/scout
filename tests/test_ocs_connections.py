@@ -13,6 +13,7 @@ from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
 from apps.users.services.ocs_team import adetect_team_from_api_key
+from apps.users.services.tenant_resolution import resolve_ocs_chatbots
 
 
 def _mock_async_client(mocker, fake_get):
@@ -196,3 +197,37 @@ async def test_detect_team_none_when_no_sessions(mocker):
 
     _mock_async_client(mocker, fake_get)
     assert await adetect_team_from_api_key("key", "https://ocs.example") is None
+
+
+# --- OAuth import -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_oauth_import_links_team_and_connection(user, mocker):
+    from allauth.socialaccount.models import SocialAccount
+
+    await SocialAccount.objects.acreate(
+        user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
+    )
+    experiments = [{"id": "exp-1", "name": "Bot 1"}, {"id": "exp-2", "name": "Bot 2"}]
+
+    async def fake_get(url, headers=None, params=None):
+        if "sessions" in url:
+            return _sessions_response([{"team": {"slug": "team-a", "name": "Team A"}}])
+        return _sessions_response(experiments)  # same envelope shape (results/next)
+
+    _mock_async_client(mocker, fake_get)
+
+    await resolve_ocs_chatbots(user, "tok")
+
+    conns = [c async for c in TenantConnection.objects.filter(user=user, provider="ocs")]
+    assert len(conns) == 1
+    assert conns[0].credential_type == "oauth"
+    tms = [
+        tm async for tm in TenantMembership.objects.filter(user=user).select_related("connection")
+    ]
+    assert len(tms) == 2
+    assert all(tm.team_slug == "team-a" and tm.team_name == "Team A" for tm in tms)
+    assert all(tm.connection_id == conns[0].id for tm in tms)
+    assert all(tm.archived_at is None for tm in tms)

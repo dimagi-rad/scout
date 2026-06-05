@@ -11,13 +11,21 @@ from __future__ import annotations
 import logging
 
 import httpx
+from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.services.ocs_team import adetect_team_name_from_oauth
 
 logger = logging.getLogger(__name__)
 
 COMMCARE_DOMAIN_API = "https://www.commcarehq.org/api/user_domains/v1/"
+
+
+async def _ocs_team_slug(user) -> str:
+    """The OCS team slug the user's current OAuth token is scoped to (OIDC claim)."""
+    acct = await SocialAccount.objects.filter(user=user, provider="ocs").afirst()
+    return (acct.extra_data or {}).get("team", "") if acct else ""
 
 
 class CommCareAuthError(Exception):
@@ -35,6 +43,9 @@ class OCSAuthError(Exception):
 async def resolve_commcare_domains(user, access_token: str) -> list[TenantMembership]:
     """Fetch the user's CommCare domains and upsert TenantMembership records."""
     domains = await _fetch_all_domains(access_token)
+    conn, _ = await TenantConnection.objects.aget_or_create(
+        user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+    )
     memberships = []
 
     for domain in domains:
@@ -44,10 +55,9 @@ async def resolve_commcare_domains(user, access_token: str) -> list[TenantMember
             defaults={"canonical_name": domain["project_name"]},
         )
         tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-        await TenantCredential.objects.aget_or_create(
-            tenant_membership=tm,
-            defaults={"credential_type": TenantCredential.OAUTH},
-        )
+        tm.connection = conn
+        tm.archived_at = None
+        await tm.asave(update_fields=["connection", "archived_at"])
         memberships.append(tm)
 
     logger.info(
@@ -80,6 +90,9 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
     resp.raise_for_status()
 
     opportunities = resp.json().get("opportunities", [])
+    conn, _ = await TenantConnection.objects.aget_or_create(
+        user=user, provider="commcare_connect", credential_type=TenantConnection.OAUTH
+    )
     memberships = []
 
     for opp in opportunities:
@@ -89,10 +102,9 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
             defaults={"canonical_name": opp["name"]},
         )
         tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-        await TenantCredential.objects.aget_or_create(
-            tenant_membership=tm,
-            defaults={"credential_type": TenantCredential.OAUTH},
-        )
+        tm.connection = conn
+        tm.archived_at = None
+        await tm.asave(update_fields=["connection", "archived_at"])
         memberships.append(tm)
 
     logger.info(
@@ -106,13 +118,24 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
 async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and upsert TenantMembership records.
 
-    OCS tokens are team-scoped — every experiment returned belongs to the team
-    the user selected during OAuth consent.
+    OCS tokens are team-scoped — every experiment returned belongs to the team the
+    user selected during OAuth consent. That team's slug is the OIDC ``team`` claim
+    (stored on the user's OCS SocialAccount); its display name is read from
+    ``/api/sessions/`` when a session exists. Each chatbot records its team on the
+    membership so credential resolution can fail closed if the token later moves to
+    a different team. A user has exactly one OCS OAuth connection.
     """
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
-    url: str | None = f"{base_url}/api/experiments/"
+
+    team_slug = await _ocs_team_slug(user)
+    team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
+
+    conn, _ = await TenantConnection.objects.aget_or_create(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+    )
 
     experiments: list[dict] = []
+    url: str | None = f"{base_url}/api/experiments/"
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
             resp = await client.get(
@@ -136,16 +159,18 @@ async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership
             defaults={"canonical_name": exp.get("name") or str(exp["id"])},
         )
         tm, _ = await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)
-        await TenantCredential.objects.aget_or_create(
-            tenant_membership=tm,
-            defaults={"credential_type": TenantCredential.OAUTH},
-        )
+        tm.connection = conn
+        tm.team_slug = team_slug
+        tm.team_name = team_name
+        tm.archived_at = None
+        await tm.asave(update_fields=["connection", "team_slug", "team_name", "archived_at"])
         memberships.append(tm)
 
     logger.info(
-        "Resolved %d OCS chatbots for user %s",
+        "Resolved %d OCS chatbots for user %s (team %s)",
         len(memberships),
         user.email,
+        team_slug,
     )
     return memberships
 
