@@ -174,6 +174,42 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
             white-space: pre-wrap;
             text-align: left;
         }
+        /* Print-to-PDF styling: white background, full content (no clipping),
+           sensible page margins, and visible chart SVGs. */
+        @media print {
+            @page {
+                size: auto;
+                margin: 16mm;
+            }
+            html, body {
+                height: auto;
+                overflow: visible;
+                background: #ffffff;
+            }
+            #root {
+                height: auto;
+                display: block;
+            }
+            #artifact-container {
+                overflow: visible;
+                height: auto;
+                padding: 0;
+            }
+            /* The loading spinner is non-content chrome; never print it. */
+            .loading-state {
+                display: none !important;
+            }
+            /* Ensure chart colors/backgrounds render instead of being stripped. */
+            * {
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+            }
+            /* Recharts/Plotly draw into SVG/canvas; keep them visible and unclipped. */
+            svg, canvas {
+                max-width: 100% !important;
+                overflow: visible !important;
+            }
+        }
     </style>
 </head>
 <body>
@@ -619,6 +655,16 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         } else {
             ArtifactRenderer.init().catch(console.error);
         }
+
+        // Print-to-PDF: the parent frame posts {type: 'scout-print'} to print
+        // only the artifact (not the surrounding app). Triggering print inside
+        // the sandboxed iframe scopes the print job to the artifact content.
+        window.addEventListener('message', (event) => {
+            if (event.origin !== window.location.origin) return;
+            if (event.data && event.data.type === 'scout-print') {
+                window.print();
+            }
+        });
     </script>
 </body>
 </html>"""
