@@ -11,7 +11,7 @@ sources:
   - name: messages
     description: "Individual messages within sessions"
   - name: participants
-    description: "Unique participants extracted from sessions"
+    description: "Participants with name, platform, and per-chatbot custom data (from the dedicated participant API)"
 
 metadata_discovery:
   description: "Fetch experiment detail from OCS API"
