@@ -18,6 +18,7 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
 from mcp_server.services.materializer import MaterializationCancelled
@@ -798,3 +799,132 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
         1002,
         abort=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sibling view-schema consistency on re-materialization
+# ---------------------------------------------------------------------------
+#
+# Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing a
+# tenant from workspace A cascade-drops the namespaced views inside every OTHER
+# multi-tenant workspace that shares that tenant, so materialize_workspace must
+# defer a rebuild for each such sibling.
+
+
+async def _make_sibling_multitenant_workspace(user, shared_tenant, *, with_view_schema, suffix):
+    """Build a multi-tenant workspace that shares ``shared_tenant`` and has a
+    distinct extra tenant, optionally with a WorkspaceViewSchema row."""
+    extra_tenant = await Tenant.objects.acreate(
+        provider="commcare",
+        external_id=f"sibling-extra-{suffix}",
+        canonical_name=f"Sibling Extra {suffix}",
+    )
+    ws = await Workspace.objects.acreate(name=f"Sibling WS {suffix}", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=shared_tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=extra_tenant)
+    if with_view_schema:
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws,
+            schema_name=f"ws_sibling_{suffix}",
+            state=SchemaState.ACTIVE,
+        )
+    return ws
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_defers_rebuild_for_sibling_view_schemas(
+    workspace, tenant, tenant_membership_obj, user, context_with_job_id
+):
+    """Materializing workspace A (sharing tenant T) defers a rebuild for the
+    multi-tenant sibling B that shares T and has a WorkspaceViewSchema — and
+    does NOT defer one for A itself nor for a single-tenant sibling."""
+    # Sibling B: multi-tenant, shares T, has a view schema → must be rebuilt.
+    sibling_b = await _make_sibling_multitenant_workspace(
+        user, tenant, with_view_schema=True, suffix="b"
+    )
+    # Sibling C: single-tenant (only T), no view schema → must NOT be rebuilt.
+    sibling_c = await Workspace.objects.acreate(name="Sibling C single", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=sibling_c, tenant=tenant)
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(sibling_b.id))
+    deferred_ids = {c.kwargs["workspace_id"] for c in mock_rebuild.await_args_list}
+    assert str(workspace.id) not in deferred_ids  # never the current workspace
+    assert str(sibling_c.id) not in deferred_ids  # single-tenant siblings excluded
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_dedupes_sibling_rebuild(
+    workspace, tenant, tenant_membership_obj, user, context_with_job_id
+):
+    """A sibling B that shares the materialized tenant must be deferred exactly
+    once even though the dedupe path could otherwise enqueue duplicates."""
+    sibling_b = await _make_sibling_multitenant_workspace(
+        user, tenant, with_view_schema=True, suffix="dedup"
+    )
+
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    assert mock_rebuild.await_count == 1
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(sibling_b.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
+    workspace, tenant_membership_obj, context_with_job_id
+):
+    """Regression: with no qualifying sibling (no other multi-tenant workspace
+    sharing the tenant + view schema), no rebuild is deferred."""
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", return_value={"status": "ok"}),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    mock_rebuild.assert_not_awaited()

@@ -7,9 +7,17 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
-from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    Workspace,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
-from apps.workspaces.tasks import expire_inactive_schemas
+from apps.workspaces.tasks import expire_inactive_schemas, teardown_schema
 
 
 @pytest.fixture
@@ -289,3 +297,78 @@ async def test_expire_then_failed_teardown_keeps_data_visible(active_schema):
     # Data is intact and still visible to the catalog.
     assert active_schema.state == SchemaState.ACTIVE
     assert completed_run.state == MaterializationRun.RunState.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema: dependent view-schema consistency
+# ---------------------------------------------------------------------------
+#
+# A tenant data schema (t_<id>) is SHARED across workspaces. DROP SCHEMA CASCADE
+# cascade-drops the namespaced views inside every dependent multi-tenant
+# workspace's view schema, so teardown_schema must flip those ACTIVE
+# WorkspaceViewSchema rows to FAILED (ACTIVE would be a lie).
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
+    active_schema, tenant, user
+):
+    """After the physical DROP, the ACTIVE view schema of a multi-tenant
+    workspace B (sharing the torn-down tenant) is flipped to FAILED, while a
+    single-tenant workspace's view schema is left untouched."""
+    # Multi-tenant workspace B: shares `tenant` + a second tenant, ACTIVE view schema.
+    extra_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="teardown-extra", canonical_name="Teardown Extra"
+    )
+    ws_b = await Workspace.objects.acreate(name="Teardown Sibling B", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=extra_tenant)
+    vs_b = await WorkspaceViewSchema.objects.acreate(
+        workspace=ws_b, schema_name="ws_teardown_b", state=SchemaState.ACTIVE
+    )
+
+    # Single-tenant workspace C: contains only `tenant`. Even if it has a view
+    # schema row, it is not multi-tenant, so it must be left untouched.
+    ws_c = await Workspace.objects.acreate(name="Teardown Single C", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_c, tenant=tenant)
+    vs_c = await WorkspaceViewSchema.objects.acreate(
+        workspace=ws_c, schema_name="ws_teardown_c", state=SchemaState.ACTIVE
+    )
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.return_value = None
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    await active_schema.arefresh_from_db()
+    await vs_b.arefresh_from_db()
+    await vs_c.arefresh_from_db()
+
+    assert active_schema.state == SchemaState.EXPIRED
+    # B's namespaced views were cascade-dropped; ACTIVE was a lie → now FAILED.
+    assert vs_b.state == SchemaState.FAILED
+    # C is single-tenant — its view schema must not be clobbered.
+    assert vs_c.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_does_not_clobber_non_active_view_schema(active_schema, tenant, user):
+    """A dependent view schema that is already TEARDOWN must keep its lifecycle
+    state — only ACTIVE rows are flipped to FAILED."""
+    extra_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="teardown-extra-2", canonical_name="Teardown Extra 2"
+    )
+    ws_b = await Workspace.objects.acreate(name="Teardown Sibling B2", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=extra_tenant)
+    vs_b = await WorkspaceViewSchema.objects.acreate(
+        workspace=ws_b, schema_name="ws_teardown_b2", state=SchemaState.TEARDOWN
+    )
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.return_value = None
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    await vs_b.arefresh_from_db()
+    assert vs_b.state == SchemaState.TEARDOWN
