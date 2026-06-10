@@ -1,10 +1,12 @@
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import psycopg.errors
 import psycopg.sql
 import pytest
+from django.utils import timezone
 
-from apps.workspaces.models import TenantSchema, WorkspaceViewSchema
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
 from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
 
@@ -28,6 +30,25 @@ class TestSchemaManager:
         # Verify DDL was executed
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
         assert any("CREATE SCHEMA" in c for c in calls)
+
+    def test_provision_fresh_sets_last_accessed_at(self, tenant_membership):
+        """A freshly provisioned schema must start with a populated
+        last_accessed_at so the inactivity TTL begins from now, not null."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+
+        before = timezone.now()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            ts = SchemaManager().provision(tenant_membership.tenant)
+
+        ts.refresh_from_db()
+        assert ts.state == SchemaState.ACTIVE
+        assert ts.last_accessed_at is not None
+        assert ts.last_accessed_at >= before
 
     def test_provision_returns_existing(self, tenant_membership):
         mgr = SchemaManager()
@@ -57,6 +78,48 @@ class TestSchemaManager:
                 psycopg.sql.Identifier(schema_name)
             )
         )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_provision_resurrects_expired_schema_and_refreshes_ttl(tenant_membership):
+    """Provisioning over an EXPIRED record (the resurrect/fall-through path)
+    re-activates it AND refreshes last_accessed_at — otherwise the janitor
+    would drop the freshly resurrected schema using its stale timestamp.
+
+    Uses transaction=True so the IntegrityError raised by objects.create (the
+    schema_name already exists) does not poison an enclosing atomic block —
+    mirroring production, where provision() runs outside a transaction.
+    """
+    mgr = SchemaManager()
+    schema_name = mgr._sanitize_schema_name(tenant_membership.tenant.external_id)
+    stale = timezone.now() - timedelta(days=20)
+    TenantSchema.objects.create(
+        tenant=tenant_membership.tenant,
+        schema_name=schema_name,
+        state=SchemaState.EXPIRED,
+        last_accessed_at=stale,
+    )
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_conn.cursor.return_value = mock_cursor
+    mock_cursor.fetchone.return_value = None  # role doesn't exist yet
+
+    before = timezone.now()
+    with patch(
+        "apps.workspaces.services.schema_manager.get_managed_db_connection",
+        return_value=mock_conn,
+    ):
+        ts = mgr.provision(tenant_membership.tenant)
+
+    # No duplicate row; the existing one was resurrected in place.
+    assert TenantSchema.objects.count() == 1
+    ts.refresh_from_db()
+    assert ts.state == SchemaState.ACTIVE
+    assert ts.last_accessed_at is not None
+    assert ts.last_accessed_at >= before
+    # The stale timestamp must be gone.
+    assert ts.last_accessed_at > stale
 
 
 @pytest.mark.django_db

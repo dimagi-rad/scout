@@ -1,12 +1,15 @@
 """Tests for schema TTL tasks."""
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.tasks import expire_inactive_schemas
 
 
 @pytest.fixture
@@ -35,6 +38,41 @@ async def test_expire_inactive_schemas_marks_stale_schema_for_teardown(active_sc
     await active_schema.arefresh_from_db()
     assert active_schema.state == SchemaState.TEARDOWN
     mock_defer.assert_called_once_with(schema_id=str(active_schema.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resurrected_schema_survives_immediate_expire_sweep(tenant):
+    """Regression for the production drop loop: an EXPIRED schema resurrected via
+    provision() must NOT be re-expired by the very next expire_inactive_schemas
+    tick. provision() now refreshes last_accessed_at, so the schema is fresh."""
+    mgr = SchemaManager()
+    schema_name = mgr._sanitize_schema_name(tenant.external_id)
+    stale = timezone.now() - timedelta(days=20)
+    await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name=schema_name,
+        state=SchemaState.EXPIRED,
+        last_accessed_at=stale,
+    )
+
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value = MagicMock()
+    mock_conn.cursor.return_value.fetchone.return_value = None
+
+    with patch(
+        "apps.workspaces.services.schema_manager.get_managed_db_connection",
+        return_value=mock_conn,
+    ):
+        ts = await sync_to_async(mgr.provision)(tenant)
+
+    # Now run the janitor immediately, as production did 60s after materialization.
+    with patch("apps.workspaces.tasks.teardown_schema.defer_async", new_callable=AsyncMock):
+        await expire_inactive_schemas()
+
+    await ts.arefresh_from_db()
+    # The schema survives — it is still ACTIVE, not flipped to TEARDOWN.
+    assert ts.state == SchemaState.ACTIVE
 
 
 @pytest.mark.asyncio
