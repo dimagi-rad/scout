@@ -35,6 +35,11 @@ def task(original_func=None, **task_kwargs):
     registration to ``@app.task``, so individual tasks can't forget the
     connection hygiene. ``tests/test_worker_db_resilience.py`` enforces that
     every task in ``apps.workspaces.tasks`` is registered through it.
+
+    TEMPORARY: this is a workaround for procrastinate-org/procrastinate#1134;
+    upstream PR #1555 adds the same cleanup natively in the Django contrib.
+    Once that merges and we upgrade past the release containing it, strip this
+    wrapper — see https://github.com/dimagi-rad/scout/issues/225.
     """
 
     def wrap(func):
