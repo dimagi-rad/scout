@@ -29,7 +29,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from config.procrastinate import app, ensure_fresh_db_connections
+from config.procrastinate import app, task
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
@@ -121,8 +121,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     return ". ".join(parts) + "."
 
 
-@app.task
-@ensure_fresh_db_connections
+@task
 async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
 
@@ -197,8 +196,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     return {"status": "active", "schema_id": schema_id}
 
 
-@app.task(pass_context=True)
-@ensure_fresh_db_connections
+@task(pass_context=True)
 async def materialize_workspace(
     context,
     workspace_id: str,
@@ -387,7 +385,7 @@ def _run_pipeline_with_progress(
     to the caller.
     """
     # This runs on an asyncio.to_thread executor thread, which has its own
-    # thread-local Django connection that ensure_fresh_db_connections (which
+    # thread-local Django connection that the task decorator's close_old_connections (which
     # cleans the async-ORM thread) cannot reach. Pool threads are reused
     # across jobs, so a connection that died since the last pipeline run here
     # would otherwise poison every progress update.
@@ -425,8 +423,7 @@ async def _drop_schema_and_fail(schema) -> None:
 
 
 @app.periodic(cron="*/30 * * * *")
-@app.task
-@ensure_fresh_db_connections
+@task
 async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """Mark stale schemas for teardown and dispatch teardown tasks.
 
@@ -465,8 +462,7 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
         await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
 
 
-@app.task
-@ensure_fresh_db_connections
+@task
 async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
 
@@ -497,8 +493,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     return {"status": "active", "schema_name": vs.schema_name}
 
 
-@app.task
-@ensure_fresh_db_connections
+@task
 async def teardown_view_schema_task(view_schema_id: str) -> None:
     """Drop the physical PostgreSQL schema for a WorkspaceViewSchema and mark EXPIRED."""
     try:
@@ -520,8 +515,7 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
     await vs.asave(update_fields=["state"])
 
 
-@app.task
-@ensure_fresh_db_connections
+@task
 async def teardown_schema(schema_id: str) -> None:
     """Drop a tenant schema in the managed database and mark it EXPIRED."""
     try:
@@ -685,8 +679,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
 
 
 @app.periodic(cron="*/15 * * * *")
-@app.task
-@ensure_fresh_db_connections
+@task
 async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     """Flip ThreadJobs that have been active too long and whose procrastinate
     job is no longer running. Fires the resume task so the user is not stuck
@@ -885,8 +878,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     return status, summary
 
 
-@app.task(pass_context=True)
-@ensure_fresh_db_connections
+@task(pass_context=True)
 async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
     re-invoke the agent so it can respond to the original request with the

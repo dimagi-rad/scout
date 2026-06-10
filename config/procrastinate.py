@@ -11,11 +11,11 @@ from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 from procrastinate.contrib.django import app
 
-__all__ = ["app", "ensure_fresh_db_connections"]
+__all__ = ["app", "task"]
 
 
-def ensure_fresh_db_connections(func):
-    """Close stale or dead Django DB connections before a task body runs.
+def task(original_func=None, **task_kwargs):
+    """Drop-in replacement for ``@app.task`` that survives dead DB connections.
 
     The worker is a long-lived process with no HTTP request cycle, so Django's
     request_started/request_finished hooks never run and a connection that dies
@@ -25,20 +25,27 @@ def ensure_fresh_db_connections(func):
     janitor task that is supposed to rescue jobs stranded by exactly this
     (June 2026 incident: ~22h of failed background jobs after an RDS upgrade).
 
-    ``close_old_connections()`` discards unusable/expired connections so the
-    next ORM call opens a fresh one. It must run on the thread that owns them:
-    ``sync_to_async``'s thread-sensitive executor — the same thread the async
-    ORM routes queries through.
+    Before each job, ``close_old_connections()`` discards unusable/expired
+    connections so the next ORM call opens a fresh one. It must run on the
+    thread that owns them: ``sync_to_async``'s thread-sensitive executor — the
+    same thread the async ORM routes queries through.
 
-    Apply between ``@app.task`` and the function so procrastinate registers
-    the wrapped callable. ``tests/test_worker_db_resilience.py`` enforces that
-    every task in ``apps.workspaces.tasks`` carries this wrapper.
+    This is the task-middleware pattern from the procrastinate docs
+    (howto/advanced/middleware): one decorator wraps the body and delegates
+    registration to ``@app.task``, so individual tasks can't forget the
+    connection hygiene. ``tests/test_worker_db_resilience.py`` enforces that
+    every task in ``apps.workspaces.tasks`` is registered through it.
     """
 
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        await sync_to_async(close_old_connections)()
-        return await func(*args, **kwargs)
+    def wrap(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            await sync_to_async(close_old_connections)()
+            return await func(*args, **kwargs)
 
-    wrapper._ensures_fresh_db_connections = True
-    return wrapper
+        wrapper._ensures_fresh_db_connections = True
+        return app.task(**task_kwargs)(wrapper)
+
+    if original_func:
+        return wrap(original_func)
+    return wrap
