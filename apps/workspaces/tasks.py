@@ -11,7 +11,7 @@ from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
-from procrastinate.contrib.django.procrastinate_app import current_app
+from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.agents.graph.base import build_agent_graph
 from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
@@ -571,13 +571,29 @@ STALE_JOB_THRESHOLD = timedelta(minutes=10)
 async def _procrastinate_job_status(job_id: int) -> str | None:
     """Return the raw procrastinate job status string, or None when unknown.
 
+    Reads the status directly from the ``procrastinate_jobs`` table via the
+    Django contrib ORM model rather than ``current_app.job_manager``. The
+    module-level ``current_app`` reference resolves to procrastinate's
+    ``FutureApp`` blueprint proxy at import time; ``AppConfig.ready()`` rebinds
+    the name in procrastinate's own module to the real ``App``, but our
+    already-imported reference keeps pointing at the unresolved ``FutureApp``,
+    which has no ``job_manager`` (it is a ``Blueprint``). In the worker that
+    raised ``AttributeError`` on every call, so the janitor treated every
+    lookup as "couldn't tell" and never reconciled. The ORM model sidesteps the
+    app lifecycle entirely and is async-native.
+
     Returning a sentinel on exception would conflate "not active" with
     "couldn't tell" — the janitor would then misclassify actively-running jobs
     as candidates for cleanup during a transient DB blip. Callers must treat
-    ``None`` as "don't touch this row this tick".
+    ``None`` as "don't touch this row this tick" (also returned for an unknown
+    job id, where there is nothing to reconcile against).
     """
     try:
-        status = await current_app.job_manager.get_job_status_async(job_id)
+        return (
+            await ProcrastinateJob.objects.filter(id=job_id)
+            .values_list("status", flat=True)
+            .afirst()
+        )
     except Exception:
         logger.warning(
             "Could not fetch procrastinate status for job %s; skipping reconcile this tick",
@@ -585,7 +601,6 @@ async def _procrastinate_job_status(job_id: int) -> str | None:
             exc_info=True,
         )
         return None
-    return status.value
 
 
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:

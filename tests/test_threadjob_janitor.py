@@ -2,7 +2,9 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.utils import timezone
 from langchain_core.messages import AIMessage
 
@@ -11,10 +13,48 @@ from apps.workspaces.models import Workspace
 from apps.workspaces.tasks import (
     RESUME_STUCK_RUNNING_MESSAGE,
     STALE_JOB_THRESHOLD,
+    _procrastinate_job_status,
     expire_stale_thread_jobs,
 )
 
 User = get_user_model()
+
+
+@pytest.fixture
+def procrastinate_job():
+    """Factory that inserts real rows into the unmanaged procrastinate_jobs
+    table and cleans them up on teardown.
+
+    The Django contrib ProcrastinateJob model is read-only (managed=False), so
+    rows are inserted via raw SQL (status/queue_name/task_name are the only
+    NOT NULL columns without a default; status is what the janitor reads).
+
+    Explicit cleanup is required: with django_db(transaction=True), Django's
+    teardown TRUNCATEs tables with data, and the procrastinate_jobs FK graph
+    breaks the non-CASCADE truncate ordering — leaving stray rows there
+    poisons the connection for subsequent tests. We delete what we inserted.
+    """
+    created: list[int] = []
+
+    def _make(status: str) -> int:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO procrastinate_jobs (queue_name, task_name, status) "
+                "VALUES (%s, %s, %s::procrastinate_job_status) RETURNING id",
+                ["default", "test_task", status],
+            )
+            job_id = cursor.fetchone()[0]
+        created.append(job_id)
+        return job_id
+
+    yield _make
+
+    if created:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM procrastinate_jobs WHERE id = ANY(%s)",
+                [created],
+            )
 
 
 @pytest.mark.asyncio
@@ -302,6 +342,71 @@ async def test_janitor_flips_pending_failed_job_directly_without_resume():
 
     resume.defer_async.assert_not_called()
     persist.assert_awaited_once()
+    assert result["flipped"] == 1
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.completed_at is not None
+    assert tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_procrastinate_job_status_reads_status_from_orm_row(procrastinate_job):
+    """_procrastinate_job_status reads the raw status string from the
+    procrastinate_jobs table via the Django contrib ORM model — not via the
+    unresolved FutureApp proxy, which raised AttributeError on every call in
+    the worker and silently disabled the janitor."""
+    failed_id = await sync_to_async(procrastinate_job)("failed")
+    assert await _procrastinate_job_status(failed_id) == "failed"
+
+    doing_id = await sync_to_async(procrastinate_job)("doing")
+    assert await _procrastinate_job_status(doing_id) == "doing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_procrastinate_job_status_returns_none_for_missing_job():
+    """A job id with no matching procrastinate_jobs row returns None (the
+    "unknown — don't touch this row" sentinel), not an exception."""
+    assert await _procrastinate_job_status(999_999_999) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_janitor_reconciles_stale_job_against_real_failed_procrastinate_row(
+    procrastinate_job,
+):
+    """End-to-end: a stale PENDING ThreadJob backed by a real procrastinate
+    job in 'failed' state is flipped to FAILED by the janitor using the
+    ORM-based status lookup (no mock of _procrastinate_job_status). This is the
+    exact scenario the FutureApp bug was suppressing for the zombie ThreadJobs."""
+    job_id = await sync_to_async(procrastinate_job)("failed")
+    user = await User.objects.acreate_user(email="zombie@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-zombie", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=job_id,
+        tool_call_id="tc-zombie",
+        state=ThreadJob.State.PENDING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+
+    with (
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        resume.defer_async = AsyncMock(return_value=None)
+        result = await expire_stale_thread_jobs()
+
+    # Failed procrastinate job -> ThreadJob flipped straight to FAILED, no resume.
+    resume.defer_async.assert_not_called()
     assert result["flipped"] == 1
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
