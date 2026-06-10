@@ -278,7 +278,7 @@ DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 
 # LLM settings
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
-DEFAULT_LLM_MODEL = "claude-sonnet-4-5-20250929"
+DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
 
 # Hard ceiling on the materialization-resume agent.ainvoke. The agent's
 # recursion_limit is 50; 120s is generous for any sane follow-up response.

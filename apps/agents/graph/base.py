@@ -25,6 +25,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from django.conf import settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
@@ -513,7 +514,7 @@ async def build_agent_graph(
 
     # --- Build LLM with tools ---
     llm = ChatAnthropic(
-        model="claude-sonnet-4-5-20250929",
+        model=settings.DEFAULT_LLM_MODEL,
         max_tokens=DEFAULT_MAX_TOKENS,
         temperature=DEFAULT_TEMPERATURE,
     )
