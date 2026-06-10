@@ -2,7 +2,6 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from langchain_core.messages import AIMessage
@@ -24,10 +23,10 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
     """Janitor defers the resume task first and leaves state unchanged.
     The resume task is responsible for flipping the ThreadJob state so the
     user gets an agent follow-up message instead of a silent FAILED."""
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=9999,
@@ -52,7 +51,7 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
     # The resume task is responsible for that transition.
     resume.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
     assert result == {"flipped": 1}
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
 
 
@@ -61,10 +60,10 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
 async def test_janitor_fallback_flips_to_failed_when_defer_raises():
     """If the defer itself fails, the janitor falls back to flipping FAILED
     directly so the user doesn't see a permanent spinner."""
-    user = await sync_to_async(User.objects.create_user)(email="b@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W2", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="b@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W2", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=8888,
@@ -85,7 +84,7 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
 
     # flipped count is 0 because defer failed (fallback path doesn't increment)
     assert result == {"flipped": 0}
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     # Fallback: janitor flips to FAILED so the user doesn't see a spinner forever.
     assert tj.state == ThreadJob.State.FAILED
 
@@ -98,10 +97,10 @@ async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
     ThreadJob. The previous bare ``except → return False`` conflated
     "not active" with "couldn't tell" — the janitor would then incorrectly
     clean up actively-running jobs during an outage."""
-    user = await sync_to_async(User.objects.create_user)(email="unknown@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-unknown", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="unknown@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-unknown", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=24242,
@@ -125,7 +124,7 @@ async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
     # No resume deferred and no state change — the row is left for the next
     # tick to retry.
     resume.defer_async.assert_not_called()
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.PENDING
     assert result == {"flipped": 0}
 
@@ -136,10 +135,10 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
     """A ThreadJob stuck in RUNNING (worker crashed mid-ainvoke) is marked
     FAILED directly — the janitor does NOT defer a duplicate resume which
     could race with the original."""
-    user = await sync_to_async(User.objects.create_user)(email="stuck@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-stuck", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="stuck@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-stuck", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=12345,
@@ -165,7 +164,7 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
         result = await expire_stale_thread_jobs()
 
     resume.defer_async.assert_not_called()
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert tj.completed_at is not None
     assert result["flipped"] == 1
@@ -182,10 +181,10 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
     also persist a user-visible AIMessage in the chat so the user sees a
     clear "your follow-up was interrupted" message instead of a spinner that
     silently disappears."""
-    user = await sync_to_async(User.objects.create_user)(email="ghost@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-ghost", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="ghost@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-ghost", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=54321,
@@ -214,7 +213,7 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
         result = await expire_stale_thread_jobs()
 
     assert result["flipped"] == 1
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
 
     # The synthetic AIMessage made it into the LangGraph state, not just the logs.
@@ -235,10 +234,10 @@ def test_janitor_cutoff_is_10_minutes():
 @pytest.mark.django_db(transaction=True)
 async def test_janitor_fallback_failed_writes_error_summary():
     """The defer-fail fallback also writes a user-facing error_summary."""
-    user = await sync_to_async(User.objects.create_user)(email="fb@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-fb", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="fb@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-fb", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=77777,
@@ -259,7 +258,7 @@ async def test_janitor_fallback_failed_writes_error_summary():
         resume.defer_async = AsyncMock(side_effect=RuntimeError("queue down"))
         await expire_stale_thread_jobs()
 
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert tj.error_summary
     assert "queue" in tj.error_summary.lower() or "retry" in tj.error_summary.lower()
@@ -273,10 +272,10 @@ async def test_janitor_flips_pending_failed_job_directly_without_resume():
     for an agent resume to narrate. The janitor flips the ThreadJob straight
     to FAILED with a user-facing error_summary and a synthetic chat message,
     and does NOT defer a resume."""
-    user = await sync_to_async(User.objects.create_user)(email="pf@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-pf", created_by=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    user = await User.objects.acreate_user(email="pf@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-pf", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=31337,
@@ -304,7 +303,7 @@ async def test_janitor_flips_pending_failed_job_directly_without_resume():
     resume.defer_async.assert_not_called()
     persist.assert_awaited_once()
     assert result["flipped"] == 1
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
     assert tj.completed_at is not None
     assert tj.error_summary

@@ -3,7 +3,6 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 from django.utils import timezone
@@ -26,31 +25,31 @@ User = get_user_model()
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_active_jobs_returns_pending_job_with_progress():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         external_id="t1",
         provider="commcare",
         canonical_name="Test Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    schema = await sync_to_async(TenantSchema.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="s_t1",
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=1001,
         tool_call_id="tc1",
     )
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
@@ -66,7 +65,7 @@ async def test_active_jobs_returns_pending_job_with_progress():
         },
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="a@b.c", password="x")
+    await client.alogin(email="a@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     body = resp.json()
@@ -86,15 +85,15 @@ async def test_active_jobs_returns_pending_job_with_progress():
 async def test_active_jobs_includes_recent_terminations():
     """Recently-terminated ThreadJobs surface in the response so the frontend
     can render an inline failure card once the spinner clears."""
-    user = await sync_to_async(User.objects.create_user)(email="rt@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="rt@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    failed_tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    failed_tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=5001,
@@ -106,7 +105,7 @@ async def test_active_jobs_includes_recent_terminations():
     await ThreadJob.objects.filter(id=failed_tj.id).aupdate(completed_at=timezone.now())
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="rt@b.c", password="x")
+    await client.alogin(email="rt@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     body = resp.json()
@@ -124,21 +123,21 @@ async def test_active_jobs_includes_recent_terminations():
 @pytest.mark.django_db(transaction=True)
 async def test_recent_terminations_filtered_by_user():
     """A terminated ThreadJob in another user's thread must not leak."""
-    me = await sync_to_async(User.objects.create_user)(email="me@b.c", password="x")
-    other = await sync_to_async(User.objects.create_user)(email="other@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=me)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    me = await User.objects.acreate_user(email="me@b.c", password="x")
+    other = await User.objects.acreate_user(email="other@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=me)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=me,
         role=WorkspaceRole.READ_WRITE,
     )
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=other,
         role=WorkspaceRole.READ_WRITE,
     )
-    other_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=other)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    other_thread = await Thread.objects.acreate(workspace=ws, user=other)
+    tj = await ThreadJob.objects.acreate(
         thread=other_thread,
         job_type="materialization",
         procrastinate_job_id=5002,
@@ -149,7 +148,7 @@ async def test_recent_terminations_filtered_by_user():
     await ThreadJob.objects.filter(id=tj.id).aupdate(completed_at=timezone.now())
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="me@b.c", password="x")
+    await client.alogin(email="me@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     assert resp.json()["recent_terminations"] == []
@@ -159,15 +158,15 @@ async def test_recent_terminations_filtered_by_user():
 @pytest.mark.django_db(transaction=True)
 async def test_recent_terminations_filtered_by_window():
     """Terminations older than RECENT_TERMINATION_WINDOW are excluded."""
-    user = await sync_to_async(User.objects.create_user)(email="window@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="window@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=5003,
@@ -180,7 +179,7 @@ async def test_recent_terminations_filtered_by_window():
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="window@b.c", password="x")
+    await client.alogin(email="window@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     assert resp.json()["recent_terminations"] == []
@@ -191,15 +190,15 @@ async def test_recent_terminations_filtered_by_window():
 async def test_recent_terminations_completed_state_has_no_retry():
     """COMPLETED state surfaces in the payload (so a stale failure card can be
     cleared) but ``retry_available`` is False."""
-    user = await sync_to_async(User.objects.create_user)(email="ok@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="ok@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=5004,
@@ -209,7 +208,7 @@ async def test_recent_terminations_completed_state_has_no_retry():
     await ThreadJob.objects.filter(id=tj.id).aupdate(completed_at=timezone.now())
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="ok@b.c", password="x")
+    await client.alogin(email="ok@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     body = resp.json()
     assert len(body["recent_terminations"]) == 1
@@ -220,17 +219,17 @@ async def test_recent_terminations_completed_state_has_no_retry():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_retry_endpoint_dispatches_new_materialization():
-    user = await sync_to_async(User.objects.create_user)(email="retry@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="retry@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="retry@b.c", password="x")
+    await client.alogin(email="retry@b.c", password="x")
     fake_job = type("J", (), {"id": 5005})()
     with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
         mock_task.defer_async = AsyncMock(return_value=fake_job)
@@ -257,15 +256,15 @@ async def test_retry_endpoint_dispatches_new_materialization():
 async def test_retry_endpoint_dedupes_in_flight():
     """If a materialization is already running for this thread, retry returns
     the existing ThreadJob identity instead of dispatching a duplicate."""
-    user = await sync_to_async(User.objects.create_user)(email="dedupe@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="dedupe@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    existing = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    existing = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=5006,
@@ -274,7 +273,7 @@ async def test_retry_endpoint_dedupes_in_flight():
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="dedupe@b.c", password="x")
+    await client.alogin(email="dedupe@b.c", password="x")
     with patch("apps.workspaces.api.materialization_views.materialize_workspace") as mock_task:
         mock_task.defer_async = AsyncMock()
         resp = await client.post(
@@ -293,23 +292,23 @@ async def test_retry_endpoint_dedupes_in_flight():
 @pytest.mark.django_db(transaction=True)
 async def test_retry_endpoint_rejects_cross_user_thread():
     """The supplied thread_id must belong to the caller in the workspace."""
-    me = await sync_to_async(User.objects.create_user)(email="r-me@b.c", password="x")
-    other = await sync_to_async(User.objects.create_user)(email="r-other@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=me)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    me = await User.objects.acreate_user(email="r-me@b.c", password="x")
+    other = await User.objects.acreate_user(email="r-other@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=me)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=me,
         role=WorkspaceRole.READ_WRITE,
     )
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=other,
         role=WorkspaceRole.READ_WRITE,
     )
-    other_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=other)
+    other_thread = await Thread.objects.acreate(workspace=ws, user=other)
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="r-me@b.c", password="x")
+    await client.alogin(email="r-me@b.c", password="x")
     resp = await client.post(
         f"/api/workspaces/{ws.id}/materialize/retry/",
         data=json.dumps({"thread_id": str(other_thread.id)}),
@@ -321,15 +320,15 @@ async def test_retry_endpoint_rejects_cross_user_thread():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_active_jobs_empty_when_none_running():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="a@b.c", password="x")
+    await client.alogin(email="a@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     assert resp.json() == {"jobs": [], "recent_terminations": []}
@@ -338,8 +337,8 @@ async def test_active_jobs_empty_when_none_running():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_active_jobs_unauthenticated_returns_401_or_403():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
     client = AsyncClient()
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 401
@@ -348,11 +347,11 @@ async def test_active_jobs_unauthenticated_returns_401_or_403():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_active_jobs_non_member_blocked():
-    owner = await sync_to_async(User.objects.create_user)(email="o@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=owner)
-    await sync_to_async(User.objects.create_user)(email="out@b.c", password="x")
+    owner = await User.objects.acreate_user(email="o@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=owner)
+    await User.objects.acreate_user(email="out@b.c", password="x")
     client = AsyncClient()
-    await sync_to_async(client.login)(email="out@b.c", password="x")
+    await client.alogin(email="out@b.c", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 403
 
@@ -360,36 +359,36 @@ async def test_active_jobs_non_member_blocked():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_job_flips_state_and_aborts_procrastinate():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         external_id="t1",
         provider="commcare",
         canonical_name="Test Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_t1")
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_t1")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=2002,
         tool_call_id="tc2",
         state=ThreadJob.State.RUNNING,
     )
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
         procrastinate_job_id=2002,
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="a@b.c", password="x")
+    await client.alogin(email="a@b.c", password="x")
 
     with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
@@ -397,7 +396,7 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "cancelled"
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.CANCELLED
     run = await MaterializationRun.objects.aget(procrastinate_job_id=2002)
     assert run.state == MaterializationRun.RunState.CANCELLED
@@ -406,22 +405,22 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_job_cross_user_blocked():
-    owner = await sync_to_async(User.objects.create_user)(email="o@b.c", password="x")
-    other = await sync_to_async(User.objects.create_user)(email="x@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=owner)
+    owner = await User.objects.acreate_user(email="o@b.c", password="x")
+    other = await User.objects.acreate_user(email="x@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=owner)
     # Both users are workspace members so aresolve_workspace lets them through.
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=owner,
         role=WorkspaceRole.READ_WRITE,
     )
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=other,
         role=WorkspaceRole.READ,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=owner)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=owner)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=3030,
@@ -429,25 +428,25 @@ async def test_cancel_job_cross_user_blocked():
         state=ThreadJob.State.RUNNING,
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="x@b.c", password="x")
+    await client.alogin(email="x@b.c", password="x")
     resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 404
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.RUNNING
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_job_double_cancel_is_idempotent():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=4040,
@@ -455,7 +454,7 @@ async def test_cancel_job_double_cancel_is_idempotent():
         state=ThreadJob.State.CANCELLED,
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="a@b.c", password="x")
+    await client.alogin(email="a@b.c", password="x")
     resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 200
     assert resp.json() == {"status": "already_terminal", "state": "cancelled"}
@@ -466,15 +465,15 @@ async def test_cancel_job_double_cancel_is_idempotent():
 async def test_cancel_does_not_overwrite_terminal_threadjob():
     """If a ThreadJob has already reached a terminal state (e.g., resume
     finished concurrently), cancel must not overwrite it."""
-    user = await sync_to_async(User.objects.create_user)(email="cancel-race@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-race", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="cancel-race@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-race", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=9090,
@@ -486,7 +485,7 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         await cancel_thread_job(tj)
 
-    await sync_to_async(tj.refresh_from_db)()
+    await tj.arefresh_from_db()
     # State must remain COMPLETED, not be overwritten with CANCELLED
     assert tj.state == ThreadJob.State.COMPLETED
 
@@ -501,28 +500,26 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
     first-page ``count`` field), the active-jobs endpoint surfaces it so the
     frontend can compute and display a percentage.
     """
-    user = await sync_to_async(User.objects.create_user)(email="total@rows.test", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="WTotal", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="total@rows.test", password="x")
+    ws = await Workspace.objects.acreate(name="WTotal", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         external_id="ccc-opp-999",
         provider="commcare_connect",
         canonical_name="Connect Test",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    schema = await sync_to_async(TenantSchema.objects.create)(
-        tenant=tenant, schema_name="s_ccc_999"
-    )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    await sync_to_async(ThreadJob.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ccc_999")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=7777,
         tool_call_id="tc-total",
     )
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="connect_sync",
         state=MaterializationRun.RunState.LOADING,
@@ -539,7 +536,7 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="total@rows.test", password="x")
+    await client.alogin(email="total@rows.test", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     body = resp.json()
@@ -560,26 +557,26 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
     """When rows_total is absent (non-Connect providers or very first page),
     percent must be null rather than a division-by-zero error.
     """
-    user = await sync_to_async(User.objects.create_user)(email="nopct@rows.test", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="WNoPct", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="nopct@rows.test", password="x")
+    ws = await Workspace.objects.acreate(name="WNoPct", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         external_id="cc-domain-x",
         provider="commcare",
         canonical_name="CommCare Test",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    schema = await sync_to_async(TenantSchema.objects.create)(tenant=tenant, schema_name="s_cc_x")
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    await sync_to_async(ThreadJob.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_cc_x")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=8888,
         tool_call_id="tc-nopct",
     )
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="commcare_sync",
         state=MaterializationRun.RunState.LOADING,
@@ -596,7 +593,7 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="nopct@rows.test", password="x")
+    await client.alogin(email="nopct@rows.test", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     body = resp.json()
@@ -619,15 +616,15 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
 
 
 async def _make_stale_pending_job(email: str, job_id: int) -> tuple:
-    user = await sync_to_async(User.objects.create_user)(email=email, password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name=f"W-{job_id}", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email=email, password="x")
+    ws = await Workspace.objects.acreate(name=f"W-{job_id}", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=job_id,
@@ -659,7 +656,7 @@ async def test_active_jobs_flips_stale_job_whose_procrastinate_job_failed():
         ),
     ):
         client = AsyncClient()
-        await sync_to_async(client.login)(email="stalefail@b.c", password="x")
+        await client.alogin(email="stalefail@b.c", password="x")
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
 
     assert resp.status_code == 200
@@ -690,7 +687,7 @@ async def test_active_jobs_defers_resume_for_stale_job_whose_procrastinate_job_s
     ):
         resume.defer_async = AsyncMock(return_value=None)
         client = AsyncClient()
-        await sync_to_async(client.login)(email="stalesucc@b.c", password="x")
+        await client.alogin(email="stalesucc@b.c", password="x")
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
 
     assert resp.status_code == 200
@@ -706,15 +703,15 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     """Jobs younger than the staleness threshold are returned untouched —
     the backstop must not add a procrastinate status query to every poll of
     a healthy in-flight materialization."""
-    user = await sync_to_async(User.objects.create_user)(email="fresh@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-fresh", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="fresh@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-fresh", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=50003,
@@ -727,7 +724,7 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
         new=AsyncMock(return_value="failed"),
     ) as status_mock:
         client = AsyncClient()
-        await sync_to_async(client.login)(email="fresh@b.c", password="x")
+        await client.alogin(email="fresh@b.c", password="x")
         resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
 
     assert resp.status_code == 200

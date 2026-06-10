@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.lineage import get_lineage_chain, get_terminal_assets
@@ -287,14 +286,14 @@ async def test_transformation_aware_terminal_replaces_raw(tenant):
     """Terminal asset replacing a raw table: raw table excluded, terminal included."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    raw_asset = await sync_to_async(TransformationAsset.objects.create)(
+    raw_asset = await TransformationAsset.objects.acreate(
         name="stg_case_patient",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
         sql_content="SELECT * FROM raw_cases",
         description="Staging cases",
     )
-    await sync_to_async(TransformationAsset.objects.create)(
+    await TransformationAsset.objects.acreate(
         name="cases_clean",
         scope=TransformationScope.TENANT,
         tenant=tenant,
@@ -346,7 +345,7 @@ async def test_transformation_aware_mixed(tenant):
     """Mix: some raw tables have no replacing asset → they appear alongside terminals."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    await sync_to_async(TransformationAsset.objects.create)(
+    await TransformationAsset.objects.acreate(
         name="stg_form_reg",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
@@ -394,7 +393,7 @@ async def test_transformation_aware_no_duplicates(tenant):
     """Terminal asset whose name matches a pipeline table should not produce duplicates."""
     from mcp_server.services.metadata import transformation_aware_list_tables
 
-    await sync_to_async(TransformationAsset.objects.create)(
+    await TransformationAsset.objects.acreate(
         name="stg_cases",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,

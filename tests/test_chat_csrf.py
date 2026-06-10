@@ -3,7 +3,6 @@
 import json
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 
@@ -15,9 +14,9 @@ async def test_chat_post_without_csrf_token_is_rejected():
     client = AsyncClient(enforce_csrf_checks=True)
 
     User = get_user_model()
-    await sync_to_async(User.objects.create_user)(email="csrf@example.com", password="pass")
+    await User.objects.acreate_user(email="csrf@example.com", password="pass")
 
-    await sync_to_async(client.login)(email="csrf@example.com", password="pass")
+    await client.alogin(email="csrf@example.com", password="pass")
 
     response = await client.post(
         "/api/chat/",
@@ -34,8 +33,8 @@ async def test_chat_post_with_csrf_token_is_accepted():
     client = AsyncClient(enforce_csrf_checks=True)
 
     User = get_user_model()
-    await sync_to_async(User.objects.create_user)(email="csrf2@example.com", password="pass")
-    await sync_to_async(client.login)(email="csrf2@example.com", password="pass")
+    await User.objects.acreate_user(email="csrf2@example.com", password="pass")
+    await client.alogin(email="csrf2@example.com", password="pass")
 
     csrf_resp = await client.get("/api/auth/csrf/")
     csrf_token = csrf_resp.json()["csrfToken"]

@@ -3,7 +3,6 @@
 import uuid
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.http import JsonResponse
 
@@ -41,9 +40,7 @@ class TestAresolveWorkspace:
     async def test_returns_workspace_on_valid_membership(self):
         from apps.workspaces.workspace_resolver import aresolve_workspace
 
-        user = await sync_to_async(User.objects.create_user)(
-            email="async-resolve@example.com", password="pass"
-        )
+        user = await User.objects.acreate_user(email="async-resolve@example.com", password="pass")
         ws = await Workspace.objects.acreate(name="Async WS", created_by=user)
         await WorkspaceMembership.objects.acreate(
             workspace=ws, user=user, role=WorkspaceRole.MANAGE
@@ -57,7 +54,7 @@ class TestAresolveWorkspace:
     async def test_returns_error_on_missing_membership(self):
         from apps.workspaces.workspace_resolver import aresolve_workspace
 
-        user = await sync_to_async(User.objects.create_user)(
+        user = await User.objects.acreate_user(
             email="async-resolve-denied@example.com", password="pass"
         )
 

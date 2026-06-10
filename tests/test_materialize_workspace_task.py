@@ -4,7 +4,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 
@@ -379,7 +378,7 @@ async def test_cancel_endpoint_marks_runs_cancelled(workspace, user, tenant):
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email=user.email, password="testpass123")
+    await client.alogin(email=user.email, password="testpass123")
 
     with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
@@ -411,7 +410,7 @@ async def test_cancel_endpoint_returns_no_active_run_when_idle(workspace, user, 
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email=user.email, password="testpass123")
+    await client.alogin(email=user.email, password="testpass123")
 
     resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
 
@@ -425,7 +424,7 @@ async def test_cancel_endpoint_returns_no_active_run_when_idle(workspace, user, 
 @pytest.mark.django_db(transaction=True)
 async def test_cancel_endpoint_requires_workspace_membership(workspace, other_user):
     client = AsyncClient()
-    await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
+    await client.alogin(email=other_user.email, password="otherpass123")
 
     resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
     assert resp.status_code == 403
@@ -443,7 +442,7 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
     the chat layer is waiting on a chained resume that never fires."""
     # Workspace exists, but the workspace has no tenants → no memberships.
     # Build a fresh workspace with no tenants/memberships.
-    bare_ws = await sync_to_async(Workspace.objects.create)(
+    bare_ws = await Workspace.objects.acreate(
         name="bare-no-memberships",
         created_by=user,
     )
@@ -615,7 +614,7 @@ async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, us
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email=user.email, password="testpass123")
+    await client.alogin(email=user.email, password="testpass123")
 
     with (
         patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
@@ -655,7 +654,7 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
     a resume-task message in the victim's chat. The fix adds a thread__user
     filter so only the caller's own ThreadJobs are cancelled."""
     # Make other_user a member of the workspace (peer with access).
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=workspace,
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
@@ -683,7 +682,7 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
 
     # other_user (a workspace peer) attempts to cancel via the legacy endpoint.
     client = AsyncClient()
-    await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
+    await client.alogin(email=other_user.email, password="otherpass123")
     with (
         patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
@@ -700,7 +699,7 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
     assert body["status"] == "no_active_run"
     assert body["runs_cancelled"] == 0
 
-    await sync_to_async(owner_tj.refresh_from_db)()
+    await owner_tj.arefresh_from_db()
     assert owner_tj.state == ThreadJob.State.RUNNING, (
         "Peer must not be able to cancel another user's chat-driven ThreadJob"
     )
@@ -732,7 +731,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     Regression test for the orphan-detection bug: ``orphan_job_ids`` was
     computed against the caller-scoped tracked set, so other users' jobs
     leaked into the orphan branch and were aborted."""
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=workspace,
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
@@ -769,7 +768,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
 
     # User A (other_user) calls cancel.
     client = AsyncClient()
-    await sync_to_async(client.login)(email=other_user.email, password="otherpass123")
+    await client.alogin(email=other_user.email, password="otherpass123")
     with (
         patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
         patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
@@ -787,7 +786,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     # B's run + ThreadJob untouched.
     await b_run.arefresh_from_db()
     assert b_run.state == MaterializationRun.RunState.LOADING
-    await sync_to_async(b_tj.refresh_from_db)()
+    await b_tj.arefresh_from_db()
     assert b_tj.state == ThreadJob.State.RUNNING
 
     # Orphan run is cancelled and procrastinate was signalled exactly once
