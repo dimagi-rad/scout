@@ -43,16 +43,19 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
   const sourceName = progress?.source ?? null
   const step = progress?.step ?? null
   const totalSteps = progress?.total_steps ?? null
+  const unit = progress?.unit ?? "rows"
   const isDeterminate = percent != null
 
-  // Count line: "27,000 of 50,000 rows" when a total is known, else "27,000 rows".
+  // Count line: "27,000 of 50,000 rows" when a total is known, else "27,000
+  // rows". The unit comes from the backend — OCS messages count "sessions"
+  // (one detail fetch per session) rather than rows.
   let countText: string
   if (rowsLoaded > 0) {
     const rowsStr = rowsLoaded.toLocaleString()
     countText =
       rowsTotal != null && rowsTotal > 0
-        ? `${rowsStr} of ${rowsTotal.toLocaleString()} rows`
-        : `${rowsStr} rows`
+        ? `${rowsStr} of ${rowsTotal.toLocaleString()} ${unit}`
+        : `${rowsStr} ${unit}`
   } else if (sourceName) {
     countText = `Loading ${sourceName}…`
   } else {

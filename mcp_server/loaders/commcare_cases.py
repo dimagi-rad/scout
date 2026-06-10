@@ -39,8 +39,9 @@ class CommCareCaseLoader(CommCareBaseLoader):
         """Yield ``(page, total_count)`` one page at a time.
 
         Each ``page`` is a list of normalised case dicts. ``total_count`` is
-        the API's ``meta.total_count`` from the first response only;
-        subsequent pages yield ``None``.
+        the API's ``matching_records`` from the first response only;
+        subsequent pages yield ``None``. (Case API v2 has no tastypie
+        ``meta`` envelope — the total lives in ``matching_records``.)
         """
         url = f"{_BASE_URL}/a/{self.domain}/api/case/v2/"
         params: dict = {"limit": self.page_size}
@@ -51,9 +52,9 @@ class CommCareCaseLoader(CommCareBaseLoader):
             cases = [_normalize_case(c) for c in data.get("cases", [])]
             page_total: int | None = None
             if first_page:
-                meta_total = data.get("meta", {}).get("total_count")
-                if isinstance(meta_total, int):
-                    page_total = meta_total
+                matching = data.get("matching_records")
+                if isinstance(matching, int):
+                    page_total = matching
                 first_page = False
             if cases:
                 total_loaded += len(cases)

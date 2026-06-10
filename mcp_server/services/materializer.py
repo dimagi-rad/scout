@@ -145,7 +145,12 @@ def run_pipeline(
                 }
             )
 
-    def make_on_page(source_name: str, message: str, known_total: int | None = None) -> OnPage:
+    def make_on_page(
+        source_name: str,
+        message: str,
+        known_total: int | None = None,
+        unit: str = "rows",
+    ) -> OnPage:
         def _on_page(rows_loaded: int, rows_total: int | None) -> None:
             if progress_updater is None:
                 return
@@ -162,6 +167,11 @@ def run_pipeline(
                     "message": message,
                     "rows_loaded": rows_loaded,
                     "rows_total": effective_total,
+                    # Unit of rows_loaded/rows_total for display. OCS messages
+                    # report progress in "sessions" — the API exposes no
+                    # message count, but the per-session detail fetches are
+                    # the work, so sessions are an honest denominator.
+                    "unit": unit,
                 }
             )
 
@@ -288,7 +298,12 @@ def run_pipeline(
                     credential,
                     schema_name,
                     provider=pipeline.provider,
-                    on_page=make_on_page(source.name, load_message, known_total=source_total),
+                    on_page=make_on_page(
+                        source.name,
+                        load_message,
+                        known_total=source_total,
+                        unit=source.progress_unit,
+                    ),
                     resumable=source_is_resumable,
                     start_cursor=start_cursor,
                     cursor_callback=cursor_callback,
@@ -933,7 +948,13 @@ def _write_ocs_messages(
     conn: Any,
     on_page: OnPage | None = None,
 ) -> int:
-    """Create the messages table and bulk-insert all pages."""
+    """Create the messages table and bulk-insert all pages.
+
+    The loader yields one ``(rows, total_sessions)`` tuple per session (rows
+    may be empty), so progress here is denominated in sessions — the unit the
+    N+1 detail fetches actually advance in — not message rows. The return
+    value is still the number of message rows written.
+    """
     sid = psql.Identifier(schema_name)
     cur = conn.cursor()
 
@@ -957,29 +978,28 @@ def _write_ocs_messages(
 
     ins_sql = _OCS_MESSAGES_INSERT.format(schema=sid)
     total = 0
-    rows_total: int | None = None
-    for page, page_total in pages:
-        if not page:
-            continue
-        if rows_total is None and page_total is not None:
-            rows_total = page_total
-        rows = [
-            (
-                r.get("message_id", ""),
-                r.get("session_id", ""),
-                r.get("message_index", 0),
-                r.get("role", ""),
-                r.get("content", ""),
-                r.get("created_at"),
-                json.dumps(r.get("metadata") or {}),
-                json.dumps(r.get("tags") or []),
-            )
-            for r in page
-        ]
-        cur.executemany(ins_sql, rows)
-        total += len(page)
+    sessions_total: int | None = None
+    for sessions_done, (page, page_total) in enumerate(pages, start=1):
+        if sessions_total is None and page_total is not None:
+            sessions_total = page_total
+        if page:
+            rows = [
+                (
+                    r.get("message_id", ""),
+                    r.get("session_id", ""),
+                    r.get("message_index", 0),
+                    r.get("role", ""),
+                    r.get("content", ""),
+                    r.get("created_at"),
+                    json.dumps(r.get("metadata") or {}),
+                    json.dumps(r.get("tags") or []),
+                )
+                for r in page
+            ]
+            cur.executemany(ins_sql, rows)
+            total += len(page)
         if on_page is not None:
-            on_page(total, rows_total)
+            on_page(sessions_done, sessions_total)
 
     return total
 

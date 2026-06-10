@@ -11,7 +11,14 @@ logger = logging.getLogger(__name__)
 
 
 class OCSSessionLoader(OCSBaseLoader):
-    """Fetch chat sessions for this experiment (paginated)."""
+    """Fetch chat sessions for this experiment (paginated).
+
+    Verified against the OCS OpenAPI schema (2026-06, issue #221):
+    ``PaginatedExperimentSessionList`` carries only ``next``/``previous``/
+    ``results`` — cursor pagination with no ``count`` — so ``page_total``
+    is always ``None`` today and the progress bar stays indeterminate.
+    ``_paginate`` will pick a ``count`` up automatically if OCS ever adds one.
+    """
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/sessions/"

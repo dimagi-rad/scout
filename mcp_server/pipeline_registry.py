@@ -23,6 +23,10 @@ class SourceConfig:
     # default True. Mutable rows like Connect ``users`` set this to False so
     # the writer always does a full DROP/CREATE/INSERT.
     resumable: bool = True
+    # Display unit for progress counts (issue #221). Most sources page through
+    # the rows they write ("rows"); OCS messages advance one session-detail
+    # fetch at a time, so their progress is denominated in "sessions".
+    progress_unit: str = "rows"
 
     @property
     def physical_table_name(self) -> str:
@@ -118,6 +122,7 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
             description=s.get("description", ""),
             table_name=s.get("table_name", ""),
             resumable=s.get("resumable", True),
+            progress_unit=s.get("progress_unit", "rows"),
         )
         for s in data.get("sources", [])
     ]
