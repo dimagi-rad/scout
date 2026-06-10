@@ -150,6 +150,50 @@ def test_write_ocs_messages_creates_table_and_rows(tenant_schema):
         conn.close()
 
 
+def test_write_ocs_messages_reports_session_progress(tenant_schema):
+    """The messages writer reports progress in sessions (one yielded tuple
+    per session, empty or not) against the loader's session-count total,
+    while still returning the number of message rows written."""
+    conn = get_managed_db_connection()
+    conn.autocommit = False
+    progress: list[tuple[int, int | None]] = []
+
+    def on_page(loaded: int, total: int | None) -> None:
+        progress.append((loaded, total))
+
+    def msg(session_id: str, idx: int) -> dict:
+        return {
+            "message_id": f"{session_id}:{idx}",
+            "session_id": session_id,
+            "message_index": idx,
+            "role": "user",
+            "content": "hi",
+            "created_at": "2026-04-01T00:00:00Z",
+            "metadata": {},
+            "tags": [],
+        }
+
+    try:
+        n = _write_ocs_messages(
+            iter(
+                [
+                    ([msg("s1", 0), msg("s1", 1)], 3),
+                    ([], 3),  # session with no messages still advances the bar
+                    ([msg("s3", 0)], 3),
+                ]
+            ),
+            tenant_schema.schema_name,
+            conn,
+            on_page=on_page,
+        )
+        conn.commit()
+        assert n == 3
+        assert _row_count(conn, tenant_schema.schema_name, "raw_messages") == 3
+        assert progress == [(1, 3), (2, 3), (3, 3)]
+    finally:
+        conn.close()
+
+
 def test_write_ocs_participants_creates_table_and_rows(tenant_schema):
     conn = get_managed_db_connection()
     conn.autocommit = False

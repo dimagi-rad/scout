@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock, patch
 
+from mcp_server.loaders.commcare_cases import CommCareCaseLoader
+
 
 class TestCommCareCaseLoader:
     def test_fetches_and_returns_cases(self):
@@ -18,8 +20,6 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.return_value = mock_response
-            from mcp_server.loaders.commcare_cases import CommCareCaseLoader
-
             loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
             cases = loader.load()
 
@@ -46,8 +46,6 @@ class TestCommCareCaseLoader:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.side_effect = [page1, page2]
-            from mcp_server.loaders.commcare_cases import CommCareCaseLoader
-
             loader = CommCareCaseLoader(domain="dimagi", access_token="fake-token")
             cases = loader.load()
 
@@ -80,18 +78,21 @@ class TestCaseLoaderLoadPages:
         page1.status_code = 200
         page1.json.return_value = {
             "next": "https://www.commcarehq.org/a/dimagi/api/case/v2/?cursor=x",
+            "matching_records": 3,
             "cases": [{"case_id": "c1"}, {"case_id": "c2"}],
         }
         page2 = MagicMock()
         page2.status_code = 200
-        page2.json.return_value = {"next": None, "cases": [{"case_id": "c3"}]}
+        page2.json.return_value = {
+            "next": None,
+            "matching_records": 3,
+            "cases": [{"case_id": "c3"}],
+        }
 
         with patch("mcp_server.loaders.commcare_base.requests.Session") as mock_session_cls:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.side_effect = [page1, page2]
-
-            from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
             loader = CommCareCaseLoader(
                 domain="dimagi", credential={"type": "api_key", "value": "u:k"}
@@ -99,12 +100,29 @@ class TestCaseLoaderLoadPages:
             pages = list(loader.load_pages())
 
         assert len(pages) == 2
-        # load_pages now yields (page, total_count) tuples; total is None
-        # because the test mock omits ``meta.total_count``.
+        # load_pages yields (page, total_count) tuples; the total comes from
+        # Case API v2's ``matching_records`` on the first page only.
         assert len(pages[0][0]) == 2
         assert len(pages[1][0]) == 1
-        assert pages[0][1] is None
+        assert pages[0][1] == 3
         assert pages[1][1] is None
+
+    def test_load_pages_total_none_when_matching_records_missing(self):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"next": None, "cases": [{"case_id": "c1"}]}
+
+        with patch("mcp_server.loaders.commcare_base.requests.Session") as mock_session_cls:
+            session = MagicMock()
+            mock_session_cls.return_value = session
+            session.get.return_value = resp
+
+            loader = CommCareCaseLoader(
+                domain="dimagi", credential={"type": "api_key", "value": "u:k"}
+            )
+            pages = list(loader.load_pages())
+
+        assert pages[0][1] is None
 
     def test_load_is_flat_list(self):
         mock_resp = MagicMock()
@@ -118,8 +136,6 @@ class TestCaseLoaderLoadPages:
             session = MagicMock()
             mock_session_cls.return_value = session
             session.get.return_value = mock_resp
-
-            from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 
             loader = CommCareCaseLoader(
                 domain="dimagi", credential={"type": "api_key", "value": "u:k"}

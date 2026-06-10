@@ -47,7 +47,7 @@ def test_workspace_tenant_str_uniqueness(workspace, tenant, user):
 
 @pytest.mark.django_db
 def test_display_name_for_connect_workspace_includes_opp_id(user):
-    """Connect provider template renders."""
+    """Connect provider template renders the Opp id without a provider tag."""
     connect_tenant = Tenant.objects.create(
         provider="commcare_connect",
         external_id="opp-42",
@@ -56,13 +56,13 @@ def test_display_name_for_connect_workspace_includes_opp_id(user):
     ws = Workspace.objects.create(name="Malaria Campaign", created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=connect_tenant)
 
-    assert ws.display_name == "[CCC] Malaria Campaign (Opp opp-42)"
+    assert ws.display_name == "Malaria Campaign (Opp opp-42)"
 
 
 @pytest.mark.django_db
-def test_display_name_for_commcare_workspace_includes_prefix(workspace):
-    """CommCare provider template renders."""
-    assert workspace.display_name == f"[CC] {workspace.name}"
+def test_display_name_for_commcare_workspace_has_no_provider_tag(workspace):
+    """CommCare provider template renders the bare name without a provider tag."""
+    assert workspace.display_name == workspace.name
 
 
 @pytest.mark.django_db

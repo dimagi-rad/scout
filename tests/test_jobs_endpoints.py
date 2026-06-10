@@ -549,6 +549,61 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
     # percent is pre-computed server-side (50%)
     assert p["percent"] == 50
     assert p["source"] == "visits"
+    # Progress dicts written before the unit field existed default to "rows".
+    assert p["unit"] == "rows"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_passes_through_progress_unit():
+    """OCS messages report progress in sessions (issue #221); the unit is
+    surfaced so the banner can label the counts honestly."""
+    user = await sync_to_async(User.objects.create_user)(email="unit@rows.test", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="WUnit", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    tenant = await sync_to_async(Tenant.objects.create)(
+        external_id="exp-uuid-unit",
+        provider="ocs",
+        canonical_name="OCS Test",
+    )
+    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    schema = await sync_to_async(TenantSchema.objects.create)(
+        tenant=tenant, schema_name="s_ocs_unit"
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=7778,
+        tool_call_id="tc-unit",
+    )
+    await sync_to_async(MaterializationRun.objects.create)(
+        tenant_schema=schema,
+        pipeline="ocs_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=7778,
+        progress={
+            "run_id": str(schema.id),
+            "step": 4,
+            "total_steps": 7,
+            "source": "messages",
+            "message": "Loading messages from ocs API...",
+            "rows_loaded": 120,
+            "rows_total": 480,
+            "unit": "sessions",
+        },
+    )
+
+    client = AsyncClient()
+    await sync_to_async(client.login)(email="unit@rows.test", password="x")
+    resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+    assert resp.status_code == 200
+    body = resp.json()
+    p = body["jobs"][0]["progress"]
+    assert p["unit"] == "sessions"
+    assert p["percent"] == 25
 
 
 @pytest.mark.asyncio

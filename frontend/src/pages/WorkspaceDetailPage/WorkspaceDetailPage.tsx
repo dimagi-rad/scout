@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react"
-import { Link, useParams, useNavigate } from "react-router-dom"
+import { Link, useParams, useNavigate, useLocation } from "react-router-dom"
 import { workspaceApi } from "@/api/workspaces"
 import {
   getUserTenantsCached,
@@ -23,6 +23,7 @@ import { ChevronLeft, Plus, RefreshCw } from "lucide-react"
 import { RoleBadge } from "@/components/RoleBadge"
 import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/SearchFilterBar"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
+import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
 
 // ── Members Tab ─────────────────────────────────────────────────────────────
 
@@ -872,15 +873,82 @@ function SettingsTab({
   )
 }
 
+// ── Provider type subtitle ────────────────────────────────────────────────────
+
+/** Friendly, human descriptor for a single provider on the settings header. */
+const PROVIDER_DESCRIPTORS: Record<string, string> = {
+  commcare_connect: "Connect opportunity",
+  commcare: "CommCare project",
+  ocs: "Open Chat Studio bot",
+}
+
+function providerDescriptor(provider: string): string {
+  return PROVIDER_DESCRIPTORS[provider] ?? getProviderMeta(provider).label
+}
+
+/**
+ * Muted icon + type descriptor shown under the workspace name. Sources the
+ * provider list from the store `domains` (already loaded for the workspaces
+ * list) so no extra backend field is needed. Renders nothing when the
+ * workspace's providers aren't known client-side yet.
+ */
+function WorkspaceProviderType({ workspaceId }: { workspaceId: string }) {
+  const domains = useAppStore((s) => s.domains)
+
+  const providers = useMemo(() => {
+    const ws = domains.find((d) => d.id === workspaceId)
+    const tenants = ws?.tenants ?? []
+    return [...new Set(tenants.map((t) => t.provider))]
+  }, [domains, workspaceId])
+
+  if (providers.length === 0) return null
+
+  if (providers.length === 1) {
+    const provider = providers[0]
+    const { Icon } = getProviderMeta(provider)
+    return (
+      <div
+        className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
+        data-testid="workspace-provider-type"
+      >
+        <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        <span>{providerDescriptor(provider)}</span>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground"
+      data-testid="workspace-provider-type"
+    >
+      {providers.map((provider) => {
+        const { label, Icon } = getProviderMeta(provider)
+        return <Icon key={provider} className="h-3.5 w-3.5 shrink-0" aria-hidden aria-label={label} />
+      })}
+      <span>Multiple sources</span>
+    </div>
+  )
+}
+
 // ── Page ────────────────────────────────────────────────────────────────────
 
 export function WorkspaceDetailPage() {
-  const { workspaceId } = useParams<{ workspaceId: string }>()
+  const { workspaceId, slug } = useParams<{ workspaceId: string; slug?: string }>()
   const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
+  const location = useLocation()
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
+  const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
+
+  // Keep the top-bar workspace switcher in sync with the workspace being
+  // viewed. On a hard refresh of /workspaces/:id, `activeDomainId` would
+  // otherwise default to domains[0] and show a different workspace there.
+  useEffect(() => {
+    if (workspaceId) setActiveDomain(workspaceId)
+  }, [workspaceId, setActiveDomain])
 
   function handleRename(newName: string) {
     setWorkspace((prev) => prev ? { ...prev, name: newName } : prev)
@@ -908,6 +976,20 @@ export function WorkspaceDetailPage() {
     void fetchWorkspace()
   }, [workspaceId])
 
+  // Canonicalize the address bar to the pretty `/workspaces/<slug>/<uuid>` form
+  // once the display name is loaded. Resolution is always by UUID, so this is
+  // purely cosmetic: old bare `/workspaces/<uuid>` links and stale slugs (e.g.
+  // after a rename) silently rewrite to the current slug. Guarded to only fire
+  // when the workspace is loaded AND the URL slug actually differs, so it can't
+  // loop. Preserves the embed prefix the same way the switcher does.
+  useEffect(() => {
+    if (!workspace || workspace.id !== workspaceId) return
+    const desiredSlug = slugifyWorkspaceName(workspace.display_name)
+    if (!desiredSlug || slug === desiredSlug) return
+    const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
+    navigate(`${pathPrefix}${workspacePath(workspace)}`, { replace: true })
+  }, [workspace, workspaceId, slug, location.pathname, navigate])
+
   if (loading) return <div className="p-8 text-center text-muted-foreground">Loading…</div>
   if (error || !workspace) return <div className="p-8 text-center text-destructive">{error ?? "Workspace not found"}</div>
 
@@ -925,11 +1007,16 @@ export function WorkspaceDetailPage() {
           <ChevronLeft className="h-4 w-4" />
           Workspaces
         </Link>
-        <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-semibold" data-testid="workspace-name">
-            {workspace.display_name}
-          </h1>
-          <RoleBadge role={workspace.role} />
+        <div className="flex items-start gap-3">
+          <div>
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl font-semibold" data-testid="workspace-name">
+                {workspace.display_name}
+              </h1>
+              <RoleBadge role={workspace.role} />
+            </div>
+            <WorkspaceProviderType workspaceId={workspace.id} />
+          </div>
         </div>
       </div>
 

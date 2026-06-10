@@ -8,6 +8,9 @@ export interface JobProgress {
   percent: number | null
   rows_loaded: number
   rows_total: number | null
+  /** Display unit for the counts — "rows" for most sources; OCS messages
+   *  report per-session progress as "sessions". */
+  unit?: string
   message: string | null
   source: string | null
   step: number | null

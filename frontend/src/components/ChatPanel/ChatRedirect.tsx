@@ -1,6 +1,7 @@
 import { useEffect } from "react"
 import { Navigate, useLocation } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { workspacePath } from "@/lib/workspacePath"
 import { ChatPanel } from "./ChatPanel"
 import { readSavedThreadId } from "./threadStorage"
 
@@ -15,6 +16,7 @@ export function ChatRedirect() {
   const location = useLocation()
   const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
   const activeDomainId = useAppStore((s) => s.activeDomainId)
+  const domains = useAppStore((s) => s.domains)
   const threadId = useAppStore((s) => s.threadId)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
@@ -28,9 +30,9 @@ export function ChatRedirect() {
     // Prefer the last thread the user viewed in this workspace (persisted in
     // localStorage by ChatPanel); fall back to the store's current threadId.
     const resolvedThreadId = readSavedThreadId(activeDomainId) || threadId
-    const target = resolvedThreadId
-      ? `${pathPrefix}/workspaces/${activeDomainId}/chat/${resolvedThreadId}`
-      : `${pathPrefix}/workspaces/${activeDomainId}/chat`
+    const activeWorkspace = domains.find((d) => d.id === activeDomainId)
+    const chatBase = `${pathPrefix}${workspacePath(activeWorkspace ?? { id: activeDomainId })}/chat`
+    const target = resolvedThreadId ? `${chatBase}/${resolvedThreadId}` : chatBase
     return <Navigate to={target} replace />
   }
 
