@@ -62,12 +62,21 @@ async def test_task_recovers_from_dead_connection():
     worker's connection died since the previous job. ``fake_task.func`` is
     the wrapped body exactly as the procrastinate worker would invoke it."""
     await sync_to_async(_kill_default_connection)()
-    try:
-        assert await fake_task.func() == 0
-    finally:
-        # Close the reconnected session so test-database teardown can drop
-        # the DB without "is being accessed by other users" warnings.
-        await sync_to_async(lambda: connections["default"].close())()
+    assert await fake_task.func() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_task_closes_connections_after_body():
+    """The decorator also cleans up after the task body (mirroring Django's
+    request_finished) so a worker thread doesn't hold a connection open
+    between jobs — with the default CONN_MAX_AGE=0 it must be closed."""
+    assert await fake_task.func() == 0
+
+    def _connection_is_closed():
+        return connections["default"].connection is None
+
+    assert await sync_to_async(_connection_is_closed)()
 
 
 def test_all_workspace_tasks_are_wrapped():

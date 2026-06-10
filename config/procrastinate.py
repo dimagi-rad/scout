@@ -8,10 +8,28 @@ once Django is ready. This module just re-exports it so tasks can do
 import functools
 
 from asgiref.sync import sync_to_async
-from django.db import close_old_connections
+from django.db import close_old_connections, reset_queries
 from procrastinate.contrib.django import app
 
 __all__ = ["app", "task"]
+
+
+def _cleanup_after() -> None:
+    # Don't leak the connection past the unit of work...
+    close_old_connections()
+    # ...and clear Django's per-connection query log, which is only populated
+    # when settings.DEBUG is True and otherwise accumulates for the lifetime
+    # of the worker. Mirrors what Django does at request_started; a no-op
+    # when DEBUG is False.
+    reset_queries()
+
+
+# Cleanup must run on the thread that owns the connections: asgiref's
+# thread-sensitive executor, the same thread the async ORM routes queries
+# through. thread_sensitive=True is the asgiref default — spelled out because
+# it is load-bearing here.
+_acleanup_before = sync_to_async(close_old_connections, thread_sensitive=True)
+_acleanup_after = sync_to_async(_cleanup_after, thread_sensitive=True)
 
 
 def task(original_func=None, **task_kwargs):
@@ -25,10 +43,10 @@ def task(original_func=None, **task_kwargs):
     janitor task that is supposed to rescue jobs stranded by exactly this
     (June 2026 incident: ~22h of failed background jobs after an RDS upgrade).
 
-    Before each job, ``close_old_connections()`` discards unusable/expired
-    connections so the next ORM call opens a fresh one. It must run on the
-    thread that owns them: ``sync_to_async``'s thread-sensitive executor — the
-    same thread the async ORM routes queries through.
+    Mirrors Django's per-request connection management around each task —
+    ``close_old_connections()`` before the body (so a connection that died
+    between jobs is replaced instead of reused) and after it (so nothing leaks
+    past the unit of work), plus ``reset_queries()`` after.
 
     This is the task-middleware pattern from the procrastinate docs
     (howto/advanced/middleware): one decorator wraps the body and delegates
@@ -45,8 +63,11 @@ def task(original_func=None, **task_kwargs):
     def wrap(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            await sync_to_async(close_old_connections)()
-            return await func(*args, **kwargs)
+            await _acleanup_before()
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                await _acleanup_after()
 
         wrapper._ensures_fresh_db_connections = True
         return app.task(**task_kwargs)(wrapper)
