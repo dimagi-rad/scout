@@ -20,13 +20,12 @@ class Migration(migrations.Migration):
         ),
         migrations.AddField(
             model_name="tenantmembership",
-            name="team_name",
-            field=models.CharField(blank=True, default="", max_length=255),
-        ),
-        migrations.AddField(
-            model_name="tenantmembership",
-            name="team_slug",
-            field=models.CharField(blank=True, default="", max_length=255),
+            name="provider_metadata",
+            field=models.JSONField(
+                blank=True,
+                default=dict,
+                help_text="Provider-specific data (e.g. OCS team_slug/team_name); empty for providers without it.",
+            ),
         ),
         migrations.CreateModel(
             name="TenantConnection",

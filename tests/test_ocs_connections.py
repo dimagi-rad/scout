@@ -18,7 +18,7 @@ from django.utils import timezone
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers.base import TenantDescriptor
-from apps.users.services.credential_resolver import aresolve_credential, resolve_credential
+from apps.users.services.credential_resolver import aresolve_credential
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import resolve_ocs_chatbots
 
@@ -137,24 +137,32 @@ def test_data_migration_maps_legacy_credentials(user):
 # --- resolution ------------------------------------------------------------
 
 
-@pytest.mark.django_db
-def test_resolve_none_when_no_connection(user):
-    tm = TenantMembership.objects.create(user=user, tenant=_tenant())
-    assert resolve_credential(tm) is None
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_none_when_no_connection(user):
+    tenant = await Tenant.objects.acreate(
+        provider="ocs", external_id="exp-1", canonical_name="exp-1"
+    )
+    tm = await TenantMembership.objects.acreate(user=user, tenant=tenant)
+    assert await aresolve_credential(tm) is None
 
 
-@pytest.mark.django_db
-def test_resolve_api_key(user):
-    conn = TenantConnection.objects.create(
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resolve_api_key(user):
+    conn = await TenantConnection.objects.acreate(
         user=user,
         provider="ocs",
         credential_type=TenantConnection.API_KEY,
         encrypted_credential=encrypt_credential("k"),
     )
-    tm = TenantMembership.objects.create(
-        user=user, tenant=_tenant(), connection=conn, team_slug="acme", team_name="Acme"
+    tenant = await Tenant.objects.acreate(
+        provider="ocs", external_id="exp-1", canonical_name="exp-1"
     )
-    assert resolve_credential(tm) == {"type": "api_key", "value": "k"}
+    tm = await TenantMembership.objects.acreate(
+        user=user, tenant=tenant, connection=conn, team_slug="acme", team_name="Acme"
+    )
+    assert await aresolve_credential(tm) == {"type": "api_key", "value": "k"}
 
 
 def _mock_token_qs(mocker, *, team, token="tok"):

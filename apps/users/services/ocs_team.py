@@ -4,6 +4,10 @@ The only API-key-reachable source of a team's name/slug is ``/api/sessions/``
 (each session embeds a ``team`` object). It returns nothing only when the team
 has zero sessions, in which case the caller must fall back to a user-supplied
 team name.
+
+TODO(OCS #3586): replace this sessions-based detection (and its no-sessions
+fallback) with the dedicated team endpoint once it ships —
+https://github.com/dimagi/open-chat-studio/issues/3586
 """
 
 from __future__ import annotations

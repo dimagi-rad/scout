@@ -163,7 +163,7 @@ async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership
         tm.team_slug = team_slug
         tm.team_name = team_name
         tm.archived_at = None
-        await tm.asave(update_fields=["connection", "team_slug", "team_name", "archived_at"])
+        await tm.asave(update_fields=["connection", "provider_metadata", "archived_at"])
         memberships.append(tm)
 
     logger.info(

@@ -138,7 +138,7 @@ class TenantConnection(models.Model):
     """A single credential a user added: one OAuth login or one API key.
 
     A connection is a credential only. The team a chatbot belongs to is recorded
-    on TenantMembership (team_slug/team_name): in v1 a user has at most one OAuth
+    on TenantMembership (provider_metadata): in v1 a user has at most one OAuth
     connection per provider, and its team can change when they re-authorize.
     """
 
@@ -200,8 +200,11 @@ class TenantMembership(models.Model):
         blank=True,
         related_name="memberships",
     )
-    team_slug = models.CharField(max_length=255, blank=True, default="")
-    team_name = models.CharField(max_length=255, blank=True, default="")
+    provider_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Provider-specific data (e.g. OCS team_slug/team_name); empty for providers without it.",
+    )
     last_selected_at = models.DateTimeField(null=True, blank=True)
     archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -212,3 +215,24 @@ class TenantMembership(models.Model):
 
     def __str__(self):
         return f"TenantMembership({self.user_id} - {self.tenant_id})"
+
+    # ``team_slug``/``team_name`` are OCS-specific, so they live in
+    # ``provider_metadata`` rather than as columns on this generic model. These
+    # accessors keep the keys in one place (the OAuth fail-closed check reads
+    # ``team_slug``) and let callers and ``objects.create(team_slug=...)`` use
+    # them as if they were fields.
+    @property
+    def team_slug(self) -> str:
+        return (self.provider_metadata or {}).get("team_slug", "")
+
+    @team_slug.setter
+    def team_slug(self, value: str) -> None:
+        self.provider_metadata = {**(self.provider_metadata or {}), "team_slug": value}
+
+    @property
+    def team_name(self) -> str:
+        return (self.provider_metadata or {}).get("team_name", "")
+
+    @team_name.setter
+    def team_name(self, value: str) -> None:
+        self.provider_metadata = {**(self.provider_metadata or {}), "team_name": value}

@@ -66,7 +66,7 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
             tm.team_slug = team_slug
             tm.team_name = team_name
             tm.archived_at = None
-            tm.save(update_fields=["connection", "team_slug", "team_name", "archived_at"])
+            tm.save(update_fields=["connection", "provider_metadata", "archived_at"])
             rows.append(
                 {
                     "membership_id": str(tm.id),
@@ -332,7 +332,9 @@ async def connection_detail_view(request, connection_id):
     # Verify the new key still has access to one of this connection's chatbots.
     sample = await conn.memberships.select_related("tenant").afirst()
     if sample is None:
-        return JsonResponse({"error": "Connection has no chatbots to verify against"}, status=400)
+        return JsonResponse(
+            {"error": "Connection has no linked data sources to verify against"}, status=400
+        )
     try:
         await strategy.verify_for_tenant(fields, external_id=sample.tenant.external_id)
     except CredentialVerificationError as e:
