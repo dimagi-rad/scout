@@ -125,7 +125,8 @@ def test_message_loader_flattens_messages_with_composite_pk():
         ],
     }
     with patch.object(loader._session, "get", side_effect=[sessions_page, detail]):
-        rows = [r for pg, _ in loader.load_pages() for r in pg]
+        pages = list(loader.load_pages())
+        rows = [r for pg, _ in pages for r in pg]
         assert rows == [
             {
                 "message_id": "sess-1:0",
@@ -148,6 +149,53 @@ def test_message_loader_flattens_messages_with_composite_pk():
                 "tags": ["greeting"],
             },
         ]
+        # Every per-session tuple carries the session count as its total —
+        # message progress is denominated in sessions (issue #221).
+        assert [total for _, total in pages] == [1]
+
+
+def test_message_loader_indexes_sessions_before_fetching_details():
+    """Two-pass: the full session list is walked first, then one tuple is
+    yielded per session — including sessions with no messages — each carrying
+    the total session count so the writer can report determinate progress."""
+    loader = OCSMessageLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    list_page1 = MagicMock(status_code=200)
+    list_page1.json.return_value = {
+        "results": [{"id": "sess-1"}],
+        "next": f"{BASE_URL}/api/sessions/?cursor=abc",
+    }
+    list_page2 = MagicMock(status_code=200)
+    list_page2.json.return_value = {
+        "results": [{"id": "sess-2"}],
+        "next": None,
+    }
+    detail_1 = MagicMock(status_code=200)
+    detail_1.json.return_value = {
+        "id": "sess-1",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    detail_2 = MagicMock(status_code=200)
+    detail_2.json.return_value = {"id": "sess-2", "messages": []}
+
+    with patch.object(
+        loader._session, "get", side_effect=[list_page1, list_page2, detail_1, detail_2]
+    ) as mock_get:
+        pages = list(loader.load_pages())
+
+    # Both list pages are fetched before the first session detail.
+    urls = [call.args[0] for call in mock_get.call_args_list]
+    assert urls == [
+        f"{BASE_URL}/api/sessions/",
+        f"{BASE_URL}/api/sessions/?cursor=abc",
+        f"{BASE_URL}/api/sessions/sess-1/",
+        f"{BASE_URL}/api/sessions/sess-2/",
+    ]
+    # One tuple per session, each with total_sessions=2; the empty session
+    # still yields so the writer can advance the progress bar.
+    assert len(pages) == 2
+    assert [total for _, total in pages] == [2, 2]
+    assert len(pages[0][0]) == 1
+    assert pages[1][0] == []
 
 
 def test_participant_loader_maps_dedicated_endpoint_fields():

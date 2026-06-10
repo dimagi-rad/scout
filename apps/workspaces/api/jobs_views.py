@@ -33,6 +33,9 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
             "percent": percent,
             "rows_loaded": rows_loaded,
             "rows_total": rows_total,
+            # Display unit for the counts ("rows" for most sources; OCS
+            # messages report per-session progress as "sessions").
+            "unit": run_progress.get("unit") or "rows",
             "message": run_progress.get("message"),
             "source": run_progress.get("source"),
             "step": run_progress.get("step"),

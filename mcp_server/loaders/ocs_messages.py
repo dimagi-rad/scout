@@ -17,27 +17,39 @@ logger = logging.getLogger(__name__)
 
 
 class OCSMessageLoader(OCSBaseLoader):
-    """Fetch messages for every session in an experiment."""
+    """Fetch messages for every session in an experiment.
+
+    Two-pass: first walk the (cheap) session list collecting session ids,
+    then fetch each session's detail. The list walk costs the same requests
+    as the old interleaved approach but lets us know the session count up
+    front, so the expensive detail-fetch phase can report determinate
+    progress (issue #221).
+
+    ``load_pages`` yields exactly one ``(rows, total_sessions)`` tuple per
+    session — ``rows`` may be empty — where the total is denominated in
+    **sessions**, not message rows (OCS' cursor pagination exposes no
+    message count). The writer counts tuples to report per-session progress.
+    """
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         list_url = f"{self.base_url}/api/sessions/"
         params = {"experiment": self.experiment_id}
-        total_sessions = 0
-        total_messages = 0
-        # No reliable total for messages — they're nested per-session.
+        session_ids: list[str] = []
         for session_page, _session_total in self._paginate(list_url, params=params):
             for session in session_page:
                 session_id = str(session.get("id") or "")
-                if not session_id:
-                    continue
-                total_sessions += 1
-                detail_url = f"{self.base_url}/api/sessions/{session_id}/"
-                detail_resp = self._get(detail_url)
-                messages = detail_resp.json().get("messages") or []
-                rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
-                if rows:
-                    total_messages += len(rows)
-                    yield rows, None
+                if session_id:
+                    session_ids.append(session_id)
+
+        total_sessions = len(session_ids)
+        total_messages = 0
+        for session_id in session_ids:
+            detail_url = f"{self.base_url}/api/sessions/{session_id}/"
+            detail_resp = self._get(detail_url)
+            messages = detail_resp.json().get("messages") or []
+            rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
+            total_messages += len(rows)
+            yield rows, total_sessions
         logger.info(
             "Fetched %d messages across %d sessions for experiment %s",
             total_messages,

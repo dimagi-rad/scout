@@ -10,6 +10,9 @@ sources:
     description: "Chat sessions with timestamps, tags, and participant info"
   - name: messages
     description: "Individual messages within sessions"
+    # Messages are fetched one session-detail request at a time; progress is
+    # counted in sessions because OCS exposes no message total (issue #221).
+    progress_unit: sessions
   - name: participants
     description: "Participants with name, platform, and per-chatbot custom data (from the dedicated participant API)"
 

@@ -169,6 +169,32 @@ sources:
                 f"{src_name} has no per-row id in the v2 export and must be non-resumable"
             )
 
+    def test_progress_unit_defaults_to_rows_and_parses_from_yaml(self, tmp_path):
+        """Issue #221: ``progress_unit`` labels the progress counts; OCS
+        messages report per-session progress as "sessions"."""
+        yml = tmp_path / "pipeline.yml"
+        yml.write_text("""
+pipeline: test_pipeline
+description: ""
+version: "1.0"
+provider: ocs
+sources:
+  - name: sessions
+  - name: messages
+    progress_unit: sessions
+""")
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        config = registry.get("test_pipeline")
+        by_name = {s.name: s for s in config.sources}
+        assert by_name["sessions"].progress_unit == "rows"
+        assert by_name["messages"].progress_unit == "sessions"
+
+    def test_ocs_sync_messages_progress_unit_is_sessions(self):
+        registry = PipelineRegistry()
+        config = registry.get("ocs_sync")
+        by_name = {s.name: s for s in config.sources}
+        assert by_name["messages"].progress_unit == "sessions"
+
     def test_relationships_defaults_to_empty(self, tmp_path):
         yml = tmp_path / "no_rel.yml"
         yml.write_text(
