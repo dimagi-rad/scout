@@ -39,7 +39,10 @@ async def test_janitor_defers_resume_for_stale_threadjobs():
     await ThreadJob.objects.filter(id=tj.id).aupdate(created_at=timezone.now() - timedelta(hours=2))
 
     with (
-        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
     ):
         resume.defer_async = AsyncMock(return_value=None)
@@ -71,7 +74,10 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
     await ThreadJob.objects.filter(id=tj.id).aupdate(created_at=timezone.now() - timedelta(hours=2))
 
     with (
-        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
     ):
         resume.defer_async = AsyncMock(side_effect=RuntimeError("queue unavailable"))
@@ -87,7 +93,7 @@ async def test_janitor_fallback_flips_to_failed_when_defer_raises():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
-    """Finding #10: when _procrastinate_job_active returns None (status check
+    """Finding #10: when _procrastinate_job_status returns None (status check
     failed, e.g. a transient DB blip), the janitor must NOT touch the
     ThreadJob. The previous bare ``except → return False`` conflated
     "not active" with "couldn't tell" — the janitor would then incorrectly
@@ -108,7 +114,7 @@ async def test_janitor_skips_threadjob_when_procrastinate_status_unknown():
 
     with (
         patch(
-            "apps.workspaces.tasks._procrastinate_job_active",
+            "apps.workspaces.tasks._procrastinate_job_status",
             new=AsyncMock(return_value=None),  # status unknown
         ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
@@ -145,7 +151,10 @@ async def test_janitor_marks_stuck_running_failed_without_deferring_resume():
     )
 
     with (
-        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
         patch(
             "apps.workspaces.tasks._persist_synthetic_failure_message",
@@ -191,7 +200,10 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
     mock_agent.aupdate_state = AsyncMock(return_value=None)
 
     with (
-        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
@@ -238,7 +250,10 @@ async def test_janitor_fallback_failed_writes_error_summary():
     )
 
     with (
-        patch("apps.workspaces.tasks._procrastinate_job_active", new=AsyncMock(return_value=False)),
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
     ):
         resume.defer_async = AsyncMock(side_effect=RuntimeError("queue down"))
@@ -248,3 +263,48 @@ async def test_janitor_fallback_failed_writes_error_summary():
     assert tj.state == ThreadJob.State.FAILED
     assert tj.error_summary
     assert "queue" in tj.error_summary.lower() or "retry" in tj.error_summary.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_janitor_flips_pending_failed_job_directly_without_resume():
+    """When the procrastinate job itself FAILED (task raised — e.g. the
+    worker's DB connection died before any pipeline ran), there is no result
+    for an agent resume to narrate. The janitor flips the ThreadJob straight
+    to FAILED with a user-facing error_summary and a synthetic chat message,
+    and does NOT defer a resume."""
+    user = await sync_to_async(User.objects.create_user)(email="pf@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-pf", created_by=user)
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=31337,
+        tool_call_id="tc-pf",
+        state=ThreadJob.State.PENDING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="failed"),
+        ),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ) as persist,
+    ):
+        resume.defer_async = AsyncMock(return_value=None)
+        result = await expire_stale_thread_jobs()
+
+    resume.defer_async.assert_not_called()
+    persist.assert_awaited_once()
+    assert result["flipped"] == 1
+    await sync_to_async(tj.refresh_from_db)()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.completed_at is not None
+    assert tj.error_summary

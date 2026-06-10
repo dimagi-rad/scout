@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from apps.chat.models import ThreadJob
 from apps.users.decorators import async_login_required
+from apps.workspaces import tasks as workspace_tasks
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.workspace_resolver import aresolve_workspace
@@ -94,14 +95,41 @@ async def active_jobs_view(request, workspace_id):
         return err
 
     # ThreadJobs for this user's threads in this workspace, in active states.
-    jobs = [
-        j
-        async for j in ThreadJob.objects.filter(
-            thread__workspace=workspace,
-            thread__user=user,
-            state__in=list(ThreadJob.ACTIVE_STATES),
-        ).order_by("-created_at")
-    ]
+    def _fetch_active_jobs():
+        return (
+            ThreadJob.objects.select_related(
+                "thread__workspace",
+                "thread__user",
+            )
+            .filter(
+                thread__workspace=workspace,
+                thread__user=user,
+                state__in=list(ThreadJob.ACTIVE_STATES),
+            )
+            .order_by("-created_at")
+        )
+
+    jobs = [j async for j in _fetch_active_jobs()]
+
+    # Backstop for jobs the worker-side janitor should have reconciled but
+    # couldn't — the janitor runs in the worker process, so a sick worker
+    # (e.g. a permanently dead DB connection) strands jobs in active states
+    # and the frontend spins forever. This poll runs in the API process and
+    # can reconcile stale jobs itself: flip ones whose procrastinate job
+    # failed, re-defer the resume for ones that quietly succeeded.
+    stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
+    reconciled = False
+    for tj in jobs:
+        if tj.created_at >= stale_cutoff:
+            continue
+        try:
+            action = await workspace_tasks.reconcile_stale_thread_job(tj)
+        except Exception:
+            logger.exception("active_jobs: reconcile failed for ThreadJob %s", tj.id)
+            continue
+        reconciled = reconciled or action is not None
+    if reconciled:
+        jobs = [j async for j in _fetch_active_jobs()]
 
     # Bulk-fetch the latest progress per procrastinate_job_id.
     job_ids = [j.procrastinate_job_id for j in jobs]

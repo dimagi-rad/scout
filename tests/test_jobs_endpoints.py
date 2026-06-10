@@ -605,3 +605,134 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
     assert p["rows_total"] is None
     # percent must be null — not zero, not a division error
     assert p["percent"] is None
+
+
+# ---------------------------------------------------------------------------
+# API-side stale-job backstop
+#
+# The janitor task runs in the worker process; when the worker itself is sick
+# (June 2026 incident: its DB connection died and every task — including the
+# janitor — failed for ~22h) nothing flips stuck ThreadJobs and the frontend
+# spins on "Preparing…" forever. The polling endpoint runs in the healthy API
+# process, so it reconciles stale active jobs itself before responding.
+# ---------------------------------------------------------------------------
+
+
+async def _make_stale_pending_job(email: str, job_id: int) -> tuple:
+    user = await sync_to_async(User.objects.create_user)(email=email, password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name=f"W-{job_id}", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=job_id,
+        tool_call_id=f"tc-{job_id}",
+        state=ThreadJob.State.PENDING,
+    )
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+    )
+    return user, ws, tj
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_flips_stale_job_whose_procrastinate_job_failed():
+    """A stale PENDING ThreadJob whose underlying procrastinate job FAILED is
+    flipped to FAILED during the poll and surfaces in recent_terminations with
+    an error_summary — the frontend just renders what the backend reports."""
+    _user, ws, tj = await _make_stale_pending_job("stalefail@b.c", 50001)
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="failed"),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="stalefail@b.c", password="x")
+        resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["jobs"] == []
+    assert len(body["recent_terminations"]) == 1
+    term = body["recent_terminations"][0]
+    assert term["thread_job_id"] == str(tj.id)
+    assert term["state"] == "failed"
+    assert term["retry_available"] is True
+    assert term["error_summary"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_defers_resume_for_stale_job_whose_procrastinate_job_succeeded():
+    """Stale PENDING job whose materialization actually finished: the poll
+    defers the resume task (same semantics as the janitor) and keeps the job
+    in the active list — the resume flips the state."""
+    _user, ws, tj = await _make_stale_pending_job("stalesucc@b.c", 50002)
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
+        patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
+    ):
+        resume.defer_async = AsyncMock(return_value=None)
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="stalesucc@b.c", password="x")
+        resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    resume.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
+    assert len(body["jobs"]) == 1
+    assert body["jobs"][0]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_does_not_reconcile_fresh_jobs():
+    """Jobs younger than the staleness threshold are returned untouched —
+    the backstop must not add a procrastinate status query to every poll of
+    a healthy in-flight materialization."""
+    user = await sync_to_async(User.objects.create_user)(email="fresh@b.c", password="x")
+    ws = await sync_to_async(Workspace.objects.create)(name="W-fresh", created_by=user)
+    await sync_to_async(WorkspaceMembership.objects.create)(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    tj = await sync_to_async(ThreadJob.objects.create)(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=50003,
+        tool_call_id="tc-50003",
+        state=ThreadJob.State.PENDING,
+    )
+
+    with patch(
+        "apps.workspaces.tasks._procrastinate_job_status",
+        new=AsyncMock(return_value="failed"),
+    ) as status_mock:
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="fresh@b.c", password="x")
+        resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    status_mock.assert_not_called()
+    assert len(body["jobs"]) == 1
+    assert body["jobs"][0]["thread_job_id"] == str(tj.id)
+    assert body["jobs"][0]["state"] == "pending"

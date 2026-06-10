@@ -8,6 +8,7 @@ from datetime import timedelta
 
 import sentry_sdk
 from django.conf import settings
+from django.db import close_old_connections
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.procrastinate_app import current_app
@@ -28,7 +29,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
-from config.procrastinate import app
+from config.procrastinate import app, ensure_fresh_db_connections
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.materializer import (
@@ -51,6 +52,9 @@ RESUME_EXCEPTION_MESSAGE = "Sorry, something went wrong while preparing your ans
 RESUME_STUCK_RUNNING_MESSAGE = (
     "Your materialization completed but the follow-up response was interrupted "
     "(likely a server restart). Please re-ask your question."
+)
+MATERIALIZATION_FAILED_MESSAGE = (
+    "Data loading failed before it could complete. Please retry your request."
 )
 
 logger = logging.getLogger(__name__)
@@ -118,6 +122,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
 
 
 @app.task
+@ensure_fresh_db_connections
 async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
 
@@ -193,6 +198,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
 
 
 @app.task(pass_context=True)
+@ensure_fresh_db_connections
 async def materialize_workspace(
     context,
     workspace_id: str,
@@ -380,6 +386,12 @@ def _run_pipeline_with_progress(
     and surfaces cancellation, then runs the pipeline. Exceptions propagate
     to the caller.
     """
+    # This runs on an asyncio.to_thread executor thread, which has its own
+    # thread-local Django connection that ensure_fresh_db_connections (which
+    # cleans the async-ORM thread) cannot reach. Pool threads are reused
+    # across jobs, so a connection that died since the last pipeline run here
+    # would otherwise poison every progress update.
+    close_old_connections()
 
     def updater(progress: dict) -> None:
         run_id = progress.get("run_id")
@@ -414,6 +426,7 @@ async def _drop_schema_and_fail(schema) -> None:
 
 @app.periodic(cron="*/30 * * * *")
 @app.task
+@ensure_fresh_db_connections
 async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """Mark stale schemas for teardown and dispatch teardown tasks.
 
@@ -453,6 +466,7 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
 
 
 @app.task
+@ensure_fresh_db_connections
 async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
 
@@ -484,6 +498,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
 
 
 @app.task
+@ensure_fresh_db_connections
 async def teardown_view_schema_task(view_schema_id: str) -> None:
     """Drop the physical PostgreSQL schema for a WorkspaceViewSchema and mark EXPIRED."""
     try:
@@ -506,6 +521,7 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
 
 
 @app.task
+@ensure_fresh_db_connections
 async def teardown_schema(schema_id: str) -> None:
     """Drop a tenant schema in the managed database and mark it EXPIRED."""
     try:
@@ -557,28 +573,120 @@ async def teardown_schema(schema_id: str) -> None:
 STALE_JOB_THRESHOLD = timedelta(minutes=10)
 
 
-async def _procrastinate_job_active(job_id: int) -> bool | None:
-    """Return True/False if the procrastinate job status is known; None on error.
+async def _procrastinate_job_status(job_id: int) -> str | None:
+    """Return the raw procrastinate job status string, or None when unknown.
 
-    A bare ``return False`` on exception conflates "not active" with "couldn't
-    tell" — the janitor would then misclassify actively-running jobs as
-    candidates for cleanup during a transient DB blip. Callers must treat
+    Returning a sentinel on exception would conflate "not active" with
+    "couldn't tell" — the janitor would then misclassify actively-running jobs
+    as candidates for cleanup during a transient DB blip. Callers must treat
     ``None`` as "don't touch this row this tick".
     """
     try:
         status = await current_app.job_manager.get_job_status_async(job_id)
     except Exception:
         logger.warning(
-            "Could not fetch procrastinate status for job %s; janitor will skip this tick",
+            "Could not fetch procrastinate status for job %s; skipping reconcile this tick",
             job_id,
             exc_info=True,
         )
         return None
-    return status.value in {"todo", "doing"}
+    return status.value
+
+
+async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
+    """Reconcile one stale active ThreadJob against its procrastinate job.
+
+    Shared by the worker-side janitor (expire_stale_thread_jobs) and the
+    API-side active-jobs poll. The poll backstop exists because the janitor
+    runs in the worker process: when the worker itself is sick (June 2026
+    incident — its DB connection died and every task, janitor included,
+    failed for ~22h) nothing flips stuck ThreadJobs and the frontend spins
+    forever. The API process polls anyway, so it can reconcile too.
+
+    Returns the action taken: "failed" (flipped to FAILED), "resumed"
+    (resume task deferred), "fallback_failed" (defer raised, flipped FAILED),
+    or None (job still active / status unknown / nothing to do).
+    """
+    status = await _procrastinate_job_status(tj.procrastinate_job_id)
+    if status is None:
+        # Status unknown (probably a transient DB error). Don't touch the
+        # row this tick — the next invocation will retry. This prevents
+        # incorrectly cleaning up jobs that may still be running.
+        return None
+    if status in {"todo", "doing"}:
+        return None
+    if tj.state == ThreadJob.State.RUNNING:
+        # A worker started a resume and presumably crashed mid-ainvoke.
+        # Marking FAILED directly avoids deferring a duplicate resume that
+        # could race with a still-running first invocation.
+        updated = await ThreadJob.objects.filter(
+            id=tj.id,
+            state=ThreadJob.State.RUNNING,
+        ).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            error_summary=(
+                "Materialization completed but the follow-up response was "
+                "interrupted (likely a server restart). Please retry."
+            ),
+        )
+        if not updated:
+            return None
+        logger.warning(
+            "Reconcile: ThreadJob %s stuck in RUNNING (worker crash?); marked FAILED",
+            tj.id,
+        )
+        # Surface the crash to the user via a synthetic AIMessage; the
+        # checkpointer write tolerates failure so a sick worker
+        # doesn't block the FAILED transition.
+        await _persist_synthetic_failure_message(tj, RESUME_STUCK_RUNNING_MESSAGE)
+        return "failed"
+    if status in {"failed", "aborted"}:
+        # The task itself raised (e.g. the worker's DB connection died before
+        # any pipeline ran) — there is no result for an agent resume to
+        # narrate. Flip straight to FAILED so the failure reaches the user
+        # instead of waiting on a resume that has nothing to say.
+        summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+        updated = await ThreadJob.objects.filter(
+            id=tj.id,
+            state=ThreadJob.State.PENDING,
+        ).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            error_summary=summary or MATERIALIZATION_FAILED_MESSAGE,
+        )
+        if not updated:
+            return None
+        logger.warning(
+            "Reconcile: ThreadJob %s pending but procrastinate job %s is %s; marked FAILED",
+            tj.id,
+            tj.procrastinate_job_id,
+            status,
+        )
+        await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+        return "failed"
+    # PENDING stuck job whose materialization finished (succeeded/cancelled)
+    # — never claimed by any worker. Safe to defer a fresh resume so the user
+    # gets an agent follow-up; the resume task flips the state.
+    try:
+        await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+    except Exception:
+        logger.exception("Reconcile: failed to defer resume for %s", tj.id)
+        await ThreadJob.objects.filter(id=tj.id).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            error_summary=(
+                "Background queue unavailable; the materialization could "
+                "not be resumed. Please retry."
+            ),
+        )
+        return "fallback_failed"
+    return "resumed"
 
 
 @app.periodic(cron="*/15 * * * *")
 @app.task
+@ensure_fresh_db_connections
 async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     """Flip ThreadJobs that have been active too long and whose procrastinate
     job is no longer running. Fires the resume task so the user is not stuck
@@ -593,56 +701,9 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
         state__in=list(ThreadJob.ACTIVE_STATES),
         created_at__lt=cutoff,
     ):
-        active = await _procrastinate_job_active(tj.procrastinate_job_id)
-        if active is None:
-            # Status unknown (probably a transient DB error). Don't touch the
-            # row this tick — the next periodic invocation will retry. This
-            # prevents the janitor from incorrectly cleaning up jobs that may
-            # still be running.
-            continue
-        if active:
-            continue
-        if tj.state == ThreadJob.State.RUNNING:
-            # A worker started a resume and presumably crashed mid-ainvoke.
-            # Marking FAILED directly avoids deferring a duplicate resume that
-            # could race with a still-running first invocation.
-            updated = await ThreadJob.objects.filter(
-                id=tj.id,
-                state=ThreadJob.State.RUNNING,
-            ).aupdate(
-                state=ThreadJob.State.FAILED,
-                completed_at=timezone.now(),
-                error_summary=(
-                    "Materialization completed but the follow-up response was "
-                    "interrupted (likely a server restart). Please retry."
-                ),
-            )
-            if updated:
-                flipped += 1
-                logger.warning(
-                    "Janitor: ThreadJob %s stuck in RUNNING (worker crash?); marked FAILED",
-                    tj.id,
-                )
-                # Surface the crash to the user via a synthetic AIMessage; the
-                # checkpointer write tolerates failure so a sick worker
-                # doesn't block the FAILED transition.
-                await _persist_synthetic_failure_message(tj, RESUME_STUCK_RUNNING_MESSAGE)
-            continue
-        # PENDING stuck job — never claimed by any worker. Safe to defer a fresh
-        # resume so the user gets an agent follow-up.
-        try:
-            await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
+        action = await reconcile_stale_thread_job(tj)
+        if action in {"failed", "resumed"}:
             flipped += 1
-        except Exception:
-            logger.exception("Janitor: failed to defer resume for %s", tj.id)
-            await ThreadJob.objects.filter(id=tj.id).aupdate(
-                state=ThreadJob.State.FAILED,
-                completed_at=timezone.now(),
-                error_summary=(
-                    "Background queue unavailable; the materialization could "
-                    "not be resumed. Please retry."
-                ),
-            )
     return {"flipped": flipped}
 
 
@@ -825,6 +886,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
 
 
 @app.task(pass_context=True)
+@ensure_fresh_db_connections
 async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
     re-invoke the agent so it can respond to the original request with the
