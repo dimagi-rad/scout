@@ -7,6 +7,7 @@ import logging
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.http import JsonResponse
 from django.utils import timezone
@@ -14,11 +15,12 @@ from django.views.decorators.http import require_http_methods
 
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
+from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -43,9 +45,16 @@ async def _aget_token_value(user, provider: str) -> str | None:
 # Django doesn't yet expose async-native transaction support, so this is the
 # sanctioned bridge for transactional ORM writes from async views.
 @sync_to_async
-def _persist_api_key_memberships(user, provider, descriptors, encrypted):
+def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slug, team_name):
+    """Create one API-key connection and link every chatbot it discovered to it."""
     rows = []
     with transaction.atomic():
+        conn = TenantConnection.objects.create(
+            user=user,
+            provider=provider,
+            credential_type=TenantConnection.API_KEY,
+            encrypted_credential=encrypted,
+        )
         for desc in descriptors:
             tenant, _ = Tenant.objects.get_or_create(
                 provider=provider,
@@ -53,13 +62,11 @@ def _persist_api_key_memberships(user, provider, descriptors, encrypted):
                 defaults={"canonical_name": desc.canonical_name},
             )
             tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
-            TenantCredential.objects.update_or_create(
-                tenant_membership=tm,
-                defaults={
-                    "credential_type": TenantCredential.API_KEY,
-                    "encrypted_credential": encrypted,
-                },
-            )
+            tm.connection = conn
+            tm.team_slug = team_slug
+            tm.team_name = team_name
+            tm.archived_at = None
+            tm.save(update_fields=["connection", "provider_metadata", "archived_at"])
             rows.append(
                 {
                     "membership_id": str(tm.id),
@@ -114,7 +121,9 @@ async def tenant_list_view(request):
                 logger.warning("Failed to refresh OCS chatbots", exc_info=True)
 
     memberships = []
-    async for tm in TenantMembership.objects.filter(user=user).select_related("tenant"):
+    async for tm in TenantMembership.objects.filter(
+        user=user, archived_at__isnull=True
+    ).select_related("tenant"):
         memberships.append(
             {
                 "id": str(tm.id),
@@ -178,28 +187,37 @@ async def api_key_providers_view(request):
 @require_http_methods(["GET", "POST"])
 @async_login_required
 async def tenant_credential_list_view(request):
-    """GET  /api/auth/tenant-credentials/ — list configured tenant credentials
-    POST /api/auth/tenant-credentials/ — create a new API-key-based tenant"""
+    """GET  /api/auth/connections/ — list the user's connections, chatbots grouped
+    POST /api/auth/connections/ — add a new API-key connection"""
     user = request._authenticated_user
 
     if request.method == "GET":
         results = []
-        async for tm in TenantMembership.objects.filter(
-            user=user,
-            credential__isnull=False,
-        ).select_related("credential", "tenant"):
+        async for conn in TenantConnection.objects.filter(user=user).order_by("-created_at"):
+            chatbots = []
+            async for tm in conn.memberships.filter(archived_at__isnull=True).select_related(
+                "tenant"
+            ):
+                chatbots.append(
+                    {
+                        "membership_id": str(tm.id),
+                        "tenant_id": tm.tenant.external_id,
+                        "tenant_name": tm.tenant.canonical_name,
+                        "team_slug": tm.team_slug,
+                        "team_name": tm.team_name,
+                    }
+                )
             results.append(
                 {
-                    "membership_id": str(tm.id),
-                    "provider": tm.tenant.provider,
-                    "tenant_id": tm.tenant.external_id,
-                    "tenant_name": tm.tenant.canonical_name,
-                    "credential_type": tm.credential.credential_type,
+                    "connection_id": str(conn.id),
+                    "provider": conn.provider,
+                    "credential_type": conn.credential_type,
+                    "chatbots": chatbots,
                 }
             )
         return JsonResponse(results, safe=False)
 
-    # POST — create API-key-backed membership(s) via strategy registry
+    # POST — create an API-key connection via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -228,6 +246,21 @@ async def tenant_credential_list_view(request):
     except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
+    # OCS connections are labeled by team. Auto-detect it from the live API;
+    # fall back to a user-supplied team name when the team has no sessions.
+    team_slug, team_name = "", ""
+    if provider == "ocs":
+        detected = await adetect_team_from_api_key(fields.get("api_key", ""))
+        if detected:
+            team_slug, team_name = detected
+        else:
+            team_name = (fields.get("team_name") or "").strip()
+            if not team_name:
+                return JsonResponse(
+                    {"error": "Could not detect the OCS team; enter a team name."},
+                    status=400,
+                )
+
     try:
         packed = strategy.pack_credential(fields)
         encrypted = encrypt_credential(packed)
@@ -235,30 +268,41 @@ async def tenant_credential_list_view(request):
         return JsonResponse({"error": str(e)}, status=500)
 
     try:
-        memberships_payload = await _persist_api_key_memberships(
-            user, provider, descriptors, encrypted
+        memberships_payload = await _persist_api_key_connection(
+            user, provider, descriptors, encrypted, team_slug, team_name
         )
     except Exception as e:
-        logger.exception("Failed to persist memberships for provider %s", provider)
+        logger.exception("Failed to persist connection for provider %s", provider)
         return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse({"memberships": memberships_payload}, status=201)
 
 
+@sync_to_async
+def _archive_and_delete_connection(conn):
+    """Archive the connection's live memberships (retaining data), then delete it."""
+    with transaction.atomic():
+        conn.memberships.filter(archived_at__isnull=True).update(
+            archived_at=timezone.now(), connection=None
+        )
+        conn.delete()
+
+
 @require_http_methods(["DELETE", "PATCH"])
 @async_login_required
-async def tenant_credential_detail_view(request, membership_id):
-    """DELETE /api/auth/tenant-credentials/<membership_id>/ — remove a credential
-    PATCH  /api/auth/tenant-credentials/<membership_id>/ — update credential"""
+async def connection_detail_view(request, connection_id):
+    """DELETE /api/auth/connections/<id>/ — remove a connection (archives its chatbots)
+    PATCH  /api/auth/connections/<id>/ — rotate the connection's API key"""
     user = request._authenticated_user
 
+    try:
+        conn = await TenantConnection.objects.aget(id=connection_id, user=user)
+    except (TenantConnection.DoesNotExist, ValueError, ValidationError):
+        return JsonResponse({"error": "Not found"}, status=404)
+
     if request.method == "DELETE":
-        try:
-            tm = await TenantMembership.objects.aget(id=membership_id, user=user)
-        except TenantMembership.DoesNotExist:
-            return JsonResponse({"error": "Not found"}, status=404)
-        await tm.adelete()  # cascades to TenantCredential
-        return JsonResponse({"status": "deleted"})
+        await _archive_and_delete_connection(conn)
+        return JsonResponse({"status": "removed"})
 
     # PATCH — rotate API key via strategy registry
     try:
@@ -268,19 +312,10 @@ async def tenant_credential_detail_view(request, membership_id):
 
     fields = body.get("fields") or {}
 
-    try:
-        tm = await TenantMembership.objects.select_related("credential", "tenant").aget(
-            id=membership_id, user=user
-        )
-    except TenantMembership.DoesNotExist:
-        return JsonResponse({"error": "Not found"}, status=404)
-    if not hasattr(tm, "credential"):
-        return JsonResponse({"error": "Not found"}, status=404)
-
-    strategy = STRATEGIES.get(tm.tenant.provider)
+    strategy = STRATEGIES.get(conn.provider)
     if strategy is None:
         return JsonResponse(
-            {"error": f"Provider '{tm.tenant.provider}' has no API-key strategy"},
+            {"error": f"Provider '{conn.provider}' has no API-key strategy"},
             status=400,
         )
 
@@ -294,8 +329,14 @@ async def tenant_credential_detail_view(request, membership_id):
             status=400,
         )
 
+    # Verify the new key still has access to one of this connection's chatbots.
+    sample = await conn.memberships.select_related("tenant").afirst()
+    if sample is None:
+        return JsonResponse(
+            {"error": "Connection has no linked data sources to verify against"}, status=400
+        )
     try:
-        await strategy.verify_for_tenant(fields, external_id=tm.tenant.external_id)
+        await strategy.verify_for_tenant(fields, external_id=sample.tenant.external_id)
     except CredentialVerificationError as e:
         return JsonResponse({"error": str(e)}, status=400)
 
@@ -305,15 +346,9 @@ async def tenant_credential_detail_view(request, membership_id):
     except (KeyError, ValueError) as e:
         return JsonResponse({"error": str(e)}, status=400)
 
-    tm.credential.encrypted_credential = encrypted
-    await tm.credential.asave(update_fields=["encrypted_credential"])
-    return JsonResponse(
-        {
-            "membership_id": str(tm.id),
-            "tenant_id": tm.tenant.external_id,
-            "tenant_name": tm.tenant.canonical_name,
-        }
-    )
+    conn.encrypted_credential = encrypted
+    await conn.asave(update_fields=["encrypted_credential"])
+    return JsonResponse({"connection_id": str(conn.id), "provider": conn.provider})
 
 
 @require_http_methods(["POST"])

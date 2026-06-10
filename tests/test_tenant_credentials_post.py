@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers import (
     CredentialVerificationError,
     TenantDescriptor,
@@ -17,7 +18,7 @@ def user(db):
 
 def _post(client, body):
     return client.post(
-        "/api/auth/tenant-credentials/",
+        "/api/auth/connections/",
         data=json.dumps(body),
         content_type="application/json",
     )
@@ -51,10 +52,17 @@ def test_ocs_post_returns_multiple_memberships(client, user):
         TenantDescriptor("exp-1", "Bot One"),
         TenantDescriptor("exp-2", "Bot Two"),
     ]
-    with patch(
-        "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
-        new_callable=AsyncMock,
-        return_value=descriptors,
+    with (
+        patch(
+            "apps.users.services.api_key_providers.ocs.OCSStrategy.verify_and_discover",
+            new_callable=AsyncMock,
+            return_value=descriptors,
+        ),
+        patch(
+            "apps.users.views.adetect_team_from_api_key",
+            new_callable=AsyncMock,
+            return_value=("team", "Team"),
+        ),
     ):
         resp = _post(
             client,
@@ -64,13 +72,17 @@ def test_ocs_post_returns_multiple_memberships(client, user):
     memberships = resp.json()["memberships"]
     assert {m["tenant_id"] for m in memberships} == {"exp-1", "exp-2"}
 
-    from apps.users.models import Tenant, TenantCredential, TenantMembership
-
     assert Tenant.objects.filter(provider="ocs").count() == 2
-    assert TenantMembership.objects.filter(user=user, tenant__provider="ocs").count() == 2
-    creds = TenantCredential.objects.filter(tenant_membership__user=user)
-    assert {c.encrypted_credential for c in creds}  # non-empty
-    assert all(c.credential_type == TenantCredential.API_KEY for c in creds)
+    tms = TenantMembership.objects.filter(user=user, tenant__provider="ocs")
+    assert tms.count() == 2
+
+    # A single API-key TenantConnection backs both memberships.
+    conns = TenantConnection.objects.filter(user=user, provider="ocs")
+    assert conns.count() == 1
+    conn = conns.get()
+    assert conn.credential_type == TenantConnection.API_KEY
+    assert conn.encrypted_credential  # non-empty
+    assert {tm.connection_id for tm in tms} == {conn.id}
 
 
 def test_unknown_provider_returns_400(client, user):
@@ -110,8 +122,6 @@ def test_partial_failure_is_atomic(client, user):
     # Inject failure inside the persistence loop on the second descriptor by
     # making Tenant.objects.get_or_create raise on its second call. This
     # exercises the atomic rollback path.
-    from apps.users.models import Tenant
-
     real_get_or_create = Tenant.objects.get_or_create
     calls = {"n": 0}
 
@@ -127,10 +137,15 @@ def test_partial_failure_is_atomic(client, user):
             new_callable=AsyncMock,
             return_value=descriptors,
         ),
+        patch(
+            "apps.users.views.adetect_team_from_api_key",
+            new_callable=AsyncMock,
+            return_value=("team", "Team"),
+        ),
         patch.object(Tenant.objects, "get_or_create", side_effect=flaky_get_or_create),
     ):
         resp = _post(client, {"provider": "ocs", "fields": {"api_key": "k"}})
     assert resp.status_code == 500
-    from apps.users.models import TenantMembership
-
+    # The whole atomic persist block rolled back: no memberships, no connection.
     assert not TenantMembership.objects.filter(user=user).exists()
+    assert not TenantConnection.objects.filter(user=user).exists()

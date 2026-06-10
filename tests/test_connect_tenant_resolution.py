@@ -1,5 +1,6 @@
 import pytest
 
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import ConnectAuthError, resolve_connect_opportunities
 
 
@@ -25,8 +26,6 @@ class TestResolveConnectOpportunities:
         assert memberships[1].tenant.external_id == "99"
         assert memberships[1].tenant.canonical_name == "Test Opp"
 
-        from apps.users.models import TenantCredential, TenantMembership
-
         assert (
             await TenantMembership.objects.filter(
                 user=user, tenant__provider="commcare_connect"
@@ -34,17 +33,21 @@ class TestResolveConnectOpportunities:
             == 2
         )
 
+        # The resolver creates ONE shared oauth TenantConnection per
+        # (user, provider) and links every membership to it.
+        oauth_conn = await TenantConnection.objects.aget(
+            user=user,
+            provider="commcare_connect",
+            credential_type=TenantConnection.OAUTH,
+        )
+
         async for tm in TenantMembership.objects.filter(
             user=user, tenant__provider="commcare_connect"
-        ):
-            assert await TenantCredential.objects.filter(
-                tenant_membership=tm, credential_type=TenantCredential.OAUTH
-            ).aexists()
+        ).select_related("connection"):
+            assert tm.connection_id == oauth_conn.id
 
     @pytest.mark.asyncio
     async def test_updates_existing_opportunity_name(self, user, httpx_mock):
-        from apps.users.models import Tenant, TenantMembership
-
         tenant = await Tenant.objects.acreate(
             provider="commcare_connect", external_id="42", canonical_name="Old Name"
         )

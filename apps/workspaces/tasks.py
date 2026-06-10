@@ -135,9 +135,9 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         return {"error": "Schema not found"}
 
     try:
-        membership = await TenantMembership.objects.select_related("tenant", "user").aget(
-            id=membership_id
-        )
+        membership = await TenantMembership.objects.select_related(
+            "tenant", "user", "connection"
+        ).aget(id=membership_id)
     except TenantMembership.DoesNotExist:
         new_schema.state = SchemaState.FAILED
         await new_schema.asave(update_fields=["state"])
@@ -224,13 +224,14 @@ async def materialize_workspace(
             logger.exception("materialize_workspace: workspace %s not found", workspace_id)
             return {"error": "Workspace not found"}
 
-        qs = TenantMembership.objects.select_related("user", "tenant").filter(
+        qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
+            archived_at__isnull=True,
             tenant_id__in=[
                 wt.tenant_id
                 async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
                     "tenant"
                 )
-            ]
+            ],
         )
         if user_id:
             qs = qs.filter(user_id=user_id)

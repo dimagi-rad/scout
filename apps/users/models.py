@@ -147,6 +147,51 @@ class Tenant(models.Model):
             return workspace_name
 
 
+class TenantConnection(models.Model):
+    """A single credential a user added: one OAuth login or one API key.
+
+    A connection is a credential only. The team a chatbot belongs to is recorded
+    on TenantMembership (provider_metadata): in v1 a user has at most one OAuth
+    connection per provider, and its team can change when they re-authorize.
+    """
+
+    OAUTH = "oauth"
+    API_KEY = "api_key"
+    TYPE_CHOICES = [
+        (OAUTH, "OAuth Token"),
+        (API_KEY, "API Key"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="tenant_connections",
+    )
+    provider = models.CharField(max_length=50, choices=PROVIDER_CHOICES)
+    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    encrypted_credential = models.CharField(
+        max_length=2000,
+        blank=True,
+        help_text="Fernet-encrypted opaque string. Empty for OAuth (token lives in allauth).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "provider"],
+                condition=models.Q(credential_type="oauth"),
+                name="unique_oauth_connection_per_user_provider",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.provider}:{self.credential_type}"
+
+
 class TenantMembership(models.Model):
     """Links a user to a verified Tenant."""
 
@@ -161,7 +206,20 @@ class TenantMembership(models.Model):
         on_delete=models.CASCADE,
         related_name="memberships",
     )
+    connection = models.ForeignKey(
+        "TenantConnection",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="memberships",
+    )
+    provider_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Provider-specific data (e.g. OCS team_slug/team_name); empty for providers without it.",
+    )
     last_selected_at = models.DateTimeField(null=True, blank=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -171,41 +229,23 @@ class TenantMembership(models.Model):
     def __str__(self):
         return f"TenantMembership({self.user_id} - {self.tenant_id})"
 
+    # ``team_slug``/``team_name`` are OCS-specific, so they live in
+    # ``provider_metadata`` rather than as columns on this generic model. These
+    # accessors keep the keys in one place (the OAuth fail-closed check reads
+    # ``team_slug``) and let callers and ``objects.create(team_slug=...)`` use
+    # them as if they were fields.
+    @property
+    def team_slug(self) -> str:
+        return (self.provider_metadata or {}).get("team_slug", "")
 
-class TenantCredential(models.Model):
-    """Stores credentials for a tenant — either OAuth pointer or encrypted API key.
+    @team_slug.setter
+    def team_slug(self, value: str) -> None:
+        self.provider_metadata = {**(self.provider_metadata or {}), "team_slug": value}
 
-    For credential_type == OAUTH: encrypted_credential is blank; the actual
-    token lives in allauth's SocialToken and is retrieved from there.
+    @property
+    def team_name(self) -> str:
+        return (self.provider_metadata or {}).get("team_name", "")
 
-    For credential_type == API_KEY: encrypted_credential holds a Fernet-encrypted
-    opaque string. Format is provider-specific, e.g. "username:apikey" for CommCare.
-    """
-
-    OAUTH = "oauth"
-    API_KEY = "api_key"
-    TYPE_CHOICES = [
-        (OAUTH, "OAuth Token"),
-        (API_KEY, "API Key"),
-    ]
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    tenant_membership = models.OneToOneField(
-        TenantMembership,
-        on_delete=models.CASCADE,
-        related_name="credential",
-    )
-    credential_type = models.CharField(max_length=20, choices=TYPE_CHOICES)
-    encrypted_credential = models.CharField(
-        max_length=2000,
-        blank=True,
-        help_text="Fernet-encrypted opaque string. Empty for OAuth type.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self):
-        return f"{self.tenant_membership} ({self.credential_type})"
+    @team_name.setter
+    def team_name(self, value: str) -> None:
+        self.provider_metadata = {**(self.provider_metadata or {}), "team_name": value}

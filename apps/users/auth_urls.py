@@ -13,7 +13,7 @@ from apps.users.auth_views import (
 )
 from apps.users.views import (
     api_key_providers_view,
-    tenant_credential_detail_view,
+    connection_detail_view,
     tenant_credential_list_view,
     tenant_ensure_view,
     tenant_list_view,
@@ -37,11 +37,11 @@ urlpatterns = [
     path("tenants/", tenant_list_view, name="tenant-list"),
     path("tenants/select/", tenant_select_view, name="tenant-select"),
     path("tenants/ensure/", tenant_ensure_view, name="tenant-ensure"),
-    path("tenant-credentials/", tenant_credential_list_view, name="tenant-credential-list"),
+    path("connections/", tenant_credential_list_view, name="connections"),
     path(
-        "tenant-credentials/<str:membership_id>/",
-        tenant_credential_detail_view,
-        name="tenant-credential-detail",
+        "connections/<str:connection_id>/",
+        connection_detail_view,
+        name="connection-detail",
     ),
     path("api-key-providers/", api_key_providers_view, name="api-key-providers"),
 ]

@@ -7,7 +7,7 @@ import os
 import pytest
 from psycopg import sql as psql
 
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
     get_managed_db_connection,
@@ -31,7 +31,13 @@ def tenant_schema(db, user):
         provider="ocs", external_id="exp-uuid-1", canonical_name="Test Bot"
     )
     tm = TenantMembership.objects.create(user=user, tenant=tenant)
-    TenantCredential.objects.create(tenant_membership=tm, credential_type=TenantCredential.OAUTH)
+    conn, _ = TenantConnection.objects.get_or_create(
+        user=tm.user,
+        provider=tm.tenant.provider,
+        credential_type=TenantConnection.OAUTH,
+    )
+    tm.connection = conn
+    tm.save(update_fields=["connection"])
     schema = SchemaManager().provision(tenant)
     yield schema
     conn = get_managed_db_connection()

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from apps.users.models import Tenant, TenantCredential, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.tenant_resolution import OCSAuthError, resolve_ocs_chatbots
 
 
@@ -50,10 +50,12 @@ async def test_resolve_ocs_chatbots_creates_tenants(user):
     assert [t.external_id for t in tenants] == ["exp-uuid-1", "exp-uuid-2"]
     assert [t.canonical_name for t in tenants] == ["Onboarding Bot", "Survey Bot"]
 
-    creds = await TenantCredential.objects.filter(
-        tenant_membership__tenant__provider="ocs"
-    ).acount()
-    assert creds == 2
+    # Both chatbots share the single OCS OAuth connection
+    conns = [c async for c in TenantConnection.objects.filter(user=user, provider="ocs")]
+    assert len(conns) == 1
+    assert conns[0].credential_type == TenantConnection.OAUTH
+    linked = [tm async for tm in TenantMembership.objects.filter(user=user, tenant__provider="ocs")]
+    assert all(tm.connection_id == conns[0].id for tm in linked)
 
     # Ensure memberships belong to the user and are for OCS tenants
     assert all(tm.user_id == user.id for tm in memberships)

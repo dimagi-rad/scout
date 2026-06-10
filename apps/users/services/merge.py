@@ -16,7 +16,7 @@ from allauth.account.models import EmailAddress
 from allauth.socialaccount.models import SocialAccount
 from django.db import transaction
 
-from apps.users.models import TenantMembership
+from apps.users.models import TenantConnection, TenantMembership
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ _SPECIAL_CASE_RELATIONS: frozenset[tuple[str, str]] = frozenset(
         ("socialaccount.SocialAccount", "user"),
         ("account.EmailAddress", "user"),
         ("users.TenantMembership", "user"),
+        ("users.TenantConnection", "user"),
         ("workspaces.WorkspaceMembership", "user"),
         # Django auth join tables — auto-generated through-tables for the custom
         # User model. Unique on (user, group) / (user, permission); a bulk repoint
@@ -92,6 +93,8 @@ class MergeReport:
     emailaddress_deleted: int = 0
     tenant_membership_repointed: int = 0
     tenant_membership_conflict_deleted: int = 0
+    tenant_connection_repointed: int = 0
+    tenant_connection_conflict_merged: int = 0
     workspace_membership_repointed: int = 0
     workspace_membership_conflict_merged: int = 0
     long_tail_fk_counts: dict[str, int] = field(default_factory=dict)
@@ -153,7 +156,8 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
     """Returns (repointed_count, conflict_deleted_count).
 
     If canonical already has a membership for a given tenant, delete duplicate's
-    row (its OneToOne TenantCredential cascades). Otherwise repoint to canonical.
+    row. Otherwise repoint to canonical. (Connections are merged separately by
+    _merge_tenant_connections, which the surviving memberships still reference.)
     """
     canonical_tenant_ids = set(
         TenantMembership.objects.filter(user=canonical).values_list("tenant_id", flat=True)
@@ -162,6 +166,36 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
     conflict_deleted, _ = dup_qs.filter(tenant_id__in=canonical_tenant_ids).delete()
     repointed = dup_qs.exclude(tenant_id__in=canonical_tenant_ids).update(user=canonical)
     return repointed, conflict_deleted
+
+
+def _merge_tenant_connections(canonical: User, duplicate: User) -> tuple[int, int]:
+    """Returns (repointed_count, conflict_merged_count).
+
+    Repoint the duplicate's connections to canonical. The model allows only one
+    OAuth connection per (user, provider), so when canonical already owns the
+    OAuth connection for a provider, the duplicate's OAuth connection for that
+    provider is merged: its memberships are repointed to canonical's connection
+    and the duplicate row is deleted. API-key connections are always repointed.
+    """
+    canonical_oauth = {
+        c.provider: c
+        for c in TenantConnection.objects.filter(
+            user=canonical, credential_type=TenantConnection.OAUTH
+        )
+    }
+    repointed = 0
+    conflict_merged = 0
+    for conn in TenantConnection.objects.filter(user=duplicate):
+        existing = canonical_oauth.get(conn.provider)
+        if conn.credential_type == TenantConnection.OAUTH and existing is not None:
+            conn.memberships.update(connection=existing)
+            conn.delete()
+            conflict_merged += 1
+        else:
+            conn.user = canonical
+            conn.save(update_fields=["user"])
+            repointed += 1
+    return repointed, conflict_merged
 
 
 def _merge_workspace_memberships(canonical: User, duplicate: User) -> tuple[int, int]:
@@ -267,6 +301,18 @@ def merge_users(
         report.tenant_membership_repointed = dup_tms.exclude(
             tenant_id__in=canonical_tenant_ids,
         ).count()
+        canonical_oauth_providers = set(
+            TenantConnection.objects.filter(
+                user=canonical, credential_type=TenantConnection.OAUTH
+            ).values_list("provider", flat=True)
+        )
+        dup_conns = TenantConnection.objects.filter(user=duplicate)
+        report.tenant_connection_conflict_merged = dup_conns.filter(
+            credential_type=TenantConnection.OAUTH, provider__in=canonical_oauth_providers
+        ).count()
+        report.tenant_connection_repointed = (
+            dup_conns.count() - report.tenant_connection_conflict_merged
+        )
         canonical_ws_ids = set(
             WorkspaceMembership.objects.filter(user=canonical).values_list(
                 "workspace_id",
@@ -290,6 +336,9 @@ def merge_users(
         )
         report.tenant_membership_repointed, report.tenant_membership_conflict_deleted = (
             _merge_tenant_memberships(canonical, duplicate)
+        )
+        report.tenant_connection_repointed, report.tenant_connection_conflict_merged = (
+            _merge_tenant_connections(canonical, duplicate)
         )
         report.workspace_membership_repointed, report.workspace_membership_conflict_merged = (
             _merge_workspace_memberships(canonical, duplicate)

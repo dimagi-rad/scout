@@ -7,7 +7,7 @@ import logging
 from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
-from apps.users.models import TenantCredential
+from apps.users.models import TenantConnection
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     get_token_url,
@@ -44,70 +44,55 @@ def _social_token_qs(user, provider: str):
     ).exclude(account__provider__startswith="commcare_connect")
 
 
-def get_social_token(user, provider: str) -> SocialToken | None:
-    """Return the SocialToken for *user* and *provider*, or None."""
-    return _social_token_qs(user, provider).first()
-
-
 async def aget_social_token(user, provider: str) -> SocialToken | None:
-    """Async version of :func:`get_social_token`."""
+    """Return the SocialToken for *user* and *provider*, or None."""
     return await _social_token_qs(user, provider).afirst()
 
 
-def resolve_credential(membership) -> dict | None:
-    """Resolve a credential dict for a TenantMembership, or return None.
+def _oauth_team_mismatch(membership, token_obj) -> bool:
+    """True when the chatbot's team is known and the live OAuth token is scoped elsewhere.
 
-    Returns a dict with keys ``type`` (``"api_key"`` or ``"oauth"``) and
-    ``value`` (the decrypted key or OAuth token string), or ``None`` if no
-    usable credential is found.
+    The chatbot's team lives on the membership (``team_slug``); the team the
+    current OAuth token is scoped to is the OIDC ``team`` claim stored in the
+    SocialAccount's ``extra_data``. When they differ we must not use this token
+    (it has moved to another OCS team) — fail closed.
     """
-    try:
-        cred_obj = TenantCredential.objects.get(tenant_membership=membership)
-    except TenantCredential.DoesNotExist:
-        return None
-
-    if cred_obj.credential_type == TenantCredential.API_KEY:
-        try:
-            decrypted = decrypt_credential(cred_obj.encrypted_credential)
-            return {"type": "api_key", "value": decrypted}
-        except Exception:
-            logger.exception("Failed to decrypt API key for membership %s", membership.id)
-            return None
-
-    token_obj = get_social_token(membership.user, membership.tenant.provider)
-    if not token_obj:
-        return None
-    return {"type": "oauth", "value": token_obj.token}
+    if not membership.team_slug:
+        return False
+    current = (getattr(token_obj.account, "extra_data", None) or {}).get("team")
+    return bool(current) and current != membership.team_slug
 
 
 async def aresolve_credential(membership) -> dict | None:
-    """Async version of :func:`resolve_credential` with token refresh.
+    """Resolve a credential dict for a TenantMembership, or return None.
 
-    Like the sync variant, returns a ``{"type": ..., "value": ...}`` dict or
-    ``None``.  For OAuth tokens, attempts a refresh when the token is near
-    expiry.
+    Resolution is driven by ``membership.connection`` (callers must
+    ``select_related("connection", "user")``). Returns a dict with keys ``type``
+    (``"api_key"`` or ``"oauth"``) and ``value`` (the decrypted key or OAuth token
+    string), or ``None`` if no usable credential is found. For OAuth tokens,
+    attempts a refresh when the token is near expiry.
     """
-    try:
-        cred_obj = await TenantCredential.objects.select_related("tenant_membership").aget(
-            tenant_membership=membership
-        )
-    except TenantCredential.DoesNotExist:
+    conn = membership.connection
+    if conn is None:
         return None
 
-    if cred_obj.credential_type == TenantCredential.API_KEY:
+    if conn.credential_type == TenantConnection.API_KEY:
         try:
-            decrypted = decrypt_credential(cred_obj.encrypted_credential)
+            decrypted = decrypt_credential(conn.encrypted_credential)
             return {"type": "api_key", "value": decrypted}
         except Exception:
             logger.exception("Failed to decrypt API key for membership %s", membership.id)
             return None
 
-    provider = membership.tenant.provider
-    token_obj = await _social_token_qs(membership.user, provider).select_related("app").afirst()
-    if not token_obj:
+    token_obj = (
+        await _social_token_qs(membership.user, conn.provider)
+        .select_related("account", "app")
+        .afirst()
+    )
+    if not token_obj or _oauth_team_mismatch(membership, token_obj):
         return None
 
-    return await _aresolve_oauth_credential(token_obj, provider)
+    return await _aresolve_oauth_credential(token_obj, conn.provider)
 
 
 async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:

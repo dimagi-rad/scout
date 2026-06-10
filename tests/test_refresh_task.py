@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from apps.users.adapters import encrypt_credential
-from apps.users.models import TenantCredential
+from apps.users.models import TenantConnection
 from apps.workspaces.models import SchemaState, TenantSchema
 
 
@@ -220,11 +220,14 @@ async def test_refresh_task_resolves_credential_in_async_context(
     in production. This test exercises the *real* resolver (no mock) against a
     stored API-key credential to catch that regression.
     """
-    await TenantCredential.objects.acreate(
-        tenant_membership=tenant_membership_obj,
-        credential_type=TenantCredential.API_KEY,
+    conn = await TenantConnection.objects.acreate(
+        user=tenant_membership_obj.user,
+        provider=tenant_membership_obj.tenant.provider,
+        credential_type=TenantConnection.API_KEY,
         encrypted_credential=encrypt_credential("secret-key"),
     )
+    tenant_membership_obj.connection = conn
+    await tenant_membership_obj.asave(update_fields=["connection"])
 
     with (
         patch(

@@ -12,7 +12,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.sites.models import Site
 from django.db import IntegrityError
 
-from apps.users.models import TenantCredential, TenantMembership
+from apps.users.models import TenantConnection, TenantMembership
 
 User = get_user_model()
 
@@ -781,10 +781,13 @@ class TestLoginOnboardingComplete:
         user = User.objects.create_user(email="u2@example.com", password="pass")
         tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
         tm = TenantMembership.objects.create(user=user, tenant=tenant)
-        TenantCredential.objects.create(
-            tenant_membership=tm,
-            credential_type=TenantCredential.OAUTH,
+        conn, _ = TenantConnection.objects.get_or_create(
+            user=tm.user,
+            provider=tm.tenant.provider,
+            credential_type=TenantConnection.OAUTH,
         )
+        tm.connection = conn
+        tm.save(update_fields=["connection"])
         resp = client.post(
             "/api/auth/login/",
             data={"email": "u2@example.com", "password": "pass"},
@@ -808,10 +811,13 @@ class TestMeOnboardingComplete:
         user = User.objects.create_user(email="u2@example.com", password="pass")
         tenant = Tenant.objects.create(provider="commcare", external_id="d1", canonical_name="D1")
         tm = TenantMembership.objects.create(user=user, tenant=tenant)
-        TenantCredential.objects.create(
-            tenant_membership=tm,
-            credential_type=TenantCredential.OAUTH,
+        conn, _ = TenantConnection.objects.get_or_create(
+            user=tm.user,
+            provider=tm.tenant.provider,
+            credential_type=TenantConnection.OAUTH,
         )
+        tm.connection = conn
+        tm.save(update_fields=["connection"])
         client.force_login(user)
         resp = client.get("/api/auth/me/")
         assert resp.json()["onboarding_complete"] is True
