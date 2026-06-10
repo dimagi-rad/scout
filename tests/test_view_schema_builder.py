@@ -2,15 +2,19 @@ import os
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.contrib.auth import get_user_model
 
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     SchemaState,
+    TenantSchema,
     Workspace,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
+from apps.workspaces.services.schema_manager import SchemaManager
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MANAGED_DATABASE_URL"),
@@ -417,3 +421,305 @@ def test_build_view_schema_returns_active_record(workspace, tenant):
         ts.delete()
         if vs:
             vs.delete()
+
+
+# --- Truncation-safety and idempotency coverage -----------------------------
+
+# Exact production tenant whose long canonical name + table names previously
+# truncated two distinct views to the same 63-byte identifier.
+_PIPN_NAME = "Kangaroo Mother Care- Preterm Infants Parents Network (PIPN)"
+
+
+def _make_long_named_workspace(canonical_a, external_a, canonical_b, external_b):
+    """Build a 2-tenant workspace with arbitrary canonical names / external ids."""
+
+    User = get_user_model()
+    user = User.objects.create_user(email="longnames@example.com", password="pass")
+    t1 = Tenant.objects.create(
+        provider="commcare", external_id=external_a, canonical_name=canonical_a
+    )
+    t2 = Tenant.objects.create(
+        provider="commcare", external_id=external_b, canonical_name=canonical_b
+    )
+    ws = Workspace.objects.create(name="Long WS", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=t1)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=t2)
+    return ws, t1, t2
+
+
+def test_build_view_schema_long_canonical_name_no_truncation_collision(db, managed_db_connection):
+    """The exact production tenant ("...PIPN") whose long name made
+    raw_completed_works and raw_completed_modules truncate to the same 63-byte
+    identifier now produces two distinct, <=63-byte views and the build succeeds."""
+    ws, t1, _t2 = _make_long_named_workspace(_PIPN_NAME, "pipn-001", "Short Partner", "short-001")
+
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_pipn_long", state=SchemaState.ACTIVE
+    )
+    ts2 = TenantSchema.objects.create(
+        tenant=_t2, schema_name="build_pipn_short", state=SchemaState.ACTIVE
+    )
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_pipn_long")
+        # Two tables whose composed view names previously collided after truncation
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS build_pipn_long.raw_completed_works "
+            "(opportunity_id TEXT, payment_date TEXT)"
+        )
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS build_pipn_long.raw_completed_modules "
+            "(module TEXT, completed_at TEXT)"
+        )
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_pipn_short")
+    finally:
+        c.close()
+
+    vs = None
+    try:
+        # Must not raise InvalidTableDefinition / column-rename error
+        vs = SchemaManager().build_view_schema(ws)
+        assert vs.state == SchemaState.ACTIVE
+
+        prefix = SchemaManager()._view_prefix(t1)
+        works_view = f"{prefix}__raw_completed_works"
+        modules_view = f"{prefix}__raw_completed_modules"
+
+        # Distinct view names, both within PG's 63-byte identifier limit
+        assert works_view != modules_view
+        assert len(works_view.encode("utf-8")) <= 63
+        assert len(modules_view.encode("utf-8")) <= 63
+
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE table_schema = '{vs.schema_name}'"
+            )
+            view_names = {row[0] for row in c2.fetchall()}
+            # Each view exposes its own source columns (no silent redefinition)
+            c2.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_schema = '{vs.schema_name}' AND table_name = %s",
+                (works_view,),
+            )
+            works_cols = {row[0] for row in c2.fetchall()}
+        finally:
+            c2.close()
+
+        assert works_view in view_names
+        assert modules_view in view_names
+        assert works_cols == {"opportunity_id", "payment_date"}
+    finally:
+        c3 = conn.cursor()
+        try:
+            if vs:
+                c3.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_pipn_long CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_pipn_short CASCADE")
+        finally:
+            c3.close()
+        if vs:
+            vs.delete()
+        ts1.delete()
+        ts2.delete()
+
+
+def test_build_view_schema_two_long_names_shared_head_get_distinct_prefixes(
+    db, managed_db_connection
+):
+    """Two long canonical names sharing their first 23 sanitized chars must still
+    get distinct prefixes (disambiguated by the external_id digest) so their
+    views do not collide."""
+    shared_head = "Maternal Child Health Program "  # >23 chars once sanitized
+    ws, t1, t2 = _make_long_named_workspace(
+        shared_head + "Northern Region Implementation",
+        "mch-north-1",
+        shared_head + "Southern Region Implementation",
+        "mch-south-1",
+    )
+
+    mgr = SchemaManager()
+    p1 = mgr._view_prefix(t1)
+    p2 = mgr._view_prefix(t2)
+    # Both bounded and distinct despite identical 23-char heads
+    assert len(p1) <= 32
+    assert len(p2) <= 32
+    assert p1[:23] == p2[:23]
+    assert p1 != p2
+
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_mch_north", state=SchemaState.ACTIVE
+    )
+    ts2 = TenantSchema.objects.create(
+        tenant=t2, schema_name="build_mch_south", state=SchemaState.ACTIVE
+    )
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_mch_north")
+        c.execute("CREATE TABLE IF NOT EXISTS build_mch_north.cases (id TEXT)")
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_mch_south")
+        c.execute("CREATE TABLE IF NOT EXISTS build_mch_south.cases (id TEXT)")
+    finally:
+        c.close()
+
+    vs = None
+    try:
+        vs = SchemaManager().build_view_schema(ws)
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                "SELECT table_name FROM information_schema.tables "
+                f"WHERE table_schema = '{vs.schema_name}'"
+            )
+            view_names = {row[0] for row in c2.fetchall()}
+        finally:
+            c2.close()
+        assert f"{p1}__cases" in view_names
+        assert f"{p2}__cases" in view_names
+    finally:
+        c3 = conn.cursor()
+        try:
+            if vs:
+                c3.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_mch_north CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_mch_south CASCADE")
+        finally:
+            c3.close()
+        if vs:
+            vs.delete()
+        ts1.delete()
+        ts2.delete()
+
+
+def test_build_view_schema_idempotent_rebuild_after_column_change(
+    two_tenant_workspace, managed_db_connection
+):
+    """A rebuild after an underlying table's columns were renamed must succeed.
+
+    The workspace view from the first build survives into the second build. With
+    the old ``CREATE OR REPLACE VIEW`` path this raised
+    "cannot change name of view column ..." (the exact production error). The
+    drop-schema-and-recreate rebuild makes it idempotent — the second build
+    reflects the new column set."""
+    ws, t1, _t2 = two_tenant_workspace
+
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_idem_a", state=SchemaState.ACTIVE
+    )
+    ts2 = TenantSchema.objects.create(
+        tenant=_t2, schema_name="build_idem_b", state=SchemaState.ACTIVE
+    )
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_idem_a")
+        c.execute("CREATE TABLE IF NOT EXISTS build_idem_a.reports (module TEXT, score TEXT)")
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_idem_b")
+    finally:
+        c.close()
+
+    vs = None
+    try:
+        # First build — view has columns (module, score)
+        vs = SchemaManager().build_view_schema(ws)
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_schema = '{vs.schema_name}' AND table_name = 'domain_a__reports'"
+            )
+            cols_before = {row[0] for row in c2.fetchall()}
+        finally:
+            c2.close()
+        assert cols_before == {"module", "score"}
+
+        # Rename the source columns in place. The first build's view SURVIVES
+        # (ALTER does not cascade-drop it), so the second build must redefine a
+        # view whose column names changed — the case CREATE OR REPLACE VIEW
+        # rejected. Add a brand-new column too, to assert the new definition.
+        c4 = conn.cursor()
+        try:
+            c4.execute("ALTER TABLE build_idem_a.reports RENAME COLUMN module TO opportunity_id")
+            c4.execute("ALTER TABLE build_idem_a.reports RENAME COLUMN score TO payment_amount")
+            c4.execute("ALTER TABLE build_idem_a.reports ADD COLUMN status TEXT")
+        finally:
+            c4.close()
+
+        # Second build must succeed (no column-rename error) and reflect new cols
+        vs2 = SchemaManager().build_view_schema(ws)
+        assert vs2.state == SchemaState.ACTIVE
+
+        c5 = conn.cursor()
+        try:
+            c5.execute(
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_schema = '{vs.schema_name}' AND table_name = 'domain_a__reports'"
+            )
+            cols_after = {row[0] for row in c5.fetchall()}
+        finally:
+            c5.close()
+        assert cols_after == {"opportunity_id", "payment_amount", "status"}
+    finally:
+        c6 = conn.cursor()
+        try:
+            if vs:
+                c6.execute(f"DROP SCHEMA IF EXISTS {vs.schema_name} CASCADE")
+            c6.execute("DROP SCHEMA IF EXISTS build_idem_a CASCADE")
+            c6.execute("DROP SCHEMA IF EXISTS build_idem_b CASCADE")
+        finally:
+            c6.close()
+        if vs:
+            vs.delete()
+        ts1.delete()
+        ts2.delete()
+
+
+def test_build_view_schema_oversized_view_name_raises(two_tenant_workspace, managed_db_connection):
+    """A composed view name exceeding 63 bytes must raise ValueError naming the
+    offending view BEFORE any DDL, rather than letting PostgreSQL silently
+    truncate it."""
+    ws, t1, _t2 = two_tenant_workspace
+
+    ts1 = TenantSchema.objects.create(
+        tenant=t1, schema_name="build_oversize_a", state=SchemaState.ACTIVE
+    )
+    ts2 = TenantSchema.objects.create(
+        tenant=_t2, schema_name="build_oversize_b", state=SchemaState.ACTIVE
+    )
+    # t1 canonical_name "domain_a" -> prefix "domain_a" (8 chars) + "__" = 10.
+    # A 60-char table name pushes the composed name to 70 bytes (>63).
+    long_table = "x" * 60
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_oversize_a")
+        c.execute(f'CREATE TABLE IF NOT EXISTS build_oversize_a."{long_table}" (id TEXT)')
+        c.execute("CREATE SCHEMA IF NOT EXISTS build_oversize_b")
+    finally:
+        c.close()
+
+    try:
+        with pytest.raises(ValueError, match="63-byte"):
+            SchemaManager().build_view_schema(ws)
+        # Offending view name is identified in the message
+        prefix = SchemaManager()._view_prefix(t1)
+        try:
+            SchemaManager().build_view_schema(ws)
+        except ValueError as exc:
+            assert f"{prefix}__{long_table}" in str(exc)
+    finally:
+        c3 = conn.cursor()
+        try:
+            view_schema = SchemaManager()._view_schema_name(ws.id)
+            c3.execute(f"DROP SCHEMA IF EXISTS {view_schema} CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_oversize_a CASCADE")
+            c3.execute("DROP SCHEMA IF EXISTS build_oversize_b CASCADE")
+        finally:
+            c3.close()
+        WorkspaceViewSchema.objects.filter(workspace=ws).delete()
+        ts1.delete()
+        ts2.delete()

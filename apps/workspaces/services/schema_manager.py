@@ -7,6 +7,7 @@ Creates and tears down tenant-scoped PostgreSQL schemas.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import re
 import uuid
@@ -15,9 +16,17 @@ import psycopg
 import psycopg.sql
 from django.conf import settings
 
+from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
 
 logger = logging.getLogger(__name__)
+
+# PostgreSQL truncates identifiers to 63 bytes (NAMEDATALEN - 1). Tenant view
+# names are composed as ``{prefix}__{table}``; we cap the prefix well below this
+# so a generous table-name budget remains, and hard-fail if a final name still
+# exceeds the limit.
+_PG_MAX_IDENTIFIER_BYTES = 63
+_MAX_VIEW_PREFIX_LEN = 32
 
 
 def readonly_role_name(schema_name: str) -> str:
@@ -199,12 +208,42 @@ class SchemaManager:
         hex_id = str(workspace_id).replace("-", "")[:16]
         return f"ws_{hex_id}"
 
-    def build_view_schema(self, workspace) -> WorkspaceViewSchema:
-        """Create (or replace) the PostgreSQL view schema for a multi-tenant workspace.
+    def _view_prefix(self, tenant) -> str:
+        """Derive the per-tenant view-name prefix, bounded to a safe length.
 
-        Fetches all active TenantSchema objects for the workspace's tenants,
-        collects their tables and columns, then creates UNION ALL views in a
-        dedicated schema. Raises ValueError if any tenant has no active schema.
+        Single source of truth for the ``{prefix}__{table}`` namespacing used by
+        ``build_view_schema``. PostgreSQL silently truncates identifiers to 63
+        bytes, so an unbounded prefix can make two distinct tenants' views
+        collapse to the same physical name. We therefore cap the prefix:
+
+        - If the sanitized canonical name is short (<= 32 chars), use it as-is so
+          human-readable names stay intact.
+        - Otherwise, use the first 23 sanitized chars plus ``_`` plus an 8-char
+          hex digest of ``tenant.external_id``. The digest is deterministic and
+          stable across builds and distinct for distinct tenants, so the prefix
+          is reproducible (same on rebuild) and collision-resistant.
+
+        The result is always a valid PG identifier and at most 32 chars long.
+        """
+        sanitized = self._sanitize_schema_name(tenant.canonical_name)
+        if len(sanitized) <= _MAX_VIEW_PREFIX_LEN:
+            return sanitized
+        digest = hashlib.sha256(str(tenant.external_id).encode("utf-8")).hexdigest()[:8]
+        # 23 (head) + 1 ("_") + 8 (digest) = 32
+        return f"{sanitized[:23]}_{digest}"
+
+    def build_view_schema(self, workspace) -> WorkspaceViewSchema:
+        """(Re)build the PostgreSQL view schema for a multi-tenant workspace.
+
+        Fetches all active TenantSchema objects for the workspace's tenants and
+        creates one namespaced ``{prefix}__{table}`` view per tenant table in a
+        dedicated schema. The build is idempotent: the view schema is dropped and
+        recreated from scratch each call, so a rebuild after an underlying table's
+        columns changed succeeds rather than failing on view-column mismatches.
+
+        Raises ValueError if any tenant has no active schema, if two tenants
+        produce the same view prefix or full view name, or if a composed view
+        name would exceed PostgreSQL's 63-byte identifier limit.
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
@@ -247,24 +286,17 @@ class SchemaManager:
             if not re.match(r"^ws_[a-f0-9]{16}$", view_schema_name):
                 raise ValueError(f"Invalid view schema name: {view_schema_name!r}")
 
-            # Step 1: Create the physical schema
-            cursor.execute(
-                psycopg.sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                    psycopg.sql.Identifier(view_schema_name)
-                )
-            )
-
-            # Step 2+3: Create per-tenant namespaced views
-            from apps.users.models import Tenant
-
-            # Pre-compute prefixes and detect collisions before creating any views
+            # Step 1: Compute per-tenant prefixes and detect collisions on the
+            # FINAL (bounded) prefixes — _view_prefix caps each prefix to <= 32
+            # chars so distinct long-named tenants don't collapse to the same
+            # truncated identifier.
             prefix_to_tenant: dict[str, str] = {}
             tenant_prefixes: list[
                 tuple[str, str, str]
             ] = []  # (schema_name, tenant_external_id, prefix)
             for schema_name, tenant_external_id in tenant_schemas:
                 tenant_obj = Tenant.objects.get(external_id=tenant_external_id)
-                prefix = self._sanitize_schema_name(tenant_obj.canonical_name)
+                prefix = self._view_prefix(tenant_obj)
                 if prefix in prefix_to_tenant:
                     raise ValueError(
                         f"Canonical name collision: tenants '{prefix_to_tenant[prefix]}' and "
@@ -273,12 +305,17 @@ class SchemaManager:
                 prefix_to_tenant[prefix] = tenant_external_id
                 tenant_prefixes.append((schema_name, tenant_external_id, prefix))
 
-            # Collect all (view_name, schema_name, table_name) and detect full
-            # view name collisions before executing any DDL. This catches cases
-            # where the __ delimiter is ambiguous (e.g. prefix "foo__bar" + table
-            # "baz" vs prefix "foo" + table "bar__baz").
+            # Step 2: Collect all (view_name, schema_name, table_name), then run
+            # the defensive length check and the full view-name collision check
+            # on the FINAL names before executing any DDL. The collision check
+            # catches ambiguous __ delimiters (e.g. prefix "foo__bar" + table
+            # "baz" vs prefix "foo" + table "bar__baz"). The length check guards
+            # against table names growing the composed name past PostgreSQL's
+            # 63-byte identifier limit (where it would silently truncate and two
+            # distinct views could collapse into one).
             planned_views: list[tuple[str, str, str]] = []
             seen_view_names: dict[str, str] = {}  # view_name → tenant_external_id
+            oversized_views: list[str] = []
             for schema_name, tenant_external_id, prefix in tenant_prefixes:
                 cursor.execute(
                     "SELECT table_name FROM information_schema.tables "
@@ -287,6 +324,9 @@ class SchemaManager:
                 )
                 for (table_name,) in cursor.fetchall():
                     view_name = f"{prefix}__{table_name}"
+                    if len(view_name.encode("utf-8")) > _PG_MAX_IDENTIFIER_BYTES:
+                        oversized_views.append(view_name)
+                        continue
                     if view_name in seen_view_names:
                         raise ValueError(
                             f"View name collision: '{view_name}' produced by both "
@@ -295,9 +335,30 @@ class SchemaManager:
                     seen_view_names[view_name] = tenant_external_id
                     planned_views.append((view_name, schema_name, table_name))
 
+            if oversized_views:
+                raise ValueError(
+                    "View name(s) exceed PostgreSQL's 63-byte identifier limit and "
+                    f"would be truncated: {', '.join(sorted(oversized_views))}"
+                )
+
+            # Step 3: Rebuild the view schema from scratch for idempotency. We
+            # DROP and recreate the schema (rather than CREATE OR REPLACE VIEW
+            # in place) so that a rebuild after an underlying table's columns
+            # changed never hits "cannot change name of view column" — and so
+            # any unexpected duplicate name becomes a hard error (plain CREATE
+            # VIEW) instead of a silent redefinition.
+            cursor.execute(
+                psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg.sql.Identifier(view_schema_name)
+                )
+            )
+            cursor.execute(
+                psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(view_schema_name))
+            )
+
             for view_name, schema_name, table_name in planned_views:
                 cursor.execute(
-                    psycopg.sql.SQL("CREATE OR REPLACE VIEW {}.{} AS SELECT * FROM {}.{}").format(
+                    psycopg.sql.SQL("CREATE VIEW {}.{} AS SELECT * FROM {}.{}").format(
                         psycopg.sql.Identifier(view_schema_name),
                         psycopg.sql.Identifier(view_name),
                         psycopg.sql.Identifier(schema_name),
