@@ -4,7 +4,6 @@ import asyncio
 import json
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 
@@ -24,7 +23,7 @@ User = get_user_model()
 async def _csrf_client(email, password):
     """Return an AsyncClient with a valid CSRF token already set."""
     client = AsyncClient(enforce_csrf_checks=True)
-    await sync_to_async(client.login)(email=email, password=password)
+    await client.alogin(email=email, password=password)
     csrf_resp = await client.get("/api/auth/csrf/")
     csrf_token = csrf_resp.json()["csrfToken"]
     client.defaults["HTTP_X_CSRFTOKEN"] = csrf_token
@@ -36,24 +35,24 @@ async def _csrf_client(email, password):
 async def test_chat_rejects_foreign_thread_id():
     """A user cannot inject content into another user's thread by passing
     that thread's UUID in the request body."""
-    owner = await sync_to_async(User.objects.create_user)(email="owner-oth@b.c", password="x")
-    attacker = await sync_to_async(User.objects.create_user)(email="attacker-oth@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-attack", created_by=owner)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    owner = await User.objects.acreate_user(email="owner-oth@b.c", password="x")
+    attacker = await User.objects.acreate_user(email="attacker-oth@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-attack", created_by=owner)
+    tenant = await Tenant.objects.acreate(
         external_id="t-attack", provider="commcare", canonical_name="Attack Tenant"
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=owner,
         role=WorkspaceRole.READ_WRITE,
     )
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=attacker,
         role=WorkspaceRole.READ_WRITE,
     )
-    owners_thread = await sync_to_async(Thread.objects.create)(
+    owners_thread = await Thread.objects.acreate(
         workspace=ws,
         user=owner,
     )
@@ -81,18 +80,18 @@ async def test_chat_rejects_foreign_thread_id():
 @pytest.mark.django_db(transaction=True)
 async def test_chat_allows_own_thread_id():
     """A user can attach a turn to their own thread without rejection."""
-    user = await sync_to_async(User.objects.create_user)(email="own-thread@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-own", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user = await User.objects.acreate_user(email="own-thread@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-own", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="t-own", provider="commcare", canonical_name="Own Tenant"
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    own_thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    own_thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     client = await _csrf_client("own-thread@b.c", "x")
     # This will fail at the MCP/agent layer (no credentials), but must NOT 404
@@ -122,17 +121,17 @@ async def test_upsert_thread_bumps_updated_at_on_subsequent_turn():
     on the existing-row path, which silently bypassed auto_now and left
     updated_at frozen at thread creation — breaking sidebar ordering and
     the "newer than last_viewed" green-dot indicator."""
-    user = await sync_to_async(User.objects.create_user)(
+    user = await User.objects.acreate_user(
         email="updated-at@b.c",
         password="x",
     )
-    ws = await sync_to_async(Workspace.objects.create)(name="W-updated", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    ws = await Workspace.objects.acreate(name="W-updated", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="t-up",
         provider="commcare",
         canonical_name="Up Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
 
     thread_id = "11111111-1111-1111-1111-111111111111"
     await _upsert_thread(thread_id, user, "first turn", workspace=ws)

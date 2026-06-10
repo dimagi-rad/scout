@@ -1,7 +1,6 @@
 import uuid
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 
@@ -18,38 +17,38 @@ User = get_user_model()
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_thread_viewed_sets_last_viewed_at():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
     client = AsyncClient()
-    await sync_to_async(client.login)(email="a@b.c", password="x")
+    await client.alogin(email="a@b.c", password="x")
 
     resp = await client.post(f"/api/workspaces/{ws.id}/threads/{thread.id}/viewed/")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
-    await sync_to_async(thread.refresh_from_db)()
+    await thread.arefresh_from_db()
     assert thread.last_viewed_at is not None
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_thread_viewed_returns_403_for_non_member():
-    user = await sync_to_async(User.objects.create_user)(email="b@b.c", password="x")
-    await sync_to_async(User.objects.create_user)(email="c@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W2", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="b@b.c", password="x")
+    await User.objects.acreate_user(email="c@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W2", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
     client = AsyncClient()
-    await sync_to_async(client.login)(email="c@b.c", password="x")
+    await client.alogin(email="c@b.c", password="x")
 
     resp = await client.post(f"/api/workspaces/{ws.id}/threads/{thread.id}/viewed/")
     assert resp.status_code == 403
@@ -58,15 +57,15 @@ async def test_thread_viewed_returns_403_for_non_member():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_thread_viewed_returns_404_for_unknown_thread():
-    user = await sync_to_async(User.objects.create_user)(email="d@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W3", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="d@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W3", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws,
         user=user,
         role=WorkspaceRole.READ_WRITE,
     )
     client = AsyncClient()
-    await sync_to_async(client.login)(email="d@b.c", password="x")
+    await client.alogin(email="d@b.c", password="x")
 
     resp = await client.post(f"/api/workspaces/{ws.id}/threads/{uuid.uuid4()}/viewed/")
     assert resp.status_code == 404

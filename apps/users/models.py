@@ -23,6 +23,19 @@ class UserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
+    async def acreate_user(self, email=None, password=None, **extra_fields):
+        """Async variant of create_user.
+
+        Django's own ``acreate_user`` lives on ``UserManager``; this manager
+        subclasses ``BaseUserManager`` so it must provide its own, mirroring
+        create_user (password hashing is CPU-only, no DB access).
+        """
+        email = self.normalize_email(email) if email else None
+        user = self.model(email=email, **extra_fields)
+        user.set_password(password)
+        await user.asave(using=self._db)
+        return user
+
     def create_superuser(self, email, password=None, **extra_fields):
         """Create and save a superuser with the given email and password."""
         extra_fields.setdefault("is_staff", True)

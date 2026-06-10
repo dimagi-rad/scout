@@ -1,7 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 
 from apps.chat.models import Thread, ThreadJob
@@ -18,14 +17,14 @@ User = get_user_model()
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_run_materialization_returns_started_immediately_and_creates_threadjob():
-    user = await sync_to_async(User.objects.create_user)(email="a@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user = await User.objects.acreate_user(email="a@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="t1", provider="commcare", canonical_name="Test Tenant"
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     job_mock = MagicMock(id=7777)
     with patch("mcp_server.server.materialize_workspace") as mw:
@@ -52,14 +51,14 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     deferred, the procrastinate job is aborted and an error envelope is
     returned. Documents that the rollback path is wired correctly even if
     its best-effort nature is acceptable per the design."""
-    user = await sync_to_async(User.objects.create_user)(email="b@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W2", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user = await User.objects.acreate_user(email="b@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W2", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="t2", provider="commcare", canonical_name="Test Tenant 2"
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     job_mock = MagicMock(id=8888)
     cancel_mock = AsyncMock(return_value=None)
@@ -93,18 +92,18 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
     """Defense-in-depth check: the MCP tool rejects a thread_id that doesn't
     belong to (user_id, workspace_id) even if the chat-layer guard somehow
     failed."""
-    user_a = await sync_to_async(User.objects.create_user)(email="usera@b.c", password="x")
-    user_b = await sync_to_async(User.objects.create_user)(email="userb@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-cross", created_by=user_a)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user_a = await User.objects.acreate_user(email="usera@b.c", password="x")
+    user_b = await User.objects.acreate_user(email="userb@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-cross", created_by=user_a)
+    tenant = await Tenant.objects.acreate(
         external_id="tx",
         provider="commcare",
         canonical_name="X Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_a)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user_b)
-    foreign_thread = await sync_to_async(Thread.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user_a)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user_b)
+    foreign_thread = await Thread.objects.acreate(
         workspace=ws,
         user=user_a,
     )
@@ -127,19 +126,19 @@ async def test_run_materialization_rejects_thread_owned_by_other_user():
 async def test_run_materialization_returns_already_in_progress_if_active_in_same_thread():
     """If a materialization is already running in THIS chat thread, do not
     dispatch a duplicate — return the existing thread_job_id."""
-    user = await sync_to_async(User.objects.create_user)(email="dup@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-dup", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user = await User.objects.acreate_user(email="dup@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-dup", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="tdup",
         provider="commcare",
         canonical_name="Dup Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
 
     # Same thread holds the in-progress job and is also the caller.
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    existing_tj = await sync_to_async(ThreadJob.objects.create)(
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    existing_tj = await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=11111,
@@ -167,19 +166,19 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     chat session in the same workspace can run its own materialization. The
     chained resume task only fires once per ThreadJob, so a workspace-scoped
     guard would leave the second caller's spinner hanging forever."""
-    user = await sync_to_async(User.objects.create_user)(email="parallel@b.c", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="W-parallel", created_by=user)
-    tenant = await sync_to_async(Tenant.objects.create)(
+    user = await User.objects.acreate_user(email="parallel@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-parallel", created_by=user)
+    tenant = await Tenant.objects.acreate(
         external_id="tparallel",
         provider="commcare",
         canonical_name="Parallel Tenant",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    await sync_to_async(TenantMembership.objects.create)(tenant=tenant, user=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
 
     # Thread 1 has an in-progress job.
-    thread1 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    await sync_to_async(ThreadJob.objects.create)(
+    thread1 = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
         thread=thread1,
         job_type="materialization",
         procrastinate_job_id=22222,
@@ -188,7 +187,7 @@ async def test_run_materialization_allows_dispatch_from_different_thread_in_same
     )
 
     # Thread 2 is a different chat — should be allowed to dispatch its own.
-    thread2 = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
+    thread2 = await Thread.objects.acreate(workspace=ws, user=user)
 
     job_mock = MagicMock(id=33333)
     with patch("mcp_server.server.materialize_workspace") as mw:
