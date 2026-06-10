@@ -145,6 +145,14 @@ async def thread_messages_view(request, workspace_id, thread_id):
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
+        # Distinguish a brand-new chat from a stale/foreign one. New chats use
+        # client-generated UUIDs with no Thread row until the first POST, so a
+        # missing row must keep returning [] 200. But if a row *exists* and just
+        # doesn't belong to this (user, workspace), it's a stale/cross-workspace
+        # thread — return 404 so the client can recover instead of silently
+        # showing an empty, "haunted" chat.
+        if await Thread.objects.filter(id=thread_id).aexists():
+            return JsonResponse({"error": "Thread not found"}, status=404)
         return JsonResponse([], safe=False)
 
     ui_messages = await _load_thread_messages(thread_id)

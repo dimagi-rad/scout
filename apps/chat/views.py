@@ -125,6 +125,15 @@ async def chat_view(request):
     if existing_thread is not None and (
         existing_thread.user_id != user.pk or existing_thread.workspace_id != workspace.pk
     ):
+        logger.warning(
+            "Rejected chat POST to foreign thread: thread_id=%s requesting_user=%s "
+            "owner_user=%s thread_workspace=%s requested_workspace=%s",
+            thread_id,
+            user.pk,
+            existing_thread.user_id,
+            existing_thread.workspace_id,
+            workspace.pk,
+        )
         return JsonResponse({"error": "Thread not found"}, status=404)
 
     # Record thread metadata (fire-and-forget on error)

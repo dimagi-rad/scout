@@ -17,7 +17,6 @@ export function ChatRedirect() {
   const pathPrefix = location.pathname.startsWith("/embed") ? "/embed" : ""
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const domains = useAppStore((s) => s.domains)
-  const threadId = useAppStore((s) => s.threadId)
   const domainsStatus = useAppStore((s) => s.domainsStatus)
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
 
@@ -27,9 +26,14 @@ export function ChatRedirect() {
   }, [domainsStatus, fetchDomains])
 
   if (activeDomainId) {
-    // Prefer the last thread the user viewed in this workspace (persisted in
-    // localStorage by ChatPanel); fall back to the store's current threadId.
-    const resolvedThreadId = readSavedThreadId(activeDomainId) || threadId
+    // Resolve the last thread the user viewed *in this workspace* (persisted in
+    // localStorage by ChatPanel, only after a successful messages load). We do
+    // NOT fall back to the store's `threadId` here: that value can belong to a
+    // different workspace (e.g. right after a workspace switch), and grafting it
+    // onto this workspace's URL is exactly the bug that produced "Thread not
+    // found". When there's no saved thread, redirect to the bare chat URL and
+    // let ChatPanel start a fresh thread.
+    const resolvedThreadId = readSavedThreadId(activeDomainId)
     const activeWorkspace = domains.find((d) => d.id === activeDomainId)
     const chatBase = `${pathPrefix}${workspacePath(activeWorkspace ?? { id: activeDomainId })}/chat`
     const target = resolvedThreadId ? `${chatBase}/${resolvedThreadId}` : chatBase
