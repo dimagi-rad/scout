@@ -558,28 +558,26 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
 async def test_active_jobs_passes_through_progress_unit():
     """OCS messages report progress in sessions (issue #221); the unit is
     surfaced so the banner can label the counts honestly."""
-    user = await sync_to_async(User.objects.create_user)(email="unit@rows.test", password="x")
-    ws = await sync_to_async(Workspace.objects.create)(name="WUnit", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
+    user = await User.objects.acreate_user(email="unit@rows.test", password="x")
+    ws = await Workspace.objects.acreate(name="WUnit", created_by=user)
+    await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         external_id="exp-uuid-unit",
         provider="ocs",
         canonical_name="OCS Test",
     )
-    await sync_to_async(WorkspaceTenant.objects.create)(workspace=ws, tenant=tenant)
-    schema = await sync_to_async(TenantSchema.objects.create)(
-        tenant=tenant, schema_name="s_ocs_unit"
-    )
-    thread = await sync_to_async(Thread.objects.create)(workspace=ws, user=user)
-    await sync_to_async(ThreadJob.objects.create)(
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ocs_unit")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
         thread=thread,
         job_type="materialization",
         procrastinate_job_id=7778,
         tool_call_id="tc-unit",
     )
-    await sync_to_async(MaterializationRun.objects.create)(
+    await MaterializationRun.objects.acreate(
         tenant_schema=schema,
         pipeline="ocs_sync",
         state=MaterializationRun.RunState.LOADING,
@@ -597,7 +595,7 @@ async def test_active_jobs_passes_through_progress_unit():
     )
 
     client = AsyncClient()
-    await sync_to_async(client.login)(email="unit@rows.test", password="x")
+    await client.alogin(email="unit@rows.test", password="x")
     resp = await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
     assert resp.status_code == 200
     body = resp.json()
