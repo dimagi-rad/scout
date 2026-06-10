@@ -1,7 +1,7 @@
 // frontend/src/components/TopBar/TopBar.tsx
 import { useState } from "react"
 import type { ReactNode } from "react"
-import { WorkspaceBadge } from "@/components/WorkspaceBadge"
+import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 import { TopBarSlotContext } from "./TopBarContext"
 
 export function TopBarProvider({ children }: { children: ReactNode }) {
@@ -20,7 +20,7 @@ export function TopBarProvider({ children }: { children: ReactNode }) {
             className="flex items-center gap-2"
             data-testid="top-bar-slot"
           />
-          <WorkspaceBadge />
+          <WorkspaceSwitcher variant="topbar" />
         </div>
       </div>
       {children}
