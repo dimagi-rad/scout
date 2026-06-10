@@ -10,7 +10,7 @@ export interface WorkspaceListTenant {
   provider: string
 }
 
-export type SchemaStatus = "available" | "provisioning" | "unavailable"
+export type SchemaStatus = "available" | "provisioning" | "unavailable" | "failed"
 
 // Workspace list item — lighter shape returned by GET /api/workspaces/
 export interface WorkspaceListItem {
@@ -65,7 +65,10 @@ export type WorkspaceDataState = "loading" | "ready" | "empty"
  *
  * - "ready"   — schema is `available`: the workspace currently has queryable data.
  * - "loading" — schema is `provisioning`/`materializing`: data is being set up.
- * - "empty"   — schema is `unavailable`: never synced, expired, or torn down.
+ * - "empty"   — schema is `unavailable` or `failed`: no queryable data. A
+ *   `failed` multi-tenant view schema means the per-tenant data loaded but the
+ *   workspace's combined query layer could not be built — there is still
+ *   nothing queryable, so it is treated as "empty" rather than "ready".
  *
  * Unlike `last_synced_at` (a *historical* "was synced at least once" signal),
  * `schema_status` reflects the live schema and correctly returns to "empty"
@@ -80,6 +83,10 @@ export function workspaceDataState(ws: {
   if (ws.schema_status === "available") return "ready"
   if (ws.schema_status === "provisioning") return "loading"
   if (ws.schema_status === "unavailable") return "empty"
+  // A failed view-schema build leaves no queryable surface even when the
+  // per-tenant data (and thus last_synced_at) is present — treat as empty so
+  // the indicator does not falsely claim the workspace has usable data.
+  if (ws.schema_status === "failed") return "empty"
   // No live signal available — fall back to the historical sync marker.
   return ws.last_synced_at != null ? "ready" : "empty"
 }

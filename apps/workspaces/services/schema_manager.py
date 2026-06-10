@@ -405,7 +405,7 @@ class SchemaManager:
                 )
 
             cursor.close()
-        except Exception:
+        except Exception as exc:
             # Drop any partially-created schema before marking FAILED to avoid leaving debris
             try:
                 if not conn.closed:
@@ -422,15 +422,20 @@ class SchemaManager:
                 )
             if not conn.closed:
                 conn.close()
+            # Persist the error text so the resume task, the MCP get_schema_status
+            # tool, and the status API can surface *why* the query layer is
+            # unavailable instead of reporting a generic "not_provisioned".
             vs.state = SchemaState.FAILED
-            vs.save(update_fields=["state"])
+            vs.last_error = str(exc)[:500]
+            vs.save(update_fields=["state", "last_error"])
             raise
         finally:
             if not conn.closed:
                 conn.close()
 
         vs.state = SchemaState.ACTIVE
-        vs.save(update_fields=["state"])
+        vs.last_error = ""
+        vs.save(update_fields=["state", "last_error"])
 
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",

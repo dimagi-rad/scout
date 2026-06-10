@@ -33,20 +33,24 @@ def _is_last_manager(workspace, membership):
 def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
     """Derive a workspace's live schema status from precomputed schema state.
 
-    Returns one of "available" | "provisioning" | "unavailable". This is the
-    single source of truth shared by the list and detail endpoints so they
-    never drift apart.
+    Returns one of "available" | "provisioning" | "unavailable" | "failed".
+    This is the single source of truth shared by the list and detail endpoints
+    so they never drift apart.
 
     - Single-tenant (or no view schema): available iff every tenant has an
       ACTIVE schema; provisioning if any schema is mid-provisioning; otherwise
       unavailable (never synced, expired, torn down, or failed).
     - Multi-tenant: readiness is tracked by the workspace's view schema, which
-      unions the per-tenant schemas. ACTIVE view schema ⇒ available, anything
-      else ⇒ provisioning.
+      unions the per-tenant schemas. ACTIVE view schema ⇒ available; a FAILED
+      view schema ⇒ failed (per-tenant data may have loaded but the workspace
+      has no queryable surface — a distinct, surfaceable state); anything else
+      ⇒ provisioning.
     """
     if tenant_count > 1:
         if view_schema_state == SchemaState.ACTIVE:
             return "available"
+        if view_schema_state == SchemaState.FAILED:
+            return "failed"
         return "provisioning"
 
     if active_count == tenant_count and tenant_count > 0:
@@ -67,17 +71,15 @@ def _schema_status_for_workspaces(workspaces):
         return {}
 
     # All tenant ids across these workspaces.
-    tenant_ids = {
-        wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()
-    }
+    tenant_ids = {wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()}
 
     # Per-tenant schema states (one bulk query).
     active_tenants = set()
     provisioning_tenants = set()
     if tenant_ids:
-        for tenant_id, state in TenantSchema.objects.filter(
-            tenant_id__in=tenant_ids
-        ).values_list("tenant_id", "state"):
+        for tenant_id, state in TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list(
+            "tenant_id", "state"
+        ):
             if state == SchemaState.ACTIVE:
                 active_tenants.add(tenant_id)
             elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):

@@ -741,6 +741,27 @@ async def get_schema_status(workspace_id: str = "") -> dict:
         ).afirst()
 
         if vs is None:
+            # No usable view schema. Distinguish a genuine never-built state
+            # from a FAILED build: the latter means the per-tenant data loaded
+            # but the workspace query layer could not be assembled, which the
+            # agent must surface (and must NOT mistake for "just run
+            # materialization"). Additive fields only — shape stays compatible.
+            failed_vs = await WorkspaceViewSchema.objects.filter(
+                workspace_id=workspace_id,
+                state=SchemaState.FAILED,
+            ).afirst()
+            if failed_vs is not None:
+                tc["result"] = success_response(
+                    {
+                        "exists": True,
+                        "state": "failed",
+                        "error": failed_vs.last_error or "View schema build failed.",
+                        "last_materialized_at": None,
+                        "tables": [],
+                    },
+                    schema=failed_vs.schema_name,
+                )
+                return tc["result"]
             tc["result"] = not_provisioned
             return tc["result"]
 
