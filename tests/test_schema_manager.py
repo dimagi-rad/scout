@@ -447,3 +447,78 @@ class TestReadonlyRoleName:
 
     def test_refresh_schema(self):
         assert readonly_role_name("test_domain_r1a2b3c4") == "test_domain_r1a2b3c4_ro"
+
+
+class _FakeTenant:
+    """Lightweight stand-in for a Tenant — _view_prefix only reads two attrs."""
+
+    def __init__(self, canonical_name: str, external_id: str):
+        self.canonical_name = canonical_name
+        self.external_id = external_id
+
+
+class TestViewPrefix:
+    """Pure-logic coverage for the bounded per-tenant view prefix (no DB)."""
+
+    PIPN_NAME = "Kangaroo Mother Care- Preterm Infants Parents Network (PIPN)"
+
+    def test_short_name_used_verbatim(self):
+        mgr = SchemaManager()
+        # _sanitize_schema_name lowercases, maps "-" -> "_", strips other
+        # non-alphanumerics (spaces dropped). "domain_a" stays verbatim.
+        t = _FakeTenant("domain_a", "ext-a")
+        assert mgr._view_prefix(t) == "domain_a"
+
+    def test_name_at_32_char_boundary_used_verbatim(self):
+        mgr = SchemaManager()
+        # 32 sanitized chars exactly -> used as-is (no digest)
+        name = "a" * 32
+        t = _FakeTenant(name, "ext-32")
+        prefix = mgr._view_prefix(t)
+        assert prefix == name
+        assert len(prefix) == 32
+
+    def test_long_name_is_bounded_and_hashed(self):
+        mgr = SchemaManager()
+        t = _FakeTenant(self.PIPN_NAME, "pipn-001")
+        prefix = mgr._view_prefix(t)
+        assert len(prefix) == 32
+        # 23-char sanitized head + "_" + 8 hex chars
+        assert prefix == "kangaroomothercare_pret_" + prefix[-8:]
+        assert all(c in "0123456789abcdef" for c in prefix[-8:])
+
+    def test_long_name_prefix_is_deterministic_across_calls(self):
+        mgr = SchemaManager()
+        t = _FakeTenant(self.PIPN_NAME, "pipn-001")
+        assert mgr._view_prefix(t) == mgr._view_prefix(t)
+
+    def test_pipn_views_distinct_and_within_byte_limit(self):
+        """The production regression: raw_completed_works / raw_completed_modules
+        previously truncated to the same 63-byte identifier."""
+        mgr = SchemaManager()
+        t = _FakeTenant(self.PIPN_NAME, "pipn-001")
+        prefix = mgr._view_prefix(t)
+        works = f"{prefix}__raw_completed_works"
+        modules = f"{prefix}__raw_completed_modules"
+        assert works != modules
+        assert len(works.encode("utf-8")) <= 63
+        assert len(modules.encode("utf-8")) <= 63
+
+    def test_two_long_names_sharing_head_get_distinct_prefixes(self):
+        mgr = SchemaManager()
+        head = "Maternal Child Health Program "
+        t1 = _FakeTenant(head + "Northern Region Implementation", "mch-north-1")
+        t2 = _FakeTenant(head + "Southern Region Implementation", "mch-south-1")
+        p1 = mgr._view_prefix(t1)
+        p2 = mgr._view_prefix(t2)
+        assert p1[:23] == p2[:23]
+        assert p1 != p2
+        assert len(p1) <= 32
+        assert len(p2) <= 32
+
+    def test_long_name_prefix_distinct_for_distinct_external_ids(self):
+        mgr = SchemaManager()
+        # Identical long canonical names, different external_ids -> different digests
+        t1 = _FakeTenant(self.PIPN_NAME, "pipn-001")
+        t2 = _FakeTenant(self.PIPN_NAME, "pipn-002")
+        assert mgr._view_prefix(t1) != mgr._view_prefix(t2)
