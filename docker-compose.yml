@@ -48,6 +48,7 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.development
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-claude-opus-4-8}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
       - MAX_CONNECTIONS_PER_PROJECT=5
