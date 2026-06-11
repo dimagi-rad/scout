@@ -78,7 +78,6 @@ MCP_TOOL_NAMES = frozenset(
 
 # Configuration constants
 DEFAULT_MAX_TOKENS = 4096
-DEFAULT_TEMPERATURE = 0
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
 
 # Circuit-breaker thresholds for the escalation node. If the last N tool
@@ -513,10 +512,11 @@ async def build_agent_graph(
     hidden_params = [*injections.keys(), "tool_call_id"]
 
     # --- Build LLM with tools ---
+    # Opus 4.7+ removed the sampling params (temperature/top_p/top_k);
+    # sending any of them returns a 400.
     llm = ChatAnthropic(
         model=settings.DEFAULT_LLM_MODEL,
         max_tokens=DEFAULT_MAX_TOKENS,
-        temperature=DEFAULT_TEMPERATURE,
     )
     llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
