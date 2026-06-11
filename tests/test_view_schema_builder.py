@@ -53,9 +53,6 @@ def two_tenant_workspace(db):
 
 def test_build_view_schema_creates_namespaced_views(two_tenant_workspace, managed_db_connection):
     """Two tenants with the same table produce separate namespaced views — no UNION ALL."""
-    from apps.workspaces.models import TenantSchema, WorkspaceViewSchema
-    from apps.workspaces.services.schema_manager import SchemaManager
-
     ws, t1, t2 = two_tenant_workspace
 
     ts1 = TenantSchema.objects.create(
@@ -723,3 +720,69 @@ def test_build_view_schema_oversized_view_name_raises(two_tenant_workspace, mana
         WorkspaceViewSchema.objects.filter(workspace=ws).delete()
         ts1.delete()
         ts2.delete()
+
+@pytest.mark.django_db
+def test_build_view_schema_clears_last_error_on_success(workspace, tenant):
+    """A successful build must clear any stale last_error from a prior failure."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_conn = MagicMock()
+    mock_conn.closed = False
+    mock_conn.cursor.return_value = mock_cursor
+
+    ts = TenantSchema.objects.create(
+        tenant=tenant, schema_name="test_domain_clear", state=SchemaState.ACTIVE
+    )
+    # Seed a pre-existing FAILED view schema with a stale error.
+    WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_stale_error",
+        state=SchemaState.FAILED,
+        last_error="stale boom",
+    )
+    vs = None
+    try:
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            vs = SchemaManager().build_view_schema(workspace)
+        assert vs.state == SchemaState.ACTIVE
+        assert vs.last_error == ""
+        vs.refresh_from_db()
+        assert vs.last_error == ""
+    finally:
+        ts.delete()
+        if vs:
+            vs.delete()
+
+
+@pytest.mark.django_db
+def test_build_view_schema_records_last_error_on_failure(workspace, tenant):
+    """On the FAILED path, the exception text is persisted to last_error."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_cursor.execute.side_effect = RuntimeError("relation does not exist")
+    mock_conn = MagicMock()
+    mock_conn.closed = False
+    mock_conn.cursor.return_value = mock_cursor
+
+    ts = TenantSchema.objects.create(
+        tenant=tenant, schema_name="test_domain_fail", state=SchemaState.ACTIVE
+    )
+    try:
+        with (
+            patch(
+                "apps.workspaces.services.schema_manager.get_managed_db_connection",
+                return_value=mock_conn,
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            SchemaManager().build_view_schema(workspace)
+
+        vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+        assert vs.state == SchemaState.FAILED
+        assert "relation does not exist" in vs.last_error
+    finally:
+        ts.delete()
+        WorkspaceViewSchema.objects.filter(workspace=workspace).delete()

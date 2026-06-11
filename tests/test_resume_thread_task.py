@@ -12,9 +12,11 @@ from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
+    SchemaState,
     TenantSchema,
     Workspace,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
@@ -899,3 +901,116 @@ async def test_resume_no_runs_sets_helpful_error_summary():
     assert any(
         term in tj.error_summary.lower() for term in ("credentials", "pipeline", "pipelines")
     )
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenant view-schema build failure surfacing (2026-06-10)
+# ---------------------------------------------------------------------------
+
+
+async def _make_multi_tenant_job(*, email, ws_name, pj_id, view_schema_state, last_error=""):
+    """Wire a 2-tenant workspace whose per-tenant runs COMPLETED, with a
+    WorkspaceViewSchema in the given state, ready to resume."""
+    user = await User.objects.acreate_user(email=email, password="x")
+    ws = await Workspace.objects.acreate(name=ws_name, created_by=user)
+    for i in (1, 2):
+        tenant = await Tenant.objects.acreate(
+            external_id=f"{ws_name}-t{i}",
+            provider="commcare",
+            canonical_name=f"Tenant {i}",
+        )
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name=f"{ws_name}_s{i}".replace("-", "_")
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.COMPLETED,
+            procrastinate_job_id=pj_id,
+            result={"rows": 100},
+        )
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws,
+        schema_name=f"ws_{ws_name}".replace("-", "_")[:22],
+        state=view_schema_state,
+        last_error=last_error,
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=pj_id,
+        tool_call_id=f"tc-{ws_name}",
+        state=ThreadJob.State.PENDING,
+    )
+    return tj
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
+    """All per-tenant runs COMPLETED but the WorkspaceViewSchema is FAILED:
+    the resume prompt must explain the view-schema build failed, quote the
+    error, and instruct the agent NOT to re-run materialization. The plain
+    'just completed' success copy must NOT appear."""
+    tj = await _make_multi_tenant_job(
+        email="vsf@b.c",
+        ws_name="W-vsf",
+        pj_id=20001,
+        view_schema_state=SchemaState.FAILED,
+        last_error="Canonical name collision: 'a' and 'b' both sanitize to 'x'",
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    lower = body.lower()
+    # The view-schema-failure instruction must be present.
+    assert "view schema" in lower
+    assert "do not re-run materialization" in lower
+    assert "Canonical name collision" in body  # the actual error text is quoted
+    # The plain success copy must NOT appear.
+    assert "Materialization just completed" not in body
+    # The job lands in FAILED with a system-fix error summary.
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    assert "view schema" in tj.error_summary.lower()
+    assert "Canonical name collision" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
+    """Regression: when the WorkspaceViewSchema is ACTIVE, the multi-tenant
+    resume uses the normal 'just completed' copy, not the failure branch."""
+    tj = await _make_multi_tenant_job(
+        email="vsa@b.c",
+        ws_name="W-vsa",
+        pj_id=20002,
+        view_schema_state=SchemaState.ACTIVE,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "Materialization just completed" in body
+    assert "view schema" not in body.lower()
+    assert result["terminal_state"] == ThreadJob.State.COMPLETED
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.COMPLETED

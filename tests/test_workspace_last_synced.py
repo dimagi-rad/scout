@@ -8,6 +8,7 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.users.models import Tenant
+from apps.workspaces.api.workspace_views import _derive_schema_status
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -184,3 +185,44 @@ def test_list_schema_status_matches_detail(client, user, workspace, tenant_schem
     list_status = _list_entry(client, user, workspace)["schema_status"]
     detail = client.get(f"/api/workspaces/{workspace.id}/").json()
     assert list_status == detail["schema_status"] == "available"
+
+
+# ── _derive_schema_status: multi-tenant view-schema states ───────────────────
+
+
+def test_derive_schema_status_multi_tenant_failed_view_schema():
+    """A FAILED multi-tenant view schema yields the distinct 'failed' status,
+    not the generic 'provisioning' bucket — so the UI/agent can surface it."""
+    assert (
+        _derive_schema_status(
+            tenant_count=2,
+            active_count=2,
+            provisioning=False,
+            view_schema_state=SchemaState.FAILED,
+        )
+        == "failed"
+    )
+
+
+def test_derive_schema_status_multi_tenant_active_view_schema():
+    assert (
+        _derive_schema_status(
+            tenant_count=2,
+            active_count=2,
+            provisioning=False,
+            view_schema_state=SchemaState.ACTIVE,
+        )
+        == "available"
+    )
+
+
+def test_derive_schema_status_multi_tenant_missing_view_schema_is_provisioning():
+    assert (
+        _derive_schema_status(
+            tenant_count=2,
+            active_count=2,
+            provisioning=False,
+            view_schema_state=None,
+        )
+        == "provisioning"
+    )

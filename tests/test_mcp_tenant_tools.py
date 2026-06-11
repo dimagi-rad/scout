@@ -9,10 +9,19 @@ to the parameterized query execution.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.test import override_settings
 
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    SchemaState,
+    Workspace,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from mcp_server.context import QueryContext
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
+from mcp_server.server import get_schema_status
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -626,6 +635,37 @@ class TestGetSchemaStatusTool:
         assert result["success"] is True
         assert result["data"]["exists"] is False
         assert result["data"]["state"] == "not_provisioned"
+
+    @pytest.mark.django_db(transaction=True)
+    async def test_returns_failed_with_error_for_failed_view_schema(self):
+        """Multi-tenant workspace whose WorkspaceViewSchema is FAILED must
+        report state='failed' with the error text, not a misleading
+        'not_provisioned' (which would invite a pointless re-materialization)."""
+        User = get_user_model()
+        user = await User.objects.acreate_user(email="vsfail@b.c", password="x")
+        ws = await Workspace.objects.acreate(name="W-vsfail", created_by=user)
+        for i in (1, 2):
+            tenant = await Tenant.objects.acreate(
+                external_id=f"vsfail-t{i}",
+                provider="commcare",
+                canonical_name=f"VSFail {i}",
+            )
+            await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=ws,
+            schema_name="ws_vsfailaaaaaaaa",
+            state=SchemaState.FAILED,
+            last_error="View name collision: 'a__t' produced by both tenants",
+        )
+
+        result = await get_schema_status(workspace_id=str(ws.id))
+
+        assert result["success"] is True
+        data = result["data"]
+        assert data["state"] == "failed"
+        assert data["exists"] is True
+        assert "View name collision" in data["error"]
+        assert data["tables"] == []
 
 
 # ---------------------------------------------------------------------------

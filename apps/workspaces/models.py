@@ -230,6 +230,11 @@ class WorkspaceViewSchema(models.Model):
         choices=SchemaState.choices,
         default=SchemaState.PROVISIONING,
     )
+    last_error = models.TextField(
+        blank=True,
+        default="",
+        help_text="Most recent build_view_schema failure message; cleared on a successful build.",
+    )
     last_accessed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

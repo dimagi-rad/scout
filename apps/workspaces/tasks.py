@@ -316,23 +316,28 @@ async def materialize_workspace(
         # *before* the resume task fires (deferred in the finally block) so
         # the agent's first list_tables call after materialization returns
         # the namespaced view instead of "No active view schema for workspace".
+        view_schema_outcome: dict | None = None
         workspace_tenant_count = await workspace.workspace_tenants.acount()
         if workspace_tenant_count > 1 and all_succeeded:
             try:
                 await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
-            except Exception:
+                view_schema_outcome = {"ok": True, "error": None}
+            except Exception as exc:
                 # Don't re-raise — the resume task should still fire so the
-                # user gets *some* agent response. The view-schema-failed
-                # state is itself queryable by the agent (it will see the
-                # validation error and surface it).
+                # user gets *some* agent response. The failure is recorded on
+                # the WorkspaceViewSchema row (state=FAILED, last_error) and is
+                # surfaced to the agent by the resume task, which inspects the
+                # row directly rather than relying on this return value.
                 logger.exception(
                     "Post-materialization view schema rebuild failed for workspace %s",
                     workspace_id,
                 )
+                view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
 
         return {
             "tenants": tenant_results,
             "all_succeeded": all_succeeded,
+            "view_schema": view_schema_outcome,
         }
     finally:
         # ALWAYS defer the resume task so the user is not left with a phantom
@@ -941,7 +946,40 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # COMPLETED it returns "completed". A user whose Stop click raced with
     # completion sees the truthful "completed" — their data is intact.
 
-    if status == "no_runs":
+    workspace = tj.thread.workspace
+    user = tj.thread.user
+
+    # Multi-tenant workspaces query through a WorkspaceViewSchema that UNION
+    # ALLs the per-tenant tables. The per-tenant runs can all complete while
+    # build_view_schema fails (a system-side defect), leaving the workspace
+    # with NO queryable surface. Detect that here so the agent is told the
+    # truth — re-running materialization cannot fix a view-schema build
+    # failure, so we must stop it from looping and tell the user a system fix
+    # is needed.
+    view_schema_failed = False
+    view_schema_error = ""
+    if status in ("completed", "partial"):
+        tenant_count = await workspace.workspace_tenants.acount()
+        if tenant_count > 1:
+            vs = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
+            if vs is None or vs.state != SchemaState.ACTIVE:
+                view_schema_failed = True
+                view_schema_error = (vs.last_error if vs else "") or (
+                    "the workspace query layer (view schema) is missing or was never built"
+                )
+
+    if view_schema_failed:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Per-tenant data loaded successfully, BUT the "
+            f"workspace query layer (the combined view schema that UNION ALLs the "
+            f"tenant tables) FAILED to build, so there is currently NO queryable "
+            f"surface for this workspace. Error: {view_schema_error}. Do NOT re-run "
+            f"materialization — it cannot fix this; the per-tenant data is already "
+            f"loaded and re-running will hit the same build failure. Tell the user "
+            f"plainly that a system-side fix is required and quote the error summary "
+            f"above. Per-tenant: {summary}"
+        )
+    elif status == "no_runs":
         logger.warning(
             "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
             "invoking agent with explanation so the user is not left with a spinner",
@@ -971,9 +1009,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"(status={status}). Please continue with the user's original request "
             f"using the now-loaded data. Per-tenant: {summary}"
         )
-
-    workspace = tj.thread.workspace
-    user = tj.thread.user
 
     timeout_s = getattr(settings, "AGENT_RESUME_TIMEOUT_S", 120)
     sentry_sdk.add_breadcrumb(
@@ -1080,15 +1115,24 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     terminal = (
         ThreadJob.State.CANCELLED
         if status == "cancelled"
+        # A view-schema build failure leaves the workspace with no queryable
+        # surface even when every per-tenant run completed, so it is not a
+        # success — flip to FAILED so the spinner clears into an error state.
         else (
             ThreadJob.State.FAILED
-            if status in ("failed", "partial", "no_runs")
+            if (status in ("failed", "partial", "no_runs") or view_schema_failed)
             else ThreadJob.State.COMPLETED
         )
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if status == "no_runs":
+        if view_schema_failed:
+            error_summary = (
+                "Per-tenant data loaded, but the workspace query layer (view "
+                f"schema) failed to build: {view_schema_error}. A system-side "
+                "fix is required — re-running materialization will not help."
+            )
+        elif status == "no_runs":
             error_summary = (
                 "Materialization finished without running any pipelines. "
                 "Check that the workspace's tenants have credentials configured."
