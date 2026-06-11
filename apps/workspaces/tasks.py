@@ -9,6 +9,7 @@ from datetime import timedelta
 import sentry_sdk
 from django.conf import settings
 from django.db import close_old_connections
+from django.db.models import Count, OuterRef, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
@@ -334,6 +335,19 @@ async def materialize_workspace(
                 )
                 view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
 
+        # Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing
+        # a tenant from THIS workspace drops & recreates its raw_* tables, which
+        # cascade-drops the namespaced views inside every OTHER workspace's view
+        # schema — leaving those WorkspaceViewSchema rows ACTIVE but empty. Defer a
+        # rebuild for each sibling multi-tenant workspace that shares any tenant we
+        # just (re)materialized so their views are recreated against the new tables.
+        # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
+        # we never block the resume on them.
+        await _rebuild_sibling_view_schemas(
+            current_workspace_id=str(workspace.id),
+            tenant_ids=[tm.tenant_id for tm in memberships],
+        )
+
         return {
             "tenants": tenant_results,
             "all_succeeded": all_succeeded,
@@ -379,6 +393,74 @@ async def _defer_resume_for_job(job_id: int) -> None:
         await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
         logger.exception("Failed to defer resume task for job %s", job_id)
+
+
+def _multi_tenant_count_subquery():
+    """Correlated subquery yielding a workspace's total tenant count.
+
+    A plain ``annotate(Count("workspace_tenants"))`` shares the same join as a
+    ``filter(workspace_tenants__tenant_id__in=...)`` predicate, so the count
+    collapses to only the *filtered* tenants (always 1 here) — the classic
+    Django filter+aggregate-on-the-same-multivalued-relation trap. Counting via
+    an independent subquery over the junction sidesteps that and stays a single
+    SQL round-trip (no per-tenant N+1).
+    """
+    return Subquery(
+        WorkspaceTenant.objects.filter(workspace=OuterRef("pk"))
+        .order_by()
+        .values("workspace")
+        .annotate(n=Count("id"))
+        .values("n")
+    )
+
+
+def _sibling_view_schema_workspaces(tenant_ids, exclude_workspace_id):
+    """Queryset of OTHER multi-tenant workspaces with a WorkspaceViewSchema row
+    that share any of ``tenant_ids``.
+
+    A workspace qualifies when it (i) contains at least one of the given tenants,
+    (ii) is multi-tenant (>= 2 tenants), and (iii) has a WorkspaceViewSchema row
+    in any state. The current workspace is excluded.
+
+    Uses a single annotated query (a subquery tenant count) rather than walking
+    each tenant's workspaces, so cost is independent of the number of tenants
+    materialized (no N+1).
+    """
+    return (
+        Workspace.objects.filter(
+            workspace_tenants__tenant_id__in=tenant_ids,
+            view_schema__isnull=False,
+        )
+        .exclude(id=exclude_workspace_id)
+        .annotate(num_tenants=_multi_tenant_count_subquery())
+        .filter(num_tenants__gte=2)
+        .distinct()
+    )
+
+
+async def _rebuild_sibling_view_schemas(*, current_workspace_id: str, tenant_ids) -> None:
+    """Defer a view-schema rebuild for every sibling workspace whose namespaced
+    views were (or will be) cascade-dropped by this workspace's re-materialization.
+
+    See the call site in materialize_workspace for the why. The query already
+    yields distinct workspace ids, so no extra dedupe is needed. Best-effort: a
+    failure to defer one rebuild must not block the resume, so each defer is
+    individually guarded and the dispatched task owns its own failure handling.
+    """
+    async for sibling_id in (
+        _sibling_view_schema_workspaces(tenant_ids, current_workspace_id)
+        .values_list("id", flat=True)
+        .aiterator()
+    ):
+        try:
+            await rebuild_workspace_view_schema.defer_async(workspace_id=str(sibling_id))
+        except Exception:
+            logger.exception(
+                "Failed to defer sibling view-schema rebuild for workspace %s "
+                "(triggered by re-materialization of workspace %s)",
+                sibling_id,
+                current_workspace_id,
+            )
 
 
 def _run_pipeline_with_progress(
@@ -562,6 +644,14 @@ async def teardown_schema(schema_id: str) -> None:
         ],
     ).aupdate(state=MaterializationRun.RunState.STALE)
 
+    # The tenant schema (t_<id>) is SHARED across workspaces. DROP SCHEMA ... CASCADE
+    # just cascade-dropped the namespaced views inside every dependent multi-tenant
+    # workspace's view schema (ws_<hash>). Those WorkspaceViewSchema rows still claim
+    # ACTIVE, which is now a lie — querying through them returns nothing. Flip them to
+    # FAILED so the catalog reports the truth. We do NOT defer a rebuild: the tenant's
+    # data is gone, so a rebuild would rightly fail until the tenant is re-materialized.
+    await _fail_dependent_view_schemas(schema.tenant_id)
+
     try:
         schema.state = SchemaState.EXPIRED
         await schema.asave(update_fields=["state"])
@@ -571,6 +661,30 @@ async def teardown_schema(schema_id: str) -> None:
             "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
         )
         raise
+
+
+async def _fail_dependent_view_schemas(tenant_id) -> int:
+    """Flip every ACTIVE WorkspaceViewSchema that depends on ``tenant_id`` to FAILED.
+
+    A view schema depends on a tenant when its workspace is multi-tenant (>= 2
+    tenants) and contains that tenant: its namespaced views were just
+    cascade-dropped by the tenant-schema DROP. We only touch ACTIVE rows — rows
+    already in TEARDOWN/FAILED/EXPIRED must not be clobbered out of their
+    lifecycle state. A single annotated subquery scopes the update to the right
+    workspaces, so cost is independent of how many workspaces share the tenant.
+
+    Returns the number of rows flipped.
+    """
+    dependent_workspace_ids = (
+        Workspace.objects.filter(workspace_tenants__tenant_id=tenant_id)
+        .annotate(num_tenants=_multi_tenant_count_subquery())
+        .filter(num_tenants__gte=2)
+        .values("id")
+    )
+    return await WorkspaceViewSchema.objects.filter(
+        workspace_id__in=dependent_workspace_ids,
+        state=SchemaState.ACTIVE,
+    ).aupdate(state=SchemaState.FAILED)
 
 
 STALE_JOB_THRESHOLD = timedelta(minutes=10)
