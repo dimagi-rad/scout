@@ -51,7 +51,22 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     },
 
     setActiveDomain: (id: string) => {
-      set({ activeDomainId: id })
+      // Switching workspaces must NOT carry the current thread over: the thread
+      // belongs to the previous workspace, and grafting its id onto the new
+      // workspace's URL produces a "Thread not found" chat. Reset to a fresh
+      // client-generated thread id. For deep links (URL → store), the sync hook
+      // calls selectThread(urlThreadId) immediately after, which overwrites this.
+      if (id !== get().activeDomainId) {
+        // `threadId` lives in the UI slice; cast so this cross-slice write
+        // typechecks (the slices share one store, mirroring uiSlice's read of
+        // `activeDomainId`).
+        ;(set as (partial: { activeDomainId: string; threadId: string }) => void)({
+          activeDomainId: id,
+          threadId: crypto.randomUUID(),
+        })
+      } else {
+        set({ activeDomainId: id })
+      }
     },
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars

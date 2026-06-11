@@ -1,7 +1,7 @@
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
 import { useEffect, useRef, useState } from "react"
-import { getCsrfToken, api } from "@/api/client"
+import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
 import { ChatMessage } from "@/components/ChatMessage/ChatMessage"
@@ -13,12 +13,21 @@ import { SLASH_COMMANDS, resolveSlashCommand } from "./slashCommands"
 import { SlashCommandMenu } from "./SlashCommandMenu"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
-import { writeSavedThreadId } from "./threadStorage"
+import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
+
+/** True when an error looks like a stale/missing-thread rejection (HTTP 404 or
+ * a body containing the backend's "Thread not found" marker). */
+function isStaleThreadError(error: Error | undefined): boolean {
+  if (!error) return false
+  if (error instanceof ApiError && error.status === 404) return true
+  return error.message.includes("Thread not found")
+}
 
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
+  const newThread = useAppStore((s) => s.uiActions.newThread)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState("")
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
@@ -67,31 +76,39 @@ export function ChatPanel() {
     setSlashMenuIndex(0)
   }
 
-  // Persist threadId to localStorage when it changes, so a bare /chat visit can
-  // restore the last-viewed thread for this workspace. The URL is the source of
-  // truth for which thread is active; this is just a "last seen" fallback.
-  useEffect(() => {
-    if (activeDomainId && threadId) {
-      writeSavedThreadId(activeDomainId, threadId)
-    }
-  }, [threadId, activeDomainId])
-
-  // Load messages from backend when threadId changes (or after a background job completes)
+  // Load messages from backend when threadId changes (or after a background job
+  // completes). On success — including an empty array for a brand-new thread —
+  // persist this (workspace, thread) pair so a later bare /chat visit can
+  // restore it. We persist ONLY here so a stale/foreign thread (which 404s
+  // below) never gets stamped into this workspace's localStorage. A 404 means
+  // the thread exists but isn't ours / isn't this workspace's: drop the saved
+  // id and start a fresh thread so the user lands in a clean chat instead of a
+  // haunted one.
   useEffect(() => {
     if (!threadId || !activeDomainId) return
     let cancelled = false
 
     async function loadMessages() {
       try {
-        const msgs = await api.get<UIMessage[]>(`/api/workspaces/${activeDomainId}/threads/${threadId}/messages/`)
-        if (!cancelled) {
-          setMessages(msgs)
+        const msgs = await api.get<UIMessage[]>(
+          `/api/workspaces/${activeDomainId}/threads/${threadId}/messages/`,
+        )
+        if (cancelled) return
+        setMessages(msgs)
+        if (activeDomainId && threadId) {
+          writeSavedThreadId(activeDomainId, threadId)
         }
-      } catch {
-        // New thread or fetch failed — start with empty
-        if (!cancelled) {
+      } catch (err) {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 404) {
+          // Stale / cross-workspace thread: recover into a fresh chat.
+          if (activeDomainId) clearSavedThreadId(activeDomainId, threadId)
           setMessages([])
+          newThread()
+          return
         }
+        // New thread or transient fetch failure — start with empty.
+        setMessages([])
       }
     }
 
@@ -135,6 +152,15 @@ export function ChatPanel() {
 
     setInput("")
     sendMessage({ text: resolveSlashCommand(text) })
+  }
+
+  // Recover from a stale/unavailable thread: forget the saved id for this
+  // workspace and start a fresh thread. The URL sync hook then rewrites the
+  // address bar to the new thread.
+  function startFreshThread() {
+    if (activeDomainId) clearSavedThreadId(activeDomainId)
+    setMessages([])
+    newThread()
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -188,11 +214,7 @@ export function ChatPanel() {
           />
         ))}
         {isStreaming && <ThinkingIndicator />}
-        {error && (
-          <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-4 py-2">
-            {error.message}
-          </div>
-        )}
+        {error && <ChatError error={error} onStartNewThread={startFreshThread} />}
       </div>
 
       {/* Materialization progress banner — always visible when a job is active for this thread */}
@@ -237,6 +259,49 @@ export function ChatPanel() {
           )}
         </form>
       </div>
+    </div>
+  )
+}
+
+/**
+ * Friendly chat error. Never renders a raw response body (e.g. the JSON
+ * `{"error":"Thread not found"}` the backend returns). The stale-thread case
+ * gets a recovery button; everything else gets a generic message, with the real
+ * error kept in the console for debugging.
+ */
+function ChatError({
+  error,
+  onStartNewThread,
+}: {
+  error: Error
+  onStartNewThread: () => void
+}) {
+  const stale = isStaleThreadError(error)
+  useEffect(() => {
+    console.error("[Scout] Chat error:", error)
+  }, [error])
+
+  return (
+    <div
+      className="text-sm text-destructive bg-destructive/10 rounded-lg px-4 py-3 space-y-2"
+      data-testid="chat-error"
+    >
+      <p>
+        {stale
+          ? "This conversation is no longer available."
+          : "Something went wrong. Please try again."}
+      </p>
+      {stale && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onStartNewThread}
+          data-testid="chat-error-new-thread"
+        >
+          Start new chat
+        </Button>
+      )}
     </div>
   )
 }
