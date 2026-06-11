@@ -15,6 +15,7 @@ import uuid
 import psycopg
 import psycopg.sql
 from django.conf import settings
+from django.utils import timezone
 
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
@@ -110,8 +111,15 @@ class SchemaManager:
             ts.delete()
             raise
 
+        # Activating here covers both the fresh-create path and the
+        # resurrect/fall-through path (an existing record that was EXPIRED or
+        # otherwise inactive). Either way the schema is now ACTIVE, so its
+        # inactivity TTL must be reset — otherwise a resurrected schema keeps a
+        # stale last_accessed_at and expire_inactive_schemas drops it on its
+        # next tick, right after data was materialized into it.
         ts.state = SchemaState.ACTIVE
-        ts.save(update_fields=["state"])
+        ts.last_accessed_at = timezone.now()
+        ts.save(update_fields=["state", "last_accessed_at"])
 
         logger.info(
             "Provisioned schema '%s' for tenant '%s'",

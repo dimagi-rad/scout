@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from apps.workspaces.models import SchemaState, WorkspaceTenant, WorkspaceViewSchema
 from apps.workspaces.tasks import rebuild_workspace_view_schema, teardown_view_schema_task
@@ -74,7 +75,12 @@ async def touch_workspace_schemas(workspace) -> None:
     """Reset the inactivity TTL for active schemas associated with a workspace.
 
     For single-tenant workspaces, touches the TenantSchema of the sole tenant.
-    For multi-tenant workspaces, touches the WorkspaceViewSchema.
+    For multi-tenant workspaces, touches the WorkspaceViewSchema *and* every
+    constituent tenant's TenantSchema. The view schema is just a set of views
+    over the per-tenant tables — multi-tenant chat activity never touches the
+    underlying TenantSchemas directly, so without this bulk-touch they expire
+    after the TTL and their DROP SCHEMA CASCADE silently destroys the views
+    inside the still-ACTIVE view schema.
     """
     from apps.workspaces.models import TenantSchema
 
@@ -88,6 +94,14 @@ async def touch_workspace_schemas(workspace) -> None:
         if ts is not None:
             await ts.atouch()
     elif tenant_count > 1:
+        # Touch the constituent tenant schemas regardless of whether the view
+        # schema row exists — they underpin everything the view schema serves.
+        tenant_ids = [t.id async for t in workspace.tenants.all()]
+        await TenantSchema.objects.filter(
+            tenant_id__in=tenant_ids,
+            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        ).aupdate(last_accessed_at=timezone.now())
+
         vs = await WorkspaceViewSchema.objects.filter(
             workspace=workspace,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],

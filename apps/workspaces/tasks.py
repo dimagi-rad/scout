@@ -175,9 +175,12 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         await _drop_schema_and_fail(new_schema)
         return {"error": "Materialization failed"}
 
-    # Step 3: Mark new schema as active
+    # Step 3: Mark new schema as active. Set last_accessed_at to now so the
+    # freshly materialized schema starts with a clean inactivity TTL —
+    # otherwise expire_inactive_schemas could drop it before it is ever used.
     new_schema.state = SchemaState.ACTIVE
-    await new_schema.asave(update_fields=["state"])
+    new_schema.last_accessed_at = timezone.now()
+    await new_schema.asave(update_fields=["state", "last_accessed_at"])
 
     # Step 4: Schedule teardown of previously active schemas with a delay to allow
     # in-flight queries against the old schema to complete before it is dropped.
