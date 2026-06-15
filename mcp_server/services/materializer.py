@@ -52,7 +52,7 @@ from psycopg import sql as psql
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.executor import run_transformation_pipeline
-from apps.workspaces.models import MaterializationRun, TenantMetadata
+from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
@@ -99,6 +99,7 @@ def run_pipeline(
     pipeline: PipelineConfig,
     progress_updater: ProgressUpdater | None = None,
     procrastinate_job_id: int | None = None,
+    target_schema: TenantSchema | None = None,
 ) -> dict:
     """Run a three-phase materialization pipeline.
 
@@ -118,6 +119,10 @@ def run_pipeline(
             triggering a transaction rollback.
         procrastinate_job_id: When set, written to ``MaterializationRun`` so
             the cancel endpoint can target the underlying procrastinate job.
+        target_schema: When set, the explicit ``TenantSchema`` to load into
+            (used by the blue-green refresh path to load into its new "_r"
+            schema). When ``None``, the tenant's base schema is resolved via
+            ``SchemaManager().provision()`` (the initial-materialization path).
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
@@ -178,9 +183,20 @@ def run_pipeline(
         return _on_page
 
     # ── 1. PROVISION ──────────────────────────────────────────────────────────
-    # Create the schema and run row up-front so progress_updater always has a
-    # valid run_id to target. Progress reporting starts immediately after.
-    tenant_schema = SchemaManager().provision(tenant_membership.tenant)
+    # Resolve the target schema and create the run row up-front so
+    # progress_updater always has a valid run_id to target.
+    #
+    # A blue-green refresh passes an explicit ``target_schema``: the freshly
+    # minted, not-yet-active "_r" schema it wants this run to load into. We must
+    # honor it. Falling back to ``provision()`` here would re-resolve the
+    # tenant's OLD active *base* schema and load there; the refresh task would
+    # then activate the empty new schema and tear down the data-bearing old one,
+    # destroying the data the refresh just loaded. When no target is given
+    # (initial materialization), ``provision()`` get-or-creates the base schema.
+    if target_schema is not None:
+        tenant_schema = target_schema
+    else:
+        tenant_schema = SchemaManager().provision(tenant_membership.tenant)
     schema_name = tenant_schema.schema_name
 
     run = MaterializationRun.objects.create(
@@ -288,9 +304,7 @@ def run_pipeline(
             # The discovered visit_count counts *all* visits, so it's only a
             # valid denominator on a fresh load. On resume, rows_loaded counts
             # just this run's new rows, so leave the bar indeterminate.
-            source_total = (
-                visit_total if source.name == "visits" and start_cursor is None else None
-            )
+            source_total = visit_total if source.name == "visits" and start_cursor is None else None
             try:
                 rows = _load_and_commit_source(
                     source.name,

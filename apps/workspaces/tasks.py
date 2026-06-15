@@ -170,7 +170,13 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
             await _drop_schema_and_fail(new_schema)
             return {"error": f"No pipeline configured for provider '{membership.tenant.provider}'"}
         pipeline_config = registry.get(pipeline_name)
-        await asyncio.to_thread(run_pipeline, membership, credential, pipeline_config)
+        # Load into the new "_r" schema this task created — NOT the tenant's
+        # base schema. Without target_schema, run_pipeline re-resolves the base
+        # (old active) schema via provision() and the data lands there; we then
+        # activate this empty new schema and tear down the data-bearing old one.
+        await asyncio.to_thread(
+            run_pipeline, membership, credential, pipeline_config, target_schema=new_schema
+        )
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
         await _drop_schema_and_fail(new_schema)

@@ -7,6 +7,8 @@ import pytest
 from apps.users.adapters import encrypt_credential
 from apps.users.models import TenantConnection
 from apps.workspaces.models import SchemaState, TenantSchema
+from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.tasks import refresh_tenant_schema
 
 
 @pytest.fixture
@@ -255,10 +257,66 @@ async def test_refresh_task_resolves_credential_in_async_context(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_refresh_task_returns_error_for_unknown_schema(tenant_membership_obj):
-    from apps.workspaces.tasks import refresh_tenant_schema
-
     result = await refresh_tenant_schema(
         schema_id="00000000-0000-0000-0000-000000000000",
         membership_id=str(tenant_membership_obj.id),
     )
     assert "error" in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_loads_into_new_schema_not_old_active(
+    provisioning_schema, old_active_schema, tenant_membership_obj
+):
+    """Regression: refresh must load the fresh data INTO the new "_r" schema.
+
+    The refresh task mints a new ``_r``-suffixed schema and then runs the
+    materialization pipeline. Before the fix, the task called ``run_pipeline``
+    without naming a target, so ``run_pipeline`` re-resolved the schema via
+    ``SchemaManager().provision()`` — which returns the tenant's OLD active
+    *base* schema. The data loaded into the old schema; the task then activated
+    the empty new schema and tore down the data-bearing old one, destroying the
+    data the refresh had just loaded (and leaving an empty, "successful" schema).
+
+    This test faithfully reproduces the bug by mirroring ``run_pipeline``'s own
+    target resolution (an explicit ``target_schema`` wins; otherwise
+    ``provision()`` picks the base schema) and asserts the pipeline loads into
+    the new ``_r`` schema, not the old active one.
+    """
+    loaded_schema_ids: list[str] = []
+
+    def fake_run_pipeline(tenant_membership, credential, pipeline, target_schema=None, **kwargs):
+        schema = target_schema or SchemaManager().provision(tenant_membership.tenant)
+        loaded_schema_ids.append(str(schema.id))
+        return {"status": "ok"}
+
+    deferrer = MagicMock()
+    deferrer.defer_async = AsyncMock(return_value=1)
+
+    with (
+        patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=_mock_conn(),
+        ),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
+        ),
+        patch(
+            "apps.workspaces.tasks.get_registry",
+            return_value=_mock_registry(),
+        ),
+        patch("apps.workspaces.tasks.run_pipeline", side_effect=fake_run_pipeline),
+        patch("apps.workspaces.tasks.teardown_schema.configure", return_value=deferrer),
+    ):
+        await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
+
+    assert loaded_schema_ids == [str(provisioning_schema.id)], (
+        "Refresh loaded data into the wrong schema: expected the new schema "
+        f"{provisioning_schema.schema_name!r}, but the pipeline targeted the old "
+        "active base schema (the refresh-data-loss bug)."
+    )
