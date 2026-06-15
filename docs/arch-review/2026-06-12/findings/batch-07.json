@@ -1,0 +1,293 @@
+[
+  {
+    "title": "Context-injection contract relies on both LangChain and FastMCP skipping arg validation",
+    "claim": "The injecting node adds workspace_id/user_id/thread_id/tool_call_id to every MCP tool call including tools that declare none of them; this works only because LangChain's BaseTool._parse_input returns dict-schema input unvalidated and FastMCP's ArgModelBase has pydantic-v2 default extra='ignore'. If either library tightens, every MCP tool call fails at once. The same silent-drop also masks the live prompt drift instructing run_materialization with a pipeline= arg the tool dropped.",
+    "status": "DEBT",
+    "impact": "velocity",
+    "complexity": "accidental",
+    "replication": 1,
+    "reviewers": [
+      "seam-chat-mcp-worker"
+    ],
+    "files": [
+      "apps/agents/graph/base.py:439-477,221-228",
+      "mcp_server/server.py:521-527"
+    ],
+    "verification": {
+      "verdict": "CONFIRMED",
+      "votes": [
+        {
+          "verdict": "CONFIRMED",
+          "evidence": "I independently re-traced the full chain and reproduced every leg.\n\nINJECTION (the contract): apps/agents/graph/base.py:452-477 `injecting_node` iterates `last_msg.tool_calls`, and for any `tc[\"name\"] in MCP_TOOL_NAMES` builds `extra = {k: state.get(v, \"\") for k, v in injections.items()}` then `extra[\"tool_call_id\"] = tc_id` and merges `tc = {**tc, \"args\": {**tc[\"args\"], **extra}}` with NO per-tool filtering. `injections` (base.py:504-508) = {workspace_id, user_id, thread_id}, plus tool_call_id => all four args go to every one of the 8 MCP_TOOL_NAMES (base.py:65-76).\n\nTOOLS DECLARE FEWER ARGS: In mcp_server/server.py, 7 of 8 tools declare ONLY workspace_id (e.g. `list_tables(workspace_id=\"\")` :108, `describe_table(table_name, workspace_id=\"\")` :177, `query(sql, workspace_id=\"\")` :334, `get_lineage(model_name, workspace_id=\"\")` :290, `get_metadata` :232, `get_schema_status` :652, `teardown_schema(confirm=False, workspace_id=\"\")` :802) — none declare user_id/thread_id/tool_call_id. Only `run_materialization` (:521-527) declares all four. So user_id/thread_id/tool_call_id are extra args for 7/8 tools.\n\nCLIENT-SIDE LEG (LangChain skips validation): langchain-mcp-adapters 0.2.1 tools.py:426-429 builds `StructuredTool(... args_schema=tool.inputSchema)` — a raw JSON-schema DICT. langchain-core 1.2.17 tools/base.py:_parse_input (:694-696) has `if isinstance(input_args, dict): return tool_input` — input is returned VERBATIM, no pydantic build, no extra-field check. Extras pass straight through to the wire.\n\nSERVER-SIDE LEG (FastMCP drops extras): mcp 1.26.0 func_metadata.py:74-95 `call_fn_with_arg_validation` does `arguments_parsed_model = self.arg_model.model_validate(...)` (:87) then `model_dump_one_level()` (:88) which only iterates declared `model_fields`. ArgModelBase (:47-65) sets only `arbitrary_types_allowed=True` — no `extra=` override, so pydantic-v2 DEFAULT extra='ignore' applies. I empirically confirmed via `uv run`: for list_tables, `arg_model.model_fields == ['workspace_id']`, `model_config['extra'] is None`, and validating {workspace_id, user_id, thread_id, tool_call_id} dumps to just `{'workspace_id': 'ws1'}` — extras silently dropped, no error. If either default flipped to forbid, line 87 would raise for every call at once.\n\nPROMPT DRIFT (masked by silent-drop): base.py:_fetch_schema_context :222-224 returns 'Call `run_materialization` with `pipeline=\"{pipeline_name}\"`' when no schema is loaded; this is appended live into the system prompt at base.py:758-759 under \"## Data Availability\" (single-tenant branch). But run_materialization (server.py:521-527) declares NO pipeline param and its body has zero `pipeline` references (grep of :520-650 returned nothing). So an LLM that obeys the prompt emits pipeline=\"...\" which is silently dropped by the same FastMCP extra='ignore' path — the arg has no effect and the bug is hidden.\n\nREACHABILITY: build_agent_graph is wired to live paths — apps/chat/views.py:167,179 (chat endpoint), apps/workspaces/tasks.py:860 (resume-after-materialization), apps/recipes/services/runner.py:115 (recipes). The injecting node is added as graph node \"tools\" (base.py:534, :628). The drift prompt is in the live single-tenant system prompt. So both the contract and the drift are exercised in production today.\n\nFinding line numbers are accurate (base.py:439-477, 222-228 [the pipeline= line is 223], server.py:521-527).",
+          "corrected_status": "DEBT",
+          "corrected_impact": "velocity",
+          "notes": "Status DEBT and impact velocity are correct: nothing is broken at runtime today (extras are silently dropped at both the LangChain client and FastMCP server layers), but the system depends on an implicit two-library contract (LangChain returning dict-schema input unvalidated + FastMCP/pydantic-v2 default extra='ignore'). A future tightening on either side would break all 8 MCP tool calls simultaneously, and the same silent-drop currently hides a live prompt bug (pipeline= instruction the tool ignores).\n\nTwo minor precision notes that do not change the verdict: (1) The phrase \"FastMCP's ArgModelBase has pydantic-v2 default extra='ignore'\" is slightly imprecise — ArgModelBase does not explicitly set extra='ignore'; it simply does not override pydantic v2's default (which is 'ignore'). The behavioral claim is exactly right; I verified model_config['extra'] is None (i.e. default) and extras are dropped. (2) The client side here is langchain-mcp-adapters (StructuredTool with a JSON-schema dict args_schema), routed through langchain-core's BaseTool._parse_input — the finding says \"LangChain's BaseTool._parse_input returns dict-schema input unvalidated,\" which is precisely correct. The drift prompt only fires in the single-tenant no-data branch; the multi-tenant branch (_fetch_multi_tenant_schema_context) tells the agent to call run_materialization WITHOUT a pipeline arg, so the drift is single-tenant-scoped but still live."
+        }
+      ]
+    }
+  },
+  {
+    "title": "Cross-workspace cancellation: materialization_cancel_view selects orphan runs by shared tenant, cancels the same user's run in a sibling workspace",
+    "claim": "materialization_cancel_view selects active runs by tenant (tenant schemas are shared across workspaces) and matches ThreadJobs by thread__user only with no workspace filter, so cancelling in workspace A cancels the same user's chat-driven run started from workspace B sharing a tenant and injects a cancelled-resume into B's thread; the orphan path can cancel /refresh/-spawned runs of sibling workspaces. (Tracked jobs are correctly restricted to thread__user.)",
+    "status": "LATENT",
+    "impact": "correctness",
+    "complexity": "accidental",
+    "replication": 2,
+    "reviewers": [
+      "seam-chat-mcp-worker",
+      "vertical-tenancy-sharing"
+    ],
+    "files": [
+      "apps/workspaces/api/materialization_views.py:46-117"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "corrected_status": "LATENT",
+          "corrected_impact": "correctness",
+          "evidence": "I re-traced the full chain. Model facts (apps/workspaces/models.py): Workspace.tenants is M2M with related_name=\"workspaces\" (tenants ARE shared across workspaces, lines 114-118); MaterializationRun -> TenantSchema -> Tenant (lines 82-87). ThreadJob.thread -> Thread which has BOTH workspace and user FKs (apps/chat/models.py:12-18, 73). So the premise \"tenant schemas shared across workspaces\" holds.\n\nPART A (chat-driven, same user, cross-workspace) — CONFIRMED as a real mechanism in materialization_cancel_view:\n- L46-52: active_runs = MaterializationRun filtered by tenant_schema__tenant__in=workspace.tenants.all() + ACTIVE_STATES. A run started from sibling workspace B (sharing tenant T) IS included when cancelling from workspace A.\n- L56: job_ids = {r.procrastinate_job_id ... if not None}. Chat-driven runs go through materialize_workspace (@task pass_context=True, tasks.py:203-221, job_id=context.job.id) -> _run_pipeline_with_progress passes procrastinate_job_id=job_id (tasks.py:501) -> MaterializationRun.create(procrastinate_job_id=...) (materializer.py:186-191). So these runs have a non-NULL job_id.\n- L63-70: tjs = ThreadJob filtered by procrastinate_job_id__in=job_ids, ACTIVE, thread__user=user — NO thread__workspace filter. The ThreadJob bound to B's thread is owned by the same user, so it MATCHES even though it belongs to workspace B.\n- L86-88: cancel_thread_job(tj) flips the run + ThreadJob to CANCELLED and aborts the procrastinate job (jobs_cancel.py:30-46). materialize_workspace's finally block always defers resume (tasks.py:356-360), and resume_thread_after_materialization injects a SYSTEM_RESUME_MARKER message into tj.thread (= B's thread) and re-invokes the agent with status=\"cancelled\" (tasks.py:1019-1064, _aggregate returns \"cancelled\" for a CANCELLED run). So a cancelled-resume IS injected into B's thread. Mechanism real.\n\nPART B (orphan path cancels /refresh/-spawned runs of sibling workspaces) — REFUTED:\n- The /refresh/ path (RefreshSchemaView, views.py:314-365) dispatches refresh_tenant_schema, which calls run_pipeline(membership, credential, pipeline_config) with NO procrastinate_job_id (tasks.py:173). run_pipeline defaults procrastinate_job_id=None (materializer.py:101) and creates MaterializationRun with procrastinate_job_id=None (materializer.py:186-191).\n- In materialization_cancel_view: L56 EXCLUDES NULL job ids; L93 orphan_job_ids = job_ids - all_tracked_job_ids (all non-NULL); L101 selects orphan_run_ids where r.procrastinate_job_id in orphan_job_ids — a NULL-job_id refresh run can NEVER match. So a real /refresh/-spawned run is never cancelled by either the tracked OR the orphan branch. (The regression test at test_materialize_workspace_task.py:762-768 models the \"orphan/refresh\" run with procrastinate_job_id=1002 — non-NULL — which does not match the real refresh path's NULL value.) The only run that can hit the orphan branch cross-workspace is one with a non-NULL job_id and no ThreadJob anywhere — producible solely by materialization_retry_view dispatched WITHOUT a thread_id (materialization_views.py:159-195), and the frontend always passes thread_id (jobs.ts:55-62, MaterializationFailure.tsx:34-37). So that orphan is itself not UI-reachable.\n\nREACHABILITY (severity correction): materialization_cancel_view is the LEGACY endpoint (jobs_cancel.py docstring: \"legacy materialization cancel endpoint\"). grep shows it is invoked ONLY by tests + the URL route — NOT the frontend, MCP, or any agent tool. The production cancel path is cancel_job_view at /jobs/<thread_job_id>/cancel/ (jobs_views.py:165-189), which fetches the ThreadJob with id=thread_job_id, thread__workspace=workspace, thread__user=user — workspace-scoped AND targets one specific job by UUID, so it has NO cross-workspace leak. Frontend cancels exclusively via this per-job endpoint (MaterializationProgressBanner.tsx:30, ChatMessage.tsx:214). aresolve_workspace only checks membership, no role (workspace_resolver.py:49-60), so a multi-workspace member CAN reach the legacy endpoint by a hand-crafted HTTP POST — but nothing in the UI/agent does.",
+          "notes": "Verdict PARTIAL: the defect's Part A (same-user cross-workspace cancellation + cancelled-resume injection into the sibling thread via the thread__user-only filter at L63-69/86-88) is a real LATENT correctness bug, but the finding misstates two things. (1) Its headline/Part-B claim that the orphan path cancels /refresh/-spawned runs is mechanically wrong: refresh runs carry procrastinate_job_id=NULL and are excluded at L56 + unreachable at L101; the test that \"proves\" the orphan path uses a non-NULL job_id and does not represent the real refresh path. (2) Reachability is overstated — this is the legacy endpoint with zero UI/MCP/agent callers; the live, UI-wired cancel path (cancel_job_view) is properly workspace-scoped and has none of these issues. The finding's own parenthetical (\"Tracked jobs are correctly restricted to thread__user\") is self-contradictory with its main claim: the user-only restriction is precisely what enables the same-user cross-workspace cancel it describes. Net: keep status LATENT (not BROKEN-NOW) because no shipped UI/agent path triggers it; impact correctness; the only correct part is Part A, scoped to a direct-HTTP attacker/edge actor who is a member of two tenant-sharing workspaces."
+        }
+      ]
+    }
+  },
+  {
+    "title": "OCS email-domain allowlist is open by default and bypassed by no-email logins; .env.example contradicts the coded default",
+    "claim": "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS default restricts only 'commcare' to dimagi.com (providers absent from the dict are unrestricted), but .env.example documents the default as restricting commcare, commcare_connect, AND ocs. config/deploy.yml does not set the env var, so in production OCS (which returns an email via openid) and commcare_connect OAuth accept any email domain; with SOCIALACCOUNT_AUTO_SIGNUP=True any OCS-authenticated user can self-provision a Scout account with auto-resolved tenants and auto-created workspaces. pre_social_login also returns/allows when the login carries no email (allow-by-default-on-missing-data), making provider-asserted unverified emails an auth factor for the three custom providers. Doc and code disagree on a security control.",
+    "status": "DEBT",
+    "impact": "security",
+    "complexity": "accidental",
+    "replication": 3,
+    "reviewers": [
+      "vertical-accounts-auth",
+      "lens-security-authz",
+      "lens-ops-config"
+    ],
+    "files": [
+      "config/settings/base.py:205,241-253",
+      "apps/users/adapters.py:74-104",
+      ".env.example:38-45",
+      "config/deploy.yml"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "corrected_status": "DEBT",
+          "corrected_impact": "security",
+          "evidence": "Re-traced independently, all from current main checkout.\n\nMECHANISM — all confirmed:\n1. Coded default restricts only commcare: config/settings/base.py:247-252 — `SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS ... default={\"commcare\": [\"dimagi.com\"]}`; comment at base.py:242 states \"A provider absent from the dict (or mapped to an empty list) is unrestricted.\"\n2. Enforcement matches: apps/users/adapters.py:84-86 — `allowed = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(provider) or []; if not allowed: return` (ocs/commcare_connect unrestricted), and adapters.py:88-90 — `if not email: return` (no-email logins bypass the check even for restricted providers).\n3. Doc contradiction is real: .env.example:43 — \"Defaults to [\\\"dimagi.com\\\"] for each of commcare, commcare_connect, and ocs if unset.\" This is stale, not matching base.py:249-251.\n4. Production runs the coded default: config/deploy.yml `env:` block contains no SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS in either `clear` or `secret`; it DOES ship OCS_OAUTH_CLIENT_ID/OCS_OAUTH_CLIENT_SECRET and CONNECT_OAUTH_* secrets, so both providers are live in prod.\n5. OCS returns an email: apps/users/providers/ocs/provider.py:26 requests \"openid\" scope; provider.py:36 `\"email\": data.get(\"email\") or None`.\n6. Reachability of self-provisioning chain: base.py:204-205 (SOCIALACCOUNT_LOGIN_ON_GET, AUTO_SIGNUP=True); base.py:63-71 installs apps.users.providers.ocs; config/urls.py:83 mounts allauth at /accounts/ (so /accounts/ocs/login/ is a live route); apps/users/apps.py:22-23 connects social_account_added/updated → resolve_tenant_on_social_login (apps/users/signals.py:55-73) → resolve_ocs_chatbots → TenantMembership.aget_or_create (apps/users/services/tenant_resolution.py:161) → post_save receiver auto_create_workspace_on_membership (signals.py:21-52) creates Workspace + MANAGE membership.\n7. Provider-asserted email as auth factor: base.py:209-214 (SOCIALACCOUNT_EMAIL_AUTHENTICATION=True, AUTO_CONNECT=True, EMAIL_VERIFICATION=\"none\") and VERIFIED_EMAIL=True for all three custom providers at base.py:225-238.\n\nFRAMING CORRECTION — the open default is deliberate, not drift:\ngit log -L on base.py shows commit bbb6604 (\"Apply suggestions from code review\") removed google/github from the default, then commit 4133b1e (Simon Kelly, 2026-05-27, \"remove domain restriction for ocs and commcare-connect\") deliberately deleted the ocs and commcare_connect entries — a 2-line maintainer commit touching only config/settings/base.py. It did NOT update .env.example (last touched 2026-05-25 by 73413b3 \"scope allow-list feature to commcare-family providers only\"). So the real defect is a stale .env.example misdocumenting a security control, plus the documented-but-accepted no-email bypass; the \"open by default for OCS/Connect\" behavior is an intentional product decision (consistent with the first-class OCS-connections feature and EMBED_ALLOWED_ORIGINS for labs.connect.dimagi.com).\n\nSCOPE CORRECTION — self-provisioning impact overstated:\nresolve_ocs_chatbots/resolve_connect_opportunities fetch tenants using the user's OWN access token (tenant_resolution.py:118-161), so an arbitrary OCS-authenticated user only gets workspaces for OCS teams they already belong to. No cross-tenant access is established by this finding. The exposure is open registration + resource provisioning on the Scout instance, not data access beyond the user's own upstream entitlements.",
+          "notes": "PARTIAL, not CONFIRMED, because the finding's central framing is off in two ways while the mechanism is accurate. (1) Git history (4133b1e) shows the OCS/Connect-unrestricted default is a deliberate maintainer decision, not an accidental gap — the genuine bug is that .env.example:43-44 was never updated and now misdocuments a security control (an operator reading it would wrongly believe OCS/Connect are restricted by default). (2) \"Any OCS-authenticated user can self-provision ... auto-resolved tenants and auto-created workspaces\" is literally true and reachable in prod today, but the tenants/workspaces are scoped to the user's own upstream OCS teams via their own token — no privilege beyond their existing OCS access. Remaining real weaknesses worth tracking: the no-email bypass (adapters.py:89-90) means the commcare→dimagi.com restriction is only best-effort and relies on HQ always returning an email; and provider-asserted emails with VERIFIED_EMAIL=True + EMAIL_AUTHENTICATION auto-connect do make upstream-provider email integrity an auth factor (accepted by code comment \"Trust Dimagi-operated providers\", base.py:210-211). Recommended fix is small: correct .env.example lines 38-44, and optionally log a warning when a restricted-provider login arrives with no email. Status corrected LATENT→DEBT: the live behavior is intended; the defect is misleading documentation of a security control plus an accepted best-effort enforcement gap."
+        }
+      ]
+    }
+  },
+  {
+    "title": "Multi-team OCS team-mismatch surfaces as generic 'No credential configured', indistinguishable from no connection",
+    "claim": "A user has at most one OCS OAuth TenantConnection; each membership records its team and aresolve_credential fails closed when the live token's team != the membership's team (correct, prevents cross-team leaks). But the failure is reported to the agent/user as the generic 'No credential configured' — identical to having no connection at all — so a user with a valid OCS login in team B materializing a chatbot scoped to team A is never told to re-authorize into the other team. Same indistinguishability applies to Fernet-decrypt failure, refresh failure (which then 401s), and team mismatch — four distinct failures collapse into one misleading message; the AUTH_TOKEN_EXPIRED envelope code exists but is unused on this path.",
+    "status": "DEBT",
+    "impact": "correctness",
+    "complexity": "essential",
+    "replication": 3,
+    "reviewers": [
+      "vertical-accounts-auth",
+      "lens-error-handling",
+      "journey-failure-paths"
+    ],
+    "files": [
+      "apps/users/services/credential_resolver.py:52-95,83-110",
+      "apps/users/services/tenant_resolution.py:118-175",
+      "apps/workspaces/tasks.py:264-272",
+      "apps/users/adapters.py:48-52",
+      "mcp_server/envelope.py:32"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "evidence": "Core fail-closed logic CONFIRMED. `apps/users/services/credential_resolver.py:92` — `if not token_obj or _oauth_team_mismatch(membership, token_obj): return None`. `_oauth_team_mismatch` (lines 52-63) reads `membership.team_slug` vs the SocialAccount's live `extra_data[\"team\"]` and returns True when both set and differ — correct cross-team-leak prevention. Model confirms single OAuth connection per user/provider: `apps/users/models.py:184-188` unique constraint; `team_slug`/`team_name` are property/setters backed by `provider_metadata` (models.py:237-251), so `asave(update_fields=[..., \"provider_metadata\", ...])` at tenant_resolution.py:166 persists them correctly.\n\nFOUR collapsed failure modes verified: (1) team mismatch → None (resolver:92); (2) no SocialToken → None (resolver:92, `not token_obj`); (3) API-key Fernet decrypt failure → None (resolver:83-85); (4) refresh failure does NOT return None — resolver:106-110 catches `TokenRefreshError`, logs, and returns the STALE token which 401s downstream (finding characterizes this correctly as distinct).\n\nAUTH_TOKEN_EXPIRED unused: CONFIRMED. `grep -rn AUTH_TOKEN_EXPIRED` finds it only at `mcp_server/envelope.py:31` (definition) and `tests/test_mcp_server.py:247-252` (existence assertion) — never used to classify any real error anywhere.\n\nReachability CONFIRMED: OCS is a fully-wired live allauth provider (`apps/users/providers/ocs/provider.py:20`, OAuth adapter views.py:16-28). `resolve_ocs_chatbots` runs on login via `apps/users/signals.py:69-71` and `apps/users/auth_views.py:89`. Materialization calls `aresolve_credential` at `apps/workspaces/tasks.py:264` (multi-tenant loop) and tasks.py:160 (single-tenant `refresh_tenant_schema`), reached by the agent-facing `run_materialization` MCP tool (`mcp_server/server.py:521,607`) and the HTTP materialization API (`apps/workspaces/api/materialization_views.py:185`).\n\nMECHANISM MISSTATED (basis for PARTIAL): The finding claims the failure is \"reported to the agent/user as the generic 'No credential configured'.\" That literal string lives at `apps/workspaces/tasks.py:270` inside `tenant_results`, which is the procrastinate task's RETURN value — and I traced that it is NEVER consumed by any user/agent-facing path. The status/error_summary/resume pipeline re-derives state independently from `MaterializationRun` rows: `_aggregate_materialization_state` (tasks.py:948-1016) reads ONLY MaterializationRun rows; a credential-None tenant is `continue`d (tasks.py:265-273) BEFORE any MaterializationRun is created, so it contributes nothing. Consequence: (a) single-tenant — zero runs → status `no_runs` → user sees tasks.py:1250-1253 / 1104-1107 (\"tenants have no pipeline configured or no credentials set up\"), NOT \"No credential configured\"; (b) multi-tenant with a mix — the team-mismatch tenant is SILENTLY DROPPED from the aggregate; status reflects only succeeding tenants (likely `completed`/`partial`), so the failure may not surface at all. Either way the indistinguishability holds and is arguably worse than the finding states (silent drop vs. one misleading line), and no path tells the user to re-authorize into the other team.",
+          "notes": "Defect is real, reachable, and DEBT/correctness as classified. The one inaccuracy is the surfaced-message mechanism: the user does not see \"No credential configured\" (that string is a dead task-return field); they see the generic `no_runs` message or, in multi-tenant, nothing — which strengthens rather than weakens the underlying complaint. The `aresolve_credential` line range in the finding (52-95, 83-110) is accurate. Suggested fix direction unchanged but should target the resolver returning a typed reason (e.g. an enum or raising a classified error) so callers can map team-mismatch → AUTH_TOKEN_EXPIRED-style re-auth guidance, AND fix the silent multi-tenant drop in `_aggregate_materialization_state` / the tasks.py:265 continue so credential failures register a FAILED MaterializationRun or otherwise reach the resume prompt.",
+          "corrected_status": "DEBT",
+          "corrected_impact": "correctness"
+        }
+      ]
+    }
+  },
+  {
+    "title": "me_view recomputes onboarding uncached on every /me poll, re-hitting all three provider APIs and flapping onboarding_complete for token-but-no-tenant users",
+    "claim": "me_view recomputes onboarding from the DB and, when incomplete, eagerly resolves all three providers with no cache guard (unlike tenant_list_view's 1h TTL). _atry_resolve_provider returns True whenever a token exists and resolve_fn doesn't raise even if it resolved zero tenants (resolve_commcare_domains returns [] without raising), so the SPA's /me poll issues up to 3 live provider API calls every poll for a token-bearing user with zero persisted memberships, and onboarding_complete is reported True transiently while the persisted state stays incomplete — the flag flaps and never stabilizes, re-resolving each poll.",
+    "status": "LATENT",
+    "impact": "cost-perf",
+    "complexity": "accidental",
+    "replication": 1,
+    "reviewers": [
+      "vertical-accounts-auth"
+    ],
+    "files": [
+      "apps/users/auth_views.py:46-92",
+      "apps/users/views.py:91-121",
+      "apps/users/services/tenant_resolution.py:43-68",
+      "frontend/src/store/authSlice.ts:36"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "evidence": "The underlying code defect is real, but the load-bearing \"every /me poll\" framing is false.\n\nTRUE parts (independently re-traced):\n- apps/users/auth_views.py:68-92 me_view: `onboarding_complete = await TenantMembership.objects.filter(user=user, connection__isnull=False, archived_at__isnull=True).aexists()`; `if not onboarding_complete:` it calls `_atry_resolve_provider` for \"commcare\", \"commcare_connect\", and \"ocs\" with NO cache guard. Contrast apps/users/views.py:91-121 tenant_list_view, which guards each provider with `cache.aget(f\"tenant_refresh:{user.id}:{provider}\")` + `cache.aset(..., TENANT_REFRESH_TTL)` where `TENANT_REFRESH_TTL = 3600` (views.py:31). me_view has no equivalent — confirmed.\n- apps/users/auth_views.py:46-56 `_atry_resolve_provider`: returns False only if `not token_obj`; otherwise `await resolve_fn(...)` then `return True`, returning False only on exception. apps/users/services/tenant_resolution.py:43-68 `resolve_commcare_domains` returns `memberships` (== [] when `domains` is empty) WITHOUT raising. So with a token but zero domains, `commcare_ok` is True while the persisted `aexists()` stays False — `onboarding_complete` is reported True transiently while persisted state is incomplete. The flag is genuinely unstable across calls. Confirmed.\n- me_view is wired live: apps/users/auth_urls.py:27 `path(\"me/\", me_view, name=\"me\")`. SPA hits it via frontend/src/store/authSlice.ts:36 `api.get<User>(\"/api/auth/me/\")`.\n\nFALSE part (the headline mechanism): the SPA does NOT poll /me. grep across frontend/src shows `fetchMe` is called only: App.tsx:34-38 once on mount (useEffect deps `[fetchMe, isPublicPage, isEmbedPage]`, no interval); EmbedPage.tsx:73-89 once on mount plus a `visibilitychange` handler that explicitly skips when `authStatus === \"authenticated\"`; OnboardingWizard.tsx:34 after API-key submit. There is no `setInterval`/`setTimeout`/react-query `refetchInterval` around fetchMe — the only intervals in the codebase are NetworkStatusContext health checks and useWorkspaceJobs job polling, both unrelated to /me. So \"every /me poll\" and \"re-resolving each poll ... never stabilizes\" do not reproduce: the eager 3-provider resolution fires per page load / hard refresh / visibility-while-unauthenticated / wizard submit, not on a continuous loop.",
+          "notes": "Corrected mechanism: the cost is incurred per full page load/refresh for a token-bearing user with zero persisted memberships, not \"every poll.\" There is no /me polling loop in the SPA, so the continuous re-resolution and \"flag flaps and never stabilizes, re-resolving each poll\" claims are overstated. The transient onboarding_complete=True / persisted-False flap IS real but only surfaces on each fresh fetchMe (reload), not continuously. Severity is accurately cost-perf and status LATENT, but replication of the stated continuous-poll behavior fails; the bounded per-load cost is much lower than implied. A real, worthwhile fix (add the same TTL cache guard me_view lacks; make _atry_resolve_provider return True only when resolution actually persisted a membership) is justified, but on the corrected, lower-frequency basis.",
+          "corrected_status": "LATENT",
+          "corrected_impact": "cost-perf"
+        }
+      ]
+    }
+  },
+  {
+    "title": "auto_create_workspace_on_membership performs three writes outside a transaction",
+    "claim": "The post_save signal creates Workspace, then WorkspaceTenant, then WorkspaceMembership with no transaction.atomic(); a failure between steps leaves an orphan auto-workspace with no tenant and/or no membership, which load_workspace_context later rejects with 'Workspace has no tenants'. The idempotency guard is sound, so this is a durability gap rather than a duplication race. Fires on every first-time TenantMembership creation.",
+    "status": "COSMETIC",
+    "impact": "correctness",
+    "complexity": "accidental",
+    "replication": 1,
+    "reviewers": [
+      "vertical-accounts-auth"
+    ],
+    "files": [
+      "apps/users/signals.py:21-52",
+      "mcp_server/context.py:106-107"
+    ],
+    "verification": {
+      "verdict": "REFUTED",
+      "votes": [
+        {
+          "verdict": "REFUTED",
+          "evidence": "QUOTES VERIFIED: apps/users/signals.py:42-52 does perform three un-wrapped writes — `workspace = Workspace.objects.create(...)` (L42), `WorkspaceTenant.objects.create(workspace=workspace, tenant=instance.tenant)` (L47), `WorkspaceMembership.objects.create(...)` (L48-52) with no `transaction.atomic()` in the handler. The consequence quote is real: mcp_server/context.py:107 `raise ValueError(f\"Workspace '{workspace_id}' has no tenants\")`, reached after `tenant_count = await workspace.tenants.acount()` (L104). The idempotency guard (signals.py:33-40) and early-return on `if not created: return` (L24-25) are quoted correctly. Signal IS wired: apps/users/apps.py:16 `import apps.users.signals  # noqa: F401 — connects auto_create_workspace_on_membership` plus `@receiver(post_save, sender=\"users.TenantMembership\")`. load_workspace_context IS reachable: mcp_server/server.py:75 and apps/agents/graph/base.py:348.\n\nREFUTATION OF THE MECHANISM: The finding asserts \"a failure between steps leaves an orphan auto-workspace.\" It does not, on any production path. Every production site that CREATES a TenantMembership (and fires created=True) goes through get_or_create/aget_or_create: apps/users/services/tenant_resolution.py:57,104,161 (`await TenantMembership.objects.aget_or_create(user=user, tenant=tenant)`) and apps/users/views.py:64 (`TenantMembership.objects.get_or_create(...)`). I verified in the installed Django 5.2.11 source (`inspect.getsource(QuerySet.get_or_create)`) that it does `with transaction.atomic(using=self.db): return self.create(**params), True`. The post_save signal dispatches synchronously inside create()->save()->save_base(), i.e. INSIDE that atomic block. A non-IntegrityError raised by the signal (e.g. WorkspaceTenant.create failing) propagates out and rolls back the WHOLE block — the orphan Workspace AND the TenantMembership row. aget_or_create is just `sync_to_async(get_or_create)`, same wrapper.\n\nEMPIRICAL CONFIRMATION: I wrote a probe that monkeypatches WorkspaceTenant.objects.create to raise RuntimeError (simulating \"failure between step 1 and step 2\"). Under @pytest.mark.django_db(transaction=True) (no pytest outer transaction = production autocommit semantics), calling `TenantMembership.objects.get_or_create(user, tenant)` produced: TenantMembership=0, Workspace=0, WorkspaceTenant=0, WorkspaceMembership=0. NO ORPHAN. The only configuration that left an orphan (Workspace=1, WorkspaceTenant=0) was plain `TenantMembership.objects.create(...)` — and grep over apps/ shows that plain-create path is used for TenantMembership ONLY in test files (apps/artifacts/tests/test_artifact_query_data.py, tests/test_workspace_auto_creation.py), never in production resolution/view code. Merge paths (apps/users/services/merge.py:166,295) use .update()/.delete() which do not fire created=True. Probe deleted after running; existing tests/test_workspace_auto_creation.py still passes (4/4).",
+          "notes": "PARTIAL-leaning-REFUTED is defensible, so let me be precise: the literal code observation (\"three writes, no transaction.atomic in the handler\") is TRUE, but the claimed CONSEQUENCE (\"a failure between steps leaves an orphan\") is FALSE for every reachable production path, because the enclosing get_or_create/aget_or_create atomic block makes the trio effectively transactional and rolls back the TenantMembership too. So there is no durability gap and no orphan in practice. The finding's own severity hook (\"load_workspace_context later rejects with 'Workspace has no tenants'\") never triggers from this path. I mark REFUTED rather than PARTIAL because the defect's actual harm (the orphan) does not exist on the live paths; the remaining true statement is purely cosmetic/stylistic (an explicit transaction.atomic() would be clearer and would also protect the non-existent plain-create path, but adds no real durability that get_or_create doesn't already provide). One caveat worth a follow-up if desired: if a future code path ever creates a TenantMembership via bulk paths or plain .save()/.create() OUTSIDE get_or_create, the orphan WOULD become real — so adding an explicit transaction.atomic() in the signal handler is cheap defense-in-depth, but today it is DEBT-at-most, not a correctness bug.",
+          "corrected_status": "COSMETIC",
+          "corrected_impact": "correctness"
+        }
+      ]
+    }
+  },
+  {
+    "title": "Login-time tenant resolution failures swallowed: user lands with zero data sources and no error",
+    "claim": "Post-OAuth tenant resolution for all three providers is wrapped in except Exception: logger.warning, so a provider-API blip at login yields a logged-in user with no TenantMembership rows: no workspace auto-creation, an empty data-sources page, and nothing distinguishing 'resolution failed' from 'account has no opportunities'. The warning is suppressed by Sentry's ERROR event-level default and has no metric filter, so nobody is told. Frontend ensure-tenant failure also only console.errors.",
+    "status": "LATENT",
+    "impact": "velocity",
+    "complexity": "mixed",
+    "replication": 2,
+    "reviewers": [
+      "lens-error-handling",
+      "lens-observability"
+    ],
+    "files": [
+      "apps/users/signals.py:55-78",
+      "frontend/src/store/domainSlice.ts:88-89"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "evidence": "All literal code claims reproduced. signals.py:64-78 wraps every provider's `async_to_sync(resolve_*)` in `except Exception: logger.warning(..., exc_info=True)` (Connect 67-68, OCS 72-73, CommCare 77-78), wired via `social_account_added.connect(resolve_tenant_on_social_login)` / `social_account_updated.connect(...)` in apps.py:22-23 — live, reachable. domainSlice.ts:88-89 `ensureTenant` only `console.error(\"[Scout] Failed to ensure tenant:\", error)`, reachable from EmbedPage.tsx:63 and :102.\n\nObservability claim VERIFIED: base.py:297 `sentry_sdk.init(dsn=..., environment=..., release=..., traces_sample_rate=..., send_default_pii=...)` passes NO `integrations=` arg, so default LoggingIntegration applies. I confirmed `LoggingIntegration.__init__` default `event_level=40` (logging.ERROR) via `inspect.signature`. `logger.warning` is level 30 < 40 → captured as breadcrumb only, never as a Sentry event. No before_send/metric filter exists anywhere in config/ or apps/. So \"operators are not told\" is correct.\n\nBUT the consequence is materially overstated — the finding omits a self-healing fallback. me_view (auth_views.py:68-92), the handler for `GET /api/auth/me/` that the SPA calls via `fetchMe` on every load (authSlice.ts:36; App.tsx, EmbedPage.tsx:74), computes `onboarding_complete` from existing memberships, and IF none exist it RE-RUNS resolution for all three providers (lines 82-90) via `_atry_resolve_provider` → `aget_social_token` (credential_resolver.py:47-49), which reads the STORED SocialToken persisted by allauth. So a transient provider blip at login self-heals on the very next page load with no user action. Meanwhile App.tsx:65-66 renders `OnboardingWizard` (not a blank data-sources page) whenever `onboarding_complete` is false — the wizard offers \"Connect with OAuth\" / \"Use an API Key\" (OnboardingWizard.tsx:121-135), i.e. a retry surface. auto_create_workspace_on_membership (signals.py:21-52) is idempotent and fires once memberships finally land, so workspace creation is deferred, not permanently skipped.",
+          "corrected_status": "LATENT",
+          "corrected_impact": "velocity",
+          "notes": "The real, confirmed defect is the OPERATOR-ALERTING half: failures are logged at WARNING, which Sentry's default event_level (40) suppresses to a breadcrumb, with no metric/before_send filter, so nobody is paged — and the user-facing screen can't distinguish \"resolution failed\" from \"account legitimately has no opportunities/domains\". Both halves are accurate.\n\nWhat the finding overstates is the END-USER consequence and severity: (1) it is self-healing — me_view re-resolves on every page load using the stored OAuth token (auth_views.py:82-90), so a transient blip clears itself with zero user action; (2) the user lands on OnboardingWizard (App.tsx:65-66), a retry-capable screen, NOT a blank/dead data-sources page; (3) auto-workspace-creation is deferred, not lost. So \"lands with zero data sources and no error\" is only momentarily true and is auto-retried.\n\nSeverity correction: the data-correctness/user-stranding framing should be downgraded. The durable issue is observability/velocity (operators get no signal; the UI conflates failure with empty). I'd recommend: raise the swallowed warnings to ERROR or add an explicit sentry_sdk.capture_message/metric, and surface a distinct \"couldn't reach your provider, retrying\" state vs \"no data sources found\" in the OnboardingWizard/data-sources view. The frontend ensureTenant console.error (domainSlice.ts:88-89) is a separate, lower-stakes embed-only path and is correctly described."
+        }
+      ]
+    }
+  },
+  {
+    "title": "Outage renders as empty-but-successful UI: checkpointer/thread-list load failures return [] with HTTP 200",
+    "claim": "_load_thread_messages returns [] on any checkpointer error with a 200 response, and the frontend fetchThreads catch sets {threads: [], threadsStatus: 'loaded'}, so during a DB/checkpointer blip users see their conversations apparently deleted with no error state. repair_dangling_tool_calls similarly returns [] on failure (repairs skipped exactly when the checkpointer is flaky). MCP get_schema_status returns the same 'not_provisioned'/empty success envelope for Workspace.DoesNotExist as for a genuinely unprovisioned workspace, inviting materialization against a phantom workspace; a pipeline-registry YAML parse failure silently omits a provider, surfacing as 'No pipeline for provider X' that points at workspace config rather than a broken deploy. Same swallowed-failure family.",
+    "status": "LATENT",
+    "impact": "correctness",
+    "complexity": "accidental",
+    "replication": 1,
+    "reviewers": [
+      "lens-error-handling"
+    ],
+    "files": [
+      "apps/chat/thread_views.py:100-102",
+      "frontend/src/store/uiSlice.ts:72-74",
+      "apps/chat/helpers.py:39-41",
+      "mcp_server/server.py:667-686",
+      "mcp_server/pipeline_registry.py:88-96",
+      "apps/workspaces/tasks.py:254-262"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "evidence": "I independently re-traced all six locations; line numbers match.\n\n1) THREAD-MESSAGE LOAD (CONFIRMED): apps/chat/thread_views.py:96-102 — `_load_thread_messages`: `try: ... checkpointer.aget_tuple(config) except Exception: logger.warning(...); return []`. Reachable: urls.py:22 routes `<uuid>/messages/` to thread_messages_view, which calls `_load_thread_messages(thread_id)` and returns `JsonResponse(ui_messages, safe=False)` — HTTP 200 with []. Frontend ChatPanel.tsx:91-112 `loadMessages` only special-cases `ApiError` 404; a 200 [] flows to `setMessages([])` with no error state. So a checkpointer blip renders an existing thread as a blank (\"haunted\") conversation. Confirmed.\n\n2) THREAD-LIST FETCH (CONFIRMED but mechanism corrected): frontend/src/store/uiSlice.ts:67-74 — `fetchThreads` `catch { set({ threads: [], threadsStatus: 'loaded' }) }`. Sidebar.tsx:118-176 renders `threads.map(...)` with NO error branch and NO empty-state text, so on failure the Chat History pane is silently blank. CORRECTION: the endpoint behind fetchThreads (`GET /api/workspaces/<id>/threads/`) is served by `_list_threads` (thread_views.py:71-91), a plain DB query that NEVER touches the checkpointer. So the trigger is \"any failure of the threads DB query / 500 / network\", not a checkpointer error specifically; the catch swallows all errors uniformly. The finding's framing (\"checkpointer blip\") is imprecise for this case, but the empty-but-successful UI consequence holds.\n\n3) repair_dangling_tool_calls (CONFIRMED): apps/chat/helpers.py:37-41 — `try: state = await agent.aget_state(config) except Exception: logger.warning(...); return []`. Live call site: apps/chat/views.py:204 in the chat stream path. On checkpointer flakiness, the dangling tool_calls are not repaired, so the unanswered tool_use sequence is sent to Anthropic and rejected with HTTP 400 — exactly when the checkpointer is the thing that's flaky. Confirmed.\n\n4) pipeline_registry (CONFIRMED): mcp_server/pipeline_registry.py:88-96 — `for path in glob('*.yml'): try: ... except Exception: logger.exception(...)`, silently dropping the failed provider from the cache. Downstream apps/workspaces/tasks.py:253-262: `pipeline_name = provider_pipeline_map.get(tm.tenant.provider); if pipeline_name is None: tenant_results.append({... 'error': f\"No pipeline for provider '{tm.tenant.provider}'\"})`. So a broken-deploy YAML parse error masquerades as a per-tenant workspace-config error. Confirmed.\n\n5) get_schema_status phantom-workspace (OVERSTATED): mcp_server/server.py:677-681 — `try: workspace = await Workspace.objects.aget(id=workspace_id) except Workspace.DoesNotExist: tc['result'] = not_provisioned`. The empty 'not_provisioned' envelope for DoesNotExist == genuinely-unprovisioned is real. BUT the claimed consequence (\"inviting materialization against a phantom workspace\") is NOT reachable: (a) workspace_id is injected server-side into MCP tool calls from agent state (apps/agents/graph/base.py:503-508), and that state is set from a resolved real workspace (views.py:211 `'workspace_id': str(workspace.id)`) — the LLM cannot supply an arbitrary id; the param is in hidden_params (base.py:512). (b) run_materialization (server.py:555-558) fails closed via `_resolve_workspace_memberships` which returns an error for a missing workspace (server.py:498-500). (c) The materialize_workspace task itself catches Workspace.DoesNotExist and returns {'error':'Workspace not found'} (tasks.py:227-229). So at most this is a cosmetic envelope ambiguity, not a materialization hazard.",
+          "notes": "Net: the \"swallowed-failure renders as empty-but-successful UI\" family is real and reachable for items 1-4. Two corrections downgrade this from CONFIRMED to PARTIAL: (a) the thread-LIST case (uiSlice/Sidebar) is triggered by a plain DB-query/HTTP failure, not by the checkpointer — the finding conflates the two distinct mechanisms (checkpointer for messages, DB query for the list); both still produce a no-error empty UI. (b) The get_schema_status phantom-workspace consequence is overstated/unreachable due to server-side workspace_id injection plus two downstream fail-closed guards in the materialization path. Status LATENT and impact correctness are appropriate for items 1-4 (degraded/misleading UX during infra blips, plus a 400-inducing skipped repair). Suggest splitting the get_schema_status item out or downgrading it to COSMETIC.",
+          "corrected_status": "LATENT",
+          "corrected_impact": "correctness"
+        }
+      ]
+    }
+  },
+  {
+    "title": "DEBUG MemorySaver fallback cached for process lifetime; dead memory checkpointer module carries a silent prod MemorySaver fallback",
+    "claim": "apps/chat/checkpointer.py correctly raises in production when Postgres is unavailable, but under DEBUG one startup blip caches MemorySaver in the module global, silently routing all subsequent conversations to process memory until restart. The parallel apps/agents/memory/checkpointer.py get_postgres_checkpointer falls back to MemorySaver on any failure ('Conversations will NOT be persisted') and get_sync_checkpointer always returns MemorySaver; both are exported but unused (only get_database_url is imported) — a future caller picking the obvious memory module would reintroduce the silent history-loss the live module was hardened against. The memory module also resolves the DB env-first (raw DATABASE_URL, then a DB_HOST/DB_NAME convention used nowhere else) with Django settings third, two sources of truth that diverge under PgBouncer/CI.",
+    "status": "DEBT",
+    "impact": "correctness",
+    "complexity": "accidental",
+    "replication": 3,
+    "reviewers": [
+      "vertical-chat-agent",
+      "lens-error-handling",
+      "lens-ops-config"
+    ],
+    "files": [
+      "apps/chat/checkpointer.py:18,43-55",
+      "apps/agents/memory/checkpointer.py:43-59,90,138-148",
+      "apps/agents/memory/__init__.py:3"
+    ],
+    "verification": {
+      "verdict": "CONFIRMED",
+      "votes": [
+        {
+          "verdict": "CONFIRMED",
+          "evidence": "I independently re-traced every link and every quote holds.\n\nLIVE MODULE (apps/chat/checkpointer.py):\n- Line 14-15: module globals `_checkpointer = None`, `_pool = None`.\n- Line 18-21 `ensure_checkpointer(*, force_new=False)`: `if _checkpointer is not None and not force_new: return _checkpointer` — cached value short-circuits.\n- Line 19 `global _checkpointer, _pool` then line 43-48: `except Exception: if settings.DEBUG: ... _checkpointer = MemorySaver()` — writes the MemorySaver into the module global. Line 57 `return _checkpointer`. So under DEBUG one failed first call caches a MemorySaver and every later call returns it (line 20) without retrying Postgres. CONFIRMED.\n- Line 49-55 (`else` branch, DEBUG False): logs error + `raise`. So production correctly raises — matches the finding's claim that prod is hardened. CONFIRMED (config/settings/production.py:11 `DEBUG = False`, base.py:34 defaults True).\n- No reset of `_checkpointer`/`_pool` exists anywhere except inside `ensure_checkpointer` itself (grep over apps/). The only escape from a cached MemorySaver is `force_new=True`, invoked solely in apps/chat/views.py:178 inside the exception fallback after a `build_agent_graph` failure — which never fires when the cached MemorySaver works. So the fallback persists for process lifetime. CONFIRMED.\n\nREACHABILITY: `ensure_checkpointer` is wired into live routes/tasks: apps/chat/thread_views.py:97, apps/chat/views.py:166 & 178, apps/workspaces/tasks.py:859. So the DEBUG-cache path is reachable in the dev runtime.\n\nDEAD MEMORY MODULE (apps/agents/memory/checkpointer.py):\n- get_postgres_checkpointer (line 90) falls back to MemorySaver on ImportError (line 136) and on any Exception (line 138-145) with log 'Conversations will NOT be persisted across sessions' — and crucially NO DEBUG guard (unconditional). get_sync_checkpointer (line 148-159) always `return MemorySaver()`. Docstring line 7-8 confirms unconditional fallback intent.\n- USAGE: grep across the entire repo (apps/, config/, mcp_server/, tests) shows the ONLY importer of this module is apps/chat/checkpointer.py:10 `from apps.agents.memory.checkpointer import get_database_url`. get_postgres_checkpointer and get_sync_checkpointer appear only in their own definitions, the apps/agents/memory/__init__.py:3-4 re-export, and the __all__ list — zero call sites. CONFIRMED both are exported-but-unused; a future caller picking the obvious memory module would reintroduce the silent history loss the live module guards against.\n\nENV-FIRST DIVERGENCE (get_database_url, line 42-86): reads raw `DATABASE_URL` first (line 43), then a `DB_HOST/DB_NAME/DB_USER/...` convention (line 49-59), then Django settings third (line 61-83). Confirmed the DB_HOST/DB_NAME convention is used nowhere else: grep over *.py/*.yml/Dockerfile/.env* finds no such vars; the project standardizes on `DATABASE_URL` (docker-compose.yml:27,47; .env.example:2; config/settings/base.py:121 `env.db('DATABASE_URL', ...)`). So Django's DATABASES['default'] and get_database_url both derive from DATABASE_URL but via independent code paths — two sources of truth as claimed. Note the live chat pool adds PgBouncer-safe kwargs (prepare_threshold:0, autocommit) at apps/chat/checkpointer.py:33-36 that the dead memory module's from_conn_string path lacks — an additional latent divergence consistent with the PgBouncer concern.",
+          "corrected_status": "DEBT",
+          "corrected_impact": "correctness",
+          "notes": "Status DEBT and impact correctness are accurate. The finding does NOT overclaim a prod break — it explicitly states the live module correctly raises in production, and classifies the issue as DEBT (latent reintroduction risk + dev-only silent fallback). Only nuance: the title phrase 'silent prod MemorySaver fallback' is mildly alarmist read in isolation, since the unconditional-fallback module is currently unwired; but the body immediately clarifies 'both are exported but unused,' so the framing is honest. The DEBUG-cache half affects only the development runtime (DEBUG defaults True in base.py, forced False in production.py), which is exactly what 'DEBUG... silently routing all subsequent conversations to process memory until restart' describes. No corrections needed to severity or mechanism."
+        }
+      ]
+    }
+  },
+  {
+    "title": "Cascade-FAILED view schemas report a fabricated cause and wrong recovery advice",
+    "claim": "_fail_dependent_view_schemas flips sibling WorkspaceViewSchema rows to FAILED without writing last_error, so get_schema_status returns the fallback 'View schema build failed.' — misattributing a tenant-schema teardown cascade as a build failure. The resume prompt built on this status tells the agent 'do NOT re-run materialization; a system-side fix is required', which is wrong advice for this cause (re-materializing the torn-down tenant is the fix). A fresh sibling of the incident-1d 'wrong story told to the agent' class, introduced by the fix wave itself.",
+    "status": "LATENT",
+    "impact": "correctness",
+    "complexity": "accidental",
+    "replication": 1,
+    "reviewers": [
+      "lens-observability"
+    ],
+    "files": [
+      "apps/workspaces/tasks.py:685-689",
+      "apps/workspaces/models.py:233",
+      "mcp_server/server.py:751-763",
+      "apps/workspaces/tasks.py:1090-1095"
+    ],
+    "verification": {
+      "verdict": "PARTIAL",
+      "votes": [
+        {
+          "verdict": "PARTIAL",
+          "evidence": "I re-traced the chain independently against the actual files.\n\n(1) Cascade writes FAILED without last_error. apps/workspaces/tasks.py:684-687: `_fail_dependent_view_schemas` ends with `.aupdate(state=SchemaState.FAILED)` — no last_error written. Called from teardown_schema at tasks.py:653. The genuine build-failure path DOES persist last_error: apps/workspaces/services/schema_manager.py:428-430 sets `vs.state = SchemaState.FAILED; vs.last_error = str(exc)[:500]`, and a successful build clears it (schema_manager.py:436-438 `vs.last_error = \"\"`). So a workspace that was ACTIVE (last_error=\"\") then cascade-flipped retains last_error=\"\". CONFIRMED that the two FAILED causes are indistinguishable downstream.\n\n(2) get_schema_status fabricates the cause. mcp_server/server.py:749-763: for a multi-tenant workspace with a FAILED WorkspaceViewSchema, returns `\"error\": failed_vs.last_error or \"View schema build failed.\"`. Empty last_error → generic \"View schema build failed.\" This is a live agent tool (registered in apps/agents/graph/base.py:72 MCP_TOOL_NAMES) callable any turn. CONFIRMED and robustly reachable.\n\n(3) Resume prompt hard-codes wrong recovery. apps/workspaces/tasks.py:1085-1095: the view_schema_failed branch unconditionally emits \"Do NOT re-run materialization — it cannot fix this... a system-side fix is required\", using `view_schema_error = (vs.last_error if vs else \"\") or \"the workspace query layer ... is missing or was never built\"` (line 1081-1083). For the cascade case last_error is empty so it falls to the generic string and the \"do NOT re-run\" advice. That advice IS wrong for this cause: re-running materialization rebuilds the view schema — tasks.py:322-324 calls `SchemaManager().build_view_schema` on `all_succeeded`. CONFIRMED in mechanism.\n\n(4) Trigger is live. apps/workspaces/tasks.py:516 `@app.periodic(cron=\"*/30 * * * *\")` expire_inactive_schemas defers teardown_schema (tasks.py:544), which runs _fail_dependent_view_schemas. Scheduled every 30 min.\n\nWHERE THE FINDING OVERSTATES:\n\n(a) The resume-prompt arm is only narrowly reachable for the cascade cause. The view_schema_failed branch (tasks.py:1075) requires `status in (\"completed\",\"partial\")` for the job being resumed — i.e. a materialization just ran for that workspace. But a successful (all_succeeded → status=\"completed\") materialize rebuilds the view schema to ACTIVE at tasks.py:322-324 BEFORE the resume reads vs.state at tasks.py:1078-1079, so the resume sees ACTIVE and view_schema_failed stays False. The cascade-FAILED row only survives to the resume when build_view_schema is skipped (status=\"partial\", since line 322 gates on all_succeeded) — a partial-materialization-after-cascade window. So the resume arm is real but not the common case; get_schema_status is the robustly-reachable surface, not the resume prompt.\n\n(b) The finding ignores a contradicting agent surface that gives CORRECT advice for this cause. apps/agents/graph/base.py:334-343 (_fetch_multi_tenant_schema_context, injected into the system prompt every turn): for any non-ACTIVE view schema it returns \"No data has been loaded yet. Call `run_materialization` to start loading data...\" — which for the cascade case is the right recovery. So the agent is NOT uniformly told \"system fix required, do not re-materialize\"; the every-turn prompt context tells it the opposite. The finding's framing of a single coherent \"wrong story\" surface is incomplete: the surfaces conflict.\n\nNet: the defect (cause fabrication + a hard-coded wrong-recovery string in one surface) is real and the trigger is live, but the severity/reachability is misstated — the most-reachable surface (get_schema_status) only misnames the cause, while the wrong-recovery prompt arm is narrowly reachable, and a separate every-turn surface actually gives correct advice. Hence PARTIAL, not CONFIRMED.",
+          "notes": "Status downgrade rationale: it is LATENT (real code, live cron trigger, but requires a shared-tenant multi-workspace topology + an agent status check on the affected sibling workspace to surface to a user; the wrong-recovery prompt arm additionally needs a partial-materialization-after-cascade timing). Impact is correctly correctness (misleading agent guidance), not data-loss. Suggested fix: have _fail_dependent_view_schemas write a distinct last_error (e.g. \"Underlying tenant schema was torn down (TTL expiry); re-run materialization to rebuild.\") so get_schema_status and the resume prompt can branch on cause; and/or make the resume view_schema_failed branch inspect whether the failure is a teardown cascade vs a genuine build error before emitting \"do NOT re-run materialization\".",
+          "corrected_status": "LATENT",
+          "corrected_impact": "correctness"
+        }
+      ]
+    }
+  }
+]
