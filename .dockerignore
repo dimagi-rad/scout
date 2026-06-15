@@ -1,0 +1,31 @@
+# Secrets — never bake into image layers (Dockerfile does `COPY . .`)
+.env
+.env.*
+
+# VCS / CI
+.git
+.gitignore
+.github
+
+# Agent worktrees & local tooling (huge — each worktree is a full repo + .venv)
+.claude
+
+# Python caches / local virtualenv
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node / frontend build artifacts (frontend source is still copied for Dockerfile.frontend)
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Docs (large; not needed in the runtime image)
+docs/
+
+# Browser automation
+.playwright/
+.playwright-cli/
