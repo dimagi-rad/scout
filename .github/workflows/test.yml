@@ -1,0 +1,44 @@
+name: Backend Test Gate
+
+on:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: scout_test
+          POSTGRES_USER: scout
+          POSTGRES_PASSWORD: scout
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U scout -d scout_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      DATABASE_USER: scout
+      DATABASE_PASSWORD: scout
+      TEST_DATABASE_NAME: scout_test
+      DATABASE_HOST: localhost
+      DATABASE_PORT: "5432"
+      # Managed/tenant-data DB for the real-DB suites. Points at the pre-created
+      # `scout_test` database; Django's own test DB is `test_scout_test`, so they
+      # don't collide. Without this, the real-DB suites silently skip (arch 12#2/10#3).
+      MANAGED_DATABASE_URL: "postgresql://scout:scout@localhost:5432/scout_test"
+      DJANGO_SECRET_KEY: test-secret-key-not-for-production
+      DJANGO_SETTINGS_MODULE: config.settings.test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check for missing migrations
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: Run tests
+        run: uv run pytest
