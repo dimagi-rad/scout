@@ -14,7 +14,11 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     env:
       IMAGE_TAG: ${{ github.sha }}
