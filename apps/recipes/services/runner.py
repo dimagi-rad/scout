@@ -102,9 +102,13 @@ class RecipeRunner:
             return self._provided_graph
 
         if self._graph is None:
+            # Reference the FK by its already-loaded column (workspace_id) rather
+            # than self.recipe.workspace: this coroutine runs inside async_to_sync,
+            # and a lazy FK load would issue a sync DB query, raising
+            # SynchronousOnlyOperation in the async context.
             workspace_tenant = (
                 await WorkspaceTenant.objects.select_related("tenant")
-                .filter(workspace=self.recipe.workspace)
+                .filter(workspace_id=self.recipe.workspace_id)
                 .afirst()
             )
             tenant = workspace_tenant.tenant if workspace_tenant else None
@@ -291,11 +295,12 @@ class RecipeRunner:
         }
 
         try:
-            workspace = self.recipe.workspace
-            # Fetch tenant info asynchronously to avoid sync query in async context
+            # Fetch tenant info asynchronously to avoid sync query in async context.
+            # Filter by workspace_id (already loaded) rather than self.recipe.workspace,
+            # which would trigger a sync lazy FK load and raise SynchronousOnlyOperation.
             wt = (
                 await WorkspaceTenant.objects.select_related("tenant")
-                .filter(workspace=workspace)
+                .filter(workspace_id=self.recipe.workspace_id)
                 .afirst()
             )
             _tenant = wt.tenant if wt else None
