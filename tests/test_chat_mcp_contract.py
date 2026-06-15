@@ -35,7 +35,6 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -218,7 +217,7 @@ async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
     schema = next(t.inputSchema for t in resp.tools if t.name == "run_materialization")
     tool_params = set((schema or {}).get("properties", {}))
 
-    tenant = await sync_to_async(Tenant.objects.create)(
+    tenant = await Tenant.objects.acreate(
         provider="commcare", external_id="contract-prompt-domain", canonical_name="Contract Prompt"
     )
     # No TenantSchema => the "no data loaded" branch that emits the pipeline= text.
@@ -266,11 +265,9 @@ async def test_get_schema_status_round_trip_not_provisioned(db):
     the shape guards the get_metadata/status "0 tables" class (10#4, tracked
     elsewhere under #246/#251).
     """
-    user = await sync_to_async(_make_user)("schema-status@example.com")
-    ws = await sync_to_async(Workspace.objects.create)(name="No Data WS", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.MANAGE
-    )
+    user = await _make_user("schema-status@example.com")
+    ws = await Workspace.objects.acreate(name="No Data WS", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
     async with mcp_wire() as (_session, tools):
         raw = await tools["get_schema_status"].ainvoke({"workspace_id": str(ws.id)})
@@ -313,11 +310,9 @@ async def test_run_materialization_enforces_thread_ownership_server_side(db):
     lives on the server, not the LLM-facing schema (07#0). Asserted on the real
     wire end to end.
     """
-    user = await sync_to_async(_make_user)("run-mat@example.com")
-    ws = await sync_to_async(Workspace.objects.create)(name="RunMat WS", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.MANAGE
-    )
+    user = await _make_user("run-mat@example.com")
+    ws = await Workspace.objects.acreate(name="RunMat WS", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
     # workspace has no tenants and the user has no tenant membership -> NOT_FOUND,
     # and there is no thread, so the tool must NOT dispatch a materialization job.
@@ -354,11 +349,9 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
     server. This is the full chat->graph->mcp_client->MCP-tool path the suite could
     not observe.
     """
-    user = await sync_to_async(_make_user)("inject@example.com")
-    ws = await sync_to_async(Workspace.objects.create)(name="Inject WS", created_by=user)
-    await sync_to_async(WorkspaceMembership.objects.create)(
-        workspace=ws, user=user, role=WorkspaceRole.MANAGE
-    )
+    user = await _make_user("inject@example.com")
+    ws = await Workspace.objects.acreate(name="Inject WS", created_by=user)
+    await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
 
     async with mcp_wire() as (_session, tools):
         base_node = ToolNode(list(tools.values()))
@@ -406,5 +399,5 @@ async def test_injecting_tool_node_flows_workspace_id_to_real_server(db):
 # --------------------------------------------------------------------------- #
 
 
-def _make_user(email: str):
-    return get_user_model().objects.create_user(email=email, password="pass")
+async def _make_user(email: str):
+    return await get_user_model().objects.acreate_user(email=email, password="pass")
