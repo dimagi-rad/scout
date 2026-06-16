@@ -189,6 +189,16 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     new_schema.last_accessed_at = timezone.now()
     await new_schema.asave(update_fields=["state", "last_accessed_at"])
 
+    # Step 3b: The tenant data schema is SHARED across workspaces, and this refresh
+    # swapped in a NEW physical schema. Every multi-tenant WorkspaceViewSchema that
+    # includes this tenant still points its namespaced views at the OLD schema
+    # (about to be torn down), so defer a rebuild for each so their views are
+    # recreated against the new ACTIVE schema — mirroring the sibling rebuild
+    # materialize_workspace performs (PR #230). Without this the views keep serving
+    # stale data until teardown drops the old schema, after which they'd be left
+    # empty (and falsely marked FAILED by teardown_schema).
+    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
+
     # Step 4: Schedule teardown of previously active schemas with a delay to allow
     # in-flight queries against the old schema to complete before it is dropped.
     old_schemas = TenantSchema.objects.filter(
@@ -349,9 +359,9 @@ async def materialize_workspace(
         # just (re)materialized so their views are recreated against the new tables.
         # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
         # we never block the resume on them.
-        await _rebuild_sibling_view_schemas(
-            current_workspace_id=str(workspace.id),
-            tenant_ids=[tm.tenant_id for tm in memberships],
+        await _rebuild_dependent_view_schemas(
+            [tm.tenant_id for tm in memberships],
+            exclude_workspace_id=str(workspace.id),
         )
 
         return {
@@ -420,52 +430,56 @@ def _multi_tenant_count_subquery():
     )
 
 
-def _sibling_view_schema_workspaces(tenant_ids, exclude_workspace_id):
-    """Queryset of OTHER multi-tenant workspaces with a WorkspaceViewSchema row
-    that share any of ``tenant_ids``.
+def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
+    """Queryset of multi-tenant workspaces with a WorkspaceViewSchema row that
+    share any of ``tenant_ids``.
 
     A workspace qualifies when it (i) contains at least one of the given tenants,
     (ii) is multi-tenant (>= 2 tenants), and (iii) has a WorkspaceViewSchema row
-    in any state. The current workspace is excluded.
+    in any state. When ``exclude_workspace_id`` is given, that workspace is left
+    out — used by the materialize path, which rebuilds its own view schema inline
+    and only needs to fan out to the *siblings*. The refresh/teardown paths pass
+    no exclusion because they are not scoped to a workspace.
 
     Uses a single annotated query (a subquery tenant count) rather than walking
     each tenant's workspaces, so cost is independent of the number of tenants
     materialized (no N+1).
     """
+    qs = Workspace.objects.filter(
+        workspace_tenants__tenant_id__in=tenant_ids,
+        view_schema__isnull=False,
+    )
+    if exclude_workspace_id is not None:
+        qs = qs.exclude(id=exclude_workspace_id)
     return (
-        Workspace.objects.filter(
-            workspace_tenants__tenant_id__in=tenant_ids,
-            view_schema__isnull=False,
-        )
-        .exclude(id=exclude_workspace_id)
-        .annotate(num_tenants=_multi_tenant_count_subquery())
+        qs.annotate(num_tenants=_multi_tenant_count_subquery())
         .filter(num_tenants__gte=2)
         .distinct()
     )
 
 
-async def _rebuild_sibling_view_schemas(*, current_workspace_id: str, tenant_ids) -> None:
-    """Defer a view-schema rebuild for every sibling workspace whose namespaced
-    views were (or will be) cascade-dropped by this workspace's re-materialization.
+async def _rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=None) -> None:
+    """Defer a view-schema rebuild for every multi-tenant workspace whose
+    namespaced views were (or will be) cascade-dropped by a (re-)materialization
+    or refresh of one of ``tenant_ids``.
 
-    See the call site in materialize_workspace for the why. The query already
-    yields distinct workspace ids, so no extra dedupe is needed. Best-effort: a
-    failure to defer one rebuild must not block the resume, so each defer is
-    individually guarded and the dispatched task owns its own failure handling.
+    Shared by materialize_workspace (which excludes the current workspace it
+    already rebuilt inline) and the refresh/teardown paths (which exclude
+    nothing). The query already yields distinct workspace ids, so no extra dedupe
+    is needed. Best-effort: a failure to defer one rebuild must not block the
+    caller, so each defer is individually guarded and the dispatched task owns its
+    own failure handling.
     """
-    async for sibling_id in (
-        _sibling_view_schema_workspaces(tenant_ids, current_workspace_id)
+    async for ws_id in (
+        _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id)
         .values_list("id", flat=True)
         .aiterator()
     ):
         try:
-            await rebuild_workspace_view_schema.defer_async(workspace_id=str(sibling_id))
+            await rebuild_workspace_view_schema.defer_async(workspace_id=str(ws_id))
         except Exception:
             logger.exception(
-                "Failed to defer sibling view-schema rebuild for workspace %s "
-                "(triggered by re-materialization of workspace %s)",
-                sibling_id,
-                current_workspace_id,
+                "Failed to defer dependent view-schema rebuild for workspace %s", ws_id
             )
 
 
@@ -652,11 +666,11 @@ async def teardown_schema(schema_id: str) -> None:
 
     # The tenant schema (t_<id>) is SHARED across workspaces. DROP SCHEMA ... CASCADE
     # just cascade-dropped the namespaced views inside every dependent multi-tenant
-    # workspace's view schema (ws_<hash>). Those WorkspaceViewSchema rows still claim
-    # ACTIVE, which is now a lie — querying through them returns nothing. Flip them to
-    # FAILED so the catalog reports the truth. We do NOT defer a rebuild: the tenant's
-    # data is gone, so a rebuild would rightly fail until the tenant is re-materialized.
-    await _fail_dependent_view_schemas(schema.tenant_id)
+    # workspace's view schema (ws_<hash>). What to do next depends on whether the
+    # tenant still has data: a refresh swaps in a NEW ACTIVE schema before tearing
+    # down the old one (data intact → rebuild), whereas pure TTL expiry leaves the
+    # tenant with nothing (data gone → fail). _reconcile handles both.
+    await _reconcile_dependent_view_schemas_after_teardown(schema)
 
     try:
         schema.state = SchemaState.EXPIRED
@@ -667,6 +681,38 @@ async def teardown_schema(schema_id: str) -> None:
             "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
         )
         raise
+
+
+async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
+    """Reconcile dependent multi-tenant view schemas after ``schema`` is dropped.
+
+    DROP SCHEMA ... CASCADE just cascade-dropped the namespaced views inside every
+    dependent multi-tenant workspace's view schema. The correct follow-up depends
+    on whether the tenant still has data:
+
+    - If the tenant has ANOTHER ACTIVE schema (the refresh path: a fresh schema was
+      swapped in before this old one was torn down), the data is NOT gone and the
+      views are rebuildable — defer a rebuild so they point at the new schema.
+    - If the tenant has NO surviving ACTIVE schema (pure TTL expiry), the data is
+      gone; flip the dependent ACTIVE view schemas to FAILED so the catalog reports
+      the truth rather than serving an empty view.
+
+    The ``exclude(id=schema.id)`` matters: production callers flip ``schema`` to
+    TEARDOWN before dispatching teardown, but a direct caller may pass an ACTIVE
+    row — excluding it makes "another ACTIVE schema?" correct either way.
+    """
+    tenant_has_surviving_active_schema = (
+        await TenantSchema.objects.filter(
+            tenant_id=schema.tenant_id,
+            state=SchemaState.ACTIVE,
+        )
+        .exclude(id=schema.id)
+        .aexists()
+    )
+    if tenant_has_surviving_active_schema:
+        await _rebuild_dependent_view_schemas([schema.tenant_id])
+    else:
+        await _fail_dependent_view_schemas(schema.tenant_id)
 
 
 async def _fail_dependent_view_schemas(tenant_id) -> int:
