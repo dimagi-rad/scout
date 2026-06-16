@@ -9,17 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
-import uuid
 from typing import TYPE_CHECKING, Any
 
-from asgiref.sync import async_to_sync
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.base import build_agent_graph
+from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
-from apps.users.models import TenantMembership
-from apps.workspaces.models import WorkspaceTenant
+from apps.workspaces.models import Workspace
 
 if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
@@ -41,13 +39,6 @@ class VariableValidationError(RecipeRunnerError):
     def __init__(self, errors: list[str]) -> None:
         self.errors = errors
         super().__init__(f"Variable validation failed: {', '.join(errors)}")
-
-
-class StepExecutionError(RecipeRunnerError):
-    """Raised when execution fails."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(f"Execution failed: {message}")
 
 
 class RecipeRunner:
@@ -76,7 +67,7 @@ class RecipeRunner:
         self._graph: CompiledStateGraph | None = None
         self._run: RecipeRun | None = None
         self._thread_id: str = ""
-        self._tenant_membership = None
+        self._oauth_tokens: dict = {}
 
     def validate_variables(self) -> None:
         """Validate that all required variables are provided."""
@@ -97,50 +88,26 @@ class RecipeRunner:
                 self.variable_values[var_name] = var_def["default"]
 
     async def _build_graph(self) -> CompiledStateGraph:
-        """Build or return the agent graph for execution."""
+        """Build or return the agent graph for execution (async-first)."""
         if self._provided_graph is not None:
             return self._provided_graph
 
         if self._graph is None:
-            workspace_tenant = (
-                await WorkspaceTenant.objects.select_related("tenant")
-                .filter(workspace=self.recipe.workspace)
-                .afirst()
-            )
-            tenant = workspace_tenant.tenant if workspace_tenant else None
-            self._tenant_membership = await TenantMembership.objects.filter(
-                user=self.user,
-                tenant=tenant,
-            ).afirst()
+            # Load the Workspace by FK id rather than traversing
+            # ``self.recipe.workspace`` lazily, which would raise
+            # SynchronousOnlyOperation under async (root of Sentry #276).
+            workspace = await Workspace.objects.aget(id=self.recipe.workspace_id)
+            mcp_tools = await get_mcp_tools()
+            self._oauth_tokens = await get_user_oauth_tokens(self.user)
             self._graph = await build_agent_graph(
-                tenant_membership=self._tenant_membership,
+                workspace=workspace,
                 user=self.user,
                 checkpointer=None,
+                mcp_tools=mcp_tools,
+                oauth_tokens=self._oauth_tokens,
             )
 
         return self._graph
-
-    def _create_run_record(self) -> RecipeRun:
-        """Create a RecipeRun record to track execution."""
-        self._thread_id = f"recipe-run-{uuid.uuid4()}"
-
-        run = RecipeRun.objects.create(
-            recipe=self.recipe,
-            status=RecipeRunStatus.RUNNING,
-            variable_values=self.variable_values,
-            step_results=[],
-            started_at=timezone.now(),
-            run_by=self.user,
-        )
-
-        logger.info(
-            "Created recipe run %s for recipe %s (thread_id: %s)",
-            run.id,
-            self.recipe.name,
-            self._thread_id,
-        )
-
-        return run
 
     def _extract_tools_used(self, messages: list) -> list[str]:
         """Extract tool names from agent response messages."""
@@ -182,78 +149,6 @@ class RecipeRunner:
 
         return artifact_ids
 
-    def execute(self) -> RecipeRun:
-        """Execute the recipe and return the RecipeRun record."""
-        self.validate_variables()
-
-        self._run = self._create_run_record()
-
-        graph = async_to_sync(self._build_graph)()
-        config = {"configurable": {"thread_id": self._thread_id}}
-
-        # Render the prompt
-        prompt = self.recipe.render_prompt(self.variable_values)
-
-        logger.info("Starting recipe execution: %s", self.recipe.name)
-
-        step_started = timezone.now()
-
-        result = {
-            "step_order": 1,
-            "prompt": prompt,
-            "response": "",
-            "tools_used": [],
-            "artifacts_created": [],
-            "success": False,
-            "error": None,
-            "started_at": step_started.isoformat(),
-            "completed_at": None,
-        }
-
-        try:
-            workspace = self.recipe.workspace
-            initial_state = {
-                "messages": [HumanMessage(content=prompt)],
-                "tenant_id": workspace.external_tenant_id if workspace else "",
-                "tenant_name": workspace.tenant_name if workspace else "",
-                "tenant_membership_id": str(self._tenant_membership.id)
-                if self._tenant_membership
-                else "",
-                "user_id": str(self.user.id),
-                "user_role": "analyst",
-            }
-
-            response = graph.invoke(initial_state, config=config)
-
-            messages = response.get("messages", [])
-            result["response"] = self._extract_response_content(messages)
-            result["tools_used"] = self._extract_tools_used(messages)
-            result["artifacts_created"] = self._extract_artifacts_created(messages)
-            result["success"] = True
-
-        except Exception as e:
-            logger.exception("Error executing recipe %s", self.recipe.name)
-            result["error"] = str(e)
-            result["success"] = False
-
-        result["completed_at"] = timezone.now().isoformat()
-
-        self._run.step_results = [result]
-        self._run.status = (
-            RecipeRunStatus.COMPLETED if result["success"] else RecipeRunStatus.FAILED
-        )
-        self._run.completed_at = timezone.now()
-        self._run.save(update_fields=["step_results", "status", "completed_at"])
-
-        logger.info(
-            "Recipe execution finished: %s (status: %s, duration: %.2fs)",
-            self.recipe.name,
-            self._run.status,
-            self._run.duration_seconds or 0,
-        )
-
-        return self._run
-
     async def execute_async(self) -> RecipeRun:
         """Execute the recipe asynchronously."""
         self.validate_variables()
@@ -270,7 +165,11 @@ class RecipeRunner:
         self._thread_id = f"recipe-run-{self._run.id}"
 
         graph = await self._build_graph()
-        config = {"configurable": {"thread_id": self._thread_id}}
+        config = {
+            "configurable": {"thread_id": self._thread_id},
+            "recursion_limit": 50,
+            "oauth_tokens": self._oauth_tokens,
+        }
 
         prompt = self.recipe.render_prompt(self.variable_values)
 
@@ -291,23 +190,12 @@ class RecipeRunner:
         }
 
         try:
-            workspace = self.recipe.workspace
-            # Fetch tenant info asynchronously to avoid sync query in async context
-            wt = (
-                await WorkspaceTenant.objects.select_related("tenant")
-                .filter(workspace=workspace)
-                .afirst()
-            )
-            _tenant = wt.tenant if wt else None
             initial_state = {
                 "messages": [HumanMessage(content=prompt)],
-                "tenant_id": _tenant.external_id if _tenant else "",
-                "tenant_name": _tenant.canonical_name if _tenant else "",
-                "tenant_membership_id": str(self._tenant_membership.id)
-                if self._tenant_membership
-                else "",
+                "workspace_id": str(self.recipe.workspace_id),
                 "user_id": str(self.user.id),
                 "user_role": "analyst",
+                "thread_id": self._thread_id,
             }
 
             response = await graph.ainvoke(initial_state, config=config)
@@ -338,6 +226,5 @@ class RecipeRunner:
 __all__ = [
     "RecipeRunner",
     "RecipeRunnerError",
-    "StepExecutionError",
     "VariableValidationError",
 ]
