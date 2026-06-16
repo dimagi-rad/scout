@@ -247,7 +247,22 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     return;
                 }
 
-                // If the artifact has live queries, fetch fresh data from the server
+                // If the artifact has live queries, fetch fresh data from the server.
+                //
+                // KNOWN LIMITATION (pre-existing, out of scope for the postMessage
+                // fix below): this frame is sandboxed WITHOUT allow-same-origin, so
+                // its document has an opaque ("null") origin. A fetch() from a
+                // null-origin document is treated as cross-origin, so the browser
+                // requires CORS on the response; /query-data returns no
+                // Access-Control-Allow-Origin header, so the response is BLOCKED
+                // ("from origin 'null' has been blocked by CORS policy"), regardless
+                // of credentials. The artifact's embedded data is also {} for live
+                // queries (see ArtifactSandboxView), so a live-query artifact cannot
+                // self-hydrate inside the iframe and will show "Data Fetch Error".
+                // The parent ArtifactPanel still loads live data for its Data tab via
+                // its own same-origin api.get(); fixing the iframe VIEW tab needs a
+                // separate change (e.g. embed query results server-side, or add CORS)
+                // and is deliberately not attempted here.
                 if (artifact.has_live_queries) {
                     this.showLoading('Querying database...');
                     try {
@@ -260,13 +275,23 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         }
                         const queryData = await resp.json();
                         artifact.data = this.mergeQueryResults(queryData, artifact.data || {});
-                        // Expose raw query info for parent frame (Data tab)
+                        // Expose raw query info for parent frame (Data tab).
+                        // targetOrigin is '*' rather than the document origin:
+                        // this frame is sandboxed WITHOUT allow-same-origin, so
+                        // its document has an opaque origin whose
+                        // window.location.origin is the string 'null'. Passing
+                        // 'null' as targetOrigin is rejected by the browser
+                        // ("Invalid target origin 'null'"), and any concrete
+                        // origin would not match the parent's, so the message
+                        // would never be delivered. '*' is safe because the
+                        // parent (ArtifactPanel) authenticates inbound messages by
+                        // event.source === this iframe's contentWindow, not origin.
                         artifact._queryResults = queryData;
                         window.parent.postMessage({
                             type: 'artifact-query-data',
                             artifactId: artifact.id,
                             queryData: queryData,
-                        }, window.location.origin);
+                        }, '*');
                     } catch (error) {
                         this.showError('Data Fetch Error', error.message);
                         return;
@@ -633,12 +658,18 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 `;
 
-                // Notify parent of error (if embedded in iframe)
+                // Notify parent of error (if embedded in iframe).
+                // targetOrigin is '*' rather than the document origin, for the
+                // same reason as artifact-query-data above: this opaque-origin
+                // sandbox frame has window.location.origin equal to the string
+                // 'null', which the browser rejects as a postMessage target, so
+                // the message would never reach the parent. The parent
+                // authenticates by event.source, so '*' leaks nothing.
                 try {
                     window.parent.postMessage({
                         type: 'artifact-error',
                         error: { title, message, details }
-                    }, window.location.origin);
+                    }, '*');
                 } catch (e) { /* ignore if not in iframe */ }
             },
 
@@ -659,8 +690,20 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         // Print-to-PDF: the parent frame posts {type: 'scout-print'} to print
         // only the artifact (not the surrounding app). Triggering print inside
         // the sandboxed iframe scopes the print job to the artifact content.
+        //
+        // SECURITY: this iframe is sandboxed WITHOUT allow-same-origin, so its
+        // document has a unique opaque ("null") security origin. An origin
+        // allowlist is therefore broken here on BOTH ends: legitimate messages
+        // from the real parent arrive with event.origin === the app's concrete
+        // origin (never "null"), so an `event.origin === window.location.origin`
+        // check would silently REJECT them and break Export PDF; and any other
+        // sandboxed frame on the page also reports event.origin "null", so a
+        // "null"-origin allowance would TRUST forgeries from sibling frames.
+        // The robust gate is on the message source: only accept messages posted
+        // by our actual parent window, mirroring the source-based check the
+        // parent (ArtifactPanel) uses on inbound artifact messages.
         window.addEventListener('message', (event) => {
-            if (event.origin !== window.location.origin) return;
+            if (event.source !== window.parent) return;
             if (event.data && event.data.type === 'scout-print') {
                 window.print();
             }
