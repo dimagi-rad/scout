@@ -9,6 +9,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 
 type Step = "choose" | "api-key"
 
+interface MembershipResult {
+  membership_id: string
+  tenant_id: string
+  tenant_name: string
+}
+
 export function OnboardingWizard() {
   const [step, setStep] = useState<Step>("choose")
   const [domain, setDomain] = useState("")
@@ -24,11 +30,13 @@ export function OnboardingWizard() {
     setLoading(true)
     setError(null)
     try {
-      await api.post("/api/auth/tenant-credentials/", {
+      await api.post<{ memberships: MembershipResult[] }>("/api/auth/connections/", {
         provider: "commcare",
-        tenant_id: domain,
-        tenant_name: domain,
-        credential: `${username}:${apiKey}`,
+        fields: {
+          domain,
+          username,
+          api_key: apiKey,
+        },
       })
       // Refresh auth state so onboarding_complete becomes true
       await fetchMe()
