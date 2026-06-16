@@ -123,6 +123,68 @@ async def test_resume_appends_system_message_and_invokes_agent():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("run_state", "expected_status", "ext_id", "schema_name", "pj_id", "tool_call"),
+    [
+        (MaterializationRun.RunState.FAILED, "failed", "t-fail", "s_fail", 7071, "tc-fail"),
+        (
+            MaterializationRun.RunState.CANCELLED,
+            "cancelled",
+            "t-cancel",
+            "s_cancel",
+            7072,
+            "tc-cancel",
+        ),
+    ],
+)
+async def test_resume_failed_or_cancelled_prompt_is_honest(
+    run_state, expected_status, ext_id, schema_name, pj_id, tool_call
+):
+    """Finding 14#5: for a fully FAILED or CANCELLED materialization there is NO
+    loaded data, so the resume prompt must NOT tell the agent the run "just
+    completed ... using the now-loaded data". That framing invites the agent to
+    query empty/absent schemas and claim a success that never happened. The
+    prompt must instead say the materialization failed/was cancelled and that
+    the agent should not claim success."""
+    _user, _ws, _thread, tj = await _make_thread_job_ready_to_resume(
+        email=f"{ext_id}@b.c",
+        ws_name=f"W-{ext_id}",
+        ext_id=ext_id,
+        schema_name=schema_name,
+        pj_id=pj_id,
+        tool_call=tool_call,
+        run_state=run_state,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "resumed"
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    lowered = body.lower()
+
+    # The status must be reflected honestly.
+    assert expected_status in lowered, f"prompt should mention {expected_status!r}: {body!r}"
+    # The dishonest "just completed ... now-loaded data" framing must be gone.
+    assert "now-loaded data" not in lowered, (
+        f"{expected_status} prompt must NOT claim now-loaded data: {body!r}"
+    )
+    assert "just completed" not in lowered, (
+        f"{expected_status} prompt must NOT claim the run just completed: {body!r}"
+    )
+    # And it must steer the agent away from claiming success.
+    assert any(
+        kw in lowered for kw in ("failed", "cancelled", "no data", "not claim", "did not")
+    ), f"{expected_status} prompt must signal failure/absence of data: {body!r}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_resume_is_idempotent_when_already_claimed():
     """If the resume task is dispatched twice and the first claim wins, the
     second invocation no-ops."""

@@ -13,6 +13,7 @@ import logging
 import time
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse, StreamingHttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
@@ -118,9 +119,19 @@ async def chat_view(request):
     # Return 404 rather than 403 to avoid leaking thread-existence information.
     # A non-UUID thread_id cannot match any row, so skip the check (the upsert
     # below will fail gracefully if the value is truly invalid).
+    #
+    # SECURITY: catch ONLY the "bad / unmatchable id" cases here. A malformed
+    # UUID surfaces as ValueError or django.core.exceptions.ValidationError when
+    # coercing the lookup value, and those genuinely mean "no such thread".
+    # A broad ``except Exception`` would also swallow TRANSIENT ORM errors
+    # (e.g. OperationalError during a DB blip), silently setting
+    # ``existing_thread = None`` and SKIPPING the ownership rejection — fail-open,
+    # letting a request carrying another user's thread UUID append a turn to
+    # their conversation. Let real errors propagate (→ 500) so we never authorize
+    # access we could not verify.
     try:
         existing_thread = await Thread.objects.filter(id=thread_id).afirst()
-    except Exception:
+    except (ValueError, ValidationError):
         existing_thread = None
     if existing_thread is not None and (
         existing_thread.user_id != user.pk or existing_thread.workspace_id != workspace.pk
