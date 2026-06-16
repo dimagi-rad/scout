@@ -372,3 +372,55 @@ async def test_teardown_schema_does_not_clobber_non_active_view_schema(active_sc
 
     await vs_b.arefresh_from_db()
     assert vs_b.state == SchemaState.TEARDOWN
+
+
+# ---------------------------------------------------------------------------
+# teardown_schema on the REFRESH path (arch #236, finding 00#9)
+# ---------------------------------------------------------------------------
+#
+# When a refresh tears down the OLD schema, the tenant still has a NEW ACTIVE
+# schema — the data is NOT gone. teardown_schema must therefore NOT mark the
+# dependent multi-tenant view schemas permanently FAILED; instead it must defer a
+# rebuild so their views are recreated against the surviving schema.
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_schema(tenant, user):
+    """Refresh path: the torn-down schema has a sibling ACTIVE schema for the same
+    tenant. Dependent multi-tenant view schemas must be rebuilt (a rebuild is
+    deferred), NOT flipped to FAILED — their data is intact."""
+    # Old schema being torn down (refresh already flipped it to TEARDOWN).
+    old_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_refresh_old", state=SchemaState.TEARDOWN
+    )
+    # New schema the refresh just swapped in and activated for the same tenant.
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_refresh_new_r1234", state=SchemaState.ACTIVE
+    )
+
+    # Dependent multi-tenant workspace B with an ACTIVE view schema.
+    extra_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="teardown-refresh-extra", canonical_name="Refresh Extra"
+    )
+    ws_b = await Workspace.objects.acreate(name="Teardown Refresh B", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=extra_tenant)
+    vs_b = await WorkspaceViewSchema.objects.acreate(
+        workspace=ws_b, schema_name="ws_teardown_refresh_b", state=SchemaState.ACTIVE
+    )
+
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as MockManager,
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        MockManager.return_value.teardown.return_value = None
+        await teardown_schema(schema_id=str(old_schema.id))
+
+    await vs_b.arefresh_from_db()
+    # Data is intact (new schema ACTIVE) → views are rebuildable, NOT failed.
+    assert vs_b.state == SchemaState.ACTIVE
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(ws_b.id))

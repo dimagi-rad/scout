@@ -76,6 +76,14 @@ class ThreadJob(models.Model):
     tool_call_id = models.CharField(max_length=64)
     state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Set when the resume task claims the job (PENDING/CANCELLED -> RUNNING).
+    # Staleness for an in-flight resume is measured from this RESUME-phase
+    # timestamp, NOT created_at: created_at includes the full materialization +
+    # queue time, so a healthy long-running materialization (>10 min) followed
+    # by a freshly-started resume would otherwise be falsely flipped to FAILED
+    # by the reconciler while the resume is still live. Null until a resume
+    # starts (so a never-claimed PENDING job still ages out from created_at).
+    started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     # Human-readable failure summary populated on FAILED/CANCELLED transitions
     # so the frontend can render an inline error card after the spinner clears.

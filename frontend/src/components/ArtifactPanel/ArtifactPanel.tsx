@@ -43,10 +43,15 @@ export function ArtifactPanel() {
     // Trigger print inside the sandboxed iframe so the print job is scoped to
     // the artifact content, not the surrounding app. The sandbox HTML listens
     // for this message and calls window.print() (browser "Save as PDF").
-    iframeRef.current?.contentWindow?.postMessage(
-      { type: "scout-print" },
-      window.location.origin,
-    )
+    //
+    // targetOrigin is "*" because the iframe is sandboxed WITHOUT
+    // allow-same-origin and therefore has an opaque ("null") security origin.
+    // The browser drops a postMessage whose targetOrigin is a concrete origin
+    // string (e.g. window.location.origin) when the target frame's security
+    // origin is opaque, which would silently break Export PDF. "*" is safe
+    // here: the message is a trivial non-secret "scout-print" signal sent only
+    // to our own artifact iframe via iframeRef, so there is nothing to leak.
+    iframeRef.current?.contentWindow?.postMessage({ type: "scout-print" }, "*")
   }, [])
 
   const fetchQueryData = useCallback(async (id: string) => {
@@ -71,6 +76,16 @@ export function ArtifactPanel() {
 
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
+      // Only trust messages that came from our own artifact iframe. The iframe
+      // runs agent-generated (prompt-injectable) code, and it is sandboxed
+      // WITHOUT allow-same-origin, so it is a unique opaque origin whose
+      // event.origin is the literal string "null" — an origin allowlist would
+      // either reject legitimate messages or have to trust "null" (which any
+      // sandboxed frame on the page could also claim). The robust check is on
+      // the message source: reject anything not posted by this iframe's window
+      // (e.g. other frames, popups, or window.opener attempting to forge
+      // artifact-query-data).
+      if (event.source !== iframeRef.current?.contentWindow) return
       if (event.data?.type === "artifact-query-data" && event.data.artifactId === artifactId) {
         setQueryData(event.data.queryData)
       }
@@ -191,7 +206,16 @@ export function ArtifactPanel() {
               key={artifactId}
               src={activeDomainId ? `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/` : ""}
               className="flex-1 w-full"
-              sandbox="allow-scripts allow-same-origin allow-modals"
+              // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
+              // served same-origin and session-authenticated, and it executes
+              // agent-generated (prompt-injectable) code. With allow-same-origin
+              // that code could read the viewer's cookies/CSRF token, issue
+              // credentialed /api/ requests, and reach window.parent — a full
+              // session takeover. Omitting it gives the frame a unique opaque
+              // origin: scripts still run and render UI, but the frame cannot
+              // touch the parent origin or send credentialed same-origin
+              // requests. Do NOT re-add allow-same-origin.
+              sandbox="allow-scripts allow-modals"
               title="Artifact"
             />
           )}

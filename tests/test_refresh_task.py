@@ -5,8 +5,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from apps.users.adapters import encrypt_credential
-from apps.users.models import TenantConnection
-from apps.workspaces.models import SchemaState, TenantSchema
+from apps.users.models import Tenant, TenantConnection
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    Workspace,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import refresh_tenant_schema
 
@@ -320,3 +326,65 @@ async def test_refresh_loads_into_new_schema_not_old_active(
         f"{provisioning_schema.schema_name!r}, but the pipeline targeted the old "
         "active base schema (the refresh-data-loss bug)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Dependent multi-tenant view-schema rebuild on refresh (arch #236, finding 00#9)
+# ---------------------------------------------------------------------------
+#
+# A tenant data schema is SHARED across workspaces. refresh_tenant_schema swaps in
+# a NEW physical schema, so every multi-tenant WorkspaceViewSchema that includes
+# the refreshed tenant still points its namespaced views at the OLD schema (about
+# to be torn down). Mirroring materialize_workspace (PR #230), refresh must defer
+# a rebuild for each such dependent workspace so the views are recreated against
+# the new schema instead of being left to rot (and later falsely marked FAILED by
+# teardown).
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_task_rebuilds_dependent_multitenant_view_schemas(
+    provisioning_schema, tenant_membership_obj, user, tenant
+):
+    """After the swap, refresh defers a rebuild for the multi-tenant workspace B
+    (sharing the refreshed tenant + a view schema) and NOT for a single-tenant
+    workspace C."""
+    # Dependent multi-tenant workspace B: shares `tenant` + an extra tenant, has a view schema.
+    extra_tenant = await Tenant.objects.acreate(
+        provider="commcare", external_id="refresh-extra", canonical_name="Refresh Extra"
+    )
+    ws_b = await Workspace.objects.acreate(name="Refresh Sibling B", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=ws_b, tenant=extra_tenant)
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws_b, schema_name="ws_refresh_b", state=SchemaState.ACTIVE
+    )
+
+    # Single-tenant workspace C: only `tenant` → must NOT be rebuilt.
+    ws_c = await Workspace.objects.acreate(name="Refresh Single C", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=ws_c, tenant=tenant)
+
+    with (
+        patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=_mock_conn(),
+        ),
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            new=AsyncMock(return_value={"type": "api_key", "value": "tok"}),
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
+        patch("apps.workspaces.tasks.run_pipeline"),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.defer_async",
+            new_callable=AsyncMock,
+        ) as mock_rebuild,
+    ):
+        await refresh_tenant_schema(
+            schema_id=str(provisioning_schema.id),
+            membership_id=str(tenant_membership_obj.id),
+        )
+
+    mock_rebuild.assert_awaited_once_with(workspace_id=str(ws_b.id))
+    deferred_ids = {c.kwargs["workspace_id"] for c in mock_rebuild.await_args_list}
+    assert str(ws_c.id) not in deferred_ids  # single-tenant workspaces excluded

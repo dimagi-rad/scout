@@ -9,7 +9,7 @@ from datetime import timedelta
 import sentry_sdk
 from django.conf import settings
 from django.db import close_old_connections
-from django.db.models import Count, OuterRef, Subquery
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
@@ -189,6 +189,16 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     new_schema.last_accessed_at = timezone.now()
     await new_schema.asave(update_fields=["state", "last_accessed_at"])
 
+    # Step 3b: The tenant data schema is SHARED across workspaces, and this refresh
+    # swapped in a NEW physical schema. Every multi-tenant WorkspaceViewSchema that
+    # includes this tenant still points its namespaced views at the OLD schema
+    # (about to be torn down), so defer a rebuild for each so their views are
+    # recreated against the new ACTIVE schema — mirroring the sibling rebuild
+    # materialize_workspace performs (PR #230). Without this the views keep serving
+    # stale data until teardown drops the old schema, after which they'd be left
+    # empty (and falsely marked FAILED by teardown_schema).
+    await _rebuild_dependent_view_schemas([new_schema.tenant_id])
+
     # Step 4: Schedule teardown of previously active schemas with a delay to allow
     # in-flight queries against the old schema to complete before it is dropped.
     old_schemas = TenantSchema.objects.filter(
@@ -349,9 +359,9 @@ async def materialize_workspace(
         # just (re)materialized so their views are recreated against the new tables.
         # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
         # we never block the resume on them.
-        await _rebuild_sibling_view_schemas(
-            current_workspace_id=str(workspace.id),
-            tenant_ids=[tm.tenant_id for tm in memberships],
+        await _rebuild_dependent_view_schemas(
+            [tm.tenant_id for tm in memberships],
+            exclude_workspace_id=str(workspace.id),
         )
 
         return {
@@ -420,52 +430,56 @@ def _multi_tenant_count_subquery():
     )
 
 
-def _sibling_view_schema_workspaces(tenant_ids, exclude_workspace_id):
-    """Queryset of OTHER multi-tenant workspaces with a WorkspaceViewSchema row
-    that share any of ``tenant_ids``.
+def _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id=None):
+    """Queryset of multi-tenant workspaces with a WorkspaceViewSchema row that
+    share any of ``tenant_ids``.
 
     A workspace qualifies when it (i) contains at least one of the given tenants,
     (ii) is multi-tenant (>= 2 tenants), and (iii) has a WorkspaceViewSchema row
-    in any state. The current workspace is excluded.
+    in any state. When ``exclude_workspace_id`` is given, that workspace is left
+    out — used by the materialize path, which rebuilds its own view schema inline
+    and only needs to fan out to the *siblings*. The refresh/teardown paths pass
+    no exclusion because they are not scoped to a workspace.
 
     Uses a single annotated query (a subquery tenant count) rather than walking
     each tenant's workspaces, so cost is independent of the number of tenants
     materialized (no N+1).
     """
+    qs = Workspace.objects.filter(
+        workspace_tenants__tenant_id__in=tenant_ids,
+        view_schema__isnull=False,
+    )
+    if exclude_workspace_id is not None:
+        qs = qs.exclude(id=exclude_workspace_id)
     return (
-        Workspace.objects.filter(
-            workspace_tenants__tenant_id__in=tenant_ids,
-            view_schema__isnull=False,
-        )
-        .exclude(id=exclude_workspace_id)
-        .annotate(num_tenants=_multi_tenant_count_subquery())
+        qs.annotate(num_tenants=_multi_tenant_count_subquery())
         .filter(num_tenants__gte=2)
         .distinct()
     )
 
 
-async def _rebuild_sibling_view_schemas(*, current_workspace_id: str, tenant_ids) -> None:
-    """Defer a view-schema rebuild for every sibling workspace whose namespaced
-    views were (or will be) cascade-dropped by this workspace's re-materialization.
+async def _rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=None) -> None:
+    """Defer a view-schema rebuild for every multi-tenant workspace whose
+    namespaced views were (or will be) cascade-dropped by a (re-)materialization
+    or refresh of one of ``tenant_ids``.
 
-    See the call site in materialize_workspace for the why. The query already
-    yields distinct workspace ids, so no extra dedupe is needed. Best-effort: a
-    failure to defer one rebuild must not block the resume, so each defer is
-    individually guarded and the dispatched task owns its own failure handling.
+    Shared by materialize_workspace (which excludes the current workspace it
+    already rebuilt inline) and the refresh/teardown paths (which exclude
+    nothing). The query already yields distinct workspace ids, so no extra dedupe
+    is needed. Best-effort: a failure to defer one rebuild must not block the
+    caller, so each defer is individually guarded and the dispatched task owns its
+    own failure handling.
     """
-    async for sibling_id in (
-        _sibling_view_schema_workspaces(tenant_ids, current_workspace_id)
+    async for ws_id in (
+        _dependent_view_schema_workspaces(tenant_ids, exclude_workspace_id)
         .values_list("id", flat=True)
         .aiterator()
     ):
         try:
-            await rebuild_workspace_view_schema.defer_async(workspace_id=str(sibling_id))
+            await rebuild_workspace_view_schema.defer_async(workspace_id=str(ws_id))
         except Exception:
             logger.exception(
-                "Failed to defer sibling view-schema rebuild for workspace %s "
-                "(triggered by re-materialization of workspace %s)",
-                sibling_id,
-                current_workspace_id,
+                "Failed to defer dependent view-schema rebuild for workspace %s", ws_id
             )
 
 
@@ -652,11 +666,11 @@ async def teardown_schema(schema_id: str) -> None:
 
     # The tenant schema (t_<id>) is SHARED across workspaces. DROP SCHEMA ... CASCADE
     # just cascade-dropped the namespaced views inside every dependent multi-tenant
-    # workspace's view schema (ws_<hash>). Those WorkspaceViewSchema rows still claim
-    # ACTIVE, which is now a lie — querying through them returns nothing. Flip them to
-    # FAILED so the catalog reports the truth. We do NOT defer a rebuild: the tenant's
-    # data is gone, so a rebuild would rightly fail until the tenant is re-materialized.
-    await _fail_dependent_view_schemas(schema.tenant_id)
+    # workspace's view schema (ws_<hash>). What to do next depends on whether the
+    # tenant still has data: a refresh swaps in a NEW ACTIVE schema before tearing
+    # down the old one (data intact → rebuild), whereas pure TTL expiry leaves the
+    # tenant with nothing (data gone → fail). _reconcile handles both.
+    await _reconcile_dependent_view_schemas_after_teardown(schema)
 
     try:
         schema.state = SchemaState.EXPIRED
@@ -667,6 +681,38 @@ async def teardown_schema(schema_id: str) -> None:
             "teardown_schema: failed to mark schema %s EXPIRED after teardown", schema.id
         )
         raise
+
+
+async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
+    """Reconcile dependent multi-tenant view schemas after ``schema`` is dropped.
+
+    DROP SCHEMA ... CASCADE just cascade-dropped the namespaced views inside every
+    dependent multi-tenant workspace's view schema. The correct follow-up depends
+    on whether the tenant still has data:
+
+    - If the tenant has ANOTHER ACTIVE schema (the refresh path: a fresh schema was
+      swapped in before this old one was torn down), the data is NOT gone and the
+      views are rebuildable — defer a rebuild so they point at the new schema.
+    - If the tenant has NO surviving ACTIVE schema (pure TTL expiry), the data is
+      gone; flip the dependent ACTIVE view schemas to FAILED so the catalog reports
+      the truth rather than serving an empty view.
+
+    The ``exclude(id=schema.id)`` matters: production callers flip ``schema`` to
+    TEARDOWN before dispatching teardown, but a direct caller may pass an ACTIVE
+    row — excluding it makes "another ACTIVE schema?" correct either way.
+    """
+    tenant_has_surviving_active_schema = (
+        await TenantSchema.objects.filter(
+            tenant_id=schema.tenant_id,
+            state=SchemaState.ACTIVE,
+        )
+        .exclude(id=schema.id)
+        .aexists()
+    )
+    if tenant_has_surviving_active_schema:
+        await _rebuild_dependent_view_schemas([schema.tenant_id])
+    else:
+        await _fail_dependent_view_schemas(schema.tenant_id)
 
 
 async def _fail_dependent_view_schemas(tenant_id) -> int:
@@ -694,6 +740,47 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
 
 
 STALE_JOB_THRESHOLD = timedelta(minutes=10)
+
+
+def _staleness_anchor(tj: ThreadJob):
+    """Timestamp from which a ThreadJob's staleness is measured.
+
+    For a RUNNING job (a resume task has claimed it) we measure from the RESUME
+    phase: ``started_at``. created_at includes the full materialization + queue
+    time, so a healthy long materialization (>10 min) followed by a fresh resume
+    would otherwise look stale the instant the resume began — the false-positive
+    the reconciler used to hit (finding 02#9).
+
+    For PENDING/other states (or a legacy RUNNING row predating ``started_at``)
+    we fall back to ``created_at`` so a job that was never claimed still ages
+    out and a never-recorded resume is not stranded forever.
+    """
+    if tj.state == ThreadJob.State.RUNNING and tj.started_at is not None:
+        return tj.started_at
+    return tj.created_at
+
+
+def _stale_active_jobs_q(cutoff) -> Q:
+    """Predicate matching active ThreadJobs whose effective staleness anchor is
+    older than ``cutoff`` (see :func:`_staleness_anchor`).
+
+    A RUNNING job with a recorded ``started_at`` is stale only when that resume
+    phase is older than the cutoff; everything else (PENDING, or a legacy
+    RUNNING row with no ``started_at``) is measured from ``created_at``. Keeping
+    this as a single ORM-side predicate means the janitor never even SELECTs a
+    healthy in-flight resume, avoiding the 02#9 false-positive at the source.
+    """
+    running_stale = Q(
+        state=ThreadJob.State.RUNNING,
+        started_at__isnull=False,
+        started_at__lt=cutoff,
+    )
+    other_stale = (
+        Q(state__in=list(ThreadJob.ACTIVE_STATES))
+        & ~Q(state=ThreadJob.State.RUNNING, started_at__isnull=False)
+        & Q(created_at__lt=cutoff)
+    )
+    return running_stale | other_stale
 
 
 async def _procrastinate_job_status(job_id: int) -> str | None:
@@ -754,6 +841,15 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     if status in {"todo", "doing"}:
         return None
     if tj.state == ThreadJob.State.RUNNING:
+        # A RUNNING ThreadJob means a resume task claimed it. The materialize
+        # job's status is irrelevant here (it has long since succeeded for any
+        # >10 min materialization). Measure staleness from the RESUME phase
+        # (started_at) so we only flip a resume that has genuinely been stuck
+        # past the threshold — NOT a healthy resume that just started after a
+        # long materialization (finding 02#9). A fresh resume is left alone.
+        anchor = _staleness_anchor(tj)
+        if anchor is not None and timezone.now() - anchor < STALE_JOB_THRESHOLD:
+            return None
         # A worker started a resume and presumably crashed mid-ainvoke.
         # Marking FAILED directly avoids deferring a duplicate resume that
         # could race with a still-running first invocation.
@@ -834,10 +930,7 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     async for tj in ThreadJob.objects.select_related(
         "thread__workspace",
         "thread__user",
-    ).filter(
-        state__in=list(ThreadJob.ACTIVE_STATES),
-        created_at__lt=cutoff,
-    ):
+    ).filter(_stale_active_jobs_q(cutoff)):
         action = await reconcile_stale_thread_job(tj)
         if action in {"failed", "resumed"}:
             flipped += 1
@@ -1047,13 +1140,20 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # CANCELLED is intentionally included so the agent can compose a follow-up
     # message even for cancelled materializations.
     CLAIMABLE_STATES = [ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
+    # Record started_at on the claim so the reconciler can measure staleness
+    # from the RESUME phase, not from created_at (which includes the full
+    # materialization + queue time). Without this a healthy long materialization
+    # (>10 min) followed by a fresh resume would be falsely flipped to FAILED.
+    resume_started_at = timezone.now()
     claimed = await ThreadJob.objects.filter(
         id=tj.id,
         state__in=CLAIMABLE_STATES,
-    ).aupdate(state=ThreadJob.State.RUNNING)
+    ).aupdate(state=ThreadJob.State.RUNNING, started_at=resume_started_at)
     if not claimed:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
         return {"status": "already_claimed"}
+    # Keep the in-memory instance consistent for any later reads in this task.
+    tj.started_at = resume_started_at
 
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
     # No in-memory tj.state override: the prior `if tj.state == CANCELLED:
@@ -1122,6 +1222,25 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
             f"as if it were complete. Per-tenant: {summary}"
+        )
+    elif status == "failed":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization FAILED — every source failed, "
+            f"so there is NO loaded data for this workspace. Do NOT claim the "
+            f"materialization completed and do NOT query the workspace's tables as "
+            f"if data were present; there is nothing there. Tell the user plainly "
+            f"that the data load failed (this is commonly caused by expired or "
+            f"revoked credentials), summarize the per-source errors below, and "
+            f"suggest checking the workspace's connection before retrying. Do NOT "
+            f"silently re-run materialization. Per-tenant: {summary}"
+        )
+    elif status == "cancelled":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization was CANCELLED before it "
+            f"finished, so the data load is incomplete or absent. Do NOT claim the "
+            f"materialization completed and do NOT query tables as if all data were "
+            f"loaded. Tell the user the data load was cancelled and ask whether they "
+            f"want to re-run it. Per-tenant: {summary}"
         )
     else:
         body = (

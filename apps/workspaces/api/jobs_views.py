@@ -123,7 +123,11 @@ async def active_jobs_view(request, workspace_id):
     stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
     reconciled = False
     for tj in jobs:
-        if tj.created_at >= stale_cutoff:
+        # Measure staleness from the resume phase for RUNNING jobs so a healthy
+        # long-running resume (after a >10 min materialization) is not falsely
+        # reconciled (finding 02#9); _staleness_anchor falls back to created_at
+        # for PENDING / legacy rows.
+        if workspace_tasks._staleness_anchor(tj) >= stale_cutoff:
             continue
         try:
             action = await workspace_tasks.reconcile_stale_thread_job(tj)
