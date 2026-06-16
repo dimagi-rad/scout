@@ -56,7 +56,6 @@ export function ConnectionsPage() {
   const fetchStoreDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
-  const storeDomains = useAppStore((s) => s.domains)
   const [providers, setProviders] = useState<OAuthProvider[]>([])
   const [connections, setConnections] = useState<ApiKeyConnection[]>([])
   const [loadingProviders, setLoadingProviders] = useState(true)
@@ -143,13 +142,20 @@ export function ConnectionsPage() {
     setError(null)
     try {
       await api.delete(`/api/auth/connections/${connectionId}/`)
-      const removedMembershipIds = new Set(
-        connection.chatbots.map((cb) => cb.membership_id),
-      )
       await fetchConnections()
       await fetchStoreDomains()
-      if (activeDomainId != null && removedMembershipIds.has(activeDomainId)) {
-        const next = storeDomains.find((d) => !removedMembershipIds.has(d.id))
+      // Removing a connection can drop the workspaces backed only by it. The
+      // connection payload carries no workspace id (chatbots hold
+      // TenantMembership ids, a disjoint id space from `activeDomainId`), so we
+      // can't tell from `connection` which workspaces vanished. Instead, read
+      // the freshly-refetched workspace list (not the stale closure snapshot)
+      // and switch away only if the active workspace no longer exists.
+      const freshDomains = useAppStore.getState().domains
+      if (
+        activeDomainId != null &&
+        !freshDomains.some((d) => d.id === activeDomainId)
+      ) {
+        const next = freshDomains[0]
         if (next) setActiveDomain(next.id)
       }
     } catch {

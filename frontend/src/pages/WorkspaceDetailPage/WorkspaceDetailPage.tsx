@@ -964,6 +964,10 @@ export function WorkspaceDetailPage() {
     if (!workspaceId) return
     async function fetchWorkspace() {
       setLoading(true)
+      // Clear any prior error so a successful in-place load (e.g. switching from
+      // a dead workspace link to a valid one) doesn't keep rendering the stale
+      // error screen — the render gate is `if (error || !workspace)`.
+      setError(null)
       try {
         const data = await workspaceApi.getDetail(workspaceId!)
         setWorkspace(data)

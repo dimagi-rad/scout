@@ -6,6 +6,7 @@ import { ArtifactList } from "./ArtifactList"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 
 export function ArtifactsPage() {
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const artifacts = useAppStore((s) => s.artifacts)
   const artifactsStatus = useAppStore((s) => s.artifactsStatus)
   const artifactSearch = useAppStore((s) => s.artifactSearch)
@@ -18,11 +19,15 @@ export function ArtifactsPage() {
 
   const { status: networkStatus } = useNetworkStatus()
 
+  // Fetch on mount, on search change, and whenever the active workspace changes,
+  // so switching workspaces refetches instead of leaving the previous
+  // workspace's artifacts on screen (which then 404 when opened).
   useEffect(() => {
+    if (!activeDomainId) return
     fetchArtifacts({
       search: artifactSearch || undefined,
     })
-  }, [artifactSearch, fetchArtifacts])
+  }, [activeDomainId, artifactSearch, fetchArtifacts])
 
   const handleSearchChange = useCallback((search: string) => {
     setArtifactSearch(search)
