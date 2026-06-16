@@ -4,14 +4,17 @@ Comprehensive tests for Phase 4 (Recipes) of the Scout data agent platform.
 Tests recipe CRUD, variable substitution, recipe runner, and save_as_recipe tool.
 """
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
+from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
+from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 
 User = get_user_model()
 
@@ -584,8 +587,6 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     async def test_recipe_runner_validates_variables(self, recipe, user, recipe_step_1):
         """RecipeRunner.execute_async raises VariableValidationError on missing vars."""
-        from apps.recipes.services.runner import RecipeRunner, VariableValidationError
-
         invalid_values = {"region": "North", "limit": 10}  # start_date missing
 
         runner = RecipeRunner(recipe, invalid_values, user, graph=Mock())
@@ -595,8 +596,6 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     async def test_recipe_runner_creates_run_record(self, recipe, user, recipe_step_1):
         """RecipeRunner creates a RecipeRun record."""
-        from apps.recipes.services.runner import RecipeRunner
-
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(
@@ -614,8 +613,6 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     async def test_recipe_runner_executes_prompt(self, recipe, user, recipe_step_1):
         """RecipeRunner records a single executed step on success."""
-        from apps.recipes.services.runner import RecipeRunner
-
         values = {"region": "West", "limit": 15, "start_date": "2024-06-01"}
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(
@@ -633,8 +630,6 @@ class TestRecipeRunner:
         self, recipe, user, recipe_step_1
     ):
         """RecipeRunner renders variable values into the prompt."""
-        from apps.recipes.services.runner import RecipeRunner
-
         values = {"region": "East", "limit": 25, "start_date": "2024-03-01"}
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(
@@ -650,8 +645,6 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     async def test_recipe_runner_handles_execution_failure(self, recipe, user, recipe_step_1):
         """RecipeRunner records a failed run when the graph raises."""
-        from apps.recipes.services.runner import RecipeRunner
-
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(side_effect=Exception("Agent execution failed"))
@@ -666,8 +659,6 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     async def test_recipe_runner_updates_run_status(self, recipe, user, recipe_step_1):
         """RecipeRunner marks the run completed with a completion timestamp."""
-        from apps.recipes.services.runner import RecipeRunner
-
         values = {"region": "South", "limit": 5, "start_date": "2024-02-01"}
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(
@@ -806,3 +797,54 @@ class TestSaveAsRecipeTool:
 
         recipe = await Recipe.objects.aget(id=result["recipe_id"])
         assert recipe.is_shared is True
+
+
+# ============================================================================
+# 8. TestRecipeRunView
+# ============================================================================
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRecipeRunView:
+    """Tests for the async recipe run endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_run_endpoint_returns_201_with_real_graph(self, recipe, user, recipe_step_1):
+        """POST run/ builds the real graph (LLM mocked, no MCP tools) and returns 201."""
+        from langchain_core.messages import AIMessage
+
+        async def fake_ainvoke(messages, *args, **kwargs):
+            return AIMessage(content="done", id="ai-1")
+
+        mock_bound = MagicMock()
+        mock_bound.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+        mock_llm = MagicMock()
+        mock_llm.bind_tools.return_value = mock_bound
+
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="test@example.com", password="testpass123")
+
+        url = f"/api/workspaces/{recipe.workspace_id}/recipes/{recipe.id}/run/"
+        body = {"variable_values": {"region": "North", "limit": 10, "start_date": "2024-01-01"}}
+
+        with (
+            patch(
+                "apps.recipes.services.runner.get_mcp_tools",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
+        ):
+            resp = await client.post(url, data=body, content_type="application/json")
+
+        assert resp.status_code == 201, resp.content
+        data = resp.json()
+        assert data["status"] == RecipeRunStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_run_endpoint_forbids_non_member(self, recipe, other_user, recipe_step_1):
+        """A user with no workspace membership gets 403."""
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="other@example.com", password="otherpass123")
+        url = f"/api/workspaces/{recipe.workspace_id}/recipes/{recipe.id}/run/"
+        resp = await client.post(url, data={"variable_values": {}}, content_type="application/json")
+        assert resp.status_code == 403

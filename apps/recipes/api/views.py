@@ -2,8 +2,12 @@
 API views for recipe management.
 """
 
+import json
 import logging
 
+from asgiref.sync import sync_to_async
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_protect
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import JSONRenderer
@@ -11,6 +15,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.recipes.models import Recipe, RecipeRun
+from apps.recipes.services.runner import RecipeRunner, VariableValidationError
+from apps.users.decorators import async_login_required
+from apps.workspaces.services.workspace_service import touch_workspace_schemas
+from apps.workspaces.workspace_resolver import aresolve_workspace
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 from .serializers import (
@@ -81,47 +89,54 @@ class RecipeDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class RecipeRunView(APIView):
+@csrf_protect
+@async_login_required
+async def recipe_run_view(request, workspace_id, recipe_id):
+    """POST /api/workspaces/<workspace_id>/recipes/<recipe_id>/run/
+
+    Execute a recipe with variable values. Raw async Django view (DRF APIView
+    is sync and cannot await the async-first runner).
     """
-    POST /api/recipes/<recipe_id>/run/ - Execute a recipe with variable values.
-    """
+    if request.method != "POST":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
 
-    def post(self, request, workspace_id, recipe_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
-        if err:
-            return err
-        try:
-            recipe = Recipe.objects.get(pk=recipe_id, workspace=workspace)
-        except Recipe.DoesNotExist:
-            return Response({"error": "Recipe not found."}, status=status.HTTP_404_NOT_FOUND)
+    user = request._authenticated_user
 
-        serializer = RunRecipeSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err:
+        return err
 
-        variable_values = serializer.validated_data.get("variable_values", {})
+    try:
+        recipe = await Recipe.objects.select_related("workspace").aget(
+            pk=recipe_id, workspace=workspace
+        )
+    except Recipe.DoesNotExist:
+        return JsonResponse({"error": "Recipe not found."}, status=404)
 
-        try:
-            from apps.recipes.services.runner import RecipeRunner
+    try:
+        body = json.loads(request.body) if request.body else {}
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
 
-            runner = RecipeRunner(recipe=recipe, variable_values=variable_values, user=request.user)
-            run = runner.execute()
-        except Exception as e:
-            logger.exception("Error running recipe %s", recipe_id)
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    serializer = RunRecipeSerializer(data=body)
+    if not await sync_to_async(serializer.is_valid)():
+        return JsonResponse(serializer.errors, status=400)
+    variable_values = serializer.validated_data.get("variable_values", {})
 
-        # Touch the schema to reset the inactivity TTL on user-initiated recipe runs
-        from apps.workspaces.models import SchemaState, TenantSchema
+    try:
+        runner = RecipeRunner(recipe=recipe, variable_values=variable_values, user=user)
+        run = await runner.execute_async()
+    except VariableValidationError as e:
+        return JsonResponse({"error": str(e), "errors": e.errors}, status=400)
+    except Exception as e:
+        logger.exception("Error running recipe %s", recipe_id)
+        return JsonResponse({"error": str(e)}, status=500)
 
-        tenant = workspace.tenant
-        if tenant:
-            ts = TenantSchema.objects.filter(
-                tenant=tenant, state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING]
-            ).first()
-            if ts is not None:
-                ts.touch()
+    # Reset the inactivity TTL on user-initiated recipe runs.
+    await touch_workspace_schemas(workspace)
 
-        return Response(RecipeRunSerializer(run).data, status=status.HTTP_201_CREATED)
+    data = await sync_to_async(lambda: RecipeRunSerializer(run).data)()
+    return JsonResponse(data, status=201)
 
 
 class RecipeRunListView(APIView):
