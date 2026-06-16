@@ -9,7 +9,7 @@ from datetime import timedelta
 import sentry_sdk
 from django.conf import settings
 from django.db import close_old_connections
-from django.db.models import Count, OuterRef, Subquery
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
@@ -742,6 +742,47 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
 STALE_JOB_THRESHOLD = timedelta(minutes=10)
 
 
+def _staleness_anchor(tj: ThreadJob):
+    """Timestamp from which a ThreadJob's staleness is measured.
+
+    For a RUNNING job (a resume task has claimed it) we measure from the RESUME
+    phase: ``started_at``. created_at includes the full materialization + queue
+    time, so a healthy long materialization (>10 min) followed by a fresh resume
+    would otherwise look stale the instant the resume began — the false-positive
+    the reconciler used to hit (finding 02#9).
+
+    For PENDING/other states (or a legacy RUNNING row predating ``started_at``)
+    we fall back to ``created_at`` so a job that was never claimed still ages
+    out and a never-recorded resume is not stranded forever.
+    """
+    if tj.state == ThreadJob.State.RUNNING and tj.started_at is not None:
+        return tj.started_at
+    return tj.created_at
+
+
+def _stale_active_jobs_q(cutoff) -> Q:
+    """Predicate matching active ThreadJobs whose effective staleness anchor is
+    older than ``cutoff`` (see :func:`_staleness_anchor`).
+
+    A RUNNING job with a recorded ``started_at`` is stale only when that resume
+    phase is older than the cutoff; everything else (PENDING, or a legacy
+    RUNNING row with no ``started_at``) is measured from ``created_at``. Keeping
+    this as a single ORM-side predicate means the janitor never even SELECTs a
+    healthy in-flight resume, avoiding the 02#9 false-positive at the source.
+    """
+    running_stale = Q(
+        state=ThreadJob.State.RUNNING,
+        started_at__isnull=False,
+        started_at__lt=cutoff,
+    )
+    other_stale = (
+        Q(state__in=list(ThreadJob.ACTIVE_STATES))
+        & ~Q(state=ThreadJob.State.RUNNING, started_at__isnull=False)
+        & Q(created_at__lt=cutoff)
+    )
+    return running_stale | other_stale
+
+
 async def _procrastinate_job_status(job_id: int) -> str | None:
     """Return the raw procrastinate job status string, or None when unknown.
 
@@ -800,6 +841,15 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     if status in {"todo", "doing"}:
         return None
     if tj.state == ThreadJob.State.RUNNING:
+        # A RUNNING ThreadJob means a resume task claimed it. The materialize
+        # job's status is irrelevant here (it has long since succeeded for any
+        # >10 min materialization). Measure staleness from the RESUME phase
+        # (started_at) so we only flip a resume that has genuinely been stuck
+        # past the threshold — NOT a healthy resume that just started after a
+        # long materialization (finding 02#9). A fresh resume is left alone.
+        anchor = _staleness_anchor(tj)
+        if anchor is not None and timezone.now() - anchor < STALE_JOB_THRESHOLD:
+            return None
         # A worker started a resume and presumably crashed mid-ainvoke.
         # Marking FAILED directly avoids deferring a duplicate resume that
         # could race with a still-running first invocation.
@@ -880,10 +930,7 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     async for tj in ThreadJob.objects.select_related(
         "thread__workspace",
         "thread__user",
-    ).filter(
-        state__in=list(ThreadJob.ACTIVE_STATES),
-        created_at__lt=cutoff,
-    ):
+    ).filter(_stale_active_jobs_q(cutoff)):
         action = await reconcile_stale_thread_job(tj)
         if action in {"failed", "resumed"}:
             flipped += 1
@@ -1093,13 +1140,20 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # CANCELLED is intentionally included so the agent can compose a follow-up
     # message even for cancelled materializations.
     CLAIMABLE_STATES = [ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
+    # Record started_at on the claim so the reconciler can measure staleness
+    # from the RESUME phase, not from created_at (which includes the full
+    # materialization + queue time). Without this a healthy long materialization
+    # (>10 min) followed by a fresh resume would be falsely flipped to FAILED.
+    resume_started_at = timezone.now()
     claimed = await ThreadJob.objects.filter(
         id=tj.id,
         state__in=CLAIMABLE_STATES,
-    ).aupdate(state=ThreadJob.State.RUNNING)
+    ).aupdate(state=ThreadJob.State.RUNNING, started_at=resume_started_at)
     if not claimed:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
         return {"status": "already_claimed"}
+    # Keep the in-memory instance consistent for any later reads in this task.
+    tj.started_at = resume_started_at
 
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
     # No in-memory tj.state override: the prior `if tj.state == CANCELLED:
@@ -1168,6 +1222,25 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
             f"as if it were complete. Per-tenant: {summary}"
+        )
+    elif status == "failed":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization FAILED — every source failed, "
+            f"so there is NO loaded data for this workspace. Do NOT claim the "
+            f"materialization completed and do NOT query the workspace's tables as "
+            f"if data were present; there is nothing there. Tell the user plainly "
+            f"that the data load failed (this is commonly caused by expired or "
+            f"revoked credentials), summarize the per-source errors below, and "
+            f"suggest checking the workspace's connection before retrying. Do NOT "
+            f"silently re-run materialization. Per-tenant: {summary}"
+        )
+    elif status == "cancelled":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} Materialization was CANCELLED before it "
+            f"finished, so the data load is incomplete or absent. Do NOT claim the "
+            f"materialization completed and do NOT query tables as if all data were "
+            f"loaded. Tell the user the data load was cancelled and ask whether they "
+            f"want to re-run it. Per-tenant: {summary}"
         )
     else:
         body = (

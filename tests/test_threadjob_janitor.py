@@ -15,6 +15,7 @@ from apps.workspaces.tasks import (
     STALE_JOB_THRESHOLD,
     _procrastinate_job_status,
     expire_stale_thread_jobs,
+    reconcile_stale_thread_job,
 )
 
 User = get_user_model()
@@ -261,6 +262,101 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
     msg = mock_agent.aupdate_state.await_args.args[1]["messages"][0]
     assert isinstance(msg, AIMessage)
     assert msg.content == RESUME_STUCK_RUNNING_MESSAGE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconciler_does_not_fail_healthy_long_running_resume():
+    """Finding 02#9: a healthy long-running materialization (>10 min) must NOT
+    be flipped to FAILED once its resume task starts running.
+
+    The bug: staleness was measured from ``created_at`` (materialize dispatch)
+    and the MATERIALIZE job's status was inspected. For any materialization
+    taking >10 min, the moment the resume claims the job (RUNNING) and enters
+    agent.ainvoke, the materialize job is already 'succeeded' and the old
+    reconciler CAS-flipped the still-live resume to FAILED, injecting a
+    synthetic 'interrupted' message that raced the real answer.
+
+    Fix: staleness for a RUNNING job is keyed off the RESUME phase
+    (``started_at``), not ``created_at``. A resume that started seconds ago is
+    NOT stale even if the materialization began an hour earlier."""
+    user = await User.objects.acreate_user(email="longmat@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-longmat", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=606060,
+        tool_call_id="tc-longmat",
+        state=ThreadJob.State.RUNNING,
+    )
+    # Materialization dispatched well over the threshold ago (a long pipeline),
+    # but the resume claimed the job and started just now.
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+        started_at=timezone.now(),
+    )
+    await tj.arefresh_from_db()
+
+    with (
+        # The MATERIALIZE job has long since 'succeeded' — the old reconciler
+        # keyed off this and wrongly flipped the live resume.
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ) as persist,
+    ):
+        action = await reconcile_stale_thread_job(tj)
+
+    # The healthy in-flight resume must be left alone.
+    assert action is None, f"healthy long-running resume must not be reconciled; got {action!r}"
+    persist.assert_not_called()
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconciler_fails_genuinely_stuck_running_resume():
+    """The flip-side of 02#9: a resume that started long ago (the worker crashed
+    mid-ainvoke) IS stale by its RESUME phase and must still be flipped to
+    FAILED so the user is not stuck on a permanent spinner."""
+    user = await User.objects.acreate_user(email="stuckresume@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-stuckresume", created_by=user)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=707070,
+        tool_call_id="tc-stuckresume",
+        state=ThreadJob.State.RUNNING,
+    )
+    # The resume itself started well over the threshold ago and never finished.
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        created_at=timezone.now() - timedelta(hours=2),
+        started_at=timezone.now() - STALE_JOB_THRESHOLD - timedelta(minutes=5),
+    )
+    await tj.arefresh_from_db()
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        action = await reconcile_stale_thread_job(tj)
+
+    assert action == "failed"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
 
 
 def test_janitor_cutoff_is_10_minutes():
