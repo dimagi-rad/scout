@@ -500,19 +500,23 @@ class TestRecipeRunView:
         assert resp.status_code == 403
 ```
 
-Add these imports at the top of `tests/test_recipes.py` (the `from unittest.mock import …` line already exists; add the rest):
+Add these imports at the top of `tests/test_recipes.py` (the `from unittest.mock import …` line already exists; add `MagicMock`, and the rest):
 
 ```python
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from asgiref.sync import sync_to_async
 from django.test import AsyncClient
+
+from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 ```
+
+Also, while here, **fix the code-review Minor #4 from Task 2**: hoist the per-test inline `from apps.recipes.services.runner import RecipeRunner` (and `VariableValidationError`) statements out of the migrated `TestRecipeRunner` methods, relying on the new module-level import above (CLAUDE.md: imports at module level, never inside function bodies). Remove the now-redundant inline `from apps.recipes.services.runner import ...` lines inside those test methods. (`tests/test_recipe_runner.py` already imports `RecipeRunner` at module level with no circular-import issue, confirming the hoist is safe.)
 
 - [ ] **Step 2: Run to verify the 201 test FAILS (sync view can't run the async path correctly)**
 
 Run: `uv run pytest "tests/test_recipes.py::TestRecipeRunView" -v`
-Expected: FAIL — the current sync `RecipeRunView.post` calls `runner.execute()`, which no longer exists after Task 3 (`AttributeError`), so the endpoint returns 500.
+Expected: FAIL — the current sync `RecipeRunView.post` calls `runner.execute()`, which was deleted in Task 2 (`AttributeError`), so the endpoint returns 500. (This is the Critical the Task-2 code review flagged; Task 4 fixes it.)
 
 - [ ] **Step 3: Replace `RecipeRunView` with `recipe_run_view` in `apps/recipes/api/views.py`**
 
