@@ -71,6 +71,24 @@ and the enforcement guardrail. **No `async_to_sync`.**
   Remove the now-dead `WorkspaceTenant` tenant fetch and the `tenant_*` keys.
 - **Config** mirrors chat:
   `{"configurable": {"thread_id": self._thread_id}, "recursion_limit": 50, "oauth_tokens": self._oauth_tokens}`.
+
+#### Design note: `oauth_tokens` (kept) and Langfuse (excluded)
+
+Two independent things ride in chat's `config`. We copy only one:
+
+- **`config["oauth_tokens"]` — KEPT.** Fetched per-run from the running user via
+  `get_user_oauth_tokens(self.user)`; ride the LangGraph runtime config →
+  `langchain_mcp_adapters` forwards them into each MCP tool call's `_meta` (transport
+  layer) → the MCP server reads them via `extract_oauth_tokens` (`mcp_server/auth.py:25`).
+  They are **never visible to the LLM** and are **scrubbed from audit logs**
+  (`mcp_server/envelope.py:82` `_SCRUB_KEYS`). The only consumer is `run_materialization`
+  (data refresh). Tokens are **never stored** on the `Recipe` or `RecipeRun`: a shared
+  recipe carries only its prompt + variables, so whoever runs it authenticates as
+  *themselves* (their tokens, their membership). Sharing is therefore secure by
+  construction; a user without CommCare-linked tokens simply can't trigger an in-recipe
+  refresh — identical to chat.
+- **`config["callbacks"]` (Langfuse tracing) — EXCLUDED.** That is chat-specific; the
+  recipe runner attaches no Langfuse callback.
 - **Imports:** add `get_mcp_tools`, `get_user_oauth_tokens` from `apps.agents.mcp_client`
   and `Workspace` from `apps.workspaces.models`. Remove `WorkspaceTenant` /
   `TenantMembership` if they become unused.
