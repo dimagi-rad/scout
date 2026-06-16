@@ -45,16 +45,6 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
     {
-      name: "workspace-switch-recipes",
-      testMatch: "workspace-switch-recipes.spec.ts",
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
-      name: "workspace-switch-artifacts",
-      testMatch: "workspace-switch-artifacts.spec.ts",
-      use: { ...devices["Desktop Chrome"] },
-    },
-    {
       name: "labs-smoke",
       testMatch: "labs-smoke.spec.ts",
       use: { ...devices["Desktop Chrome"], headless: false },

@@ -1,5 +1,73 @@
-import { beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, render, screen, waitFor } from "@testing-library/react"
+import { createElement, useEffect } from "react"
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { api } from "@/api/client"
+import { workspaceApi } from "@/api/workspaces"
+import { RecipesPage } from "@/pages/RecipesPage/RecipesPage"
+import { ArtifactsPage } from "@/pages/ArtifactsPage/ArtifactsPage"
+import { WorkspaceDetailPage } from "@/pages/WorkspaceDetailPage/WorkspaceDetailPage"
+import { ApiError } from "@/api/client"
+import type { Recipe } from "@/store/recipeSlice"
+import type { ArtifactSummary } from "@/store/artifactSlice"
+import type { WorkspaceDetail } from "@/api/workspaces"
+
+// Two workspaces the user belongs to. The active workspace id is baked into the
+// `/api/workspaces/{id}/...` request path, so we can read the requested id back
+// out of the mocked api call to prove a refetch fired for the NEW workspace.
+const WS_A = "11111111-1111-1111-1111-111111111111"
+const WS_B = "22222222-2222-2222-2222-222222222222"
+
+/** Pull the workspace UUID out of a `/api/workspaces/{id}/...` request URL. */
+function workspaceIdFromUrl(url: string): string | null {
+  const match = url.match(/\/api\/workspaces\/([^/?]+)\//)
+  return match ? match[1] : null
+}
+
+function recipe(id: string, name: string): Recipe {
+  return {
+    id,
+    name,
+    description: `Recipe ${name}`,
+    prompt: "do the thing",
+    variables: [],
+    is_shared: false,
+    variable_count: 0,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+}
+
+function artifact(id: string, title: string): ArtifactSummary {
+  return {
+    id,
+    title,
+    description: `Artifact ${title}`,
+    artifact_type: "react",
+    version: 1,
+    has_live_queries: false,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+}
+
+function workspaceDetail(id: string, name: string): WorkspaceDetail {
+  return {
+    id,
+    name,
+    display_name: name,
+    is_auto_created: false,
+    role: "manage",
+    system_prompt: "",
+    schema_status: "available",
+    tenant_count: 1,
+    member_count: 1,
+    last_synced_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  }
+}
 
 /**
  * Workspace-switch state-reset contract. Coordinates with issue #247.
@@ -8,13 +76,19 @@ import { useAppStore } from "@/store/store"
  * only per-workspace state reset that exists today (from the 00c423d
  * threadId-leak fix).
  *
- * SKIPPED (#247): on a workspace switch the pages must also refetch / clear
- * their per-workspace state. #247 supplies the runtime fix; when it lands, flip
- * the `it.skip` calls below to `it` and assert the refetch/clear behaviour.
+ * The remaining three (#247): on a workspace switch the pages must also refetch
+ * / clear their per-workspace state. #247 supplied the runtime fix (page
+ * effects keyed on `activeDomainId`; WorkspaceDetailPage clears `error` at the
+ * start of each load), so these assert the refetch/clear behaviour by rendering
+ * the page against a mocked api layer and a real store.
  */
 describe("workspace switch resets per-workspace state", () => {
   beforeEach(() => {
     useAppStore.setState({ activeDomainId: "ws-a", threadId: "thread-a" })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it("starts a fresh thread for the new workspace (no cross-workspace carry)", () => {
@@ -23,8 +97,152 @@ describe("workspace switch resets per-workspace state", () => {
     expect(useAppStore.getState().threadId).not.toBe(before)
   })
 
-  // --- #247: pages don't refetch / clear state on workspace switch ---
-  it.skip("refetches the recipes list on workspace switch (#247, 04#9)", () => {})
-  it.skip("refetches the artifacts list on workspace switch (#247, 04#9)", () => {})
-  it.skip("clears a prior workspace-detail load error on later success (#247, 05#5)", () => {})
+  // --- #247: pages refetch / clear state on workspace switch ---
+
+  it("refetches the recipes list on workspace switch (#247, 04#9)", async () => {
+    const recipesByWs: Record<string, Recipe[]> = {
+      [WS_A]: [recipe("recipe-a1", "Alpha Cohort Report")],
+      [WS_B]: [recipe("recipe-b1", "Beta Revenue Rollup")],
+    }
+    const getSpy = vi
+      .spyOn(api, "get")
+      .mockImplementation(async (url: string) => {
+        const wsId = workspaceIdFromUrl(url)
+        return (wsId ? recipesByWs[wsId] : []) as never
+      })
+
+    useAppStore.setState({
+      activeDomainId: WS_A,
+      recipes: [],
+      recipeStatus: "idle",
+    })
+
+    render(
+      createElement(
+        MemoryRouter,
+        { initialEntries: ["/recipes"] },
+        createElement(
+          Routes,
+          null,
+          createElement(Route, { path: "/recipes", element: createElement(RecipesPage) }),
+        ),
+      ),
+    )
+
+    // Mount fetch resolves with workspace A's recipes.
+    await waitFor(() => expect(screen.getByTestId("recipe-card-recipe-a1")).toBeInTheDocument())
+    expect(screen.queryByTestId("recipe-card-recipe-b1")).not.toBeInTheDocument()
+    expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_A}/recipes/`)
+
+    // Switch workspace the same way the WorkspaceSwitcher does.
+    act(() => {
+      useAppStore.getState().domainActions.setActiveDomain(WS_B)
+    })
+
+    // The effect refetches for the NEW workspace id, the new list renders, and
+    // the stale list is gone. (Old code only fetched on mount → this fails.)
+    await waitFor(() => expect(screen.getByTestId("recipe-card-recipe-b1")).toBeInTheDocument())
+    expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_B}/recipes/`)
+    expect(screen.queryByTestId("recipe-card-recipe-a1")).not.toBeInTheDocument()
+  })
+
+  it("refetches the artifacts list on workspace switch (#247, 04#9)", async () => {
+    const artifactsByWs: Record<string, ArtifactSummary[]> = {
+      [WS_A]: [artifact("artifact-a1", "Alpha Dashboard")],
+      [WS_B]: [artifact("artifact-b1", "Beta Dashboard")],
+    }
+    const getSpy = vi
+      .spyOn(api, "get")
+      .mockImplementation(async (url: string) => {
+        const wsId = workspaceIdFromUrl(url)
+        return { results: wsId ? artifactsByWs[wsId] : [] } as never
+      })
+
+    useAppStore.setState({
+      activeDomainId: WS_A,
+      artifacts: [],
+      artifactsStatus: "idle",
+      artifactSearch: "",
+    })
+
+    render(
+      createElement(
+        MemoryRouter,
+        { initialEntries: ["/artifacts"] },
+        createElement(
+          Routes,
+          null,
+          createElement(Route, { path: "/artifacts", element: createElement(ArtifactsPage) }),
+        ),
+      ),
+    )
+
+    await waitFor(() => expect(screen.getByText("Alpha Dashboard")).toBeInTheDocument())
+    expect(screen.queryByText("Beta Dashboard")).not.toBeInTheDocument()
+    expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_A}/artifacts/`)
+
+    act(() => {
+      useAppStore.getState().domainActions.setActiveDomain(WS_B)
+    })
+
+    await waitFor(() => expect(screen.getByText("Beta Dashboard")).toBeInTheDocument())
+    expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_B}/artifacts/`)
+    expect(screen.queryByText("Alpha Dashboard")).not.toBeInTheDocument()
+  })
+
+  it("clears a prior workspace-detail load error on later success (#247, 05#5)", async () => {
+    // WS_A fails to load (e.g. dead link / 404); WS_B loads fine. Switching from
+    // the failed workspace to the good one must drop the stale error screen.
+    const getDetailSpy = vi
+      .spyOn(workspaceApi, "getDetail")
+      .mockImplementation(async (id: string) => {
+        if (id === WS_A) throw new ApiError(404, "Workspace not found")
+        return workspaceDetail(WS_B, "Workspace Beta")
+      })
+
+    // Drive the page's `workspaceId` route param via a controllable navigate.
+    // Captured in an effect (runs outside render, so it's a lint-clean side
+    // effect) rather than during render.
+    let navigateTo: ((path: string) => void) | null = null
+    function NavProbe() {
+      const navigate = useNavigate()
+      useEffect(() => {
+        navigateTo = (path: string) => navigate(path)
+      }, [navigate])
+      return null
+    }
+
+    useAppStore.setState({ activeDomainId: WS_A, domains: [] })
+
+    render(
+      createElement(
+        MemoryRouter,
+        { initialEntries: [`/workspaces/${WS_A}`] },
+        createElement(NavProbe),
+        createElement(
+          Routes,
+          null,
+          createElement(Route, {
+            path: "/workspaces/:workspaceId",
+            element: createElement(WorkspaceDetailPage),
+          }),
+        ),
+      ),
+    )
+
+    // WS_A's load fails → the error screen renders.
+    await waitFor(() => expect(screen.getByText("Workspace not found")).toBeInTheDocument())
+    expect(getDetailSpy).toHaveBeenCalledWith(WS_A)
+
+    // Navigate to WS_B, which loads successfully.
+    act(() => {
+      navigateTo?.(`/workspaces/${WS_B}`)
+    })
+
+    // The successful load clears the prior error and shows the workspace. (Old
+    // code never reset `error`, so the stale error screen would persist → fail.)
+    await waitFor(() => expect(screen.getByTestId("workspace-name")).toHaveTextContent("Workspace Beta"))
+    expect(screen.queryByText("Workspace not found")).not.toBeInTheDocument()
+    expect(getDetailSpy).toHaveBeenCalledWith(WS_B)
+  })
 })
