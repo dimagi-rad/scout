@@ -260,6 +260,50 @@ class TestArtifactSandboxView:
         # and does NOT gate it on origin equality (which breaks opaque-origin frames).
         assert "event.origin !== window.location.origin" not in listener
 
+    def test_iframe_to_parent_messages_use_wildcard_target_origin(
+        self, authenticated_client, artifact, workspace
+    ):
+        """iframe->parent postMessage must target "*", never window.location.origin.
+
+        The iframe is sandboxed WITHOUT allow-same-origin, so its document has an
+        opaque ("null") security origin: inside the frame
+        window.location.origin === "null". A postMessage whose targetOrigin is a
+        concrete origin string (or "null") will NOT match the parent's real
+        concrete origin, so the browser SILENTLY DROPS the message. Both
+        iframe->parent sends (artifact-query-data and artifact-error) must use
+        targetOrigin "*". This is safe because the parent (ArtifactPanel)
+        authenticates inbound messages by event.source === the iframe's
+        contentWindow, not by origin.
+        """
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+
+        # No iframe->parent postMessage call may target the document origin
+        # (window.location.origin == "null"). Match the concrete call form
+        # `}, window.location.origin)` so explanatory comments don't trip it.
+        assert "}, window.location.origin)" not in content, (
+            "iframe->parent postMessage still targets window.location.origin, "
+            "which is 'null' for an opaque-origin sandbox frame and will be "
+            "silently dropped by the browser."
+        )
+
+        # Both message types must be posted to the parent with the "*" target.
+        # The targetOrigin is the final argument on the `}, <target>);` line that
+        # closes each postMessage call; locate it from the message type marker.
+        for msg_type in ("artifact-query-data", "artifact-error"):
+            idx = content.index(f"type: '{msg_type}'")
+            close = content.index("}, ", idx)
+            # Slice the closing line up to the call terminator `);`.
+            target_arg = content[close + len("}, ") : content.index(");", close)]
+            assert target_arg == "'*'", (
+                f"iframe->parent '{msg_type}' postMessage must use targetOrigin "
+                f"'*'; found: {target_arg!r}"
+            )
+
     def test_sandbox_csp_headers(self, authenticated_client, artifact, workspace):
         """Test that CSP headers are set correctly for security."""
         response = authenticated_client.get(
