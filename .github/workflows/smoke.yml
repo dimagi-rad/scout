@@ -1,0 +1,34 @@
+name: Smoke Tests (manual)
+
+# Post-deploy smoke checks against a running Scout deployment. Manual only —
+# needs a live URL + (optionally) credentials, so it never runs in PR CI.
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_url:
+        description: "Frontend base URL (SCOUT_FRONTEND_URL)"
+        required: true
+        default: "https://labs.connect.dimagi.com/scout"
+      api_url:
+        description: "API base URL (SCOUT_API_URL)"
+        required: true
+        default: "https://labs.connect.dimagi.com/scout"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    env:
+      SCOUT_FRONTEND_URL: ${{ inputs.frontend_url }}
+      SCOUT_API_URL: ${{ inputs.api_url }}
+      # Optional — the authenticated-flow tests skip when these are absent.
+      SCOUT_TEST_EMAIL: ${{ secrets.SCOUT_TEST_EMAIL }}
+      SCOUT_TEST_PASSWORD: ${{ secrets.SCOUT_TEST_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Run deployment smoke tests
+        run: >-
+          uv run pytest tests/smoke/test_deployment.py
+          -v --override-ini="addopts=" -p no:django
