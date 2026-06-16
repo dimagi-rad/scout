@@ -2,8 +2,10 @@
 API views for recipe management.
 """
 
+import hashlib
 import json
 import logging
+import time
 
 from asgiref.sync import sync_to_async
 from django.http import JsonResponse
@@ -129,8 +131,11 @@ async def recipe_run_view(request, workspace_id, recipe_id):
     except VariableValidationError as e:
         return JsonResponse({"error": str(e), "errors": e.errors}, status=400)
     except Exception as e:
-        logger.exception("Error running recipe %s", recipe_id)
-        return JsonResponse({"error": str(e)}, status=500)
+        # Don't leak internal exception detail to the client; log it behind a
+        # short ref and return the ref (mirrors apps/chat/views.py).
+        error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
+        logger.exception("Error running recipe %s [ref=%s]", recipe_id, error_ref)
+        return JsonResponse({"error": f"Recipe run failed. Ref: {error_ref}"}, status=500)
 
     # Reset the inactivity TTL on user-initiated recipe runs.
     await touch_workspace_schemas(workspace)
