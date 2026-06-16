@@ -12,6 +12,7 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import AsyncClient
 from django.utils import timezone
+from langchain_core.messages import AIMessage
 
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
@@ -811,7 +812,6 @@ class TestRecipeRunView:
     @pytest.mark.asyncio
     async def test_run_endpoint_returns_201_with_real_graph(self, recipe, user, recipe_step_1):
         """POST run/ builds the real graph (LLM mocked, no MCP tools) and returns 201."""
-        from langchain_core.messages import AIMessage
 
         async def fake_ainvoke(messages, *args, **kwargs):
             return AIMessage(content="done", id="ai-1")
