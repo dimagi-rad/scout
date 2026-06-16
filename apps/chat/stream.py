@@ -31,12 +31,40 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import ToolMessage
 
 logger = logging.getLogger(__name__)
 
 # Maximum wall-clock time for agent execution before we abort.
 AGENT_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Anthropic error.type values that indicate a transient, retryable capacity
+# problem (overload / rate limit) rather than a bug on our side.
+_TRANSIENT_ERROR_TYPES = {"overloaded_error", "rate_limit_error"}
+_TRANSIENT_STATUS_CODES = {429, 503, 529}
+
+
+def _is_transient_overload(exc: BaseException) -> bool:
+    """True for transient Anthropic capacity errors worth retrying.
+
+    On a mid-stream ``error`` SSE event the streaming response opened with HTTP
+    200, so anthropic raises a base ``APIStatusError`` whose ``status_code`` is
+    200 -- the body's ``error.type`` is then the only reliable signal. The
+    subclass / status-code checks cover the non-streaming (real HTTP status)
+    path.
+    """
+    if isinstance(exc, RateLimitError | InternalServerError):
+        return True
+    if isinstance(exc, APIStatusError):
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict) and err.get("type") in _TRANSIENT_ERROR_TYPES:
+                return True
+        if getattr(exc, "status_code", None) in _TRANSIENT_STATUS_CODES:
+            return True
+    return False
 
 
 def _sse(chunk: dict) -> str:
@@ -223,20 +251,38 @@ async def langgraph_to_ui_stream(
                 "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
             }
         )
-    except Exception:
-        logger.exception("Error during agent streaming")
-        if reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": reasoning_id})
-        if not text_started:
-            yield _sse({"type": "text-start", "id": text_id})
-            text_started = True
-        yield _sse(
-            {
-                "type": "text-delta",
-                "id": text_id,
-                "delta": "\n\nAn error occurred while processing your request.",
-            }
-        )
+    except Exception as exc:
+        if _is_transient_overload(exc):
+            # Anthropic was momentarily overloaded / rate-limited -- a transient
+            # upstream condition, not a bug. Log at WARNING (so it does not page
+            # via Sentry's ERROR-level capture) and emit a transient data part
+            # the frontend can use to auto-retry the turn. Any open text/
+            # reasoning part is closed by the shared block below.
+            logger.warning(
+                "Anthropic capacity error during stream (retryable): %s",
+                exc.__class__.__name__,
+            )
+            yield _sse(
+                {
+                    "type": "data-chat-status",
+                    "data": {"kind": "retryable-error", "reason": "overloaded"},
+                    "transient": True,
+                }
+            )
+        else:
+            logger.exception("Error during agent streaming")
+            if reasoning_started:
+                yield _sse({"type": "reasoning-end", "id": reasoning_id})
+            if not text_started:
+                yield _sse({"type": "text-start", "id": text_id})
+                text_started = True
+            yield _sse(
+                {
+                    "type": "text-delta",
+                    "id": text_id,
+                    "delta": "\n\nAn error occurred while processing your request.",
+                }
+            )
 
     # Close any open parts
     if reasoning_started:
