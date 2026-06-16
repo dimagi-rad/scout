@@ -659,8 +659,20 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
         // Print-to-PDF: the parent frame posts {type: 'scout-print'} to print
         // only the artifact (not the surrounding app). Triggering print inside
         // the sandboxed iframe scopes the print job to the artifact content.
+        //
+        // SECURITY: this iframe is sandboxed WITHOUT allow-same-origin, so its
+        // document has a unique opaque ("null") security origin. An origin
+        // allowlist is therefore broken here on BOTH ends: legitimate messages
+        // from the real parent arrive with event.origin === the app's concrete
+        // origin (never "null"), so an `event.origin === window.location.origin`
+        // check would silently REJECT them and break Export PDF; and any other
+        // sandboxed frame on the page also reports event.origin "null", so a
+        // "null"-origin allowance would TRUST forgeries from sibling frames.
+        // The robust gate is on the message source: only accept messages posted
+        // by our actual parent window, mirroring the source-based check the
+        // parent (ArtifactPanel) uses on inbound artifact messages.
         window.addEventListener('message', (event) => {
-            if (event.origin !== window.location.origin) return;
+            if (event.source !== window.parent) return;
             if (event.data && event.data.type === 'scout-print') {
                 window.print();
             }
