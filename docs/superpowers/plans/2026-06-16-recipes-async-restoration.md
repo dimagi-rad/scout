@@ -19,7 +19,7 @@
   4. The view calls sync `execute()` (`async_to_sync` + sync `graph.invoke()`).
 - **The correct pattern** is `apps/chat/views.py:153-197` (load `get_mcp_tools()` + `get_user_oauth_tokens()`, call `build_agent_graph(workspace=…, mcp_tools=…, oauth_tokens=…)`, config `{"configurable": {"thread_id":…}, "recursion_limit": 50, "oauth_tokens":…}`).
 - **Async-first is non-negotiable.** No `async_to_sync`. Do NOT move execution to a background task (#267). Keep `execute_async` (supersedes #266's "delete it"). Do not touch PR #277 / issues #276 / #266.
-- **Fixtures** (`tests/conftest.py`): `user` (test@example.com / testpass123), `workspace` (1 tenant "test-domain", **no** TenantSchema, `user` is MANAGE member), `other_user`. `tests/test_recipes.py` adds `recipe` (built on `workspace`, vars region/limit/start_date; only `start_date` has no default), `recipe_step_1`.
+- **Fixtures** (`tests/conftest.py`): `user` (test@example.com / testpass123), `workspace` (1 tenant "test-domain", **no** TenantSchema, `user` is MANAGE member), `other_user`. The `recipe`/`recipe_step_1` fixtures are **module-local to `tests/test_recipes.py`** (the codebase pattern: each recipe test module defines its own `recipe` — see also `test_recipe_soft_delete.py`). `tests/test_recipe_runner.py` therefore defines its own local `recipe` fixture (depending on the conftest `user`/`workspace`).
 - **`get_schema_status` contract** (`mcp_server/server.py:652`): empty `workspace_id` → `success=False, error.code="VALIDATION_ERROR"`; a workspace with 1 tenant and no ACTIVE schema → `success=True, data.state="not_provisioned"` with **no managed-DB connection**. This is the signal the contract test keys on.
 - **`RecipeRunStatus`** (`apps/recipes/models.py:281`): `PENDING/RUNNING/COMPLETED/FAILED`.
 - **Real-MCP-wire pattern** (modeled on commit `2320d52`, `tests/test_chat_mcp_contract.py`, not on main): `create_connected_server_and_client_session(scout_mcp)` + `load_mcp_tools(session)`.
@@ -137,7 +137,7 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
 - [ ] **Step 2: Run it to verify it FAILS against the current (broken) runner**
 
 Run: `uv run pytest tests/test_recipe_runner.py -v`
-Expected: FAIL. The current `_build_graph` calls `build_agent_graph(tenant_membership=…)` → the run is caught inside `execute_async` and recorded as `FAILED` with a `TypeError` in `step_results[0]["error"]`, so `assert run.status == RecipeRunStatus.COMPLETED` fails (the assert message prints the TypeError).
+Expected: RED (the feature isn't implemented yet). The current runner does **not** import `get_mcp_tools` (drift #3 — mcp_tools are never loaded), so `patch("apps.recipes.services.runner.get_mcp_tools", …)` raises `AttributeError` on context entry. That is a legitimate TDD red: it directly reflects the missing-mcp_tools drift. (Once Task 2 adds `from apps.agents.mcp_client import get_mcp_tools` to the runner and fixes the `build_agent_graph` signature, the patch target exists and the assertions run for real.) Acceptable RED signatures: the `AttributeError` on the missing `get_mcp_tools`, OR — if the import were present but the signature still wrong — a FAILED run with a `TypeError` printed by the `assert run.status == RecipeRunStatus.COMPLETED` message. The test must COLLECT and RUN cleanly (no import error, no "fixture not found"); it must simply not PASS.
 
 - [ ] **Step 3: Commit the failing test**
 
@@ -154,9 +154,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 2: Fix the runner's async path (`execute_async` + `_build_graph`)
+## Task 2: Fix the runner's async path + delete sync path + migrate unit tests (MERGED with Task 3)
 
-Make the contract test pass. Do NOT delete `execute()` yet (Task 3) so the existing mocked tests stay green between commits.
+> **Execution note (revised during implementation):** Tasks 2 and 3 are executed as ONE task. Reason: `_build_graph` is shared by both `execute()` and `execute_async`. Rewriting it to call `get_mcp_tools()` (unmocked in the old `execute()`-based tests) plus removing `self._tenant_membership` would break the old tests in the gap between commits. So the runner fix, the deletion of `execute()`/`_create_run_record()`, and the migration of the 6 mocked unit tests all land together. The contract test goes GREEN and the migrated unit tests (which pass `graph=mock_graph`, bypassing `_build_graph`) stay GREEN. Step 6 below ("old mocked tests still pass, execute() untouched") is superseded by Task 3's migration steps.
 
 **Files:**
 - Modify: `apps/recipes/services/runner.py`
@@ -295,7 +295,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 3: Delete the sync path; migrate the mocked unit tests to `execute_async`
+## Task 3: Delete the sync path; migrate the mocked unit tests to `execute_async` (MERGED INTO TASK 2 — executed together)
 
 **Files:**
 - Modify: `apps/recipes/services/runner.py` (delete `execute()` + `_create_run_record()`)
