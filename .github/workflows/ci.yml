@@ -35,5 +35,9 @@ jobs:
         run: bun run lint
         working-directory: frontend
 
+      - name: Unit test frontend
+        run: bun run test
+        working-directory: frontend
+
   test:
     uses: ./.github/workflows/test.yml
