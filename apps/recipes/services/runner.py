@@ -41,13 +41,6 @@ class VariableValidationError(RecipeRunnerError):
         super().__init__(f"Variable validation failed: {', '.join(errors)}")
 
 
-class StepExecutionError(RecipeRunnerError):
-    """Raised when execution fails."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(f"Execution failed: {message}")
-
-
 class RecipeRunner:
     """
     Executes a recipe by sending its rendered prompt to the agent.
@@ -233,6 +226,5 @@ class RecipeRunner:
 __all__ = [
     "RecipeRunner",
     "RecipeRunnerError",
-    "StepExecutionError",
     "VariableValidationError",
 ]
