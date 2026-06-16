@@ -14,6 +14,7 @@ import { SlashCommandMenu } from "./SlashCommandMenu"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
+import { decideOverloadAction, isRetryableErrorPart } from "./overloadRetry"
 
 /** True when an error looks like a stale/missing-thread rejection (HTTP 404 or
  * a body containing the backend's "Thread not found" marker). */
@@ -33,6 +34,13 @@ export function ChatPanel() {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
+  // Transient-overload auto-retry (see ./overloadRetry):
+  //   hitRetryableRef — a retryable-error data part arrived during this turn
+  //   retriedRef      — we've already auto-retried this turn once
+  const hitRetryableRef = useRef(false)
+  const retriedRef = useRef(false)
+  const prevRetryStatusRef = useRef<string>("")
+  const [overloadNotice, setOverloadNotice] = useState(false)
 
   const {
     jobsByThreadId,
@@ -57,9 +65,19 @@ export function ChatPanel() {
       }),
   )
 
-  const { messages, sendMessage, status, stop, error, setMessages } = useChat({
+  const { messages, sendMessage, status, stop, error, setMessages, regenerate } = useChat({
     transport,
+    onData: (part) => {
+      if (isRetryableErrorPart(part)) hitRetryableRef.current = true
+    },
   })
+
+  // Clear auto-retry bookkeeping at the start of each user-initiated turn.
+  function resetOverloadState() {
+    hitRetryableRef.current = false
+    retriedRef.current = false
+    setOverloadNotice(false)
+  }
 
   const isStreaming = status === "streaming" || status === "submitted"
 
@@ -138,6 +156,29 @@ export function ChatPanel() {
     prevStatusRef.current = status
   }, [status, activeDomainId, fetchThreads])
 
+  // Auto-retry a turn once if it hit a transient Anthropic overload; if the
+  // retry also hits it, surface a notice instead. See ./overloadRetry.
+  useEffect(() => {
+    const prev = prevRetryStatusRef.current
+    prevRetryStatusRef.current = status
+    const justFinished =
+      (prev === "streaming" || prev === "submitted") && status === "ready"
+    if (!justFinished) return
+
+    const action = decideOverloadAction({
+      hitRetryable: hitRetryableRef.current,
+      alreadyRetried: retriedRef.current,
+    })
+    hitRetryableRef.current = false
+    if (action === "retry") {
+      retriedRef.current = true
+      void regenerate()
+    } else if (action === "notify") {
+      retriedRef.current = false
+      setOverloadNotice(true)
+    }
+  }, [status, regenerate])
+
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     if (scrollRef.current) {
@@ -151,7 +192,13 @@ export function ChatPanel() {
     if (!text || isStreaming) return
 
     setInput("")
+    resetOverloadState()
     sendMessage({ text: resolveSlashCommand(text) })
+  }
+
+  function handleOverloadRetry() {
+    resetOverloadState()
+    void regenerate()
   }
 
   // Recover from a stale/unavailable thread: forget the saved id for this
@@ -191,7 +238,10 @@ export function ChatPanel() {
       <ChatEmptyState
         input={input}
         setInput={setInput}
-        onSend={(text) => sendMessage({ text })}
+        onSend={(text) => {
+          resetOverloadState()
+          sendMessage({ text })
+        }}
         disabled={isStreaming}
       />
     )
@@ -215,6 +265,7 @@ export function ChatPanel() {
         ))}
         {isStreaming && <ThinkingIndicator />}
         {error && <ChatError error={error} onStartNewThread={startFreshThread} />}
+        {overloadNotice && <OverloadNotice onRetry={handleOverloadRetry} />}
       </div>
 
       {/* Materialization progress banner — always visible when a job is active for this thread */}
@@ -302,6 +353,30 @@ function ChatError({
           Start new chat
         </Button>
       )}
+    </div>
+  )
+}
+
+/**
+ * Shown when a turn hit a transient Anthropic overload and the one automatic
+ * retry also failed. Offers a manual retry rather than a dead end.
+ */
+function OverloadNotice({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div
+      className="text-sm text-muted-foreground bg-muted rounded-lg px-4 py-3 space-y-2"
+      data-testid="chat-overload-notice"
+    >
+      <p>The assistant is busy right now. Please try again in a moment.</p>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={onRetry}
+        data-testid="chat-overload-retry"
+      >
+        Retry
+      </Button>
     </div>
   )
 }
