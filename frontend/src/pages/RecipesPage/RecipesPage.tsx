@@ -22,6 +22,7 @@ export function RecipesPage() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
   const navigate = useNavigate()
 
+  const activeDomainId = useAppStore((s) => s.activeDomainId)
   const recipes = useAppStore((s) => s.recipes)
   const recipeStatus = useAppStore((s) => s.recipeStatus)
   const currentRecipe = useAppStore((s) => s.currentRecipe)
@@ -41,10 +42,13 @@ export function RecipesPage() {
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
 
-  // Fetch recipes list on mount
+  // Fetch recipes list on mount and whenever the active workspace changes, so
+  // switching workspaces refetches instead of leaving the previous workspace's
+  // recipes on screen (which then 404 when combined with the new workspace id).
   useEffect(() => {
+    if (!activeDomainId) return
     fetchRecipes()
-  }, [fetchRecipes])
+  }, [activeDomainId, fetchRecipes])
 
   // Fetch specific recipe when viewing detail
   useEffect(() => {
