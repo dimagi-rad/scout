@@ -36,7 +36,7 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
   return (
     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
       {recipes.map((recipe) => (
-        <Card key={recipe.id} className="flex flex-col">
+        <Card key={recipe.id} className="flex flex-col" data-testid={`recipe-card-${recipe.id}`}>
           <CardHeader className="pb-2">
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1 min-w-0">
