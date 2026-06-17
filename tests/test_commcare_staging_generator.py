@@ -746,4 +746,50 @@ class TestUpsertSystemAssets:
             tenant_membership=membership, metadata=_make_metadata()
         )
         result = upsert_system_assets(tenant, empty_meta)
-        assert result == {"created": 0, "updated": 0, "total": 0}
+        assert result == {"created": 0, "updated": 0, "total": 0, "deleted": 0}
+
+    def test_removed_case_type_deletes_orphan_asset(self, tenant, tenant_metadata):
+        """When a case type disappears from metadata, its system asset is deleted
+        rather than left behind as a stale table presented as fresh (issue #241,
+        04#5: upsert_system_assets never deleted orphaned assets)."""
+        from apps.transformations.models import TransformationAsset
+
+        first = upsert_system_assets(tenant, tenant_metadata)
+        before = TransformationAsset.objects.filter(
+            tenant=tenant, scope=TransformationScope.SYSTEM
+        ).count()
+        assert before == first["total"]
+
+        # Drop a case type from the metadata, then re-upsert.
+        removed = tenant_metadata.metadata["case_types"].pop()
+        tenant_metadata.save()
+        removed_model = f"stg_case_{slugify_model_name(removed['name'])}"
+
+        second = upsert_system_assets(tenant, tenant_metadata)
+
+        assert second["deleted"] >= 1
+        names = set(
+            TransformationAsset.objects.filter(
+                tenant=tenant, scope=TransformationScope.SYSTEM
+            ).values_list("name", flat=True)
+        )
+        assert removed_model not in names
+
+    def test_orphan_delete_only_touches_system_scope(self, tenant, tenant_metadata):
+        """A user's tenant-scoped asset is never deleted by the system-asset
+        orphan sweep, even though it shares the tenant."""
+        from apps.transformations.models import TransformationAsset
+
+        upsert_system_assets(tenant, tenant_metadata)
+        user_asset = TransformationAsset.objects.create(
+            name="my_custom_model",
+            scope=TransformationScope.TENANT,
+            tenant=tenant,
+            sql_content="SELECT 1",
+        )
+
+        tenant_metadata.metadata["case_types"].pop()
+        tenant_metadata.save()
+        upsert_system_assets(tenant, tenant_metadata)
+
+        assert TransformationAsset.objects.filter(id=user_asset.id).exists()

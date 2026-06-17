@@ -321,8 +321,16 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
 def upsert_system_assets(tenant, tenant_metadata) -> dict:
     """Generate and upsert system staging TransformationAssets for a tenant.
 
-    Calls generate_system_assets(), then update_or_create for each.
-    Returns {"created": int, "updated": int, "total": int}.
+    Calls generate_system_assets(), then update_or_create for each, and finally
+    deletes any SYSTEM-scoped asset for this tenant whose model is no longer
+    generated from the current metadata (issue #241, 04#5). Without this sweep a
+    case type or form removed upstream would leave an orphaned asset that the
+    transform phase keeps materializing into a stale table presented as fresh.
+
+    Only SYSTEM-scoped assets for this tenant are swept — user-authored
+    TENANT/WORKSPACE assets are never touched.
+
+    Returns {"created": int, "updated": int, "deleted": int, "total": int}.
     """
     metadata = tenant_metadata.metadata
     assets = generate_system_assets(tenant, metadata)
@@ -346,4 +354,11 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
         else:
             updated += 1
 
-    return {"created": created, "updated": updated, "total": len(assets)}
+    current_names = {a.name for a in assets}
+    deleted, _ = (
+        TransformationAsset.objects.filter(tenant=tenant, scope=TransformationScope.SYSTEM)
+        .exclude(name__in=current_names)
+        .delete()
+    )
+
+    return {"created": created, "updated": updated, "deleted": deleted, "total": len(assets)}

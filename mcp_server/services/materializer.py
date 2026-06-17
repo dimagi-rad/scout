@@ -1072,7 +1072,18 @@ def _write_ocs_participants(
 
 
 def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None) -> dict:
-    """Run the three-stage transformation pipeline using TransformationAsset records."""
+    """Run the transformation pipeline's SYSTEM + TENANT stages for this tenant.
+
+    No ``workspace`` is passed because materialization is tenant-scoped: a tenant
+    may belong to several workspaces, so there is no single workspace context
+    here. The WORKSPACE stage therefore does not run during materialization — it
+    is driven separately by the transformations trigger endpoint, which passes an
+    explicit ``workspace`` (issue #241, 04#5: the WORKSPACE never-run gap is a
+    property of tenant-scoped materialization, not a bug to fix here; running an
+    arbitrary workspace's assets against a single tenant's schema would be
+    ill-defined). The dbt run itself is now confined to a low-privilege,
+    schema-scoped role and a failure surfaces via ``status``/``error`` below.
+    """
     run = run_transformation_pipeline(
         tenant=tenant,
         schema_name=schema_name,

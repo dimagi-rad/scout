@@ -24,9 +24,19 @@ from apps.transformations.models import (
     TransformationScope,
 )
 from apps.transformations.services.dbt_project import write_dbt_project
+from apps.workspaces.services.schema_manager import dbt_role_name
 from mcp_server.services.dbt_runner import generate_profiles_yml, run_dbt, run_dbt_test
 
 logger = logging.getLogger(__name__)
+
+
+class TransformStageError(RuntimeError):
+    """Raised when a dbt stage reports overall failure.
+
+    Surfaced so ``run_transformation_pipeline`` marks the run FAILED instead of
+    silently COMPLETED — the dbt connection-level / compilation failures that
+    issue #241 (04#4) showed were being swallowed.
+    """
 
 
 def run_transformation_pipeline(
@@ -134,10 +144,15 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
         db_url = getattr(settings, "MANAGED_DATABASE_URL", "")
         if not db_url:
             raise RuntimeError("MANAGED_DATABASE_URL is not configured")
+        # Confine dbt to a low-privilege, schema-scoped role and pin its
+        # search_path to the target schema (issue #241): user-authored asset SQL
+        # must not run as the managed-DB superuser, and unqualified staging
+        # SELECTs (FROM raw_cases) must resolve inside the tenant schema.
         generate_profiles_yml(
             output_path=profiles_dir / "profiles.yml",
             schema_name=schema_name,
             db_url=db_url,
+            confinement_role=dbt_role_name(schema_name),
         )
 
         # Run models
@@ -182,4 +197,9 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
             ar.save(update_fields=["status", "logs", "test_results", "completed_at"])
 
         if not result.get("success"):
-            logger.warning("Stage '%s' had failures: %s", stage_name, result.get("error"))
+            # Surface the failure so the run is marked FAILED rather than silently
+            # COMPLETED (issue #241, 04#4). Per-asset results are already recorded
+            # above, so the raise only flips the run-level status.
+            error = result.get("error") or "dbt run failed"
+            logger.warning("Stage '%s' failed: %s", stage_name, error)
+            raise TransformStageError(f"Stage '{stage_name}' failed: {error}")

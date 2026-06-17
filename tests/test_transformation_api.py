@@ -388,25 +388,97 @@ def test_list_runs_tenant_filter(api_client, user, tenant, tenant_membership):
 
 
 @pytest.mark.django_db
-def test_trigger_run(api_client, user, tenant, tenant_membership):
+def test_trigger_run_uses_confined_dbt_path(api_client, user, tenant, tenant_membership):
+    """The trigger endpoint must drive the real confined dbt path (issue #241),
+    not a mocked-instant pipeline. Only the dbt invocation itself is stubbed; the
+    real executor + profile generation run, and we assert the profile pins a
+    low-privilege confinement role (04#3) and a schema-scoped search_path (04#4)
+    — never the bare managed-DB superuser connection."""
     from apps.workspaces.models import TenantSchema
 
     TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
+    TransformationAsset.objects.create(
+        name="stg_case_patient",
+        scope=TransformationScope.SYSTEM,
+        tenant=tenant,
+        sql_content="SELECT * FROM raw_cases WHERE case_type = 'patient'",
+    )
 
-    mock_run = TransformationRun.objects.create(tenant=tenant, status="completed")
+    captured = {}
+
+    def _fake_generate_profiles_yml(*, output_path, schema_name, db_url, confinement_role=None):
+        captured["schema_name"] = schema_name
+        captured["confinement_role"] = confinement_role
+        # Write a minimal valid profiles.yml so dbt_project + run_dbt (mocked)
+        # don't trip on a missing file.
+        from pathlib import Path
+
+        Path(output_path).write_text("data_explorer:\n  outputs: {}\n")
 
     api_client.force_login(user)
-    with patch(
-        "apps.transformations.services.executor.run_transformation_pipeline",
-        return_value=mock_run,
+    with (
+        patch(
+            "apps.transformations.services.executor.generate_profiles_yml",
+            side_effect=_fake_generate_profiles_yml,
+        ),
+        patch(
+            "apps.transformations.services.executor.run_dbt",
+            return_value={
+                "success": True,
+                "models": {"stg_case_patient": "success"},
+                "error": None,
+            },
+        ),
     ):
         resp = api_client.post(
             "/api/transformations/runs/trigger/",
             {"tenant_id": str(tenant.id)},
             format="json",
         )
+
     assert resp.status_code == 201
     assert resp.data["status"] == "completed"
+    # Confinement was wired: a dedicated low-priv role derived from the schema,
+    # and the search_path-bearing profile generator was the real one.
+    assert captured["schema_name"] == "test_schema"
+    assert captured["confinement_role"] == "test_schema_dbt"
+
+
+@pytest.mark.django_db
+def test_trigger_run_surfaces_dbt_failure_as_failed(api_client, user, tenant, tenant_membership):
+    """A dbt failure during a triggered run must surface as a FAILED run rather
+    than a swallowed COMPLETED (issue #241, 04#4)."""
+    from apps.workspaces.models import TenantSchema
+
+    TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
+    TransformationAsset.objects.create(
+        name="stg_case_patient",
+        scope=TransformationScope.SYSTEM,
+        tenant=tenant,
+        sql_content="SELECT * FROM raw_cases",
+    )
+
+    api_client.force_login(user)
+    with (
+        patch("apps.transformations.services.executor.generate_profiles_yml"),
+        patch(
+            "apps.transformations.services.executor.run_dbt",
+            return_value={
+                "success": False,
+                "models": {},
+                "error": 'relation "raw_cases" does not exist',
+            },
+        ),
+    ):
+        resp = api_client.post(
+            "/api/transformations/runs/trigger/",
+            {"tenant_id": str(tenant.id)},
+            format="json",
+        )
+
+    assert resp.status_code == 201
+    assert resp.data["status"] == "failed"
+    assert "raw_cases" in resp.data["error_message"]
 
 
 @pytest.mark.django_db

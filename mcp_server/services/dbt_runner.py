@@ -30,35 +30,61 @@ def generate_profiles_yml(
     schema_name: str,
     db_url: str,
     threads: int = 4,
+    confinement_role: str | None = None,
 ) -> None:
     """Generate a dbt profiles.yml targeting the tenant's schema.
+
+    Two confinement controls are written into the profile (issue #241):
+
+    - ``search_path`` is pinned to ``schema_name`` ONLY (not ``$user,public``).
+      Postgres' default search path would otherwise resolve the SELECT in a
+      generated staging model (e.g. ``FROM raw_cases``) against ``public`` even
+      though dbt creates the relation in the tenant schema, so every model would
+      fail silently (04#4). Restricting the path to the single schema also means
+      an unqualified table reference can never reach another tenant's schema.
+    - ``role`` (when ``confinement_role`` is given) makes dbt ``SET ROLE`` to a
+      dedicated low-privilege, NOLOGIN role on every connection, so user-authored
+      SQL does NOT execute with the full ``MANAGED_DATABASE_URL`` superuser's
+      privileges (04#3 SECURITY). That role holds rights on this schema only, so
+      a fully-qualified cross-tenant read (``FROM other_schema.raw_cases``) is
+      blocked by missing USAGE rather than allowed as superuser.
 
     Args:
         output_path: Where to write the profiles.yml.
         schema_name: PostgreSQL schema name for this tenant.
         db_url: PostgreSQL connection URL (postgresql://user:pass@host:port/dbname).
         threads: dbt parallelism (default 4).
+        confinement_role: Low-privilege role dbt should ``SET ROLE`` to. When
+            ``None`` the ``role`` key is omitted (dbt connects as the URL user).
     """
     parsed = urlparse(db_url)
+    output = {
+        "type": "postgres",
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 5432,
+        "user": parsed.username or "",
+        "password": parsed.password or "",
+        "dbname": parsed.path.lstrip("/") if parsed.path else "",
+        "schema": schema_name,
+        # Confine resolution to the target schema only — see docstring.
+        "search_path": schema_name,
+        "threads": threads,
+    }
+    if confinement_role:
+        output["role"] = confinement_role
     profile = {
         "data_explorer": {
             "target": "tenant_schema",
-            "outputs": {
-                "tenant_schema": {
-                    "type": "postgres",
-                    "host": parsed.hostname or "localhost",
-                    "port": parsed.port or 5432,
-                    "user": parsed.username or "",
-                    "password": parsed.password or "",
-                    "dbname": parsed.path.lstrip("/") if parsed.path else "",
-                    "schema": schema_name,
-                    "threads": threads,
-                }
-            },
+            "outputs": {"tenant_schema": output},
         }
     }
     Path(output_path).write_text(yaml.dump(profile, default_flow_style=False))
-    logger.debug("Generated profiles.yml at %s for schema '%s'", output_path, schema_name)
+    logger.debug(
+        "Generated profiles.yml at %s for schema '%s' (role=%s)",
+        output_path,
+        schema_name,
+        confinement_role or "<url user>",
+    )
 
 
 def run_dbt(

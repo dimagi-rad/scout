@@ -35,6 +35,16 @@ def readonly_role_name(schema_name: str) -> str:
     return f"{schema_name}_ro"
 
 
+def dbt_role_name(schema_name: str) -> str:
+    """Derive the low-privilege dbt role name for a schema (issue #241).
+
+    dbt assumes this role (via ``SET ROLE`` in its profile) when materializing
+    transformation assets, so user-authored SQL runs with rights on this schema
+    only — never as the full ``MANAGED_DATABASE_URL`` superuser.
+    """
+    return f"{schema_name}_dbt"
+
+
 def get_managed_db_connection():
     """Get a psycopg connection to the managed database."""
     url = settings.MANAGED_DATABASE_URL
@@ -201,15 +211,29 @@ class SchemaManager:
             )
             try:
                 self._drop_readonly_role(cursor, tenant_schema.schema_name)
+                self._drop_dbt_role(cursor, tenant_schema.schema_name)
             except Exception:
                 logger.exception(
-                    "teardown: dropping readonly role for schema '%s' failed; "
+                    "teardown: dropping derived roles for schema '%s' failed; "
                     "physical schema was dropped, role may be dangling",
                     tenant_schema.schema_name,
                 )
             cursor.close()
         finally:
             conn.close()
+
+    def _drop_dbt_role(self, cursor, schema_name: str) -> None:
+        """Drop the low-privilege dbt role for a schema (issue #241).
+
+        The role's only grants are on its own schema, which ``DROP SCHEMA
+        CASCADE`` has already removed, so a plain ``DROP ROLE IF EXISTS`` is
+        sufficient. Idempotent.
+        """
+        cursor.execute(
+            psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                psycopg.sql.Identifier(dbt_role_name(schema_name))
+            )
+        )
 
     def _view_schema_name(self, workspace_id) -> str:
         """Generate a PostgreSQL schema name for a workspace's view schema."""
@@ -461,9 +485,10 @@ class SchemaManager:
             )
             try:
                 self._drop_readonly_role(cursor, view_schema.schema_name)
+                self._drop_dbt_role(cursor, view_schema.schema_name)
             except Exception:
                 logger.exception(
-                    "teardown_view_schema: dropping readonly role for '%s' failed; "
+                    "teardown_view_schema: dropping derived roles for '%s' failed; "
                     "physical schema was dropped, role may be dangling",
                     view_schema.schema_name,
                 )
@@ -484,9 +509,14 @@ class SchemaManager:
             )
             try:
                 await self._adrop_readonly_role(cursor, tenant_schema.schema_name)
+                await cursor.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        psycopg.sql.Identifier(dbt_role_name(tenant_schema.schema_name))
+                    )
+                )
             except Exception:
                 logger.exception(
-                    "ateardown: dropping readonly role for schema '%s' failed; "
+                    "ateardown: dropping derived roles for schema '%s' failed; "
                     "physical schema was dropped, role may be dangling",
                     tenant_schema.schema_name,
                 )
@@ -504,9 +534,14 @@ class SchemaManager:
             )
             try:
                 await self._adrop_readonly_role(cursor, view_schema.schema_name)
+                await cursor.execute(
+                    psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        psycopg.sql.Identifier(dbt_role_name(view_schema.schema_name))
+                    )
+                )
             except Exception:
                 logger.exception(
-                    "ateardown_view_schema: dropping readonly role for '%s' failed; "
+                    "ateardown_view_schema: dropping derived roles for '%s' failed; "
                     "physical schema was dropped, role may be dangling",
                     view_schema.schema_name,
                 )
@@ -585,12 +620,70 @@ class SchemaManager:
             psycopg.sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg.sql.Identifier(role_name))
         )
 
+    def _create_dbt_role(self, cursor, schema_name: str) -> None:
+        """Create a low-privilege dbt role confined to one schema (issue #241).
+
+        dbt assumes this role via its profile's ``role`` key (``SET ROLE``) when
+        materializing transformation assets, so the free-text SQL in a
+        ``TransformationAsset`` runs with rights on THIS schema only — not as the
+        ``MANAGED_DATABASE_URL`` superuser that runs CREATE SCHEMA / CREATE ROLE.
+
+        Privileges granted (this schema only):
+        - ``USAGE`` + ``CREATE`` on the schema so dbt can build its models.
+        - ``SELECT`` on existing tables (the materializer's ``raw_*`` tables) plus
+          default privileges for tables created later, so staging models can read.
+
+        Critically, NO privileges are granted on any other schema, so a
+        fully-qualified cross-tenant read fails on missing USAGE. The role is
+        granted TO the current user so the managed-DB user can ``SET ROLE`` to it.
+
+        Idempotent — checks pg_roles before creating.
+        """
+        role_name = dbt_role_name(schema_name)
+        cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
+        if not cursor.fetchone():
+            with contextlib.suppress(psycopg.errors.DuplicateObject):
+                cursor.execute(
+                    psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
+                        psycopg.sql.Identifier(role_name)
+                    )
+                )
+        # Grant the role to the current (managed-DB) user so it can SET ROLE to it.
+        cursor.execute(
+            psycopg.sql.SQL("GRANT {} TO CURRENT_USER").format(psycopg.sql.Identifier(role_name))
+        )
+        cursor.execute(
+            psycopg.sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+        cursor.execute(
+            psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+        cursor.execute(
+            psycopg.sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
+                "GRANT SELECT ON TABLES TO {}"
+            ).format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+
     def _create_readonly_role(self, cursor, schema_name: str) -> None:
         """Create a read-only PostgreSQL role for a schema.
 
         Idempotent — checks pg_roles before creating. Grants USAGE on the
         schema and sets ALTER DEFAULT PRIVILEGES so tables created later by
         the materializer are automatically readable.
+
+        Also creates the low-privilege dbt role (issue #241) alongside the
+        read-only role so every provisioned schema has its confinement role
+        available before the transform phase runs.
         """
         role_name = readonly_role_name(schema_name)
         # Idempotent role creation — pg doesn't have CREATE ROLE IF NOT EXISTS
@@ -621,6 +714,8 @@ class SchemaManager:
                 psycopg.sql.Identifier(role_name),
             )
         )
+        # Confinement role for the dbt transform phase (issue #241).
+        self._create_dbt_role(cursor, schema_name)
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
         """Convert a tenant_id to a valid PostgreSQL schema name."""
