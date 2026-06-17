@@ -217,163 +217,178 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     return {"status": "active", "schema_id": schema_id}
 
 
+async def materialize_workspace_core(
+    workspace_id: str,
+    user_id: str = "",
+    job_id: int | None = None,
+) -> dict:
+    """Run materialization for all tenants in a workspace and rebuild view schemas.
+
+    Returns a per-tenant summary. Does NOT defer any chat-resume task — the
+    interactive chat path uses the ``materialize_workspace`` Procrastinate task
+    (which wraps this and defers ``resume_thread_after_materialization``);
+    headless callers (e.g. the recipe runner's blocking materialize tool) call
+    this directly and block on the return value.
+
+    Writes progress to ``MaterializationRun.progress`` (keyed by ``job_id``)
+    after each page so the MCP polling loop can surface real-time status. The
+    ``progress_updater`` closure also acts as the cancellation checkpoint: it
+    re-reads ``MaterializationRun.state`` and raises ``MaterializationCancelled``
+    when the run has been marked CANCELLED, triggering a transaction rollback.
+    """
+    tenant_results: list[dict] = []
+
+    try:
+        workspace = await Workspace.objects.aget(id=workspace_id)
+    except Workspace.DoesNotExist:
+        logger.exception("materialize_workspace: workspace %s not found", workspace_id)
+        return {"error": "Workspace not found"}
+
+    qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
+        archived_at__isnull=True,
+        tenant_id__in=[
+            wt.tenant_id
+            async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
+                "tenant"
+            )
+        ],
+    )
+    if user_id:
+        qs = qs.filter(user_id=user_id)
+
+    memberships = [tm async for tm in qs]
+    if not memberships:
+        logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
+        return {"error": "No tenant memberships found", "tenants": []}
+
+    registry = get_registry()
+    provider_pipeline_map = {p.provider: p.name for p in registry.list()}
+
+    for tm in memberships:
+        tenant_id = tm.tenant.external_id
+        pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
+        if pipeline_name is None:
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "success": False,
+                    "error": f"No pipeline for provider '{tm.tenant.provider}'",
+                }
+            )
+            continue
+
+        credential = await aresolve_credential(tm)
+        if credential is None:
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "success": False,
+                    "error": "No credential configured",
+                }
+            )
+            continue
+
+        pipeline_config = registry.get(pipeline_name)
+        try:
+            result = await asyncio.to_thread(
+                _run_pipeline_with_progress,
+                tm,
+                credential,
+                pipeline_config,
+                job_id,
+            )
+            tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
+        except MaterializationCancelled:
+            tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
+            # Stop processing remaining tenants — the user has cancelled.
+            break
+        except ConnectExportError as e:
+            # Upstream Connect failure after retry exhaustion. Capture
+            # the response's sentry-trace header so support can correlate
+            # with Connect's Sentry in a single hop. sentry_sdk.set_tag
+            # is a no-op when the SDK was never initialised (no DSN).
+            logger.exception(
+                "Materialization failed for tenant %s on pipeline %s: "
+                "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
+                tenant_id,
+                pipeline_name,
+                e.status,
+                e.attempts,
+                e.last_id,
+                e.sentry_trace,
+            )
+            sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
+            sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
+            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
+        except Exception as e:
+            logger.exception("Materialization failed for tenant %s", tenant_id)
+            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
+
+    all_succeeded = all(r.get("success") for r in tenant_results)
+
+    # Multi-tenant workspaces query through a WorkspaceViewSchema that
+    # UNION ALLs the per-tenant tables. build_view_schema requires every
+    # tenant to have an ACTIVE TenantSchema, so we can only attempt this
+    # after the per-tenant loop completes successfully. This must run
+    # *before* the resume task fires (deferred by the task wrapper) so
+    # the agent's first list_tables call after materialization returns
+    # the namespaced view instead of "No active view schema for workspace".
+    view_schema_outcome: dict | None = None
+    workspace_tenant_count = await workspace.workspace_tenants.acount()
+    if workspace_tenant_count > 1 and all_succeeded:
+        try:
+            await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
+            view_schema_outcome = {"ok": True, "error": None}
+        except Exception as exc:
+            # Don't re-raise — the resume task should still fire so the
+            # user gets *some* agent response. The failure is recorded on
+            # the WorkspaceViewSchema row (state=FAILED, last_error) and is
+            # surfaced to the agent by the resume task, which inspects the
+            # row directly rather than relying on this return value.
+            logger.exception(
+                "Post-materialization view schema rebuild failed for workspace %s",
+                workspace_id,
+            )
+            view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+
+    # Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing
+    # a tenant from THIS workspace drops & recreates its raw_* tables, which
+    # cascade-drops the namespaced views inside every OTHER workspace's view
+    # schema — leaving those WorkspaceViewSchema rows ACTIVE but empty. Defer a
+    # rebuild for each sibling multi-tenant workspace that shares any tenant we
+    # just (re)materialized so their views are recreated against the new tables.
+    # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
+    # we never block the resume on them.
+    await _rebuild_dependent_view_schemas(
+        [tm.tenant_id for tm in memberships],
+        exclude_workspace_id=str(workspace.id),
+    )
+
+    return {
+        "tenants": tenant_results,
+        "all_succeeded": all_succeeded,
+        "view_schema": view_schema_outcome,
+    }
+
+
 @task(pass_context=True)
 async def materialize_workspace(
     context,
     workspace_id: str,
     user_id: str = "",
 ) -> dict:
-    """Run materialization for all tenants in a workspace.
+    """Procrastinate task: run materialization for a workspace, then ALWAYS
+    defer the chat-resume task so an interactive user is never left with a
+    phantom spinner — even on early-return paths (workspace missing, no
+    memberships) where the per-tenant loop never executed.
 
-    Writes progress to ``MaterializationRun.progress`` after each page so
-    the MCP polling loop can surface real-time status to the user. The
-    ``progress_updater`` closure also acts as the cancellation checkpoint:
-    it re-reads ``MaterializationRun.state`` and raises
-    ``MaterializationCancelled`` when the run has been marked CANCELLED
-    by the cancel endpoint, triggering a transaction rollback.
-
-    Returns a per-tenant summary so the polling loop can build a final
-    aggregated result for the agent.
+    The actual work lives in ``materialize_workspace_core`` so headless callers
+    (recipes) can reuse it without the fire-and-resume machinery.
     """
     job_id = context.job.id
-    tenant_results: list[dict] = []
-
     try:
-        try:
-            workspace = await Workspace.objects.aget(id=workspace_id)
-        except Workspace.DoesNotExist:
-            logger.exception("materialize_workspace: workspace %s not found", workspace_id)
-            return {"error": "Workspace not found"}
-
-        qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
-            archived_at__isnull=True,
-            tenant_id__in=[
-                wt.tenant_id
-                async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
-                    "tenant"
-                )
-            ],
-        )
-        if user_id:
-            qs = qs.filter(user_id=user_id)
-
-        memberships = [tm async for tm in qs]
-        if not memberships:
-            logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
-            return {"error": "No tenant memberships found", "tenants": []}
-
-        registry = get_registry()
-        provider_pipeline_map = {p.provider: p.name for p in registry.list()}
-
-        for tm in memberships:
-            tenant_id = tm.tenant.external_id
-            pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
-            if pipeline_name is None:
-                tenant_results.append(
-                    {
-                        "tenant": tenant_id,
-                        "success": False,
-                        "error": f"No pipeline for provider '{tm.tenant.provider}'",
-                    }
-                )
-                continue
-
-            credential = await aresolve_credential(tm)
-            if credential is None:
-                tenant_results.append(
-                    {
-                        "tenant": tenant_id,
-                        "success": False,
-                        "error": "No credential configured",
-                    }
-                )
-                continue
-
-            pipeline_config = registry.get(pipeline_name)
-            try:
-                result = await asyncio.to_thread(
-                    _run_pipeline_with_progress,
-                    tm,
-                    credential,
-                    pipeline_config,
-                    job_id,
-                )
-                tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
-            except MaterializationCancelled:
-                tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
-                # Stop processing remaining tenants — the user has cancelled.
-                break
-            except ConnectExportError as e:
-                # Upstream Connect failure after retry exhaustion. Capture
-                # the response's sentry-trace header so support can correlate
-                # with Connect's Sentry in a single hop. sentry_sdk.set_tag
-                # is a no-op when the SDK was never initialised (no DSN).
-                logger.exception(
-                    "Materialization failed for tenant %s on pipeline %s: "
-                    "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
-                    tenant_id,
-                    pipeline_name,
-                    e.status,
-                    e.attempts,
-                    e.last_id,
-                    e.sentry_trace,
-                )
-                sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
-                sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
-                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
-            except Exception as e:
-                logger.exception("Materialization failed for tenant %s", tenant_id)
-                tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
-
-        all_succeeded = all(r.get("success") for r in tenant_results)
-
-        # Multi-tenant workspaces query through a WorkspaceViewSchema that
-        # UNION ALLs the per-tenant tables. build_view_schema requires every
-        # tenant to have an ACTIVE TenantSchema, so we can only attempt this
-        # after the per-tenant loop completes successfully. This must run
-        # *before* the resume task fires (deferred in the finally block) so
-        # the agent's first list_tables call after materialization returns
-        # the namespaced view instead of "No active view schema for workspace".
-        view_schema_outcome: dict | None = None
-        workspace_tenant_count = await workspace.workspace_tenants.acount()
-        if workspace_tenant_count > 1 and all_succeeded:
-            try:
-                await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
-                view_schema_outcome = {"ok": True, "error": None}
-            except Exception as exc:
-                # Don't re-raise — the resume task should still fire so the
-                # user gets *some* agent response. The failure is recorded on
-                # the WorkspaceViewSchema row (state=FAILED, last_error) and is
-                # surfaced to the agent by the resume task, which inspects the
-                # row directly rather than relying on this return value.
-                logger.exception(
-                    "Post-materialization view schema rebuild failed for workspace %s",
-                    workspace_id,
-                )
-                view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
-
-        # Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing
-        # a tenant from THIS workspace drops & recreates its raw_* tables, which
-        # cascade-drops the namespaced views inside every OTHER workspace's view
-        # schema — leaving those WorkspaceViewSchema rows ACTIVE but empty. Defer a
-        # rebuild for each sibling multi-tenant workspace that shares any tenant we
-        # just (re)materialized so their views are recreated against the new tables.
-        # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
-        # we never block the resume on them.
-        await _rebuild_dependent_view_schemas(
-            [tm.tenant_id for tm in memberships],
-            exclude_workspace_id=str(workspace.id),
-        )
-
-        return {
-            "tenants": tenant_results,
-            "all_succeeded": all_succeeded,
-            "view_schema": view_schema_outcome,
-        }
+        return await materialize_workspace_core(workspace_id, user_id, job_id)
     finally:
-        # ALWAYS defer the resume task so the user is not left with a phantom
-        # spinner — even on early-return paths (workspace missing, no
-        # memberships) where the loop above never executed.
         await _defer_resume_for_job(job_id)
 
 

@@ -275,6 +275,34 @@ async def test_materialize_workspace_breaks_on_cancel(
     assert result["tenants"][0]["cancelled"] is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_core_runs_without_deferring_resume(
+    workspace, tenant_membership_obj
+):
+    """materialize_workspace_core does the tenant loop + view rebuild but does
+    NOT defer any chat-resume task — headless callers (recipes) invoke it
+    directly and block on the return value. The fire-and-resume deferral lives
+    only in the materialize_workspace task wrapper."""
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch("apps.workspaces.tasks._defer_resume_for_job", new_callable=AsyncMock) as defer_mock,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        result = await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), user_id="", job_id=None
+        )
+
+    assert result["all_succeeded"] is True
+    assert result["tenants"][0]["success"] is True
+    defer_mock.assert_not_awaited()  # core must never defer the resume task
+
+
 # ---------------------------------------------------------------------------
 # _run_pipeline_with_progress closure
 # ---------------------------------------------------------------------------
