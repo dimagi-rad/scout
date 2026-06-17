@@ -70,10 +70,25 @@ MCP_TOOL_NAMES = frozenset(
         "get_metadata",
         "run_materialization",
         "get_schema_status",
-        "teardown_schema",
         "get_lineage",
     }
 )
+
+# MCP tools the server advertises but that must NEVER be exposed to the agent.
+#
+# ``teardown_schema`` (arch #237 / finding 00#2) physically DROPs every tenant
+# and view schema for a workspace but updates no Django state — TenantSchema
+# stays ACTIVE over dropped schemas, MaterializationRuns stay COMPLETED, the
+# WorkspaceViewSchema stays ACTIVE, and sibling multi-tenant workspaces sharing
+# the (external_id-keyed) tenant schema are silently destroyed without being
+# failed. Its only guards are an LLM-suppliable ``confirm`` flag and workspace
+# existence; there is no role/membership check. It duplicates the worker
+# ``teardown_schema`` task (which carries the full state-update + sibling-fail
+# machinery) with none of its safety, and has no legitimate agent use case
+# (schemas are re-provisioned automatically on the next materialization). It is
+# therefore filtered out before tools are bound to the LLM. The MCP server still
+# defines the tool so operator/HTTP callers are unaffected.
+AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
 
 
 # Configuration constants
@@ -700,7 +715,9 @@ def _build_tools(
     Returns:
         List of LangChain tool functions.
     """
-    tools = list(mcp_tools)
+    # Drop any MCP tool the server advertises but that must not reach the LLM
+    # (e.g. the destructive ``teardown_schema`` — see AGENT_EXCLUDED_MCP_TOOLS).
+    tools = [t for t in mcp_tools if getattr(t, "name", None) not in AGENT_EXCLUDED_MCP_TOOLS]
     tools.append(create_save_learning_tool(workspace, user))
     tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))

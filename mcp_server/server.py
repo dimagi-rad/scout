@@ -802,6 +802,14 @@ async def get_schema_status(workspace_id: str = "") -> dict:
 async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict:
     """Drop all materialized data for this workspace.
 
+    NOT exposed to the agent (arch #237 / finding 00#2): this tool DROPs
+    physical schemas but updates no Django state and does not fail dependent
+    sibling workspaces, so it is filtered out of the agent's tool set
+    (``AGENT_EXCLUDED_MCP_TOOLS`` in ``apps/agents/graph/base.py``). It remains
+    defined for operator/HTTP callers only. Legitimate teardown for the agent's
+    workflow happens via the worker ``teardown_schema`` task (TTL expiry /
+    refresh), which performs the full state update + sibling-fail machinery.
+
     Destructive — all tenant schemas and the workspace view schema are
     permanently dropped. Schemas will be re-provisioned automatically on
     the next materialization run. Metadata extracted during materialization
