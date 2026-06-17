@@ -115,6 +115,11 @@ async def test_schema_with_null_last_accessed_is_not_expired(active_schema):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_teardown_schema_marks_expired_on_success(active_schema):
+    # Production flips the row to TEARDOWN before dispatching teardown_schema;
+    # the state CAS (arch #237) only drops a row still in TEARDOWN.
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
     with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
         MockManager.return_value.teardown.return_value = None
         from apps.workspaces.tasks import teardown_schema
@@ -164,6 +169,11 @@ async def test_teardown_schema_marks_runs_stale_on_success(active_schema):
     must be flipped to STALE so the catalog stops returning ghost entries for
     tables that no longer exist. CANCELLED/FAILED runs are left alone.
     """
+    # Production flips the row to TEARDOWN before dispatch; the CAS (arch #237)
+    # only drops a row still in TEARDOWN.
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
     completed_run = await MaterializationRun.objects.acreate(
         tenant_schema=active_schema,
         pipeline="commcare_sync",
@@ -317,6 +327,11 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
     """After the physical DROP, the ACTIVE view schema of a multi-tenant
     workspace B (sharing the torn-down tenant) is flipped to FAILED, while a
     single-tenant workspace's view schema is left untouched."""
+    # Production flips the row to TEARDOWN before dispatch; the CAS (arch #237)
+    # only drops a row still in TEARDOWN.
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
     # Multi-tenant workspace B: shares `tenant` + a second tenant, ACTIVE view schema.
     extra_tenant = await Tenant.objects.acreate(
         provider="commcare", external_id="teardown-extra", canonical_name="Teardown Extra"
@@ -424,3 +439,115 @@ async def test_teardown_schema_rebuilds_dependent_views_when_surviving_active_sc
     # Data is intact (new schema ACTIVE) → views are rebuildable, NOT failed.
     assert vs_b.state == SchemaState.ACTIVE
     mock_rebuild.assert_awaited_once_with(workspace_id=str(ws_b.id))
+
+
+# ---------------------------------------------------------------------------
+# teardown state CAS (arch #237, finding 03#0)
+# ---------------------------------------------------------------------------
+#
+# provision() resurrects TEARDOWN/EXPIRED rows back to ACTIVE (the 2026-06-10
+# incident-b fix). A teardown task that was already queued before the resurrection
+# fetches the row by id and would otherwise DROP SCHEMA CASCADE unconditionally —
+# destroying the freshly re-provisioned data. The task must re-read the row's state
+# and ABORT the drop when the row is no longer TEARDOWN.
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_aborts_when_row_resurrected_to_active(active_schema):
+    """A stale queued teardown_schema must NOT drop a schema that provision()
+    resurrected to ACTIVE between enqueue and execution. The CAS holds: the
+    physical DROP is skipped and the schema stays ACTIVE."""
+    # The row is ACTIVE (active_schema fixture) — i.e. it was resurrected after the
+    # teardown was queued (which would have required it to be TEARDOWN at enqueue).
+    assert active_schema.state == SchemaState.ACTIVE
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    # The drop never happened — the manager was never asked to teardown.
+    MockManager.return_value.teardown.assert_not_called()
+
+    await active_schema.arefresh_from_db()
+    # The resurrected schema is untouched.
+    assert active_schema.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_aborts_does_not_stale_runs(active_schema):
+    """When the CAS aborts the drop, data-bearing runs must remain terminal —
+    they must NOT be flipped to STALE, since the schema/tables are still present."""
+    completed_run = await MaterializationRun.objects.acreate(
+        tenant_schema=active_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+        result={"sources": {"cases": {"state": "completed", "rows": 1}}},
+    )
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    MockManager.return_value.teardown.assert_not_called()
+
+    await completed_run.arefresh_from_db()
+    assert completed_run.state == MaterializationRun.RunState.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_schema_still_drops_when_state_is_teardown(active_schema):
+    """Sanity: the CAS does not break the normal path — a row legitimately in
+    TEARDOWN is still dropped and marked EXPIRED."""
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown.return_value = None
+        await teardown_schema(schema_id=str(active_schema.id))
+
+    MockManager.return_value.teardown.assert_called_once()
+    await active_schema.arefresh_from_db()
+    assert active_schema.state == SchemaState.EXPIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_view_schema_aborts_when_row_resurrected_to_active(db, user):
+    """A stale queued teardown_view_schema_task must NOT drop a view schema that
+    was reactivated (ACTIVE) between enqueue and execution."""
+    workspace = await Workspace.objects.acreate(name="CAS view ws", created_by=user)
+    vs = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name="ws_cas_active", state=SchemaState.ACTIVE
+    )
+
+    from apps.workspaces.tasks import teardown_view_schema_task
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        await teardown_view_schema_task(view_schema_id=str(vs.id))
+
+    MockManager.return_value.teardown_view_schema.assert_not_called()
+
+    await vs.arefresh_from_db()
+    assert vs.state == SchemaState.ACTIVE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_view_schema_still_drops_when_state_is_teardown(db, user):
+    """Sanity: a view schema legitimately in TEARDOWN is still dropped and
+    marked EXPIRED."""
+    workspace = await Workspace.objects.acreate(name="CAS view ws 2", created_by=user)
+    vs = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace, schema_name="ws_cas_teardown", state=SchemaState.TEARDOWN
+    )
+
+    from apps.workspaces.tasks import teardown_view_schema_task
+
+    with patch("apps.workspaces.tasks.SchemaManager") as MockManager:
+        MockManager.return_value.teardown_view_schema.return_value = None
+        await teardown_view_schema_task(view_schema_id=str(vs.id))
+
+    MockManager.return_value.teardown_view_schema.assert_called_once()
+    await vs.arefresh_from_db()
+    assert vs.state == SchemaState.EXPIRED

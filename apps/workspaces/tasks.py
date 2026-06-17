@@ -613,6 +613,18 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         logger.exception("teardown_view_schema_task: view schema %s not found", view_schema_id)
         return
 
+    # State CAS (arch #237, finding 03#0): abort the DROP if the row is no longer
+    # TEARDOWN — it may have been reactivated (rebuild → ACTIVE) after this
+    # teardown was queued, in which case the physical schema is live again.
+    if vs.state != SchemaState.TEARDOWN:
+        logger.info(
+            "teardown_view_schema_task: view schema %s is %s (not TEARDOWN) — "
+            "aborting drop; the row was likely reactivated after teardown was queued",
+            vs.id,
+            vs.state,
+        )
+        return
+
     manager = SchemaManager()
     try:
         await asyncio.to_thread(manager.teardown_view_schema, vs)
@@ -633,6 +645,21 @@ async def teardown_schema(schema_id: str) -> None:
         schema = await TenantSchema.objects.aget(id=schema_id)
     except TenantSchema.DoesNotExist:
         logger.exception("teardown_schema: schema %s not found", schema_id)
+        return
+
+    # State CAS (arch #237, finding 03#0): this task is enqueued against a row
+    # that was TEARDOWN at dispatch time, but provision() resurrects EXPIRED/
+    # TEARDOWN rows back to ACTIVE (the 2026-06-10 incident-b fix). If a
+    # resurrection raced ahead of this queued teardown, the row is ACTIVE again
+    # and its (re-provisioned) data must be preserved — abort the DROP. Only a
+    # row still in TEARDOWN is safe to drop.
+    if schema.state != SchemaState.TEARDOWN:
+        logger.info(
+            "teardown_schema: schema %s is %s (not TEARDOWN) — aborting drop; "
+            "the row was likely resurrected by provision() after teardown was queued",
+            schema.id,
+            schema.state,
+        )
         return
 
     manager = SchemaManager()
