@@ -51,9 +51,13 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         ``status: completed``, continue with the requested analysis in the same
         run — the data is ready.
         """
-        # Imported lazily: apps.workspaces.tasks imports apps.agents.graph.base
-        # (build_agent_graph) at module level, so a module-level import here
-        # would create an agents<->workspaces.tasks import cycle.
+        # Imported inside the function to break a real import cycle (verified:
+        # module-level fails with ImportError "partially initialized module
+        # apps.workspaces.tasks" in every import order). The chain is
+        # graph.base -> this module -> workspaces.tasks -> graph.base
+        # (tasks imports build_agent_graph for the resume path). This mirrors the
+        # established pattern in apps/agents/tools/recipe_tool.py, which imports
+        # apps.recipes.models inside the tool body for the same reason.
         from apps.workspaces.tasks import materialize_workspace_core
 
         summary = await materialize_workspace_core(workspace_id, user_id, job_id)
