@@ -215,16 +215,19 @@ async def _fetch_schema_context(tenant, user) -> str:
 
     registry = get_registry()
     pipeline_config = registry.get_by_provider(tenant.provider)
-    pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
 
     if ts is None:
+        # NB: no `pipeline=` argument — run_materialization takes no pipeline
+        # parameter (routing moved into materialize_workspace per-provider) and
+        # all of its real params are injected server-side and hidden, so the
+        # LLM-facing schema is empty. Emitting `pipeline="..."` here told the
+        # agent to send an argument the tool can't accept (finding 02#6).
         return (
-            f"No data has been loaded yet. Call `run_materialization` with "
-            f'`pipeline="{pipeline_name}"` to start loading. This tool returns '
-            f"IMMEDIATELY with `status: started` — do NOT call other data tools "
-            f"in the same turn. Acknowledge to the user in ONE sentence and end "
-            f"your turn. The system will resume the conversation automatically "
-            f"when materialization completes."
+            "No data has been loaded yet. Call `run_materialization` to start "
+            "loading. This tool returns IMMEDIATELY with `status: started` — do "
+            "NOT call other data tools in the same turn. Acknowledge to the user "
+            "in ONE sentence and end your turn. The system will resume the "
+            "conversation automatically when materialization completes."
         )
 
     if ts.state == SchemaState.MATERIALIZING:
