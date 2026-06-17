@@ -756,8 +756,14 @@ class TestGetMaterializationStatus:
         mock_run.started_at.isoformat.return_value = "2026-02-24T10:00:00+00:00"
         mock_run.completed_at.isoformat.return_value = "2026-02-24T10:05:00+00:00"
         mock_run.result = {"sources": {"cases": {"rows": 100}}}
-        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
+        # Real model path: TenantSchema.tenant -> Tenant.external_id (12#0 item 3).
+        # Prod reads run.tenant_schema.tenant.external_id; there is NO
+        # tenant_membership on TenantSchema. Delete the fabricated wrong path so
+        # a regression reading it raises AttributeError instead of silently
+        # returning a MagicMock.
+        mock_run.tenant_schema.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
+        del mock_run.tenant_schema.tenant_membership
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
@@ -768,6 +774,8 @@ class TestGetMaterializationStatus:
         assert result["success"] is True
         assert result["data"]["run_id"] == run_id
         assert result["data"]["state"] == "completed"
+        # Pin that tenant_id was read from the real attribute path.
+        assert result["data"]["tenant_id"] == "dimagi"
 
     def test_unknown_run_returns_not_found(self):
         import asyncio
@@ -800,8 +808,10 @@ class TestCancelMaterialization:
         mock_run.id = uuid.UUID(run_id)
         mock_run.state = "loading"
         mock_run.result = {}
-        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
+        # Real model path: TenantSchema.tenant -> Tenant.external_id (12#0 item 3).
+        mock_run.tenant_schema.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
+        del mock_run.tenant_schema.tenant_membership
         mock_run.asave = AsyncMock()
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
@@ -818,6 +828,15 @@ class TestCancelMaterialization:
         assert result["success"] is True
         assert result["data"]["cancelled"] is True
         assert result["data"]["run_id"] == run_id
+        assert result["data"]["previous_state"] == "loading"
+        # 12#0 item 6: assert the PERSISTED state, not just the response flag.
+        # cancel_materialization currently writes RunState.FAILED (NOT CANCELLED)
+        # and stamps result["cancelled"]=True. Pinning the written state makes the
+        # FAILED-vs-CANCELLED inconsistency vs cancel_thread_job visible; the
+        # reconciliation is tracked in #290.
+        assert mock_run.state == "failed"
+        assert mock_run.result == {"cancelled": True}
+        mock_run.asave.assert_awaited_once_with(update_fields=["state", "completed_at", "result"])
 
     def test_cancel_completed_run_returns_error(self):
         import asyncio
@@ -827,8 +846,10 @@ class TestCancelMaterialization:
         run_id = str(uuid.uuid4())
         mock_run = MagicMock()
         mock_run.state = "completed"
-        mock_run.tenant_schema.tenant_membership.tenant.external_id = "dimagi"
+        # Real model path: TenantSchema.tenant -> Tenant.external_id (12#0 item 3).
+        mock_run.tenant_schema.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
+        del mock_run.tenant_schema.tenant_membership
 
         with patch("mcp_server.server.MaterializationRun") as mock_cls:
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)

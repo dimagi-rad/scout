@@ -34,6 +34,12 @@ async def test_fetch_schema_context_not_provisioned(mock_tenant, mock_user):
 
     assert "No data has been loaded yet" in result
     assert "run_materialization" in result
+    # Finding 02#6: the prompt must NOT instruct a `pipeline=` argument — the
+    # run_materialization MCP tool has no pipeline parameter (routing moved into
+    # materialize_workspace per-provider) and its LLM-facing schema is empty.
+    # The multi-tenant branch already omits it; the single-tenant branch must too.
+    assert "pipeline=" not in result
+    assert 'pipeline="' not in result
 
 
 @pytest.mark.asyncio

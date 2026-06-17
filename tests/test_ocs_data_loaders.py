@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+import requests
+
+from mcp_server.loaders.ocs_base import OCSAuthError
 from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
 from mcp_server.loaders.ocs_messages import OCSMessageLoader
 from mcp_server.loaders.ocs_participants import OCSParticipantLoader
@@ -267,3 +271,54 @@ def test_participant_loader_queries_chatbot_scoped_endpoint():
     args, kwargs = mock_get.call_args
     assert args[0] == f"{BASE_URL}/api/participants"
     assert kwargs["params"] == {"chatbot": "exp-1"}
+
+
+# ---------------------------------------------------------------------------
+# 12#0 item 9: error paths (the data-loader tests above are happy-path only).
+# The OCS loaders have no retry policy, so a non-2xx/malformed response must
+# surface as an exception rather than be silently swallowed.
+# ---------------------------------------------------------------------------
+
+
+def test_experiment_loader_raises_auth_error_on_403():
+    """A 403 from the experiment detail endpoint surfaces as OCSAuthError
+    (single-request `_get` path)."""
+    loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    resp = MagicMock(status_code=403)
+    with patch.object(loader._session, "get", return_value=resp):
+        with pytest.raises(OCSAuthError):
+            list(loader.load_pages())
+    # On an auth failure we never attempt to parse a body.
+    resp.json.assert_not_called()
+
+
+def test_experiment_loader_raises_on_server_error():
+    """A 5xx (no retry policy in OCS) propagates via raise_for_status rather
+    than being swallowed into an empty page."""
+    loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    resp = MagicMock(status_code=500)
+    resp.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
+    with patch.object(loader._session, "get", return_value=resp):
+        with pytest.raises(requests.HTTPError):
+            list(loader.load_pages())
+
+
+def test_experiment_loader_raises_on_malformed_json():
+    """A 200 with a non-JSON body must raise (ValueError from .json()), not
+    yield a partial/empty row set."""
+    loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    resp = MagicMock(status_code=200)
+    resp.json.side_effect = ValueError("No JSON object could be decoded")
+    with patch.object(loader._session, "get", return_value=resp):
+        with pytest.raises(ValueError):
+            list(loader.load_pages())
+
+
+def test_session_loader_raises_auth_error_on_401():
+    """A 401 on the paginated sessions endpoint surfaces as OCSAuthError
+    (`_paginate` path)."""
+    loader = OCSSessionLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    resp = MagicMock(status_code=401)
+    with patch.object(loader._session, "get", return_value=resp):
+        with pytest.raises(OCSAuthError):
+            list(loader.load_pages())

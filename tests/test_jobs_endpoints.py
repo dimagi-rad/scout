@@ -6,9 +6,11 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient
 from django.utils import timezone
+from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
+from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import (
     MaterializationRun,
@@ -18,6 +20,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.tasks import reconcile_stale_thread_job
 
 User = get_user_model()
 
@@ -786,3 +789,181 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     assert len(body["jobs"]) == 1
     assert body["jobs"][0]["thread_job_id"] == str(tj.id)
     assert body["jobs"][0]["state"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# 12#0 item 1: the RUNNING false-failure reconcile branch
+#
+# Every other stale-reconcile test builds a PENDING ThreadJob, so
+# reconcile_stale_thread_job's RUNNING branch (worker started a resume then
+# crashed) was never exercised. Build it explicitly.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconcile_flips_stale_running_job_straight_to_failed():
+    """A stale RUNNING ThreadJob whose procrastinate job is no longer running
+    (a worker claimed the resume then crashed mid-ainvoke) must be flipped
+    straight to FAILED with the interrupted-resume summary — NOT handed a
+    duplicate resume that could race a still-running first invocation."""
+    user = await User.objects.acreate_user(email="stalerun@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-run", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=60001,
+        tool_call_id="tc-run",
+        state=ThreadJob.State.RUNNING,
+    )
+    # A RUNNING job's staleness is measured from the RESUME phase (started_at),
+    # not created_at (finding 02#9). Backdate started_at so the resume reads as
+    # genuinely stuck rather than freshly started.
+    await ThreadJob.objects.filter(id=tj.id).aupdate(
+        started_at=timezone.now() - timedelta(hours=2),
+    )
+    await tj.arefresh_from_db()
+
+    with (
+        # Terminal procrastinate status (succeeded) — NOT todo/doing — so the
+        # reconcile proceeds; tj.state==RUNNING selects the worker-crash branch.
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="succeeded"),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ) as persist,
+    ):
+        action = await reconcile_stale_thread_job(tj)
+
+    assert action == "failed"
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    assert tj.completed_at is not None
+    # The summary tells the user the follow-up was interrupted and to retry —
+    # it must NOT claim the materialization itself failed.
+    assert "interrupted" in tj.error_summary.lower()
+    assert "retry" in tj.error_summary.lower()
+    # The crash is surfaced to the user via a synthetic message.
+    persist.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_terminal():
+    """The 02#9 anti-false-positive guard: a RUNNING ThreadJob whose resume only
+    just started (fresh started_at) must be left alone even though its
+    materialization job long since succeeded — a healthy resume after a long
+    materialization must NOT be mistaken for a crash and falsely failed."""
+    user = await User.objects.acreate_user(email="runfresh@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-fresh-run", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=60002,
+        tool_call_id="tc-fresh-run",
+        state=ThreadJob.State.RUNNING,
+    )
+    # Resume just started — well within the staleness threshold.
+    await ThreadJob.objects.filter(id=tj.id).aupdate(started_at=timezone.now())
+    await tj.arefresh_from_db()
+
+    with patch(
+        "apps.workspaces.tasks._procrastinate_job_status",
+        new=AsyncMock(return_value="succeeded"),
+    ):
+        action = await reconcile_stale_thread_job(tj)
+
+    assert action is None
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# 12#0 item 2: exercise the REAL current_app binding in cancel_thread_job
+#
+# The other cancel tests patch apps.workspaces.api.jobs_cancel.current_app,
+# replacing the module-level import-time binding. That masks the risk the
+# finding names: jobs_cancel does `from ...procrastinate_app import current_app`
+# (a surviving sibling of the binding that broke the worker-side janitor before
+# it moved to the ORM). If that binding ever resolved to procrastinate's
+# FutureApp blueprint, `current_app.job_manager` would raise AttributeError and
+# the abort would be silently swallowed by cancel_thread_job's try/except.
+#
+# These tests leave the binding intact and patch the abort at the JobManager
+# CLASS level, so the real binding must resolve for the abort to fire.
+# ---------------------------------------------------------------------------
+
+
+def test_jobs_cancel_current_app_binding_is_live_not_a_blueprint():
+    """The surviving-sibling binding must resolve to a real App exposing a
+    usable job_manager — not procrastinate's not-ready FutureApp blueprint."""
+    job_manager = jobs_cancel.current_app.job_manager
+    assert hasattr(job_manager, "cancel_job_by_id_async")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_thread_job_aborts_through_live_current_app_binding():
+    """cancel_thread_job must actually send the procrastinate abort through its
+    real current_app binding. Patching JobManager.cancel_job_by_id_async at the
+    class level (instead of the module binding) means a regression to a stale
+    binding makes job_manager access raise, the mock is never called, and this
+    fails loudly."""
+    user = await User.objects.acreate_user(email="livebind@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-bind", created_by=user)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws,
+        user=user,
+        role=WorkspaceRole.READ_WRITE,
+    )
+    tenant = await Tenant.objects.acreate(
+        external_id="t-bind",
+        provider="commcare",
+        canonical_name="Bind Tenant",
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_bind")
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=61001,
+        tool_call_id="tc-bind",
+        state=ThreadJob.State.RUNNING,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=61001,
+    )
+
+    with patch.object(
+        JobManager,
+        "cancel_job_by_id_async",
+        new=AsyncMock(return_value=None),
+    ) as mock_abort:
+        runs_cancelled = await cancel_thread_job(tj)
+
+    # The abort fired through the live binding with the right job id + abort flag.
+    mock_abort.assert_awaited_once_with(tj.procrastinate_job_id, abort=True)
+    assert runs_cancelled == 1
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.CANCELLED
+    run = await MaterializationRun.objects.aget(procrastinate_job_id=61001)
+    assert run.state == MaterializationRun.RunState.CANCELLED
