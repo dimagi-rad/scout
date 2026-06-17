@@ -503,6 +503,96 @@ class TestEdgeCases:
         assert "users" in tables
 
 
+class TestSystemCatalogDisclosure:
+    """Issue #244: block cross-tenant metadata disclosure via system catalogs."""
+
+    def test_reject_unqualified_pg_namespace(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT nspname FROM pg_namespace")
+
+    def test_reject_unqualified_pg_class(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT relname, reltuples FROM pg_class")
+
+    def test_reject_unqualified_pg_tables(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT schemaname FROM pg_tables")
+
+    def test_reject_unqualified_pg_views(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT viewname FROM pg_views")
+
+    def test_reject_unqualified_pg_catalog_in_join(self):
+        """A system catalog hidden inside a JOIN must still be caught."""
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT n.nspname FROM users u JOIN pg_namespace n ON true")
+
+    def test_reject_schema_qualified_pg_catalog(self):
+        """Explicit pg_catalog.* is rejected by schema enforcement too."""
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)pg_catalog|schema|system catalog"):
+            validator.validate("SELECT * FROM pg_catalog.pg_class")
+
+    def test_allow_legitimate_unqualified_table(self):
+        """A normal user table that is not a system catalog must still pass."""
+        validator = SQLValidator(schema="ws_demo")
+        statement = validator.validate("SELECT id FROM users")
+        assert statement is not None
+
+
+class TestDataModifyingStatements:
+    """Issue #244: harden statement-type checks against hidden DML."""
+
+    def test_reject_select_into(self):
+        """SELECT ... INTO creates a table — must be rejected."""
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)only SELECT|INTO"):
+            validator.validate("SELECT * INTO new_table FROM users")
+
+    def test_reject_cte_insert(self):
+        """A data-modifying CTE (WITH x AS (INSERT ...)) must be rejected."""
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)only SELECT|INSERT|modif"):
+            validator.validate(
+                "WITH x AS (INSERT INTO users VALUES (1) RETURNING id) SELECT * FROM x"
+            )
+
+    def test_reject_cte_update(self):
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)only SELECT|UPDATE|modif"):
+            validator.validate("WITH x AS (UPDATE users SET a = 1 RETURNING id) SELECT * FROM x")
+
+    def test_reject_cte_delete(self):
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)only SELECT|DELETE|modif"):
+            validator.validate("WITH x AS (DELETE FROM users RETURNING id) SELECT * FROM x")
+
+    def test_allow_read_only_cte(self):
+        """A read-only CTE must still pass."""
+        validator = SQLValidator(schema="public")
+        statement = validator.validate("WITH x AS (SELECT id FROM users) SELECT * FROM x")
+        assert statement is not None
+
+
+class TestDangerousTimingFunctions:
+    """Issue #244: pg_sleep (DoS) and set_config (session tampering)."""
+
+    def test_reject_pg_sleep(self):
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)not allowed"):
+            validator.validate("SELECT pg_sleep(10)")
+
+    def test_reject_set_config(self):
+        validator = SQLValidator(schema="public")
+        with pytest.raises(SQLValidationError, match="(?i)not allowed"):
+            validator.validate("SELECT set_config('search_path', 'pg_catalog', false)")
+
+
 class TestPromptValidatorAlignment:
     """Meta-tests ensuring the system prompt matches the validator's real behavior."""
 
@@ -511,15 +601,20 @@ class TestPromptValidatorAlignment:
         with pytest.raises(SQLValidationError, match="information_schema"):
             validator.validate("SELECT * FROM information_schema.columns")
 
-    def test_unqualified_pg_catalog_views_are_allowed(self):
+    def test_unqualified_pg_catalog_views_are_rejected(self):
+        """Unqualified system-catalog reads resolve via implicit pg_catalog and
+        leak cross-tenant metadata (schema names from external_id, row counts
+        from pg_class.reltuples). The validator MUST reject them — secure
+        contract (was previously pinned ALLOWED, see issue #244)."""
         validator = SQLValidator(schema="ws_demo")
         for sql in (
             "SELECT schemaname, tablename FROM pg_tables",
             "SELECT schemaname, viewname FROM pg_views",
             "SELECT nspname FROM pg_namespace",
-            "SELECT relname FROM pg_class",
+            "SELECT relname, reltuples FROM pg_class",
         ):
-            validator.validate(sql)
+            with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+                validator.validate(sql)
 
     def test_prompt_mentions_information_schema_restriction(self):
         prompt = BASE_SYSTEM_PROMPT.lower()
@@ -527,14 +622,18 @@ class TestPromptValidatorAlignment:
         assert "describe_table" in prompt
         assert "list_tables" in prompt
 
-    def test_prompt_does_not_claim_pg_catalog_is_blocked(self):
-        prompt = BASE_SYSTEM_PROMPT
-        forbidden_phrases = [
-            "cannot query pg_catalog",
-            "cannot access pg_catalog",
+    def test_prompt_does_not_advertise_pg_catalog_reachability(self):
+        """The prompt must NOT advertise unqualified pg_catalog views as
+        reachable — doing so invites chat users / prompt-injected content to
+        enumerate the shared DB's customer list (issue #244)."""
+        prompt = BASE_SYSTEM_PROMPT.lower()
+        advertised_phrases = [
+            "are reachable",
+            "is reachable",
+            "if you really need raw system-state introspection",
         ]
-        for phrase in forbidden_phrases:
-            assert phrase.lower() not in prompt.lower(), (
-                f"Prompt still claims pg_catalog is blocked ({phrase!r}), but the "
-                "validator allows unqualified pg_* views."
+        for phrase in advertised_phrases:
+            assert phrase not in prompt, (
+                f"Prompt still advertises pg_catalog reachability ({phrase!r}), but the "
+                "validator now rejects unqualified pg_* views (issue #244)."
             )

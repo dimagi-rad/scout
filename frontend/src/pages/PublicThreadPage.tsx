@@ -168,9 +168,25 @@ function PublicChatMessage({
   )
 }
 
+// Artifact types that are self-contained markup and can be rendered directly in
+// a sandboxed iframe on the public page. React/Plotly artifacts need the full
+// CDN-backed sandbox renderer plus live query data (which requires auth), so
+// they are not rendered live for anonymous viewers — their source is shown.
+const SANDBOXABLE_TYPES = new Set(["html", "svg"])
+
+// Wrap self-contained artifact markup in a minimal HTML document so the
+// sandboxed iframe renders it. SVG is centered; HTML is rendered as-is.
+function buildSandboxSrcDoc(artifact: Artifact): string {
+  const body =
+    artifact.artifact_type === "svg"
+      ? `<div style="display:flex;align-items:center;justify-content:center;min-height:100%">${artifact.code}</div>`
+      : artifact.code
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:12px;font-family:system-ui,-apple-system,sans-serif}</style></head><body>${body}</body></html>`
+}
+
 function ArtifactPreview({ artifact }: { artifact: Artifact }) {
   return (
-    <Card>
+    <Card data-testid={`public-artifact-${artifact.id}`}>
       <CardHeader>
         <CardTitle className="text-base">{artifact.title}</CardTitle>
         <span className="text-xs text-muted-foreground">{artifact.artifact_type}</span>
@@ -180,8 +196,24 @@ function ArtifactPreview({ artifact }: { artifact: Artifact }) {
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <Markdown remarkPlugins={[remarkGfm]}>{artifact.code}</Markdown>
           </div>
+        ) : SANDBOXABLE_TYPES.has(artifact.artifact_type) ? (
+          <iframe
+            // SECURITY: render untrusted, agent-generated markup with NO
+            // allow-same-origin so the frame gets a unique opaque origin and
+            // cannot touch the parent or this origin's cookies. allow-scripts
+            // is intentionally omitted: static html/svg need no JS, and
+            // withholding it blocks script execution entirely.
+            sandbox=""
+            srcDoc={buildSandboxSrcDoc(artifact)}
+            title={artifact.title}
+            className="h-96 w-full rounded border bg-white"
+            data-testid={`public-artifact-frame-${artifact.id}`}
+          />
         ) : (
-          <pre className="max-h-96 overflow-auto rounded bg-muted p-3 text-xs font-mono whitespace-pre-wrap">
+          <pre
+            className="max-h-96 overflow-auto rounded bg-muted p-3 text-xs font-mono whitespace-pre-wrap"
+            data-testid={`public-artifact-code-${artifact.id}`}
+          >
             {artifact.code}
           </pre>
         )}

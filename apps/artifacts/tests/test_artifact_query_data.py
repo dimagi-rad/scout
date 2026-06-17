@@ -148,7 +148,7 @@ async def test_returns_query_results_for_live_artifact(live_artifact, member_cli
 
     with (
         patch(
-            "apps.artifacts.views.load_tenant_context",
+            "apps.artifacts.views.load_workspace_context",
             new=AsyncMock(return_value=FAKE_CTX),
         ),
         patch(
@@ -224,11 +224,11 @@ async def test_no_workspace_returns_404(member_user, member_client, membership):
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_tenant_context_error_returns_error_query(live_artifact, member_client, membership):
-    """If load_tenant_context fails (no schema), return error response."""
+    """If load_workspace_context fails (no schema), return error response."""
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     with patch(
-        "apps.artifacts.views.load_tenant_context",
+        "apps.artifacts.views.load_workspace_context",
         new=AsyncMock(side_effect=ValueError("No active schema")),
     ):
         response = await member_client.get(url)
@@ -249,7 +249,7 @@ async def test_individual_query_failure_continues(live_artifact, member_client, 
 
     with (
         patch(
-            "apps.artifacts.views.load_tenant_context",
+            "apps.artifacts.views.load_workspace_context",
             new=AsyncMock(return_value=FAKE_CTX),
         ),
         patch(

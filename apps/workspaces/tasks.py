@@ -949,7 +949,7 @@ async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
     return _compose_failure_summary(runs)
 
 
-async def _build_agent_for_resume(workspace, user):
+async def _build_agent_for_resume(workspace, user, conversation_id=None):
     """Build the LangGraph agent + load oauth_tokens for runtime config.
 
     Returns (agent, oauth_tokens).
@@ -963,6 +963,7 @@ async def _build_agent_for_resume(workspace, user):
         checkpointer=checkpointer,
         mcp_tools=mcp_tools,
         oauth_tokens=oauth_tokens,
+        conversation_id=conversation_id,
     )
     return agent, oauth_tokens
 
@@ -1011,6 +1012,7 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
         agent, _ = await _build_agent_for_resume(
             thread_job.thread.workspace,
             thread_job.thread.user,
+            conversation_id=str(thread_job.thread.id),
         )
         config = {"configurable": {"thread_id": str(thread_job.thread.id)}}
         await agent.aupdate_state(
@@ -1279,7 +1281,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     start = time.monotonic()
     try:
-        agent, oauth_tokens = await _build_agent_for_resume(workspace, user)
+        agent, oauth_tokens = await _build_agent_for_resume(
+            workspace, user, conversation_id=str(tj.thread.id)
+        )
         input_state = {
             "messages": [HumanMessage(content=body)],
             "workspace_id": str(workspace.id),
