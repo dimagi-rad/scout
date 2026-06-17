@@ -28,6 +28,7 @@ from apps.transformations.models import (
     TransformationScope,
 )
 from apps.transformations.services.executor import run_transformation_pipeline
+from apps.users.models import Tenant
 from apps.workspaces.services.schema_manager import (
     SchemaManager,
     dbt_role_name,
@@ -55,8 +56,6 @@ def confinement_schemas(db, managed_conn):
     Yields ``(attacker_schema, victim_schema)``. Both physical schemas and the
     derived roles are dropped on teardown.
     """
-    from apps.users.models import Tenant
-
     suffix = uuid.uuid4().hex[:8]
     attacker_schema = f"conf241_attacker_{suffix}"
     victim_schema = f"conf241_victim_{suffix}"

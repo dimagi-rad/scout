@@ -21,6 +21,7 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
+    _aggregate_materialization_state,
     resume_thread_after_materialization,
 )
 
@@ -582,8 +583,6 @@ async def test_aggregate_surfaces_failed_transform_phase():
     in the per-tenant summary so the agent discloses that staging/derived tables
     are stale (issue #241, 04#4: result["transforms"] was previously never read
     by the aggregator)."""
-    from apps.workspaces.tasks import _aggregate_materialization_state
-
     tenant = await Tenant.objects.acreate(
         external_id="t-xform-fail",
         provider="commcare",
@@ -620,8 +619,6 @@ async def test_aggregate_surfaces_failed_transform_phase():
 @pytest.mark.django_db(transaction=True)
 async def test_aggregate_no_transform_error_when_transforms_succeed():
     """A successful transform phase adds no ``transform_error`` noise."""
-    from apps.workspaces.tasks import _aggregate_materialization_state
-
     tenant = await Tenant.objects.acreate(
         external_id="t-xform-ok",
         provider="commcare",
