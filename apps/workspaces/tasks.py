@@ -19,6 +19,7 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import aresolve_credential
 from apps.workspaces.models import (
@@ -1063,6 +1064,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         tenant_id = r.tenant_schema.tenant.external_id
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
+        transform_error: str | None = None
         if isinstance(r.result, dict):
             for source, info in (r.result.get("sources") or {}).items():
                 if not isinstance(info, dict):
@@ -1081,14 +1083,26 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 if isinstance(cursor_state, dict) and isinstance(cursor_state.get("last_id"), int):
                     detail["resume_last_id"] = cursor_state["last_id"]
                 sources_detail[source] = detail
-        summary.append(
-            {
-                "tenant": tenant_id,
-                "state": r.state,
-                "materialized_row_counts": materialized_row_counts,
-                "sources": sources_detail,
-            }
-        )
+            # Surface a failed transform phase (issue #241, 04#4). The run state
+            # stays COMPLETED because transform failures are isolated from the
+            # raw load, but a failed transform means staging/derived tables are
+            # stale — the agent must disclose this rather than present them as
+            # fresh. ``result["transforms"]`` was previously never read here.
+            transforms = r.result.get("transforms")
+            if isinstance(transforms, dict):
+                if transforms.get("status") == TransformationRunStatus.FAILED:
+                    transform_error = transforms.get("error") or "transform phase failed"
+                elif transforms.get("error"):
+                    transform_error = transforms["error"]
+        tenant_summary = {
+            "tenant": tenant_id,
+            "state": r.state,
+            "materialized_row_counts": materialized_row_counts,
+            "sources": sources_detail,
+        }
+        if transform_error:
+            tenant_summary["transform_error"] = transform_error
+        summary.append(tenant_summary)
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
             all_completed = False
