@@ -4,6 +4,7 @@ import requests_mock as rm
 from mcp_server.loaders.connect_assessments import ConnectAssessmentLoader
 from mcp_server.loaders.connect_base import (
     EXPORT_ACCEPT_HEADER,
+    RETRY_TOTAL,
     ConnectAuthError,
     ConnectExportError,
 )
@@ -258,6 +259,39 @@ class TestConnectVisitLoader:
             m.get(
                 f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
                 json={"next": None},
+            )
+            with pytest.raises(ConnectExportError):
+                loader.load()
+
+    # --- 12#0 item 9: additional error paths (was 401 + missing-results only) ---
+
+    def test_auth_error_on_403(self, loader):
+        """403 is treated the same as 401 — a ConnectAuthError, not a generic
+        export failure."""
+        with rm.Mocker() as m:
+            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", status_code=403)
+            with pytest.raises(ConnectAuthError):
+                loader.load()
+
+    def test_export_error_on_5xx_reports_retry_exhaustion(self, loader):
+        """A retryable 5xx that never recovers surfaces as ConnectExportError
+        carrying the status and the exhausted attempt count (initial + retries),
+        so the failure is observable rather than silent."""
+        with rm.Mocker() as m:
+            m.get(f"{BASE}/export/opportunity/{OPP_ID}/user_visits/", status_code=503)
+            with pytest.raises(ConnectExportError) as exc:
+                loader.load()
+        assert exc.value.status == 503
+        assert exc.value.attempts == RETRY_TOTAL + 1
+
+    def test_export_error_on_malformed_json(self, loader):
+        """A 200 with a non-JSON body raises ConnectExportError (wrapping the
+        JSON decode error), not an unhandled ValueError deep in the writer."""
+        with rm.Mocker() as m:
+            m.get(
+                f"{BASE}/export/opportunity/{OPP_ID}/user_visits/",
+                text="<html>gateway error</html>",
+                status_code=200,
             )
             with pytest.raises(ConnectExportError):
                 loader.load()
