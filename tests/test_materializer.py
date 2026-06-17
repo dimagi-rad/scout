@@ -1,8 +1,15 @@
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
-from mcp_server.services.materializer import _connect_visit_total
+from apps.users.models import Tenant
+from apps.workspaces.models import MaterializationRun, TenantSchema
+from mcp_server.services.materializer import (
+    _connect_visit_total,
+    _load_prior_resume_cursors,
+)
 
 
 class TestRunPipeline:
@@ -1452,3 +1459,112 @@ class TestConnectVisitTotal:
     def test_returns_none_for_no_metadata(self):
         assert _connect_visit_total(None, 765) is None
         assert _connect_visit_total({}, 765) is None
+
+
+@pytest.mark.django_db
+class TestLoadPriorResumeCursors:
+    """Real-DB exercise of the prior-run / stale-cursor selection query
+    (12#0 item 7). The stale-cursor regression test elsewhere injects prior_run
+    via a mocked filter/exclude/order_by chain, so the real ORM query
+    (filter(tenant_schema=...).exclude(id=...).order_by('-started_at').first())
+    and the PARTIAL/FAILED eligibility logic were never run against a database.
+    These build actual MaterializationRun rows.
+    """
+
+    def _schema(self, ext_id, schema_name):
+        tenant = Tenant.objects.create(
+            provider="commcare_connect",
+            external_id=ext_id,
+            canonical_name=ext_id,
+        )
+        return TenantSchema.objects.create(tenant=tenant, schema_name=schema_name)
+
+    @staticmethod
+    def _set_started_at(run, when):
+        # started_at is auto_now_add, so it can only be overridden via update().
+        MaterializationRun.objects.filter(id=run.id).update(started_at=when)
+
+    def test_completed_run_after_partial_invalidates_stale_cursor(self):
+        """Run A PARTIAL (cursor last_id=1500) -> Run B COMPLETED full reload ->
+        Run C must start clean: the MOST RECENT prior run (B, COMPLETED) is not a
+        resume target, so no cursor is surfaced from the older PARTIAL."""
+        schema = self._schema("cur-skip", "s_cur_skip")
+        run_a = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.PARTIAL,
+            result={
+                "sources": {
+                    "completed_works": {
+                        "state": "failed",
+                        "cursor_state": {"last_id": 1500},
+                    }
+                }
+            },
+        )
+        run_b = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.COMPLETED,
+            result={"sources": {"completed_works": {"state": "completed", "rows": 5000}}},
+        )
+        run_c = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.STARTED,
+        )
+        base = timezone.now()
+        self._set_started_at(run_a, base - timedelta(hours=2))
+        self._set_started_at(run_b, base - timedelta(hours=1))
+        self._set_started_at(run_c, base)
+
+        cursors = _load_prior_resume_cursors(schema, exclude_run_id=run_c.id)
+
+        assert cursors == {}
+
+    def test_recent_partial_surfaces_only_resumable_source_cursors(self):
+        """When the most-recent prior run is PARTIAL, return cursors only for
+        sources whose state was in_progress/failed AND have an int last_id —
+        completed sources are whole-history checkpoints, not resume targets."""
+        schema = self._schema("cur-keep", "s_cur_keep")
+        prior = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.PARTIAL,
+            result={
+                "sources": {
+                    "completed_works": {
+                        "state": "failed",
+                        "cursor_state": {"last_id": 1500},
+                    },
+                    "users": {"state": "completed", "rows": 100},
+                    "visits": {"state": "in_progress", "cursor_state": {"last_id": None}},
+                }
+            },
+        )
+        current = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.STARTED,
+        )
+        base = timezone.now()
+        self._set_started_at(prior, base - timedelta(hours=1))
+        self._set_started_at(current, base)
+
+        cursors = _load_prior_resume_cursors(schema, exclude_run_id=current.id)
+
+        # completed_works (failed + int last_id) only; 'users' is completed and
+        # 'visits' has a None last_id — neither is resumable.
+        assert cursors == {"completed_works": 1500}
+
+    def test_no_prior_run_returns_empty(self):
+        """A schema whose only run is the current one (excluded) has no prior to
+        resume from."""
+        schema = self._schema("cur-none", "s_cur_none")
+        current = MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_connect",
+            state=MaterializationRun.RunState.STARTED,
+        )
+
+        assert _load_prior_resume_cursors(schema, exclude_run_id=current.id) == {}
