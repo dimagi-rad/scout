@@ -50,7 +50,18 @@ async def _update_thread_sharing(thread, is_shared=None):
 
 
 async def _get_thread_artifacts(thread_id):
-    """Load artifacts associated with a thread."""
+    """Load artifacts associated with a thread.
+
+    Returns the artifact ``code`` and ``data`` so a public (unauthenticated)
+    thread page can render each artifact in a client-side sandboxed iframe
+    (``srcdoc``) instead of dumping the source as ``<pre>``.
+
+    Note: the authenticated server sandbox route
+    (``/api/workspaces/<wsid>/artifacts/<id>/sandbox/``) and the live
+    ``query-data`` route both require session auth + workspace membership, so
+    they intentionally are NOT exposed here. Public rendering uses the embedded
+    static ``data`` only; live tenant data is never served to anonymous viewers.
+    """
     from apps.artifacts.models import Artifact
 
     return [
