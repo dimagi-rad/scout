@@ -207,6 +207,42 @@ def test_total_dbt_failure(mock_profiles, mock_dbt, tenant, system_assets):
 
 
 @pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_dbt_run_failure_marks_run_failed(mock_profiles, mock_dbt, tenant, system_assets):
+    """dbt reports overall failure (e.g. a staging SELECT could not resolve
+    raw_cases) — the run must be marked FAILED, not silently COMPLETED
+    (issue #241, 04#4: failures were triply swallowed)."""
+    mock_dbt.return_value = _dbt_failure('relation "raw_cases" does not exist')
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.FAILED
+    assert "raw_cases" in run.error_message
+    # Per-asset runs reflect the failure too — none left RUNNING/SUCCESS.
+    assert run.asset_runs.count() == 3
+    assert all(ar.status == AssetRunStatus.FAILED for ar in run.asset_runs.all())
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_dbt_failure_in_later_stage_marks_run_failed(
+    mock_profiles, mock_dbt, tenant, system_assets, tenant_assets
+):
+    """A failure in the tenant stage (after system succeeded) still fails the run."""
+    mock_dbt.side_effect = [
+        _dbt_success(*[a.name for a in system_assets]),
+        _dbt_failure("permission denied for schema other_tenant"),
+    ]
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.FAILED
+    assert "permission denied" in run.error_message
+
+
+@pytest.mark.django_db
 @patch("apps.transformations.services.executor.run_dbt_test")
 @patch("apps.transformations.services.executor.run_dbt")
 @patch("apps.transformations.services.executor.generate_profiles_yml")

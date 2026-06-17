@@ -181,6 +181,7 @@ async def chat_view(request):
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
             oauth_tokens=oauth_tokens,
+            conversation_id=str(thread_id),
         )
     except Exception:
         # Connection may have gone stale -- force a new checkpointer and retry
@@ -193,6 +194,7 @@ async def chat_view(request):
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
                 oauth_tokens=oauth_tokens,
+                conversation_id=str(thread_id),
             )
         except Exception as e:
             error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]

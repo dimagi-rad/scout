@@ -20,9 +20,8 @@ from django.views import View
 
 from apps.common.utils import creator_display_name
 from apps.users.decorators import LoginRequiredJsonMixin
-from apps.workspaces.models import TenantSchema
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
-from mcp_server.context import load_tenant_context
+from mcp_server.context import load_workspace_context
 from mcp_server.services.query import execute_query
 
 from .models import Artifact
@@ -808,9 +807,12 @@ class ArtifactQueryDataView(View):
     """
     Executes an artifact's source_queries via the MCP query service and returns results.
 
-    For artifacts with source_queries, each SQL query is executed against the tenant's
-    database using the same query service as the MCP server. Results are returned in a
-    format the artifact sandbox can consume directly via mergeQueryResults().
+    For artifacts with source_queries, each SQL query is executed against the
+    workspace's query schema using the same query service as the MCP server.
+    Routing goes through ``load_workspace_context`` so multi-tenant workspaces hit
+    the ``ws_*`` view schema the agent authored queries against -- not the first
+    tenant's ``t_*`` schema. Results are returned in a format the artifact sandbox
+    can consume directly via mergeQueryResults().
     """
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
@@ -835,12 +837,11 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
-        tenant = await artifact.workspace.tenants.afirst()
-        if tenant is None:
-            return JsonResponse({"error": "Workspace has no associated tenant"}, status=400)
-
+        # Route through load_workspace_context so single- vs multi-tenant
+        # workspaces resolve to the correct schema (t_* vs ws_* view schema) and
+        # the inactivity TTL is touched on the right schema.
         try:
-            ctx = await load_tenant_context(tenant.external_id)
+            ctx = await load_workspace_context(str(artifact.workspace_id))
         except Exception as e:
             error_msg = str(e)
             results = [
@@ -848,11 +849,6 @@ class ArtifactQueryDataView(View):
                 for i, entry in enumerate(artifact.source_queries)
             ]
             return JsonResponse({"queries": results, "static_data": artifact.data or {}})
-
-        # Touch the schema to reset the inactivity TTL on user-initiated queries
-        ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
-        if ts is not None:
-            await ts.atouch()
 
         results = []
         for i, entry in enumerate(artifact.source_queries):

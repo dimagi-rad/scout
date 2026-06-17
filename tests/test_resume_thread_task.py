@@ -21,6 +21,7 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
+    _aggregate_materialization_state,
     resume_thread_after_materialization,
 )
 
@@ -573,6 +574,71 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
     assert "failed" in body
     # And the resume terminal state for partial is FAILED (matches existing behavior).
     assert result["terminal_state"] == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_aggregate_surfaces_failed_transform_phase():
+    """A COMPLETED run whose transform phase FAILED must surface ``transform_error``
+    in the per-tenant summary so the agent discloses that staging/derived tables
+    are stale (issue #241, 04#4: result["transforms"] was previously never read
+    by the aggregator)."""
+    tenant = await Tenant.objects.acreate(
+        external_id="t-xform-fail",
+        provider="commcare",
+        canonical_name="Xform Tenant",
+    )
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_xform_fail")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=778899,
+        result={
+            "pipeline": "commcare",
+            "sources": {"cases": {"state": "completed", "rows": 10}},
+            "transforms": {
+                "run_id": "abc",
+                "status": "failed",
+                "asset_count": 3,
+                "error": 'relation "raw_cases" does not exist',
+            },
+        },
+    )
+
+    status, summary = await _aggregate_materialization_state(778899)
+
+    # Raw sources loaded → run-level status stays completed (transforms isolated).
+    assert status == "completed"
+    assert len(summary) == 1
+    assert "transform_error" in summary[0]
+    assert "raw_cases" in summary[0]["transform_error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_aggregate_no_transform_error_when_transforms_succeed():
+    """A successful transform phase adds no ``transform_error`` noise."""
+    tenant = await Tenant.objects.acreate(
+        external_id="t-xform-ok",
+        provider="commcare",
+        canonical_name="Xform OK Tenant",
+    )
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_xform_ok")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=778900,
+        result={
+            "pipeline": "commcare",
+            "sources": {"cases": {"state": "completed", "rows": 10}},
+            "transforms": {"run_id": "abc", "status": "completed", "asset_count": 3},
+        },
+    )
+
+    _, summary = await _aggregate_materialization_state(778900)
+    assert "transform_error" not in summary[0]
 
 
 @pytest.mark.asyncio

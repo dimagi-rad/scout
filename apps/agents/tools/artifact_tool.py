@@ -205,8 +205,9 @@ def create_artifact_tools(
                 title,
             )
 
-            # Build render URL
-            render_url = f"/artifacts/{artifact.id}/render/"
+            # Build render URL pointing at the real sandbox route
+            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
+            render_url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
 
             return {
                 "artifact_id": str(artifact.id),
@@ -318,8 +319,9 @@ def create_artifact_tools(
                 workspace.id,
             )
 
-            # Build render URL
-            render_url = f"/artifacts/{new_artifact.id}/render/"
+            # Build render URL pointing at the real sandbox route
+            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
+            render_url = f"/api/workspaces/{workspace.id}/artifacts/{new_artifact.id}/sandbox/"
 
             return {
                 "artifact_id": str(new_artifact.id),
