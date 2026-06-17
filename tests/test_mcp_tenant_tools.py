@@ -836,9 +836,7 @@ class TestCancelMaterialization:
         # reconciliation is tracked in #290.
         assert mock_run.state == "failed"
         assert mock_run.result == {"cancelled": True}
-        mock_run.asave.assert_awaited_once_with(
-            update_fields=["state", "completed_at", "result"]
-        )
+        mock_run.asave.assert_awaited_once_with(update_fields=["state", "completed_at", "result"])
 
     def test_cancel_completed_run_returns_error(self):
         import asyncio
