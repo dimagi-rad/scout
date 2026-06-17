@@ -11,7 +11,12 @@ from django.contrib.auth.models import Group
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.merge import merge_users, select_canonical
-from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import (
+    TenantMetadata,
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+)
 
 User = get_user_model()
 
@@ -450,3 +455,75 @@ def test_merge_skips_auth_group_through_tables_when_shared():
     # Canonical still has the group; through-table state is consistent.
     canonical.refresh_from_db()
     assert g in canonical.groups.all()
+
+
+# ---------------------------------------------------------------------------
+# 12#0 item 8: TenantMetadata fate across a merge
+#
+# TenantMetadata is a OneToOne on TenantMembership (on_delete=CASCADE), and
+# TenantMembership.user is on_delete=CASCADE. The merge suite had ZERO
+# TenantMetadata assertions, so the data-preservation behaviour of the
+# membership repoint vs conflict-delete was invisible. Pin it: discovered
+# provider metadata must ride along when a membership is repointed, and the
+# canonical's own metadata must survive a conflict-delete of the duplicate's row.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_merge_preserves_tenant_metadata_when_membership_is_repointed():
+    """A duplicate-only tenant: the membership is repointed (user=canonical), so
+    its OneToOne TenantMetadata must survive and now be reachable via the
+    canonical's membership — no discovered metadata is lost."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    only_dup = Tenant.objects.create(provider="ocs", external_id="exp1", canonical_name="Exp1")
+    dup_tm = TenantMembership.objects.create(user=duplicate, tenant=only_dup)
+    TenantMetadata.objects.create(
+        tenant_membership=dup_tm,
+        metadata={"team_slug": "alpha", "discovered": True},
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    # The membership row is the same row, now owned by canonical — so its
+    # metadata is preserved (not cascade-deleted with the duplicate user).
+    canon_tm = TenantMembership.objects.get(user=canonical, tenant=only_dup)
+    md = TenantMetadata.objects.get(tenant_membership=canon_tm)
+    assert md.metadata == {"team_slug": "alpha", "discovered": True}
+    # And nothing was orphaned/dropped: exactly one metadata row still exists.
+    assert TenantMetadata.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_merge_conflict_delete_keeps_canonical_tenant_metadata():
+    """When both users belong to the same tenant, the duplicate's membership is
+    conflict-deleted (its metadata cascades away with it), but the canonical
+    keeps its OWN membership and metadata for that tenant — no canonical data is
+    lost. Whichever side survives, the tenant stays covered."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="ocs", external_id="shared1", canonical_name="Shared")
+
+    canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared)
+    TenantMetadata.objects.create(
+        tenant_membership=canon_tm,
+        metadata={"owner": "canonical"},
+    )
+    dup_tm = TenantMembership.objects.create(user=duplicate, tenant=shared)  # conflict
+    TenantMetadata.objects.create(
+        tenant_membership=dup_tm,
+        metadata={"owner": "duplicate"},
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    # The duplicate's membership for the shared tenant is conflict-deleted, and
+    # its OneToOne metadata cascades away with it. The canonical keeps its OWN
+    # membership + metadata, so the tenant stays covered (no canonical data lost).
+    surviving = TenantMembership.objects.get(user=canonical, tenant=shared)
+    md = TenantMetadata.objects.get(tenant_membership=surviving)
+    assert md.metadata == {"owner": "canonical"}
+    # The duplicate's redundant metadata cascaded away with its membership — no
+    # dangling rows pointing at the deleted membership remain.
+    assert TenantMetadata.objects.count() == 1
+    assert TenantMetadata.objects.filter(tenant_membership=dup_tm.id).count() == 0
