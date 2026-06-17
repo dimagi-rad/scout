@@ -595,6 +595,31 @@ class TestRecipeRunner:
             await runner.execute_async()
 
     @pytest.mark.asyncio
+    @patch("apps.recipes.services.runner.build_agent_graph", new_callable=AsyncMock)
+    @patch("apps.recipes.services.runner.get_mcp_tools", new_callable=AsyncMock)
+    @patch("apps.recipes.services.runner.get_user_oauth_tokens", new_callable=AsyncMock)
+    async def test_recipe_runner_builds_headless_graph(
+        self, mock_oauth, mock_mcp, mock_build, recipe, user, recipe_step_1
+    ):
+        """The runner must build the agent graph in HEADLESS mode (interactive=
+        False), with no checkpointer, passing its job_id — so the agent gets the
+        blocking materialize tool instead of the chat fire-and-ack one that would
+        crash on the recipe's synthetic thread_id."""
+        values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
+        mock_mcp.return_value = []
+        mock_oauth.return_value = {}
+        stub_graph = Mock()
+        stub_graph.ainvoke = AsyncMock(return_value={"messages": []})
+        mock_build.return_value = stub_graph
+
+        await RecipeRunner(recipe, values, user, job_id=123).execute_async()
+
+        kwargs = mock_build.await_args.kwargs
+        assert kwargs["interactive"] is False
+        assert kwargs["job_id"] == 123
+        assert kwargs["checkpointer"] is None
+
+    @pytest.mark.asyncio
     async def test_recipe_runner_creates_run_record(self, recipe, user, recipe_step_1):
         """RecipeRunner creates a RecipeRun record."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}

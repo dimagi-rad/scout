@@ -59,13 +59,21 @@ class RecipeRunner:
         variable_values: dict[str, Any],
         user: User,
         graph: CompiledStateGraph | None = None,
+        run: RecipeRun | None = None,
+        job_id: int | None = None,
     ) -> None:
         self.recipe = recipe
         self.variable_values = variable_values.copy()
         self.user = user
         self._provided_graph = graph
         self._graph: CompiledStateGraph | None = None
-        self._run: RecipeRun | None = None
+        # When the caller (the run_recipe background task) has already created
+        # the RecipeRun, reuse it so the row the API returned to the client is
+        # the same one we update. Otherwise we create one ourselves.
+        self._run: RecipeRun | None = run
+        # The enclosing Procrastinate job id, forwarded to the headless
+        # materialization tool for MaterializationRun traceability.
+        self._job_id: int | None = job_id
         self._thread_id: str = ""
         self._oauth_tokens: dict = {}
 
@@ -106,6 +114,13 @@ class RecipeRunner:
                 mcp_tools=mcp_tools,
                 oauth_tokens=self._oauth_tokens,
                 conversation_id=self._thread_id or None,
+                # A recipe is a HEADLESS run: no chat Thread, no checkpointer, no
+                # async-resume path. interactive=False gives the agent the
+                # blocking materialize tool (not the fire-and-ack MCP one, which
+                # would crash on the synthetic thread_id) and blocking prompt
+                # guidance. job_id is forwarded for MaterializationRun traceability.
+                interactive=False,
+                job_id=self._job_id,
             )
 
         return self._graph
@@ -154,14 +169,21 @@ class RecipeRunner:
         """Execute the recipe asynchronously."""
         self.validate_variables()
 
-        self._run = await RecipeRun.objects.acreate(
-            recipe=self.recipe,
-            status=RecipeRunStatus.RUNNING,
-            variable_values=self.variable_values,
-            step_results=[],
-            started_at=timezone.now(),
-            run_by=self.user,
-        )
+        if self._run is None:
+            self._run = await RecipeRun.objects.acreate(
+                recipe=self.recipe,
+                status=RecipeRunStatus.RUNNING,
+                variable_values=self.variable_values,
+                step_results=[],
+                started_at=timezone.now(),
+                run_by=self.user,
+            )
+        else:
+            # A pre-created run (dispatched by the run_recipe background task):
+            # mark it RUNNING as execution begins.
+            self._run.status = RecipeRunStatus.RUNNING
+            self._run.started_at = timezone.now()
+            await self._run.asave(update_fields=["status", "started_at"])
 
         self._thread_id = f"recipe-run-{self._run.id}"
 
