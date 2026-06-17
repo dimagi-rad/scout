@@ -58,6 +58,22 @@ export function RecipesPage() {
     }
   }, [id, fetchRecipe, fetchRuns])
 
+  // Recipe execution is a background task: POST /run/ returns 202 with a PENDING
+  // run, so while viewing a run that is still pending/running we poll the runs
+  // list until it reaches a terminal status (completed/failed). Depending on the
+  // status string (not the array identity) keeps this to one interval that tears
+  // down as soon as the run finishes or we navigate away.
+  const viewedRunStatus =
+    id && runId ? recipeRuns.find((r) => r.id === runId)?.status : undefined
+  useEffect(() => {
+    if (!id || !runId) return
+    if (viewedRunStatus !== "pending" && viewedRunStatus !== "running") return
+    const interval = setInterval(() => {
+      void fetchRuns(id)
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [id, runId, viewedRunStatus, fetchRuns])
+
   const handleView = useCallback(
     (recipe: Recipe) => {
       navigate(`/recipes/${recipe.id}`)

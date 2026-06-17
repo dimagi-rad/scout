@@ -83,7 +83,7 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
           <p className="text-sm text-muted-foreground">{recipe.name}</p>
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold">Run Details</h1>
-            <Badge className={getStatusBadgeClass(run.status)}>
+            <Badge className={getStatusBadgeClass(run.status)} data-testid="run-detail-status">
               {run.status}
             </Badge>
           </div>
