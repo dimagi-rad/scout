@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from psycopg import sql as psycopg_sql
 
 from apps.users.models import Tenant
 from apps.workspaces.models import (
@@ -14,7 +15,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MANAGED_DATABASE_URL"),
@@ -721,6 +722,7 @@ def test_build_view_schema_oversized_view_name_raises(two_tenant_workspace, mana
         ts1.delete()
         ts2.delete()
 
+
 @pytest.mark.django_db
 def test_build_view_schema_clears_last_error_on_success(workspace, tenant):
     """A successful build must clear any stale last_error from a prior failure."""
@@ -786,3 +788,111 @@ def test_build_view_schema_records_last_error_on_failure(workspace, tenant):
     finally:
         ts.delete()
         WorkspaceViewSchema.objects.filter(workspace=workspace).delete()
+
+
+def _role_grant_schemas(cursor, role_name: str) -> set[str]:
+    """Return the set of schemas on which ``role_name`` holds a direct ACL entry."""
+    cursor.execute(
+        """
+        SELECT DISTINCT n.nspname
+        FROM pg_namespace n, aclexplode(n.nspacl) AS acl
+        JOIN pg_roles r ON r.oid = acl.grantee
+        WHERE r.rolname = %s
+        """,
+        (role_name,),
+    )
+    return {row[0] for row in cursor.fetchall()}
+
+
+def test_rebuild_revokes_ro_grants_on_removed_tenant_schema(db, managed_db_connection):
+    """Issue #244: after a tenant is removed and the view schema is rebuilt, the
+    _ro role must no longer hold SELECT/USAGE on the removed tenant's schema."""
+    User = get_user_model()
+    user = User.objects.create_user(email="revoke@example.com", password="pass")
+    # Unique schema names so sibling agents sharing the managed DB don't collide.
+    ta = Tenant.objects.create(
+        provider="commcare", external_id="revoke-dom-a-244", canonical_name="revoke_a_244"
+    )
+    tb = Tenant.objects.create(
+        provider="commcare", external_id="revoke-dom-b-244", canonical_name="revoke_b_244"
+    )
+    tc = Tenant.objects.create(
+        provider="commcare", external_id="revoke-dom-c-244", canonical_name="revoke_c_244"
+    )
+    ws = Workspace.objects.create(name="Revoke WS 244", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=ta)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=tb)
+    wt_c = WorkspaceTenant.objects.create(workspace=ws, tenant=tc)
+
+    sa, sb, sc = "revoke_a_244_sch", "revoke_b_244_sch", "revoke_c_244_sch"
+    tsa = TenantSchema.objects.create(tenant=ta, schema_name=sa, state=SchemaState.ACTIVE)
+    tsb = TenantSchema.objects.create(tenant=tb, schema_name=sb, state=SchemaState.ACTIVE)
+    tsc = TenantSchema.objects.create(tenant=tc, schema_name=sc, state=SchemaState.ACTIVE)
+
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        for s in (sa, sb, sc):
+            c.execute(f"CREATE SCHEMA IF NOT EXISTS {s}")
+            c.execute(f"CREATE TABLE IF NOT EXISTS {s}.cases (id TEXT)")
+    finally:
+        c.close()
+
+    vs = None
+    try:
+        vs = SchemaManager().build_view_schema(ws)
+        view_role = readonly_role_name(vs.schema_name)
+
+        c2 = conn.cursor()
+        try:
+            granted = _role_grant_schemas(c2, view_role)
+            # Initially the role can read all three constituent tenant schemas.
+            assert {sa, sb, sc} <= granted
+        finally:
+            c2.close()
+
+        # Remove tenant C from the workspace, then rebuild.
+        wt_c.delete()
+        tsc_schema = sc
+        vs = SchemaManager().build_view_schema(ws)
+
+        c3 = conn.cursor()
+        try:
+            granted_after = _role_grant_schemas(c3, view_role)
+            # The _ro role must NO LONGER reach the removed tenant's schema.
+            assert tsc_schema not in granted_after, (
+                f"_ro role {view_role} still holds grants on removed schema {tsc_schema}: "
+                f"{sorted(granted_after)}"
+            )
+            # ...but still reaches the remaining members.
+            assert {sa, sb} <= granted_after
+        finally:
+            c3.close()
+    finally:
+        c4 = conn.cursor()
+        try:
+            # Drop all schemas first (CASCADE removes the grants that would
+            # otherwise block DROP ROLE), then drop the roles.
+            schemas_to_drop = list((sa, sb, sc))
+            roles_to_drop = [readonly_role_name(s) for s in (sa, sb, sc)]
+            if vs:
+                schemas_to_drop.append(vs.schema_name)
+                roles_to_drop.append(readonly_role_name(vs.schema_name))
+            for s in schemas_to_drop:
+                c4.execute(
+                    psycopg_sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                        psycopg_sql.Identifier(s)
+                    )
+                )
+            for role in roles_to_drop:
+                c4.execute(
+                    psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg_sql.Identifier(role))
+                )
+        finally:
+            c4.close()
+        if vs:
+            vs.delete()
+        tsa.delete()
+        tsb.delete()
+        tsc.delete()

@@ -378,9 +378,18 @@ class SchemaManager:
             # Create read-only role for the view schema
             self._create_readonly_role(cursor, view_schema_name)
 
+            view_role = readonly_role_name(view_schema_name)
+
+            # Revoke grants the role still holds on tenant schemas that are no
+            # longer part of this workspace. The role is reused across rebuilds,
+            # so without this a removed tenant's schema keeps SELECT/USAGE for
+            # the _ro role — leaving the prior tenant's data reachable through a
+            # role that should only see the current members (issue #244).
+            current_schemas = {view_schema_name} | {s for s, _ in tenant_schemas}
+            self._revoke_stale_view_role_grants(cursor, view_role, current_schemas)
+
             # Grant SELECT on the views themselves (ALTER DEFAULT PRIVILEGES
             # only covers future tables, not the views just created above)
-            view_role = readonly_role_name(view_schema_name)
             cursor.execute(
                 psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
                     psycopg.sql.Identifier(view_schema_name),
@@ -621,6 +630,37 @@ class SchemaManager:
                 psycopg.sql.Identifier(role_name),
             )
         )
+
+    def _revoke_stale_view_role_grants(
+        self, cursor, role_name: str, current_schemas: set[str]
+    ) -> None:
+        """Revoke the view-schema _ro role's grants on schemas it should no longer reach.
+
+        On a view-schema rebuild the role is reused, so any tenant schema that
+        was dropped from the workspace since the last build still carries
+        SELECT/USAGE for this role. Find every schema where the role holds an
+        ACL entry and revoke from those not in ``current_schemas`` (the view
+        schema plus the constituent tenant schemas of the new membership).
+        Best-effort per schema: a removed schema that has since been dropped
+        from the database leaves no ACL to revoke.
+        """
+        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        granted_schemas = [row[0] for row in cursor.fetchall()]
+        for schema in granted_schemas:
+            if schema in current_schemas:
+                continue
+            cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+            cursor.execute(
+                psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
         """Convert a tenant_id to a valid PostgreSQL schema name."""

@@ -164,7 +164,7 @@ Your access is strictly limited for safety:
 
 2. **Schema-Scoped**: You can ONLY access tables within the current project's schema. Attempts to access other schemas will fail.
 
-3. **No `information_schema`**: You cannot query `information_schema` directly. Use the `describe_table` and `list_tables` tools to inspect schema. Unqualified `pg_catalog` views (`pg_namespace`, `pg_class`, `pg_views`, `pg_tables`) are reachable if you really need raw system-state introspection, but prefer the dedicated tools.
+3. **No System Catalogs**: You cannot query `information_schema` or PostgreSQL system catalogs (`pg_namespace`, `pg_class`, `pg_views`, `pg_tables`, and the rest of `pg_catalog`), whether qualified or unqualified. These are shared across all customers and are blocked to prevent cross-tenant metadata disclosure. Use the `describe_table` and `list_tables` tools to inspect schema instead.
 
 4. **Query Limits**: Large queries have row limits and timeouts to prevent runaway operations.
 

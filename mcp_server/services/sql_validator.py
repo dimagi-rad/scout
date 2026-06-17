@@ -73,6 +73,11 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "pg_rotate_logfile",
         "pg_terminate_backend",
         "pg_cancel_backend",
+        # Denial of service / session tampering
+        "pg_sleep",
+        "pg_sleep_for",
+        "pg_sleep_until",
+        "set_config",
         # Command execution
         "query_to_xml",
         "query_to_xml_and_xmlschema",
@@ -105,6 +110,40 @@ FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset(
         exp.Merge,
         exp.Set,
         exp.Command,
+    }
+)
+
+# System catalog relations that resolve via the implicit ``pg_catalog`` schema
+# even when written UNqualified. These are world-readable in PG16+ regardless of
+# SET ROLE, so an unqualified reference (where the AST carries no schema) leaks
+# cross-tenant metadata: tenant schema names derive from customer identifiers and
+# ``pg_class.reltuples`` exposes row counts. Schema-qualified ``pg_catalog.*`` is
+# already rejected by ``_validate_table_access``; this set closes the unqualified
+# gap. Names are matched case-insensitively against the bare relation name.
+SYSTEM_CATALOG_RELATIONS: frozenset[str] = frozenset(
+    {
+        "pg_namespace",
+        "pg_class",
+        "pg_views",
+        "pg_tables",
+        "pg_matviews",
+        "pg_attribute",
+        "pg_proc",
+        "pg_roles",
+        "pg_user",
+        "pg_shadow",
+        "pg_authid",
+        "pg_database",
+        "pg_stat_activity",
+        "pg_stat_user_tables",
+        "pg_stat_all_tables",
+        "pg_statio_user_tables",
+        "pg_index",
+        "pg_indexes",
+        "pg_constraint",
+        "pg_type",
+        "pg_description",
+        "pg_settings",
     }
 )
 
@@ -213,29 +252,51 @@ class SQLValidator:
         # Check for dangerous functions
         self._validate_no_dangerous_functions(statement, sql)
 
+        # Reject unqualified system-catalog reads (cross-tenant disclosure)
+        self._validate_no_system_catalogs(statement, sql)
+
         # Check table access permissions
         self._validate_table_access(statement, sql)
 
         return statement
 
     def _validate_statement_type(self, statement: exp.Expression, sql: str) -> None:
-        """Ensure only SELECT statements are allowed."""
+        """Ensure only SELECT statements are allowed.
+
+        Beyond the top-level expression type, this also rejects:
+
+        - ``SELECT ... INTO`` (a table-creating SELECT — the ``into`` arg on a
+          ``Select`` node), and
+        - data-modifying CTEs (``WITH x AS (INSERT/UPDATE/DELETE ...) SELECT ...``)
+          which parse as a top-level ``Select`` but embed DML in a subtree.
+
+        Both pass a naive top-level ``isinstance`` check, so we scan the AST.
+        """
+        # SELECT ... INTO creates a new relation; reject regardless of nesting.
+        if statement.args.get("into") is not None or statement.find(exp.Into) is not None:
+            raise SQLValidationError(
+                "SELECT ... INTO is not allowed. Only read-only SELECT queries are permitted.",
+                sql=sql,
+                error_type="forbidden_statement",
+            )
+
+        # Data-modifying CTEs / subqueries: any embedded INSERT/UPDATE/DELETE/
+        # MERGE/etc. is forbidden even if the outer statement is a SELECT.
+        forbidden_tuple = tuple(FORBIDDEN_STATEMENT_TYPES)
+        for node in statement.find_all(*forbidden_tuple):
+            raise SQLValidationError(
+                f"{type(node).__name__.upper()} statements are not allowed "
+                "(including inside CTEs and subqueries). Only SELECT queries are permitted.",
+                sql=sql,
+                error_type="forbidden_statement",
+            )
+
         # Check if it's a SELECT statement
         if not isinstance(statement, exp.Select):
             # Also allow UNION, INTERSECT, EXCEPT which wrap SELECT statements
             if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
                 # These are valid compound SELECT operations
                 return
-
-            # Check for forbidden statement types
-            for forbidden_type in FORBIDDEN_STATEMENT_TYPES:
-                if isinstance(statement, forbidden_type):
-                    raise SQLValidationError(
-                        f"{forbidden_type.__name__.upper()} statements are not allowed. "
-                        "Only SELECT queries are permitted.",
-                        sql=sql,
-                        error_type="forbidden_statement",
-                    )
 
             # If not a SELECT and not explicitly forbidden, still reject
             raise SQLValidationError(
@@ -244,6 +305,24 @@ class SQLValidator:
                 sql=sql,
                 error_type="forbidden_statement",
             )
+
+    def _validate_no_system_catalogs(self, statement: exp.Expression, sql: str) -> None:
+        """Reject references to PostgreSQL system catalogs.
+
+        Unqualified catalog relations (``pg_class``, ``pg_namespace``, ...)
+        resolve via the implicit ``pg_catalog`` schema and are world-readable
+        regardless of ``SET ROLE``, leaking cross-tenant metadata. Schema-
+        qualified ``pg_catalog.*`` is already blocked by ``_validate_table_access``;
+        this catches the unqualified form the AST records with no schema.
+        """
+        for table in statement.find_all(exp.Table):
+            if table.name.lower() in SYSTEM_CATALOG_RELATIONS:
+                raise SQLValidationError(
+                    f"Access to system catalog '{table.name}' is not permitted. "
+                    "Use the describe_table and list_tables tools to inspect schema.",
+                    sql=sql,
+                    error_type="system_catalog_not_allowed",
+                )
 
     def _validate_no_dangerous_functions(self, statement: exp.Expression, sql: str) -> None:
         """Check for dangerous function calls in the query."""
@@ -396,6 +475,7 @@ class SQLValidator:
 __all__ = [
     "DANGEROUS_FUNCTIONS",
     "FORBIDDEN_STATEMENT_TYPES",
+    "SYSTEM_CATALOG_RELATIONS",
     "SQLValidationError",
     "SQLValidator",
 ]
