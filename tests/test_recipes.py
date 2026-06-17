@@ -12,8 +12,8 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.test import AsyncClient
 from django.utils import timezone
-from langchain_core.messages import AIMessage
 
+from apps.recipes import tasks as recipe_tasks
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus, RecipeStep
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
 
@@ -835,35 +835,74 @@ class TestRecipeRunView:
     """Tests for the async recipe run endpoint."""
 
     @pytest.mark.asyncio
-    async def test_run_endpoint_returns_201_with_real_graph(self, recipe, user, recipe_step_1):
-        """POST run/ builds the real graph (LLM mocked, no MCP tools) and returns 201."""
-
-        async def fake_ainvoke(messages, *args, **kwargs):
-            return AIMessage(content="done", id="ai-1")
-
-        mock_bound = MagicMock()
-        mock_bound.ainvoke = AsyncMock(side_effect=fake_ainvoke)
-        mock_llm = MagicMock()
-        mock_llm.bind_tools.return_value = mock_bound
-
+    async def test_run_endpoint_returns_202_and_defers_task(self, recipe, user, recipe_step_1):
+        """POST run/ creates a PENDING RecipeRun, defers the background task, and
+        returns 202 — execution is async because a recipe may block on a
+        materialization that must not hold the HTTP connection open."""
         client = AsyncClient()
         await sync_to_async(client.login)(email="test@example.com", password="testpass123")
 
         url = f"/api/workspaces/{recipe.workspace_id}/recipes/{recipe.id}/run/"
         body = {"variable_values": {"region": "North", "limit": 10, "start_date": "2024-01-01"}}
 
-        with (
-            patch(
-                "apps.recipes.services.runner.get_mcp_tools",
-                new=AsyncMock(return_value=[]),
-            ),
-            patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
-        ):
+        with patch("apps.recipes.api.views.run_recipe") as mock_task:
+            mock_task.defer_async = AsyncMock()
             resp = await client.post(url, data=body, content_type="application/json")
 
-        assert resp.status_code == 201, resp.content
+        assert resp.status_code == 202, resp.content
         data = resp.json()
-        assert data["status"] == RecipeRunStatus.COMPLETED
+        assert data["status"] == RecipeRunStatus.PENDING
+        run = await RecipeRun.objects.aget(id=data["id"])
+        assert run.status == RecipeRunStatus.PENDING
+        mock_task.defer_async.assert_awaited_once_with(recipe_run_id=str(run.id))
+
+    @pytest.mark.asyncio
+    async def test_run_endpoint_rejects_invalid_variables_before_dispatch(
+        self, recipe, user, recipe_step_1
+    ):
+        """Variable validation happens in the request (400) — we must not create
+        a run or defer a task for an invalid request."""
+        client = AsyncClient()
+        await sync_to_async(client.login)(email="test@example.com", password="testpass123")
+        url = f"/api/workspaces/{recipe.workspace_id}/recipes/{recipe.id}/run/"
+        body = {"variable_values": {"region": "North", "limit": 10}}  # start_date missing
+
+        with patch("apps.recipes.api.views.run_recipe") as mock_task:
+            mock_task.defer_async = AsyncMock()
+            resp = await client.post(url, data=body, content_type="application/json")
+
+        assert resp.status_code == 400, resp.content
+        assert not await RecipeRun.objects.filter(recipe=recipe).aexists()
+        mock_task.defer_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_recipe_task_executes_and_finalizes(
+        self, recipe, user, recipe_step_1, monkeypatch
+    ):
+        """The run_recipe task runs the (mocked) runner against the pre-created
+        run and the run reaches a terminal status."""
+        run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values={"region": "North", "limit": 10, "start_date": "2024-01-01"},
+            step_results=[],
+        )
+
+        async def _fake_exec(self):
+            self._run.status = RecipeRunStatus.COMPLETED
+            await self._run.asave(update_fields=["status"])
+            return self._run
+
+        monkeypatch.setattr("apps.recipes.services.runner.RecipeRunner.execute_async", _fake_exec)
+        ctx = MagicMock()
+        ctx.job.id = 7
+
+        result = await recipe_tasks.run_recipe(ctx, str(run.id))
+
+        await run.arefresh_from_db()
+        assert run.status == RecipeRunStatus.COMPLETED
+        assert result["status"] == RecipeRunStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_run_endpoint_forbids_non_member(self, recipe, other_user, recipe_step_1):
