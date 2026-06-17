@@ -24,6 +24,7 @@ import contextlib
 import logging
 import os
 import sys
+import uuid
 from datetime import UTC, datetime
 
 from django.core.exceptions import ValidationError as _ValidationError
@@ -548,6 +549,20 @@ async def run_materialization(
             return tc["result"]
         if not thread_id:
             tc["result"] = error_response(VALIDATION_ERROR, "thread_id is required")
+            return tc["result"]
+
+        # thread_id is injected server-side and must be a real chat Thread UUID.
+        # A non-UUID value (e.g. the recipe runner's synthetic "recipe-run-<id>")
+        # must fail cleanly here rather than crash the UUIDField cast in the
+        # Thread lookup below. This tool is interactive/fire-and-resume only;
+        # headless callers (recipes) use the blocking agent-side materialize
+        # tool, which never reaches this code path.
+        try:
+            uuid.UUID(str(thread_id))
+        except (ValueError, AttributeError, TypeError):
+            tc["result"] = error_response(
+                VALIDATION_ERROR, "thread_id must be a valid thread identifier"
+            )
             return tc["result"]
 
         # Authorization guard: confirms the user has at least one tenant
