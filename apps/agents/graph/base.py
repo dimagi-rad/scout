@@ -36,6 +36,7 @@ from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
+from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.workspaces.models import (
@@ -143,18 +144,21 @@ _system_prompt_cache: dict[str, tuple[str, float]] = {}
 _SYSTEM_PROMPT_TTL = 60  # 60 seconds — short to limit staleness from knowledge/schema changes
 
 
-def _system_prompt_cache_key(workspace, user) -> str:
+def _system_prompt_cache_key(workspace, user, interactive: bool = True) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
     Includes user.id because _fetch_schema_context scopes TenantMetadata
     lookup to the specific user. Includes workspace.system_prompt hash
-    so edits invalidate immediately.
+    so edits invalidate immediately. Includes ``interactive`` because the
+    materialization guidance differs between interactive (fire-and-resume) and
+    headless (blocking) runs — caching one for the other would mislead the agent.
     """
     prompt_hash = hashlib.md5(
         (workspace.system_prompt or "").encode(), usedforsecurity=False
     ).hexdigest()[:8]
     user_id = getattr(user, "id", "anon")
-    return f"{workspace.id}:{user_id}:{prompt_hash}"
+    mode = "i" if interactive else "h"
+    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}"
 
 
 def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
@@ -217,11 +221,27 @@ def _render_full_schema(
     return "\n".join(lines)
 
 
-async def _fetch_schema_context(tenant, user) -> str:
+# Guidance injected for HEADLESS (non-interactive) runs — e.g. recipe execution.
+# Such runs have no chat Thread/checkpointer and no async-resume path, so the
+# agent must NOT "end its turn and wait": the headless run_materialization tool
+# BLOCKS and returns when loading finishes, and the agent continues in the same
+# run. (Deliberately avoids the substring "end your turn".)
+_HEADLESS_MATERIALIZE_GUIDANCE = (
+    "No data has been loaded yet. Call `run_materialization` to load it. This "
+    "tool BLOCKS and returns a status summary once loading finishes — keep "
+    "working in the same run rather than stopping. After it returns "
+    "`status: completed`, continue with the requested analysis; the data is ready."
+)
+
+
+async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
     Tries to build a full schema block (tables + columns). Falls back to a compact
     block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
+
+    ``interactive`` selects the materialization guidance: fire-and-resume (chat)
+    vs blocking (headless recipe runs).
     """
     ts = await TenantSchema.objects.filter(
         tenant=tenant,
@@ -232,6 +252,8 @@ async def _fetch_schema_context(tenant, user) -> str:
     pipeline_config = registry.get_by_provider(tenant.provider)
 
     if ts is None:
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_GUIDANCE
         # NB: no `pipeline=` argument — run_materialization takes no pipeline
         # parameter (routing moved into materialize_workspace per-provider) and
         # all of its real params are injected server-side and hidden, so the
@@ -246,6 +268,8 @@ async def _fetch_schema_context(tenant, user) -> str:
         )
 
     if ts.state == SchemaState.MATERIALIZING:
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_GUIDANCE
         return (
             "A materialization is already in progress in the background. Do NOT "
             "trigger another one and do NOT call other data tools (the data is "
@@ -321,7 +345,7 @@ _MULTI_TENANT_NAMESPACE_HINT = (
 )
 
 
-async def _fetch_multi_tenant_schema_context(workspace, user) -> str:
+async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool = True) -> str:
     """Build the ## Data Availability block for a multi-tenant workspace.
 
     Mirrors `_fetch_schema_context` but consults `WorkspaceViewSchema` plus the
@@ -341,6 +365,8 @@ async def _fetch_multi_tenant_schema_context(workspace, user) -> str:
         ).afirst()
 
     if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_GUIDANCE
         return (
             "A materialization is already in progress in the background. Do NOT "
             "trigger another one and do NOT call other data tools (the data is "
@@ -350,6 +376,8 @@ async def _fetch_multi_tenant_schema_context(workspace, user) -> str:
         )
 
     if vs is None or vs.state != SchemaState.ACTIVE:
+        if not interactive:
+            return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{_HEADLESS_MATERIALIZE_GUIDANCE}"
         return (
             f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
             "No data has been loaded yet. Call `run_materialization` to start "
@@ -502,6 +530,9 @@ async def build_agent_graph(
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
     conversation_id: str | None = None,
+    *,
+    interactive: bool = True,
+    job_id: int | None = None,
 ):
     """
     Build a LangGraph agent graph for a workspace.
@@ -515,11 +546,27 @@ async def build_agent_graph(
         conversation_id: Optional thread/conversation id. Threaded through to the
             artifact tools so chat-created artifacts record their originating
             conversation (so shared/public thread pages can find them).
+        interactive: Whether this graph serves an interactive chat turn (the
+            default). Interactive runs own a real Thread + persistent checkpointer
+            and use the fire-and-ack MCP ``run_materialization`` + async resume.
+            Headless runs (``interactive=False``, e.g. recipe execution) have no
+            Thread/checkpointer/resume path, so they get a *blocking*
+            ``run_materialization`` tool instead and matching prompt guidance.
+        job_id: Enclosing Procrastinate job id, passed to the headless
+            materialization tool for MaterializationRun traceability. Ignored in
+            interactive mode.
     """
-    logger.info("Building agent graph for workspace %s", workspace.id)
+    logger.info("Building agent graph for workspace %s (interactive=%s)", workspace.id, interactive)
 
     # --- Build tools ---
-    tools = _build_tools(workspace, user, mcp_tools or [], conversation_id=conversation_id)
+    tools = _build_tools(
+        workspace,
+        user,
+        mcp_tools or [],
+        conversation_id=conversation_id,
+        interactive=interactive,
+        job_id=job_id,
+    )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
     # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
@@ -544,7 +591,7 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, user)
+    system_prompt = await _build_system_prompt(workspace, user, interactive=interactive)
     logger.debug(
         "System prompt assembled: %d characters for workspace %s",
         len(system_prompt),
@@ -692,6 +739,8 @@ def _build_tools(
     user: User | None,
     mcp_tools: list,
     conversation_id: str | None = None,
+    interactive: bool = True,
+    job_id: int | None = None,
 ) -> list:
     """
     Build the tool list for the agent.
@@ -720,14 +769,24 @@ def _build_tools(
     """
     # Drop any MCP tool the server advertises but that must not reach the LLM
     # (e.g. the destructive ``teardown_schema`` — see AGENT_EXCLUDED_MCP_TOOLS).
-    tools = [t for t in mcp_tools if getattr(t, "name", None) not in AGENT_EXCLUDED_MCP_TOOLS]
+    # In headless mode also drop the interactive fire-and-ack
+    # ``run_materialization``: it requires a real chat Thread + checkpointer +
+    # async resume that a headless run does not have. It is replaced below by the
+    # blocking materialize tool, which runs the pipeline inline and returns when
+    # data is ready.
+    excluded = set(AGENT_EXCLUDED_MCP_TOOLS)
+    if not interactive:
+        excluded.add("run_materialization")
+    tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
     tools.append(create_save_learning_tool(workspace, user))
     tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
+    if not interactive:
+        tools.append(create_materialization_tool(workspace, user, job_id))
     return tools
 
 
-async def _build_system_prompt(workspace: Workspace, user) -> str:
+async def _build_system_prompt(workspace: Workspace, user, interactive: bool = True) -> str:
     """
     Assemble the complete system prompt for a workspace.
 
@@ -745,7 +804,7 @@ async def _build_system_prompt(workspace: Workspace, user) -> str:
     Returns:
         Complete system prompt string.
     """
-    cache_key = _system_prompt_cache_key(workspace, user)
+    cache_key = _system_prompt_cache_key(workspace, user, interactive)
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -786,7 +845,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
 
         # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant, user)
+        schema_context = await _fetch_schema_context(tenant, user, interactive)
         sections.append(f"\n## Data Availability\n\n{schema_context}\n")
     elif tenant_count > 1:
         sections.append("""
@@ -797,7 +856,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
-        schema_context = await _fetch_multi_tenant_schema_context(workspace, user)
+        schema_context = await _fetch_multi_tenant_schema_context(workspace, user, interactive)
         sections.append(f"\n## Data Availability\n\n{schema_context}\n")
 
     result = "\n".join(sections)
