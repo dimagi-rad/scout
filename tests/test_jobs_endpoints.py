@@ -10,6 +10,7 @@ from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
+from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import (
     MaterializationRun,
@@ -911,8 +912,6 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
 def test_jobs_cancel_current_app_binding_is_live_not_a_blueprint():
     """The surviving-sibling binding must resolve to a real App exposing a
     usable job_manager — not procrastinate's not-ready FutureApp blueprint."""
-    from apps.workspaces.api import jobs_cancel
-
     job_manager = jobs_cancel.current_app.job_manager
     assert hasattr(job_manager, "cancel_job_by_id_async")
 
