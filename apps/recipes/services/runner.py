@@ -105,6 +105,7 @@ class RecipeRunner:
                 checkpointer=None,
                 mcp_tools=mcp_tools,
                 oauth_tokens=self._oauth_tokens,
+                conversation_id=self._thread_id or None,
             )
 
         return self._graph

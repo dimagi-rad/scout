@@ -5,12 +5,24 @@ Tests artifact models, views, access control, versioning, and artifact tools.
 """
 
 import uuid
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
-from django.test import Client
+from django.test import AsyncClient, Client
 
+import apps.artifacts.views as artifact_views
+from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
+from mcp_server.context import QueryContext
 
 User = get_user_model()
 
@@ -441,8 +453,11 @@ class TestArtifactTools:
         assert "artifact_id" in result
         assert result["title"] == "Revenue Chart"
         assert result["type"] == "react"
-        assert "/artifacts/" in result["render_url"]
-        assert "/render" in result["render_url"]
+        # render_url must point at the real sandbox route, not the dead
+        # /artifacts/<id>/render/ path (issue #240, finding 00#8).
+        assert result["render_url"] == (
+            f"/api/workspaces/{workspace.id}/artifacts/{result['artifact_id']}/sandbox/"
+        )
 
         # Verify artifact was created in database
         artifact = await Artifact.objects.aget(id=result["artifact_id"])
@@ -518,3 +533,121 @@ class TestArtifactTools:
 
         assert result2["status"] == "updated"
         assert result2["version"] == original_version + 2
+
+    @pytest.mark.asyncio
+    async def test_create_artifact_threads_conversation_id(self, user, workspace):
+        """create_artifact must persist the conversation_id it was built with.
+
+        Regression for issue #240, finding 00#8: chat-created artifacts stored
+        conversation_id='' because _build_tools never passed it, so shared/public
+        thread pages (which filter conversation_id=str(thread_id)) showed ZERO
+        artifacts.
+        """
+        tools = create_artifact_tools(workspace, user, conversation_id="thread-xyz")
+        create_artifact_tool = tools[0]
+
+        result = await create_artifact_tool.ainvoke(
+            {
+                "title": "Threaded Chart",
+                "artifact_type": "react",
+                "code": "export default function C() { return <div/>; }",
+            }
+        )
+
+        assert result["status"] == "created"
+        artifact = await Artifact.objects.aget(id=result["artifact_id"])
+        assert artifact.conversation_id == "thread-xyz"
+
+    @pytest.mark.asyncio
+    async def test_update_artifact_render_url_points_at_sandbox(
+        self, user, workspace, artifact, tenant_membership
+    ):
+        """update_artifact's render_url must resolve to the real sandbox route."""
+        tools = create_artifact_tools(workspace, user)
+        update_artifact_tool = tools[1]
+
+        result = await update_artifact_tool.ainvoke(
+            {
+                "artifact_id": str(artifact.id),
+                "code": "export default function C() { return <div>v2</div>; }",
+            }
+        )
+
+        assert result["status"] == "updated"
+        assert result["render_url"] == (
+            f"/api/workspaces/{workspace.id}/artifacts/{result['artifact_id']}/sandbox/"
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestArtifactQueryDataRouting:
+    """Tests for ArtifactQueryDataView schema routing (issue #240, finding 00#6)."""
+
+    @pytest.mark.asyncio
+    async def test_query_data_routes_through_workspace_context(self, user):
+        """Live query-data in a multi-tenant workspace must execute against the
+        VIEW schema (ws_*), not the FIRST tenant's t_* schema.
+
+        Before the fix, ArtifactQueryDataView resolved context via
+        workspace.tenants.afirst() + load_tenant_context(external_id), so it ran
+        against the wrong schema (relation-does-not-exist / silent single-tenant
+        slice). The fix routes through load_workspace_context like every other
+        consumer.
+        """
+
+        ws = await Workspace.objects.acreate(name="Multi WS", created_by=user)
+        await WorkspaceMembership.objects.acreate(
+            workspace=ws, user=user, role=WorkspaceRole.MANAGE
+        )
+        for ext in ("first-tenant", "second-tenant"):
+            t = await Tenant.objects.acreate(
+                provider="commcare", external_id=ext, canonical_name=ext
+            )
+            await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+        art = await Artifact.objects.acreate(
+            workspace=ws,
+            created_by=user,
+            title="Live",
+            artifact_type=ArtifactType.REACT,
+            code="export default function C(){return <div/>}",
+            source_queries=[{"name": "q", "sql": "SELECT 1"}],
+        )
+
+        view_ctx = QueryContext(
+            tenant_id=str(ws.id),
+            schema_name="ws_viewschema123",
+            connection_params={"host": "localhost"},
+        )
+
+        client = AsyncClient()
+        await sync_to_async(client.force_login)(user)
+
+        with (
+            patch(
+                "apps.artifacts.views.load_workspace_context",
+                new=AsyncMock(return_value=view_ctx),
+            ) as mock_lwc,
+            patch(
+                "apps.artifacts.views.execute_query",
+                new=AsyncMock(
+                    return_value={
+                        "success": True,
+                        "columns": ["n"],
+                        "rows": [[1]],
+                        "row_count": 1,
+                        "truncated": False,
+                    }
+                ),
+            ) as mock_exec,
+        ):
+            resp = await client.get(f"/api/workspaces/{ws.id}/artifacts/{art.id}/query-data/")
+
+        assert resp.status_code == 200
+        mock_lwc.assert_awaited_once_with(str(ws.id))
+        # The query ran against the view-schema context, not a tenant context.
+        assert mock_exec.await_args.args[0].schema_name == "ws_viewschema123"
+        body = resp.json()
+        assert body["queries"][0]["rows"] == [[1]]
+
+        # Regression guard: the view must no longer reach for per-tenant context.
+        assert not hasattr(artifact_views, "load_tenant_context")

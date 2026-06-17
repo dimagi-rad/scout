@@ -483,6 +483,7 @@ async def build_agent_graph(
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
     oauth_tokens: dict | None = None,
+    conversation_id: str | None = None,
 ):
     """
     Build a LangGraph agent graph for a workspace.
@@ -493,11 +494,14 @@ async def build_agent_graph(
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
         oauth_tokens: Optional OAuth tokens for tool authentication.
+        conversation_id: Optional thread/conversation id. Threaded through to the
+            artifact tools so chat-created artifacts record their originating
+            conversation (so shared/public thread pages can find them).
     """
     logger.info("Building agent graph for workspace %s", workspace.id)
 
     # --- Build tools ---
-    tools = _build_tools(workspace, user, mcp_tools or [])
+    tools = _build_tools(workspace, user, mcp_tools or [], conversation_id=conversation_id)
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
     # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
@@ -665,7 +669,12 @@ async def build_agent_graph(
     return compiled
 
 
-def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> list:
+def _build_tools(
+    workspace: Workspace,
+    user: User | None,
+    mcp_tools: list,
+    conversation_id: str | None = None,
+) -> list:
     """
     Build the tool list for the agent.
 
@@ -685,13 +694,15 @@ def _build_tools(workspace: Workspace, user: User | None, mcp_tools: list) -> li
         workspace: The Workspace model instance.
         user: Optional User for tracking learning discovery.
         mcp_tools: LangChain tools loaded from the MCP server.
+        conversation_id: Optional thread/conversation id, recorded on artifacts
+            the agent creates so shared/public thread pages can find them.
 
     Returns:
         List of LangChain tool functions.
     """
     tools = list(mcp_tools)
     tools.append(create_save_learning_tool(workspace, user))
-    tools.extend(create_artifact_tools(workspace, user))
+    tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
     return tools
 
