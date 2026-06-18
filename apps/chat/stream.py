@@ -34,10 +34,21 @@ from typing import Any
 from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import ToolMessage
 
+from apps.agents.graph.base import INJECTED_TOOL_PARAMS
+
 logger = logging.getLogger(__name__)
 
 # Maximum wall-clock time for agent execution before we abort.
 AGENT_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Hard cap on the tool-output payload we put on the wire, to bound a runaway
+# tool from flooding the SSE stream / browser. Generous enough that real query
+# results (already row-limited upstream by the MCP server) round-trip intact so
+# the rich card can parse them LIVE. When we do truncate we emit the RAW prefix
+# (not pretty-printed) plus an explicit marker; the frontend then falls back to
+# the <pre> view rather than silently rendering a broken card.
+TOOL_OUTPUT_MAX_CHARS = 100_000
+TOOL_OUTPUT_TRUNCATION_MARKER = "\n\n... (truncated, {total} chars total)"
 
 # Anthropic error.type values that indicate a transient, retryable capacity
 # problem (overload / rate limit) rather than a bug on our side.
@@ -73,32 +84,56 @@ def _sse(chunk: dict) -> str:
 
 
 def _tool_content_to_str(output: Any) -> str:
-    """Convert tool output to a readable string for frontend display."""
+    """Convert tool output to a compact, parse-safe string for the frontend.
+
+    The frontend rich cards JSON.parse this string, so we MUST NOT mangle it:
+    JSON content is left as the tool emitted it (no re-pretty-printing — that
+    bloated payloads and pushed valid JSON past the live truncation limit,
+    breaking the cards live while they worked on reload). Non-JSON content is
+    passed through untouched.
+    """
     content = output.content if isinstance(output, ToolMessage) else output
     if isinstance(content, str):
-        return _try_pretty_json(content)
+        return content
     if isinstance(content, list):
         texts = []
         for block in content:
             if isinstance(block, dict) and block.get("type") == "text":
-                texts.append(_try_pretty_json(block.get("text", "")))
+                texts.append(block.get("text", ""))
             elif isinstance(block, str):
-                texts.append(_try_pretty_json(block))
+                texts.append(block)
             else:
-                texts.append(json.dumps(block, indent=2, default=str))
+                texts.append(json.dumps(block, default=str))
         return "\n".join(texts)
-    return json.dumps(content, indent=2, default=str)
+    return json.dumps(content, default=str)
 
 
-def _try_pretty_json(s: str) -> str:
-    """If s is a JSON string, return it pretty-printed. Otherwise return as-is."""
-    try:
-        parsed = json.loads(s)
-        if isinstance(parsed, dict | list):
-            return json.dumps(parsed, indent=2, default=str)
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return s
+def _redact_tool_input(raw_input: Any) -> dict:
+    """Strip server-injected context params from a tool's input for display.
+
+    The graph injects workspace_id / user_id / thread_id / tool_call_id into
+    every MCP tool call; those are internal ids, not arguments the user typed,
+    so they must not surface in the tool-call card. Returns {} for non-dict
+    input (e.g. positional-only), which the card renders as "no input".
+    """
+    if not isinstance(raw_input, dict):
+        return {}
+    return {k: v for k, v in raw_input.items() if k not in INJECTED_TOOL_PARAMS}
+
+
+def _truncate_tool_output(content: str) -> str:
+    """Cap tool-output length without corrupting parse-safe JSON silently.
+
+    Below the cap: returned unchanged so the rich card parses it. Above the
+    cap: returns the raw prefix plus an explicit marker. The marker makes the
+    payload non-JSON, so the frontend deterministically falls back to the
+    <pre> view instead of rendering a half-parsed card.
+    """
+    if len(content) <= TOOL_OUTPUT_MAX_CHARS:
+        return content
+    return content[:TOOL_OUTPUT_MAX_CHARS] + TOOL_OUTPUT_TRUNCATION_MARKER.format(
+        total=len(content)
+    )
 
 
 audit_logger = logging.getLogger("scout.agent.audit")
@@ -117,6 +152,10 @@ async def langgraph_to_ui_stream(
     reasoning_id = "reasoning-0"
     reasoning_started = False
     tool_calls_processed: set[str] = set()
+    # run_id (LangGraph) -> tool_call_id (LLM toolu_ id) emitted on_tool_start.
+    # The frontend keys per-card progress / Stop / failure off the toolu_ id
+    # (ThreadJob.tool_call_id), so the stream MUST emit that id, not run_id.
+    run_to_tool_call_id: dict[str, str] = {}
 
     # Preamble
     yield _sse({"type": "start"})
@@ -183,6 +222,41 @@ async def langgraph_to_ui_stream(
                         text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": t})
 
+            # ── on_tool_start ──────────────────────────────────────────────────
+            elif event_type == "on_tool_start":
+                # Emit the loading-state input part LIVE so loading affordances
+                # (and run_materialization's Stop/progress) can render before
+                # the tool finishes. The LLM toolu_ id is carried in the input
+                # (the graph injects `tool_call_id` into every MCP tool call);
+                # falling back to run_id only for non-MCP tools that lack it.
+                run_id = event.get("run_id")
+                raw_input = event.get("data", {}).get("input")
+                tool_call_id = None
+                if isinstance(raw_input, dict):
+                    tool_call_id = raw_input.get("tool_call_id")
+                if not tool_call_id:
+                    tool_call_id = run_id or uuid.uuid4().hex
+                if run_id:
+                    run_to_tool_call_id[run_id] = tool_call_id
+
+                if text_started:
+                    yield _sse({"type": "text-end", "id": text_id})
+                    text_started = False
+                    text_id = f"text-{uuid.uuid4().hex[:8]}"
+                if reasoning_started:
+                    yield _sse({"type": "reasoning-end", "id": reasoning_id})
+                    reasoning_started = False
+                    reasoning_id = f"reasoning-{uuid.uuid4().hex[:8]}"
+
+                yield _sse(
+                    {
+                        "type": "tool-input-available",
+                        "toolCallId": tool_call_id,
+                        "toolName": event.get("name", "unknown"),
+                        "input": _redact_tool_input(raw_input),
+                    }
+                )
+
             # ── on_tool_end ────────────────────────────────────────────────────
             elif event_type == "on_tool_end":
                 run_id = event.get("run_id")
@@ -215,25 +289,34 @@ async def langgraph_to_ui_stream(
                     input_state.get("project_id", ""),
                 )
 
-                tool_call_id = run_id or uuid.uuid4().hex
-                yield _sse(
-                    {
-                        "type": "tool-input-available",
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "input": {},
-                    }
+                # The ToolMessage carries the authoritative LLM toolu_ id; use
+                # it so this output pairs with the input part the frontend keyed
+                # its per-card affordances off of. Fall back to the start map /
+                # run_id when (rarely) absent.
+                tool_call_id = (
+                    getattr(tool_output, "tool_call_id", None)
+                    or run_to_tool_call_id.get(run_id or "")
+                    or run_id
+                    or uuid.uuid4().hex
                 )
 
-                truncated = len(content) > 2000
-                display_content = content[:2000]
-                if truncated:
-                    display_content += f"\n\n... (truncated, {len(content)} chars total)"
+                # If on_tool_start never emitted an input part for this call,
+                # emit a minimal one now so AI SDK has a part to attach output to.
+                if not run_id or run_id not in run_to_tool_call_id:
+                    yield _sse(
+                        {
+                            "type": "tool-input-available",
+                            "toolCallId": tool_call_id,
+                            "toolName": tool_name,
+                            "input": {},
+                        }
+                    )
+
                 yield _sse(
                     {
                         "type": "tool-output-available",
                         "toolCallId": tool_call_id,
-                        "output": display_content,
+                        "output": _truncate_tool_output(content),
                     }
                 )
 

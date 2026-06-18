@@ -21,7 +21,12 @@ from django.contrib.auth.signals import user_logged_in
 from django.test import AsyncClient
 from langchain_core.messages import ToolMessage
 
-from apps.chat.stream import _sse, _tool_content_to_str, langgraph_to_ui_stream
+from apps.chat.stream import (
+    TOOL_OUTPUT_MAX_CHARS,
+    _sse,
+    _tool_content_to_str,
+    langgraph_to_ui_stream,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -481,19 +486,25 @@ class TestSSEStreamFormat:
         assert "tool-input-available" in types
         assert "tool-output-available" in types
 
-        # Verify tool event content
+        # Verify tool event content. toolCallId must be the LLM tool_call_id
+        # carried by the ToolMessage (arch #246, 06#3), NOT the LangGraph run_id
+        # -- otherwise per-card progress / Stop / failure never render live.
         tool_input = next(e for e in events if e["type"] == "tool-input-available")
         assert tool_input["toolName"] == "query"
-        assert tool_input["toolCallId"] == "run-123"
+        assert tool_input["toolCallId"] == "call-123"
 
         tool_output = next(e for e in events if e["type"] == "tool-output-available")
-        assert tool_output["toolCallId"] == "run-123"
+        assert tool_output["toolCallId"] == "call-123"
 
     @pytest.mark.asyncio
-    async def test_tool_output_truncated_to_2000_chars(self):
-        """Tool output longer than 2000 chars should be truncated."""
+    async def test_tool_output_truncated_with_marker_above_cap(self):
+        """Tool output above the cap is truncated with an explicit marker
+        (arch #246, 13#4: the old 2000-char cut JSON mid-token, breaking the
+        live card; the cap is now generous and the marker makes the payload
+        deterministically fall back to <pre>)."""
         mock_agent = AsyncMock()
-        long_output = "x" * 5000
+        total = TOOL_OUTPUT_MAX_CHARS + 5000
+        long_output = "x" * total
 
         async def fake_events(*args, **kwargs):
             yield {
@@ -519,9 +530,39 @@ class TestSSEStreamFormat:
                     events.append(json.loads(line[6:]))
 
         tool_output = next(e for e in events if e["type"] == "tool-output-available")
-        assert tool_output["output"].startswith("x" * 2000)
+        assert tool_output["output"].startswith("x" * TOOL_OUTPUT_MAX_CHARS)
         assert "truncated" in tool_output["output"]
-        assert "5000 chars total" in tool_output["output"]
+        assert f"{total} chars total" in tool_output["output"]
+
+    @pytest.mark.asyncio
+    async def test_tool_output_under_cap_is_untouched(self):
+        """Realistic payloads stay byte-for-byte intact so the rich card parses
+        them LIVE (arch #246, 13#4)."""
+        mock_agent = AsyncMock()
+        payload = '{"success": true, "data": {"rows": [[1, 2], [3, 4]], "row_count": 2}}'
+
+        async def fake_events(*args, **kwargs):
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-ok",
+                "name": "query",
+                "data": {
+                    "output": ToolMessage(content=payload, tool_call_id="call-ok", name="query"),
+                },
+            }
+
+        mock_agent.astream_events = fake_events
+
+        events = []
+        async for chunk in langgraph_to_ui_stream(mock_agent, {}, {}):
+            for line in chunk.strip().split("\n"):
+                line = line.strip()
+                if line.startswith("data: "):
+                    events.append(json.loads(line[6:]))
+
+        tool_output = next(e for e in events if e["type"] == "tool-output-available")
+        assert tool_output["output"] == payload
+        assert json.loads(tool_output["output"])["data"]["row_count"] == 2
 
     @pytest.mark.asyncio
     async def test_duplicate_tool_events_deduplicated(self):
@@ -669,11 +710,14 @@ class TestSSEStreamFormat:
         msg = ToolMessage(content="result text", tool_call_id="x", name="test")
         assert _tool_content_to_str(msg) == "result text"
 
-        # String
+        # String — passed through verbatim so the rich card can JSON.parse it
+        # (no re-pretty-printing; arch #246, 13#4).
         assert _tool_content_to_str("hello") == "hello"
+        assert _tool_content_to_str('{"a": 1}') == '{"a": 1}'
 
-        # Dict — falls through to json.dumps fallback
-        assert _tool_content_to_str({"key": "value"}) == '{\n  "key": "value"\n}'
+        # Dict — falls through to a COMPACT json.dumps fallback (not indent=2,
+        # which bloated payloads and broke the live truncation heuristic).
+        assert _tool_content_to_str({"key": "value"}) == '{"key": "value"}'
 
 
 # ---------------------------------------------------------------------------

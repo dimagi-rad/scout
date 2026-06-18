@@ -90,6 +90,15 @@ MCP_TOOL_NAMES = frozenset(
 # defines the tool so operator/HTTP callers are unaffected.
 AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
 
+# Context params the graph injects into every MCP tool call server-side. They
+# are hidden from the LLM-facing tool schema (so the model never sets them) and
+# must also be stripped from any tool input surfaced to the UI (they carry
+# internal ids, not arguments the user typed). ``tool_call_id`` is injected
+# per-call from the LangChain tool_call's own id; the rest come from agent
+# state. Kept here as the single source of truth so the SSE stream's
+# input-redaction stays in lockstep with what the graph injects.
+INJECTED_TOOL_PARAMS = frozenset({"workspace_id", "user_id", "thread_id", "tool_call_id"})
+
 
 # Configuration constants
 DEFAULT_MAX_TOKENS = 4096
@@ -529,9 +538,10 @@ async def build_agent_graph(
         "thread_id": "thread_id",
     }
     # tool_call_id is injected per-call (from the LangChain tool_call dict's
-    # own id), not from agent state, so it can't live in `injections`. List it
-    # here so the LLM-facing tool schema still hides it.
-    hidden_params = [*injections.keys(), "tool_call_id"]
+    # own id), not from agent state, so it can't live in `injections`.
+    # INJECTED_TOOL_PARAMS is the single source of truth for the LLM-facing
+    # hidden set (also used to redact tool input in the SSE stream).
+    hidden_params = list(INJECTED_TOOL_PARAMS)
 
     # --- Build LLM with tools ---
     # Opus 4.7+ removed the sampling params (temperature/top_p/top_k);

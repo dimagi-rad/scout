@@ -26,6 +26,42 @@ function Badge({
   )
 }
 
+// Render a result-table cell. Objects/arrays (JSONB columns) are JSON-encoded
+// rather than coerced with String(), which produced "[object Object]" (13#8).
+function formatCell(cell: unknown): string {
+  if (typeof cell === "object") {
+    try {
+      return JSON.stringify(cell)
+    } catch {
+      return String(cell)
+    }
+  }
+  return String(cell)
+}
+
+// Standard MCP error-envelope error object (mcp_server/envelope.py).
+export interface ToolError {
+  code: string
+  message: string
+  detail?: string
+}
+
+// Shared failure row so error-envelope fields (code / message / detail) are
+// surfaced by every rich card instead of being silently discarded (arch #246,
+// 13#6). Falls back to a generic label when the tool gave no structured error.
+function ToolErrorRow({ error, fallback }: { error?: ToolError; fallback: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2">
+        <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+        <span className="text-red-500 font-medium text-xs">{error?.message ?? fallback}</span>
+        {error?.code && <Badge variant="error">{error.code}</Badge>}
+      </div>
+      {error?.detail && <p className="text-xs text-muted-foreground pl-5">{error.detail}</p>}
+    </div>
+  )
+}
+
 // ---- query tool ----
 
 export interface QueryOutput {
@@ -38,7 +74,7 @@ export interface QueryOutput {
     sql_executed?: string
     tables_accessed?: string[]
   }
-  error?: { code: string; message: string }
+  error?: ToolError
   warnings?: string[]
   timing_ms?: number
   schema?: string
@@ -46,18 +82,7 @@ export interface QueryOutput {
 
 export function QueryToolOutput({ output }: { output: QueryOutput }) {
   if (!output.success || !output.data) {
-    return (
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-          <span className="text-red-500 font-medium text-xs">Query failed</span>
-          {output.error && <Badge variant="error">{output.error.code}</Badge>}
-        </div>
-        {output.error && (
-          <p className="text-xs text-muted-foreground pl-5">{output.error.message}</p>
-        )}
-      </div>
-    )
+    return <ToolErrorRow error={output.error} fallback="Query failed" />
   }
 
   const { columns, rows, row_count, truncated, sql_executed, tables_accessed } = output.data
@@ -136,7 +161,7 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
                       {cell === null || cell === undefined ? (
                         <span className="text-muted-foreground/50 italic text-[10px]">null</span>
                       ) : (
-                        String(cell)
+                        formatCell(cell)
                       )}
                     </td>
                   ))}
@@ -179,13 +204,14 @@ export interface DescribeTableOutput {
       description?: string
     }>
   }
+  error?: ToolError
   timing_ms?: number
   schema?: string
 }
 
 export function DescribeTableOutput({ output }: { output: DescribeTableOutput }) {
   if (!output.success || !output.data) {
-    return <span className="text-xs text-red-500">Failed to describe table</span>
+    return <ToolErrorRow error={output.error} fallback="Failed to describe table" />
   }
   const { name, description, columns } = output.data
   return (
@@ -254,14 +280,16 @@ export interface ListTablesOutput {
       materialized_row_count?: number | null
       row_count_verified?: boolean
     }>
-    note?: string
+    note?: string | null
   }
+  error?: ToolError
   timing_ms?: number
 }
 
 export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
   if (!output.success || !output.data)
-    return <span className="text-xs text-red-500">Failed to list tables</span>
+    return <ToolErrorRow error={output.error} fallback="Failed to list tables" />
+
   const { tables, note } = output.data
   return (
     <div className="space-y-2">
@@ -300,26 +328,57 @@ export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
 
 // ---- get_metadata tool ----
 
+export interface Relationship {
+  from_table: string
+  from_column: string
+  to_table: string
+  to_column: string
+  description?: string
+}
+
 export interface GetMetadataOutput {
   success: boolean
-  data?: { tables: unknown[] }
+  data?: {
+    schema?: string
+    // The backend emits `tables` as a NAME -> detail object map, not an array
+    // (mcp_server/services/metadata.py). `table_count` is the authoritative
+    // count it computes server-side.
+    tables?: Record<string, unknown>
+    table_count?: number
+    relationships?: Relationship[]
+  }
+  error?: ToolError
   timing_ms?: number
   schema?: string
 }
 
 export function GetMetadataOutput({ output }: { output: GetMetadataOutput }) {
   if (!output.success || !output.data)
-    return <span className="text-xs text-red-500">Failed to get metadata</span>
-  const tableCount = Array.isArray(output.data.tables) ? output.data.tables.length : 0
+    return <ToolErrorRow error={output.error} fallback="Failed to get metadata" />
+  // tables is an object map (name -> detail); prefer the server-computed
+  // table_count, falling back to counting keys. The old Array.isArray() check
+  // was always false over the map, so this card showed "0 tables" on reload.
+  const { tables, table_count, relationships } = output.data
+  const tableCount =
+    table_count ?? (tables && typeof tables === "object" ? Object.keys(tables).length : 0)
+  const relCount = Array.isArray(relationships) ? relationships.length : 0
+  const schema = output.schema ?? output.data.schema
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
       <span className="text-xs text-muted-foreground">Metadata loaded</span>
-      <Badge variant="muted">{tableCount} tables</Badge>
-      {output.schema && (
+      <Badge variant="muted">
+        {tableCount} table{tableCount !== 1 ? "s" : ""}
+      </Badge>
+      {relCount > 0 && (
+        <Badge variant="muted">
+          {relCount} relationship{relCount !== 1 ? "s" : ""}
+        </Badge>
+      )}
+      {schema && (
         <Badge variant="muted">
           <Database className="w-2.5 h-2.5 mr-0.5 inline" />
-          {output.schema}
+          {schema}
         </Badge>
       )}
       {output.timing_ms != null && (

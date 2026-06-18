@@ -5,6 +5,7 @@ import uuid
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.chat.constants import SYSTEM_RESUME_MARKER
+from apps.chat.stream import _redact_tool_input, _tool_content_to_str
 
 
 def langchain_messages_to_ui(lc_messages) -> list[dict]:
@@ -39,16 +40,24 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
         elif isinstance(msg, AIMessage):
             parts: list[dict] = []
 
-            # Text content
+            # Reasoning (extended-thinking) content. Emitted FIRST and as its
+            # own part so the Thinking card survives reload / the
+            # post-materialization refetch (arch #246, 13#5). The live stream
+            # emits reasoning before text; mirror that ordering here.
+            reasoning = ""
             text = ""
             if isinstance(msg.content, str):
                 text = msg.content
             elif isinstance(msg.content, list):
-                text = "".join(
-                    b.get("text", "") if isinstance(b, dict) else str(b)
-                    for b in msg.content
-                    if not isinstance(b, dict) or b.get("type") == "text"
-                )
+                for b in msg.content:
+                    if not isinstance(b, dict):
+                        text += str(b)
+                    elif b.get("type") == "thinking":
+                        reasoning += b.get("thinking", "")
+                    elif b.get("type") == "text":
+                        text += b.get("text", "")
+            if reasoning:
+                parts.append({"type": "reasoning", "text": reasoning})
             if text:
                 parts.append({"type": "text", "text": text})
 
@@ -58,14 +67,12 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                     "type": f"tool-{tc['name']}",
                     "toolCallId": tc["id"],
                     "toolName": tc["name"],
-                    "input": tc.get("args", {}),
+                    "input": _redact_tool_input(tc.get("args", {})),
                     "state": "output-available",
                 }
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 if tr:
-                    from apps.chat.stream import _tool_content_to_str
-
                     tool_part["output"] = _tool_content_to_str(tr)
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
