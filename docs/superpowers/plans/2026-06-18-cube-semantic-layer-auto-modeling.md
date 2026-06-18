@@ -379,9 +379,10 @@ git commit -m "feat(transform): generate Connect staging + column notes during m
 > **Architecture mandate (user decision):** M3 is built **fully multi-tenant** — Cube must map to Scout's per-tenant/per-workspace schema routing, not a single-schema shortcut. The design (single source of truth = Scout):
 > 1. **Scout resolves** `workspace_id → schema_name` via the existing `mcp_server/context.py::load_workspace_context()` (single-tenant → `t_<id>`; multi-tenant → `ws_<hash>`). Cube never re-implements this routing.
 > 2. **Scout mints a JWT** signed with `CUBEJS_API_SECRET`, carrying `securityContext = {workspace_id, schema_name}`, and connects to Cube's pg-wire SQL API passing the JWT as the password.
-> 3. **Cube's `cube.js`**: `checkSqlAuth` verifies the JWT and returns its `securityContext`; `contextToAppId`/`contextToOrchestratorId` key compilation + cache per `workspace_id`; the generated data model uses `sql_table: "{COMPILE_CONTEXT.security_context.schema_name}.stg_visits"` so ONE model definition resolves to the correct schema per request. One managed DB, dynamic schema via `COMPILE_CONTEXT` (no per-tenant `driverFactory` needed).
+> 3. **Cube's `cube.js`**: `checkSqlAuth` verifies the JWT and returns its `securityContext`; `contextToAppId`/`contextToOrchestratorId` key compilation + cache per `schema_name`; the generated data model uses `sql_table: "{COMPILE_CONTEXT.security_context.schema_name}.stg_visits"` so the schema resolves per request. One managed DB, dynamic schema via `COMPILE_CONTEXT` (no per-tenant `driverFactory` needed).
+> 4. **Per-workspace model loading (heterogeneous apps):** different opportunities use different deliver apps → different `stg_visits` columns, so the model STRUCTURE varies per workspace (not just the schema). Cube's `repositoryFactory: ({ securityContext }) => new FileRepository(\`model/${securityContext.schema_name}\`)` serves each workspace its own model files from `cube/model/<schema_name>/`. The generator (Task 7) writes per-workspace model files there. `contextToAppId` keyed by `schema_name` ensures one compiled model per workspace.
 >
-> The model generator (Task 7) drives an LLM, so its steps test the output **contract** (incl. the `COMPILE_CONTEXT` schema templating), not literal YAML.
+> The model generator (Task 7) drives an LLM, so its steps test the output **contract** (incl. the `COMPILE_CONTEXT` schema templating + per-workspace file layout), not literal YAML.
 
 ### Task 6: Cube Core service + multi-tenant `cube.js` config
 
