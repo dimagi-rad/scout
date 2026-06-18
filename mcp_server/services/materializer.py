@@ -225,7 +225,7 @@ def run_pipeline(
         # discovery payload already carries the opportunity's visit_count — use
         # it as the visits progress denominator.
         visit_total: int | None = None
-        if pipeline.provider == "commcare_connect":
+        if pipeline.provider in ("commcare_connect", "commcare_connect_labs"):
             visit_total = _connect_visit_total(
                 discovered_metadata, int(tenant_membership.tenant.external_id)
             )
@@ -254,7 +254,7 @@ def run_pipeline(
 
         # Generate Connect staging assets + column notes from discovered metadata.
         # Failures are isolated — the pipeline continues regardless.
-        if pipeline.provider == "commcare_connect":
+        if pipeline.provider in ("commcare_connect", "commcare_connect_labs"):
             try:
                 tenant_meta = TenantMetadata.objects.filter(
                     tenant_membership=tenant_membership
@@ -297,7 +297,10 @@ def run_pipeline(
         # The resumable code path (start_cursor + per-page cursor_callback) is
         # currently implemented only for Connect writers. Other providers
         # ignore ``source.resumable`` until their writers are migrated.
-        is_resumable_provider = pipeline.provider == "commcare_connect"
+        is_resumable_provider = pipeline.provider in (
+            "commcare_connect",
+            "commcare_connect_labs",
+        )
 
         sources_list = list(pipeline.sources)
         for idx, source in enumerate(sources_list):
@@ -566,6 +569,14 @@ def _run_discover_phase(
             opportunity_id=int(tenant_membership.tenant.external_id),
             credential=credential,
         )
+    elif pipeline.provider == "commcare_connect_labs":
+        from django.conf import settings
+
+        loader = ConnectMetadataLoader(
+            opportunity_id=int(tenant_membership.tenant.external_id),
+            credential=credential,
+            base_url=settings.CONNECT_LABS_API_URL or None,
+        )
     elif pipeline.provider == "ocs":
         loader = OCSMetadataLoader(
             experiment_id=tenant_membership.tenant.external_id,
@@ -792,6 +803,20 @@ def _load_source(
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
+    if provider == "commcare_connect_labs":
+        from django.conf import settings
+
+        return _load_connect_source(
+            source_name,
+            tenant_membership,
+            credential,
+            schema_name,
+            conn,
+            on_page,
+            start_cursor=start_cursor,
+            cursor_callback=cursor_callback,
+            base_url=settings.CONNECT_LABS_API_URL or None,
+        )
     if provider == "ocs":
         return _load_ocs_source(
             source_name, tenant_membership, credential, schema_name, conn, on_page
@@ -824,6 +849,7 @@ def _load_connect_source(
     on_page: OnPage | None = None,
     start_cursor: int | None = None,
     cursor_callback: CursorCallback | None = None,
+    base_url: str | None = None,
 ) -> int:
     opp_id = int(tenant_membership.tenant.external_id)
     loader_map = {
@@ -840,7 +866,7 @@ def _load_connect_source(
         raise ValueError(f"Unknown Connect source '{source_name}'. Known: {known}")
 
     loader_cls, writer_fn = loader_map[source_name]
-    loader = loader_cls(opportunity_id=opp_id, credential=credential)
+    loader = loader_cls(opportunity_id=opp_id, credential=credential, base_url=base_url)
     if source_name in _RESUMABLE_CONNECT_SOURCES:
         pages = loader.load_pages(start_last_id=start_cursor)
         return writer_fn(
