@@ -67,3 +67,5 @@ def test_generates_visit_staging_with_typed_columns(connect_tenant):
     rsql = by_name["stg_visits__repeat_children"].sql_content
     assert "jsonb_array_elements" in rsql
     assert "child_name" in rsql
+    assert "muac" not in rsql
+    assert "muac_confirmed" not in rsql

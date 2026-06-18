@@ -16,6 +16,7 @@ from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _column_name_from_path,
     _question_path_to_json_path,
+    _sql_escape,
     _typed_expression,
     _unique_alias,
     slugify_model_name,
@@ -106,7 +107,7 @@ def _generate_connect_repeat_group_asset(
             continue
         leaf_name = value_path.rsplit("/", 1)[-1]
         col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
-        raw_expr = f"elem.value->>'{leaf_name}'"
+        raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
 
