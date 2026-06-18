@@ -50,6 +50,7 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
     NOT_FOUND,
+    SCHEMA_BUILD_FAILED,
     VALIDATION_ERROR,
     error_response,
     success_response,
@@ -766,15 +767,16 @@ async def get_schema_status(workspace_id: str = "") -> dict:
                 state=SchemaState.FAILED,
             ).afirst()
             if failed_vs is not None:
-                tc["result"] = success_response(
-                    {
-                        "exists": True,
-                        "state": "failed",
-                        "error": failed_vs.last_error or "View schema build failed.",
-                        "last_materialized_at": None,
-                        "tables": [],
-                    },
-                    schema=failed_vs.schema_name,
+                # Return a TOP-LEVEL error envelope (success=False), not a
+                # success envelope carrying ``data.error`` (arch #246, 13#6).
+                # A success-on-failure is mis-classified as success by both the
+                # rich cards and the agent (the "agent told completed" class):
+                # the agent must surface this build failure, not silently treat
+                # the workspace as queryable or invite a pointless re-run.
+                tc["result"] = error_response(
+                    SCHEMA_BUILD_FAILED,
+                    "The workspace view schema failed to build.",
+                    detail=failed_vs.last_error or "View schema build failed.",
                 )
                 return tc["result"]
             tc["result"] = not_provisioned

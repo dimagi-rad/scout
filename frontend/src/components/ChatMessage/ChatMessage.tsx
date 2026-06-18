@@ -23,14 +23,11 @@ import type {
 
 function parseOutput(output: unknown): unknown {
   if (typeof output === "string") {
-    // MCP wraps results as [{'type':'text','text':'...json...'}] with single quotes
-    try {
-      const jsonLike = output.replace(/'/g, '"')
-      const arr = JSON.parse(jsonLike)
-      if (Array.isArray(arr) && arr[0]?.text) return JSON.parse(arr[0].text)
-    } catch {
-      /* ignore */
-    }
+    // The backend emits the MCP envelope as JSON (apps/chat/stream.py
+    // _tool_content_to_str), so a plain JSON.parse is sufficient. The old
+    // `output.replace(/'/g, '"')` Python-repr→JSON hack is vestigial under the
+    // current adapter and actively corrupted any apostrophe in the data (05#2 /
+    // 13#8), so it was removed.
     try {
       return JSON.parse(output)
     } catch {
@@ -195,9 +192,18 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
   const expanded = effectiveOverride ?? autoExpanded
   const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
 
-  const richOutput = hasOutput && part.output != null ? renderToolOutput(toolName, part.output) : null
-  const fallbackText =
-    hasOutput && part.output != null && !richOutput ? formatToolOutput(part.output) : null
+  const isErrored = part.state === "output-error"
+  const richOutput =
+    hasOutput && part.output != null && !isErrored ? renderToolOutput(toolName, part.output) : null
+  // Fallback text for the <pre> view: an output-error part carries its message
+  // in errorText (no `output`); otherwise show the raw output when no rich card
+  // matched. Either way, the <pre> renders the FULL text — the historical
+  // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
+  const fallbackText = isErrored
+    ? (part.errorText ?? "The tool reported an error.")
+    : hasOutput && part.output != null && !richOutput
+      ? formatToolOutput(part.output)
+      : null
 
   const showCancelButton =
     toolName === "run_materialization"
@@ -297,8 +303,12 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
             )}
           {richOutput ?? (
             fallbackText && (
+              // No client-side slice: the scroll container caps the height and
+              // the backend already truncates with an explicit marker
+              // (apps/chat/stream.py), so the old `.slice(0, 2000)` only dropped
+              // the tail silently (13#4).
               <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
-                {fallbackText.slice(0, 2000)}
+                {fallbackText}
               </pre>
             )
           )}

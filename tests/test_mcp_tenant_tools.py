@@ -639,8 +639,10 @@ class TestGetSchemaStatusTool:
     @pytest.mark.django_db(transaction=True)
     async def test_returns_failed_with_error_for_failed_view_schema(self):
         """Multi-tenant workspace whose WorkspaceViewSchema is FAILED must
-        report state='failed' with the error text, not a misleading
-        'not_provisioned' (which would invite a pointless re-materialization)."""
+        return a TOP-LEVEL error envelope (success=False), not a misleading
+        success-on-failure (arch #246, 13#6). A success envelope carrying
+        ``data.error`` is mis-classified as a success by both the agent (the
+        "agent told completed" class) and the rich cards."""
         User = get_user_model()
         user = await User.objects.acreate_user(email="vsfail@b.c", password="x")
         ws = await Workspace.objects.acreate(name="W-vsfail", created_by=user)
@@ -660,12 +662,10 @@ class TestGetSchemaStatusTool:
 
         result = await get_schema_status(workspace_id=str(ws.id))
 
-        assert result["success"] is True
-        data = result["data"]
-        assert data["state"] == "failed"
-        assert data["exists"] is True
-        assert "View name collision" in data["error"]
-        assert data["tables"] == []
+        assert result["success"] is False
+        error = result["error"]
+        # The collision text must survive so the agent and the card can show it.
+        assert "View name collision" in (error["message"] + str(error.get("detail", "")))
 
 
 # ---------------------------------------------------------------------------
