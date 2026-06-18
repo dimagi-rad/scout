@@ -53,11 +53,17 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
 
             column_notes[col_name] = note
 
+    existing = await TableKnowledge.objects.filter(
+        workspace=workspace, table_name=table_name
+    ).afirst()
+    merged_notes = {**(existing.column_notes if existing else {}), **column_notes}
+
     tk, _created = await TableKnowledge.objects.aupdate_or_create(
         workspace=workspace,
         table_name=table_name,
-        defaults={
-            "column_notes": column_notes,
+        defaults={"column_notes": merged_notes},
+        create_defaults={
+            "column_notes": merged_notes,
             "description": f"Auto-generated column notes for {table_name}.",
         },
     )
