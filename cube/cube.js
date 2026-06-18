@@ -60,7 +60,7 @@ module.exports = {
 
     let decoded;
     try {
-      decoded = jwt.verify(password, secret);
+      decoded = jwt.verify(password, secret, { algorithms: ["HS256"] });
     } catch (err) {
       throw new Error(`SQL API authentication failed: ${err.message}`);
     }

@@ -4,6 +4,11 @@ Fallback logging for the governed semantic layer.
 When the agent cannot answer a metric-style question via the Cube semantic layer
 and falls back to raw SQL, this service records a ``ModelGapSignal`` so the M5
 self-improving loop can identify gaps in the semantic model.
+
+Persistence primitive for model-gap signals.  The DETECTION/triggering of
+fallbacks (calling this when the agent uses raw ``query`` for a metric question)
+is wired in M5 (self-improving loop); this function is intentionally not yet
+called from the graph.
 """
 
 from __future__ import annotations
