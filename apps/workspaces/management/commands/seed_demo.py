@@ -1,26 +1,25 @@
-"""Management command: seed a complete, repeatable demo workspace for semantic-layer testing.
+"""Management command: seed complete, repeatable demo workspaces for semantic-layer testing.
 
 Creates (idempotently) all platform records and managed-DB artifacts needed to exercise
-the Cube semantic layer end-to-end without an LLM or external API:
+the Cube semantic layer end-to-end without an LLM or external API.
 
-  User:              admin@example.com  (must exist — typically the dev superuser)
-  Tenant:            provider=commcare_connect, external_id="10001"
-  TenantMembership:  links the user to the tenant
-  Workspace:         "Demo Workspace" (single-tenant, so schema = t_10001)
-  WorkspaceMembership: MANAGE role
-  TenantSchema:      ACTIVE t_10001 in the managed DB (provisioned via SchemaManager)
-  stg_visits table:  50 deterministic rows in t_10001
-  TenantMetadata:    form_definitions blob describing muac / muac_confirmed questions
-  Cube model file:   cube/model/t_10001/visits.yml
+Seeds TWO workspaces:
 
-Expected metric values (can be asserted in tests):
-  count:                    50
-  approval_rate:            0.6   (30 approved / 50 total)
-  muac_confirmation_rate:   0.7   (35 muac_confirmed='yes' / 50 total)
+Workspace A (tenant 10001):
+  Tenant:      provider=commcare_connect, external_id="10001"
+  Schema:      t_10001
+  stg_visits:  50 deterministic rows
+  Expected:    count=50, approval_rate=0.60, muac_confirmation_rate=0.70
+
+Workspace B (tenant 10002) — used for tenant-isolation testing:
+  Tenant:      provider=commcare_connect, external_id="10002"
+  Schema:      t_10002
+  stg_visits:  50 deterministic rows with different distribution
+  Expected:    count=50, approval_rate=0.40, muac_confirmation_rate=0.50
 
 Run:
     uv run python manage.py seed_demo
-    uv run python manage.py seed_demo --verify   # also queries Cube end-to-end
+    uv run python manage.py seed_demo --verify   # also queries Cube end-to-end for both
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ from apps.workspaces.services.schema_manager import SchemaManager
 
 logger = logging.getLogger(__name__)
 
-# ── Seed constants ─────────────────────────────────────────────────────────────
+# ── Workspace A constants ──────────────────────────────────────────────────────
 
 DEMO_TENANT_PROVIDER = "commcare_connect"
 DEMO_TENANT_EXTERNAL_ID = "10001"
@@ -73,6 +72,20 @@ DEMO_SCHEMA_NAME = "t_10001"
 EXPECTED_COUNT = 50
 EXPECTED_APPROVAL_RATE = 0.60
 EXPECTED_MUAC_CONFIRMATION_RATE = 0.70
+
+# ── Workspace B constants (tenant-isolation testing) ───────────────────────────
+
+DEMO_B_TENANT_EXTERNAL_ID = "10002"
+DEMO_B_TENANT_CANONICAL_NAME = "Demo Connect Opportunity B"
+DEMO_B_WORKSPACE_NAME = "Demo Workspace B"
+DEMO_B_SCHEMA_NAME = "t_10002"
+
+# Deterministic seed values for workspace B (intentionally different from A):
+#   50 rows: 20 approved, 20 pending, 10 rejected → approval_rate = 0.40
+#   25 muac_confirmed='yes', 25 'no' → muac_confirmation_rate = 0.50
+EXPECTED_B_COUNT = 50
+EXPECTED_B_APPROVAL_RATE = 0.40
+EXPECTED_B_MUAC_CONFIRMATION_RATE = 0.50
 
 # Form definitions blob (mimics _extract_form_definitions shape).
 # Keyed by deliver_unit slug; questions describe muac and muac_confirmed.
@@ -162,28 +175,39 @@ def _build_visits_cube_model() -> str:
     return yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
-def _generate_seed_rows() -> list[dict]:
+def _generate_seed_rows(
+    *,
+    opportunity_id: int = 10001,
+    n_approved: int = 30,
+    n_pending: int = 12,
+    n_rejected: int = 8,
+    n_muac_yes: int = 35,
+    prefix: str = "visit",
+) -> list[dict]:
     """Generate 50 deterministic stg_visits rows.
 
-    Distribution:
-      status: 30 approved, 12 pending, 8 rejected  → approval_rate = 0.60
-      muac_confirmed: rows 0-34 = 'yes', 35-49 = 'no'  → muac_conf_rate = 0.70
-      muac: cycles 9.0, 9.5, 10.0, ..., 14.0 deterministically
-      visit_date: one per day starting 2024-01-01
-      username: cycles across 5 FLW usernames
+    Args:
+        opportunity_id: Integer opportunity ID written to each row.
+        n_approved: Number of rows with status='approved'.
+        n_pending: Number of rows with status='pending'.
+        n_rejected: Number of rows with status='rejected'.
+        n_muac_yes: Number of rows with muac_confirmed='yes' (rest are 'no').
+        prefix: Prefix for visit_id strings (e.g. 'visit' → 'visit_0001').
     """
-    statuses = ["approved"] * 30 + ["pending"] * 12 + ["rejected"] * 8
-    muac_confirmeds = ["yes"] * 35 + ["no"] * 15
-    muac_values = [round(9.0 + (i % 11) * 0.5, 1) for i in range(50)]
+    total = n_approved + n_pending + n_rejected
+    n_muac_no = total - n_muac_yes
+    statuses = ["approved"] * n_approved + ["pending"] * n_pending + ["rejected"] * n_rejected
+    muac_confirmeds = ["yes"] * n_muac_yes + ["no"] * n_muac_no
+    muac_values = [round(9.0 + (i % 11) * 0.5, 1) for i in range(total)]
     usernames = ["flw_alice", "flw_bob", "flw_carol", "flw_dave", "flw_eve"]
     base_date = datetime(2024, 1, 1, 8, 0, 0, tzinfo=UTC)
 
     rows = []
-    for i in range(50):
+    for i in range(total):
         rows.append(
             {
-                "visit_id": f"visit_{i + 1:04d}",
-                "opportunity_id": 10001,
+                "visit_id": f"{prefix}_{i + 1:04d}",
+                "opportunity_id": opportunity_id,
                 "user_id": f"user_{(i % 5) + 1:04d}",
                 "entity_id": f"entity_{i + 1:04d}",
                 "status": statuses[i],
@@ -287,12 +311,125 @@ async def _verify_semantic_query(workspace_id: str) -> dict:
     raise RuntimeError(f"Semantic query failed after retries: {last_exc}") from last_exc
 
 
+# ── Shared seeding logic ───────────────────────────────────────────────────────
+
+
+def _seed_workspace(
+    stdout,
+    style,
+    user: User,
+    *,
+    tenant_external_id: str,
+    tenant_canonical_name: str,
+    workspace_name: str,
+    expected_schema_name: str,
+    seed_rows: list[dict],
+    label: str = "A",
+) -> tuple[Workspace, str]:
+    """Seed a single workspace idempotently.
+
+    Returns ``(workspace, schema_name)`` for use in verification or tests.
+    """
+    tag = f"[{label}]"
+
+    # ── Tenant ────────────────────────────────────────────────────────────────
+    tenant, tenant_created = Tenant.objects.get_or_create(
+        provider=DEMO_TENANT_PROVIDER,
+        external_id=tenant_external_id,
+        defaults={"canonical_name": tenant_canonical_name},
+    )
+    stdout.write(
+        f"  {tag}[tenant] {tenant} ({'created' if tenant_created else 'existing'})"
+    )
+
+    # ── TenantMembership ──────────────────────────────────────────────────────
+    membership, mem_created = TenantMembership.objects.get_or_create(
+        user=user,
+        tenant=tenant,
+    )
+    stdout.write(
+        f"  {tag}[membership] user={user.email} ↔ tenant={tenant.external_id} "
+        f"({'created' if mem_created else 'existing'})"
+    )
+
+    # ── Provision schema ──────────────────────────────────────────────────────
+    manager = SchemaManager()
+    tenant_schema = manager.provision(tenant)
+    stdout.write(
+        f"  {tag}[schema] '{tenant_schema.schema_name}' state={tenant_schema.state}"
+    )
+    if tenant_schema.schema_name != expected_schema_name:
+        stdout.write(
+            style.WARNING(
+                f"  {tag} WARNING: expected schema '{expected_schema_name}', "
+                f"got '{tenant_schema.schema_name}'"
+            )
+        )
+
+    # ── Workspace ──────────────────────────────────────────────────────────────
+    workspace, ws_created = Workspace.objects.get_or_create(
+        name=workspace_name,
+        defaults={"created_by": user, "is_auto_created": False},
+    )
+    stdout.write(
+        f"  {tag}[workspace] '{workspace.name}' id={workspace.id} "
+        f"({'created' if ws_created else 'existing'})"
+    )
+
+    # Ensure workspace↔tenant link
+    WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
+
+    # Ensure workspace membership
+    WorkspaceMembership.objects.get_or_create(
+        workspace=workspace,
+        user=user,
+        defaults={"role": WorkspaceRole.MANAGE},
+    )
+
+    # ── TenantMetadata ────────────────────────────────────────────────────────
+    meta, meta_created = TenantMetadata.objects.get_or_create(
+        tenant_membership=membership,
+        defaults={
+            "metadata": {"form_definitions": DEMO_FORM_DEFINITIONS},
+            "discovered_at": timezone.now(),
+        },
+    )
+    if not meta_created:
+        meta.metadata = {"form_definitions": DEMO_FORM_DEFINITIONS}
+        meta.discovered_at = timezone.now()
+        meta.save(update_fields=["metadata", "discovered_at", "updated_at"])
+    stdout.write(
+        f"  {tag}[metadata] {'created' if meta_created else 'updated'} "
+        f"for membership {membership.id}"
+    )
+
+    # ── stg_visits table ──────────────────────────────────────────────────────
+    stdout.write(f"  {tag}[data] Provisioning stg_visits in '{tenant_schema.schema_name}' …")
+    _provision_schema_and_data(tenant_schema.schema_name, seed_rows)
+    stdout.write(
+        f"  {tag}[data] Inserted {len(seed_rows)} deterministic rows into "
+        f"{tenant_schema.schema_name}.stg_visits"
+    )
+
+    # ── Cube model ────────────────────────────────────────────────────────────
+    model_yaml = _build_visits_cube_model()
+    repo_root = Path(settings.BASE_DIR)
+    model_dir = repo_root / "cube" / "model" / tenant_schema.schema_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir / "visits.yml"
+    model_path.write_text(model_yaml, encoding="utf-8")
+    stdout.write(f"  {tag}[model] Cube model written: {model_path}")
+
+    return workspace, tenant_schema.schema_name
+
+
 # ── Command ────────────────────────────────────────────────────────────────────
 
 
 class Command(BaseCommand):
     help = (
-        "Seed a complete demo workspace for repeatable semantic-layer testing. "
+        "Seed two demo workspaces for repeatable semantic-layer testing. "
+        "Workspace A (tenant 10001) and Workspace B (tenant 10002). "
         "Idempotent — safe to run multiple times."
     )
 
@@ -301,16 +438,16 @@ class Command(BaseCommand):
             "--verify",
             action="store_true",
             default=False,
-            help="After seeding, run an end-to-end Cube semantic query and confirm results.",
+            help="After seeding, run end-to-end Cube semantic queries and confirm results.",
         )
 
     def handle(self, *args, **options):
         self.stdout.write(self.style.MIGRATE_HEADING("=== seed_demo: starting ===\n"))
 
-        # ── Step 1: Resolve the admin user ────────────────────────────────────
+        # ── Resolve the admin user ─────────────────────────────────────────────
         try:
             user = User.objects.get(email=DEMO_USER_EMAIL)
-            self.stdout.write(f"  [1] User: {user.email} (id={user.pk})")
+            self.stdout.write(f"  [user] {user.email} (id={user.pk})")
         except User.DoesNotExist:
             self.stderr.write(
                 self.style.ERROR(
@@ -320,199 +457,194 @@ class Command(BaseCommand):
             )
             raise SystemExit(1) from None
 
-        # ── Step 2: Tenant ─────────────────────────────────────────────────────
-        tenant, tenant_created = Tenant.objects.get_or_create(
-            provider=DEMO_TENANT_PROVIDER,
-            external_id=DEMO_TENANT_EXTERNAL_ID,
-            defaults={"canonical_name": DEMO_TENANT_CANONICAL_NAME},
+        # ── Seed Workspace A (tenant 10001) ────────────────────────────────────
+        self.stdout.write(self.style.MIGRATE_HEADING("\n--- Workspace A (tenant 10001) ---"))
+        rows_a = _generate_seed_rows(
+            opportunity_id=10001,
+            n_approved=30,
+            n_pending=12,
+            n_rejected=8,
+            n_muac_yes=35,
+            prefix="visit",
         )
-        self.stdout.write(
-            f"  [2] Tenant: {tenant} "
-            f"({'created' if tenant_created else 'existing'})"
-        )
-
-        # ── Step 3: TenantMembership ───────────────────────────────────────────
-        membership, mem_created = TenantMembership.objects.get_or_create(
-            user=user,
-            tenant=tenant,
-        )
-        self.stdout.write(
-            f"  [3] TenantMembership: user={user.email} ↔ tenant={tenant.external_id} "
-            f"({'created' if mem_created else 'existing'})"
-        )
-
-        # ── Step 4: Provision the tenant schema ────────────────────────────────
-        manager = SchemaManager()
-        tenant_schema = manager.provision(tenant)
-        self.stdout.write(
-            f"  [4] TenantSchema: '{tenant_schema.schema_name}' state={tenant_schema.state}"
-        )
-        if tenant_schema.schema_name != DEMO_SCHEMA_NAME:
-            self.stderr.write(
-                self.style.WARNING(
-                    f"  WARNING: expected schema '{DEMO_SCHEMA_NAME}', "
-                    f"got '{tenant_schema.schema_name}'"
-                )
-            )
-
-        # ── Step 5: Workspace ──────────────────────────────────────────────────
-        workspace, ws_created = Workspace.objects.get_or_create(
-            name=DEMO_WORKSPACE_NAME,
-            defaults={"created_by": user, "is_auto_created": False},
-        )
-        self.stdout.write(
-            f"  [5] Workspace: '{workspace.name}' id={workspace.id} "
-            f"({'created' if ws_created else 'existing'})"
+        workspace_a, schema_a = _seed_workspace(
+            self.stdout,
+            self.style,
+            user,
+            tenant_external_id=DEMO_TENANT_EXTERNAL_ID,
+            tenant_canonical_name=DEMO_TENANT_CANONICAL_NAME,
+            workspace_name=DEMO_WORKSPACE_NAME,
+            expected_schema_name=DEMO_SCHEMA_NAME,
+            seed_rows=rows_a,
+            label="A",
         )
 
-        # Ensure workspace↔tenant link
-        WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
-
-        # Ensure workspace membership
-        WorkspaceMembership.objects.get_or_create(
-            workspace=workspace,
-            user=user,
-            defaults={"role": WorkspaceRole.MANAGE},
+        # ── Seed Workspace B (tenant 10002) ────────────────────────────────────
+        self.stdout.write(self.style.MIGRATE_HEADING("\n--- Workspace B (tenant 10002) ---"))
+        rows_b = _generate_seed_rows(
+            opportunity_id=10002,
+            n_approved=20,
+            n_pending=20,
+            n_rejected=10,
+            n_muac_yes=25,
+            prefix="visitb",
         )
-
-        # ── Step 6: TenantMetadata with form_definitions ──────────────────────
-        meta, meta_created = TenantMetadata.objects.get_or_create(
-            tenant_membership=membership,
-            defaults={
-                "metadata": {"form_definitions": DEMO_FORM_DEFINITIONS},
-                "discovered_at": timezone.now(),
-            },
+        workspace_b, schema_b = _seed_workspace(
+            self.stdout,
+            self.style,
+            user,
+            tenant_external_id=DEMO_B_TENANT_EXTERNAL_ID,
+            tenant_canonical_name=DEMO_B_TENANT_CANONICAL_NAME,
+            workspace_name=DEMO_B_WORKSPACE_NAME,
+            expected_schema_name=DEMO_B_SCHEMA_NAME,
+            seed_rows=rows_b,
+            label="B",
         )
-        if not meta_created:
-            # Update to latest form definitions on re-run
-            meta.metadata = {"form_definitions": DEMO_FORM_DEFINITIONS}
-            meta.discovered_at = timezone.now()
-            meta.save(update_fields=["metadata", "discovered_at", "updated_at"])
-        self.stdout.write(
-            f"  [6] TenantMetadata: {'created' if meta_created else 'updated'} "
-            f"for membership {membership.id}"
-        )
-
-        # ── Step 7: Create stg_visits table and insert seed rows ──────────────
-        self.stdout.write(f"  [7] Provisioning stg_visits in '{tenant_schema.schema_name}' …")
-        rows = _generate_seed_rows()
-        _provision_schema_and_data(tenant_schema.schema_name, rows)
-        self.stdout.write(
-            f"      Inserted {len(rows)} deterministic rows into "
-            f"{tenant_schema.schema_name}.stg_visits"
-        )
-
-        # ── Step 8: Write Cube model YAML ─────────────────────────────────────
-        model_yaml = _build_visits_cube_model()
-        repo_root = Path(settings.BASE_DIR)
-        model_dir = repo_root / "cube" / "model" / tenant_schema.schema_name
-        model_dir.mkdir(parents=True, exist_ok=True)
-        model_path = model_dir / "visits.yml"
-        model_path.write_text(model_yaml, encoding="utf-8")
-        self.stdout.write(f"  [8] Cube model written: {model_path}")
 
         # ── Summary ────────────────────────────────────────────────────────────
         self.stdout.write(self.style.SUCCESS("\n=== seed_demo: DONE ==="))
-        self.stdout.write(f"  workspace_id : {workspace.id}")
-        self.stdout.write(f"  schema_name  : {tenant_schema.schema_name}")
-        self.stdout.write(f"  model_path   : {model_path}")
+        self.stdout.write("\nWorkspace A:")
+        self.stdout.write(f"  workspace_id                    : {workspace_a.id}")
+        self.stdout.write(f"  schema_name                     : {schema_a}")
         self.stdout.write(f"  expected count                  : {EXPECTED_COUNT}")
         self.stdout.write(f"  expected approval_rate          : {EXPECTED_APPROVAL_RATE}")
         self.stdout.write(
             f"  expected muac_confirmation_rate : {EXPECTED_MUAC_CONFIRMATION_RATE}"
+        )
+        self.stdout.write("\nWorkspace B:")
+        self.stdout.write(f"  workspace_id                    : {workspace_b.id}")
+        self.stdout.write(f"  schema_name                     : {schema_b}")
+        self.stdout.write(f"  expected count                  : {EXPECTED_B_COUNT}")
+        self.stdout.write(f"  expected approval_rate          : {EXPECTED_B_APPROVAL_RATE}")
+        self.stdout.write(
+            f"  expected muac_confirmation_rate : {EXPECTED_B_MUAC_CONFIRMATION_RATE}"
         )
 
         # ── Optional end-to-end Cube verification ──────────────────────────────
         if options["verify"]:
             self.stdout.write(
                 self.style.MIGRATE_HEADING(
-                    "\n=== seed_demo: verifying end-to-end Cube query ===\n"
+                    "\n=== seed_demo: verifying end-to-end Cube queries ===\n"
                 )
             )
             self.stdout.write(
-                "  Cube may need up to ~18 s to compile the new model directory …"
+                "  Cube may need up to ~18 s to compile new model directories …"
             )
-            try:
-                result = asyncio.run(_verify_semantic_query(str(workspace.id)))
-            except Exception as exc:
-                self.stderr.write(self.style.ERROR(f"  Verification FAILED: {exc}"))
-                raise SystemExit(1) from exc
 
-            columns = result.get("columns", [])
-            rows_out = result.get("rows", [])
-            row_count = result.get("row_count", 0)
-
-            self.stdout.write(f"  columns: {columns}")
-            self.stdout.write(f"  rows:    {rows_out}")
-            self.stdout.write(f"  row_count: {row_count}")
-
-            if row_count == 0 or not rows_out:
-                self.stderr.write(self.style.ERROR("  Verification FAILED: no rows returned"))
-                raise SystemExit(1)
-
-            # Map column names to values
-            col_map = {col: rows_out[0][i] for i, col in enumerate(columns)}
-            # Column names from Cube semantic SQL use dot notation e.g. "visits.count"
-            count_val = None
-            approval_val = None
-            muac_val = None
-            for col, val in col_map.items():
-                if "count" in col.lower() and "muac" not in col.lower():
-                    count_val = val
-                elif "approval_rate" in col.lower():
-                    approval_val = val
-                elif "muac_confirmation_rate" in col.lower():
-                    muac_val = val
-
-            ok = True
-            if count_val != EXPECTED_COUNT:
-                self.stderr.write(
-                    self.style.ERROR(f"  count mismatch: got {count_val}, expected {EXPECTED_COUNT}")
-                )
-                ok = False
-            else:
-                self.stdout.write(self.style.SUCCESS(f"  count OK: {count_val}"))
-
-            def _close_enough(a, b, tol=0.001):
-                if a is None or b is None:
-                    return False
-                return abs(float(a) - float(b)) < tol
-
-            if not _close_enough(approval_val, EXPECTED_APPROVAL_RATE):
-                self.stderr.write(
-                    self.style.ERROR(
-                        f"  approval_rate mismatch: got {approval_val}, "
-                        f"expected {EXPECTED_APPROVAL_RATE}"
+            for label, ws, expected_count, expected_approval, expected_muac in [
+                (
+                    "A",
+                    workspace_a,
+                    EXPECTED_COUNT,
+                    EXPECTED_APPROVAL_RATE,
+                    EXPECTED_MUAC_CONFIRMATION_RATE,
+                ),
+                (
+                    "B",
+                    workspace_b,
+                    EXPECTED_B_COUNT,
+                    EXPECTED_B_APPROVAL_RATE,
+                    EXPECTED_B_MUAC_CONFIRMATION_RATE,
+                ),
+            ]:
+                self.stdout.write(f"\n  Verifying Workspace {label} (id={ws.id}) …")
+                try:
+                    result = asyncio.run(_verify_semantic_query(str(ws.id)))
+                except Exception as exc:
+                    self.stderr.write(
+                        self.style.ERROR(f"  [{label}] Verification FAILED: {exc}")
                     )
-                )
-                ok = False
-            else:
-                self.stdout.write(self.style.SUCCESS(f"  approval_rate OK: {approval_val}"))
+                    raise SystemExit(1) from exc
 
-            if not _close_enough(muac_val, EXPECTED_MUAC_CONFIRMATION_RATE):
-                self.stderr.write(
-                    self.style.ERROR(
-                        f"  muac_confirmation_rate mismatch: got {muac_val}, "
-                        f"expected {EXPECTED_MUAC_CONFIRMATION_RATE}"
-                    )
-                )
-                ok = False
-            else:
-                self.stdout.write(
-                    self.style.SUCCESS(f"  muac_confirmation_rate OK: {muac_val}")
-                )
+                columns = result.get("columns", [])
+                rows_out = result.get("rows", [])
+                row_count = result.get("row_count", 0)
 
-            if ok:
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        "\n  END-TO-END VERIFICATION PASSED — "
-                        f"semantic_query returned count={count_val}, "
-                        f"approval_rate={approval_val}, "
-                        f"muac_confirmation_rate={muac_val}"
+                self.stdout.write(f"  [{label}] columns: {columns}")
+                self.stdout.write(f"  [{label}] rows:    {rows_out}")
+                self.stdout.write(f"  [{label}] row_count: {row_count}")
+
+                if row_count == 0 or not rows_out:
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"  [{label}] Verification FAILED: no rows returned"
+                        )
                     )
-                )
-            else:
-                self.stderr.write(
-                    self.style.ERROR("\n  END-TO-END VERIFICATION FAILED — see above")
-                )
-                raise SystemExit(1)
+                    raise SystemExit(1)
+
+                col_map = {col: rows_out[0][i] for i, col in enumerate(columns)}
+                count_val = None
+                approval_val = None
+                muac_val = None
+                for col, val in col_map.items():
+                    if "count" in col.lower() and "muac" not in col.lower():
+                        count_val = val
+                    elif "approval_rate" in col.lower():
+                        approval_val = val
+                    elif "muac_confirmation_rate" in col.lower():
+                        muac_val = val
+
+                def _close_enough(a, b, tol=0.001):
+                    if a is None or b is None:
+                        return False
+                    return abs(float(a) - float(b)) < tol
+
+                ok = True
+                if count_val != expected_count:
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"  [{label}] count mismatch: got {count_val}, "
+                            f"expected {expected_count}"
+                        )
+                    )
+                    ok = False
+                else:
+                    self.stdout.write(
+                        self.style.SUCCESS(f"  [{label}] count OK: {count_val}")
+                    )
+
+                if not _close_enough(approval_val, expected_approval):
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"  [{label}] approval_rate mismatch: got {approval_val}, "
+                            f"expected {expected_approval}"
+                        )
+                    )
+                    ok = False
+                else:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"  [{label}] approval_rate OK: {approval_val}"
+                        )
+                    )
+
+                if not _close_enough(muac_val, expected_muac):
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"  [{label}] muac_confirmation_rate mismatch: got {muac_val}, "
+                            f"expected {expected_muac}"
+                        )
+                    )
+                    ok = False
+                else:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"  [{label}] muac_confirmation_rate OK: {muac_val}"
+                        )
+                    )
+
+                if ok:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"\n  [{label}] END-TO-END VERIFICATION PASSED — "
+                            f"count={count_val}, approval_rate={approval_val}, "
+                            f"muac_confirmation_rate={muac_val}"
+                        )
+                    )
+                else:
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"\n  [{label}] END-TO-END VERIFICATION FAILED — see above"
+                        )
+                    )
+                    raise SystemExit(1)
