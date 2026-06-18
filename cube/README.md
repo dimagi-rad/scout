@@ -93,6 +93,35 @@ set the `CUBEJS_DB_*` variables to match that instance's credentials.
 
 ## Model files
 
-Generated data model YAML/JS files land in `cube/model/`. The `.gitkeep`
-placeholder keeps the directory tracked by git until model files are added
-(Task 7).
+Generated data model YAML files live in `cube/model/<schema_name>/` — one
+subdirectory per workspace schema. Each subdirectory contains one YAML file
+per cube plus a `views.yml` for any views:
+
+```
+cube/model/
+  t_42/
+    visits.yml       # stg_visits cube with dimensions, measures, joins
+    flws.yml         # raw_users cube
+    views.yml        # program_health view
+  ws_a1b2c3/
+    visits.yml
+    flws.yml
+    views.yml
+```
+
+The Task 7 generator (`apps/transformations/services/cube_model_generator.py`)
+writes these files after generating the model from:
+- The staged schema column list (`stg_visits`, `raw_users`, etc.)
+- Connect form definitions (question labels become dimension titles)
+- Business knowledge / KPI metric definitions
+- Relationship declarations (used as Cube joins)
+
+`cube.js` picks up the right directory via `repositoryFactory`:
+
+```javascript
+repositoryFactory: ({ securityContext }) =>
+  new FileRepository(`model/${securityContext.schema_name}`),
+```
+
+A workspace whose model directory is empty or missing gets an empty model —
+Cube returns an empty schema for that tenant instead of erroring out.

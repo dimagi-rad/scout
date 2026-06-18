@@ -12,9 +12,28 @@
  *   1. Verifies the JWT in checkSqlAuth and surfaces its payload as securityContext.
  *   2. Keys compilation and orchestrator cache per schema_name so each tenant
  *      gets its own data model compile context.
+ *   3. Loads per-workspace model files from cube/model/<schema_name>/ via
+ *      repositoryFactory so each tenant gets its own generated data model.
  *
  * The data model files (Task 7) reference the active schema via:
  *   sql_table: `{COMPILE_CONTEXT.security_context.schema_name}.stg_visits`
+ *
+ * Per-workspace model layout
+ * --------------------------
+ * The Task 7 generator writes YAML to cube/model/<schema_name>/:
+ *
+ *   cube/model/
+ *     t_42/
+ *       visits.yml
+ *       flws.yml
+ *       views.yml
+ *     ws_a1b2c3/
+ *       visits.yml
+ *       ...
+ *
+ * A workspace whose model directory is empty or missing gets an empty model
+ * (no cubes, no views). That degrades gracefully — Cube will not error on
+ * SELECT 1 or meta requests; it simply returns an empty schema for that tenant.
  *
  * Note: the checkSqlAuth signature in current Cube docs is (req, username, password)
  * — first argument is the request object, NOT the SQL query string.
@@ -22,6 +41,7 @@
  */
 
 const jwt = require("jsonwebtoken");
+const { FileRepository } = require("@cubejs-backend/server-core");
 
 module.exports = {
   /**
@@ -74,4 +94,18 @@ module.exports = {
    */
   contextToOrchestratorId: ({ securityContext }) =>
     `SCOUT_${securityContext.schema_name}`,
+
+  /**
+   * Load per-workspace model files from cube/model/<schema_name>/.
+   *
+   * The Task 7 generator writes YAML files here after generating the model.
+   * If the directory is missing or empty, FileRepository returns an empty
+   * repository — Cube compiles an empty model, which is safe and returns
+   * an empty schema rather than erroring out.
+   *
+   * @param {{ securityContext: { schema_name: string } }} ctx
+   * @returns {FileRepository}
+   */
+  repositoryFactory: ({ securityContext }) =>
+    new FileRepository(`model/${securityContext.schema_name}`),
 };
