@@ -109,9 +109,9 @@ async def semantic_catalog(workspace_id: str = "") -> dict[str, Any]:
     """Fetch the Cube semantic catalog (cubes/views, measures, dimensions).
 
     Resolves the workspace schema, mints a JWT, and calls the Cube REST API
-    ``GET /v1/meta`` with ``Authorization: Bearer <JWT>``. Returns a compact
-    dict of available cubes and their measures & dimensions so the agent knows
-    what semantic queries it can construct.
+    ``GET /cubejs-api/v1/meta`` with ``Authorization: Bearer <JWT>``. Returns a
+    compact dict of available cubes and their measures & dimensions so the agent
+    knows what semantic queries it can construct.
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
