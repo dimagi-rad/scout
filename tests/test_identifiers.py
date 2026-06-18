@@ -5,6 +5,8 @@ schema, dbt model/alias) routes through this module so the 63-byte limit and the
 (provider, external_id) collision class are guarded in exactly one place.
 """
 
+import re
+
 from apps.common.identifiers import (
     PG_MAX_IDENTIFIER_BYTES,
     dbt_column_alias,
@@ -24,8 +26,6 @@ def _nbytes(s: str) -> int:
 
 def _is_valid_pg_identifier(s: str) -> bool:
     # Lowercase, starts with a letter, only [a-z0-9_], <= 63 bytes.
-    import re
-
     return bool(re.match(r"^[a-z][a-z0-9_]*$", s)) and _nbytes(s) <= PG_MAX_IDENTIFIER_BYTES
 
 
