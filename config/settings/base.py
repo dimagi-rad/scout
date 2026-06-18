@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     "apps.recipes",
     "apps.chat",
     "apps.transformations",
+    "apps.evals",
 ]
 
 MIDDLEWARE = [
