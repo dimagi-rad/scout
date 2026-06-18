@@ -224,9 +224,9 @@ class TestSemanticCatalog:
 
     @pytest.mark.asyncio
     async def test_returns_cubes_with_measures_and_dimensions(self, httpx_mock):
-        """semantic_catalog returns structured cubes list from /v1/meta."""
+        """semantic_catalog returns structured cubes list from /cubejs-api/v1/meta."""
         httpx_mock.add_response(
-            url="http://localhost:4000/v1/meta",
+            url="http://localhost:4000/cubejs-api/v1/meta",
             json=_META_RESPONSE,
             status_code=200,
         )
@@ -239,7 +239,7 @@ class TestSemanticCatalog:
             patch("mcp_server.services.semantic.settings") as mock_settings,
         ):
             mock_settings.CUBEJS_API_SECRET = _SECRET
-            mock_settings.CUBE_REST_URL = "http://localhost:4000"
+            mock_settings.CUBE_REST_URL = "http://localhost:4000/cubejs-api"
 
             result = await semantic_catalog(_WORKSPACE_ID)
 
@@ -260,9 +260,9 @@ class TestSemanticCatalog:
 
     @pytest.mark.asyncio
     async def test_sends_authorization_bearer_header(self, httpx_mock):
-        """semantic_catalog sends Authorization: Bearer <JWT> to /v1/meta."""
+        """semantic_catalog sends Authorization: Bearer <JWT> to /cubejs-api/v1/meta."""
         httpx_mock.add_response(
-            url="http://localhost:4000/v1/meta",
+            url="http://localhost:4000/cubejs-api/v1/meta",
             json={"cubes": []},
             status_code=200,
         )
@@ -275,12 +275,14 @@ class TestSemanticCatalog:
             patch("mcp_server.services.semantic.settings") as mock_settings,
         ):
             mock_settings.CUBEJS_API_SECRET = _SECRET
-            mock_settings.CUBE_REST_URL = "http://localhost:4000"
+            mock_settings.CUBE_REST_URL = "http://localhost:4000/cubejs-api"
 
             await semantic_catalog(_WORKSPACE_ID)
 
         requests = httpx_mock.get_requests()
         assert len(requests) == 1
+        # Assert the request hit the correct /cubejs-api/v1/meta path.
+        assert str(requests[0].url) == "http://localhost:4000/cubejs-api/v1/meta"
         auth_header = requests[0].headers.get("authorization", "")
         assert auth_header.startswith("Bearer ")
 
@@ -299,7 +301,7 @@ class TestSemanticCatalog:
     async def test_empty_cubes_response(self, httpx_mock):
         """semantic_catalog handles an empty cubes list gracefully."""
         httpx_mock.add_response(
-            url="http://localhost:4000/v1/meta",
+            url="http://localhost:4000/cubejs-api/v1/meta",
             json={"cubes": []},
             status_code=200,
         )
@@ -312,7 +314,7 @@ class TestSemanticCatalog:
             patch("mcp_server.services.semantic.settings") as mock_settings,
         ):
             mock_settings.CUBEJS_API_SECRET = _SECRET
-            mock_settings.CUBE_REST_URL = "http://localhost:4000"
+            mock_settings.CUBE_REST_URL = "http://localhost:4000/cubejs-api"
 
             result = await semantic_catalog(_WORKSPACE_ID)
 
