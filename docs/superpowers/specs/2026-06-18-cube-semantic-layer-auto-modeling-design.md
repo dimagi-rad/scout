@@ -106,14 +106,18 @@ The auto-modeling thesis needs two things from the data source: the materialized
 A real Connect opportunity is already connectable in Scout via existing CommCare Connect OAuth.
 
 The one real gap: **`ConnectMetadataLoader` fetches org/program structure but NOT the deliver-app
-form definitions** (per code review). A Connect opportunity is backed by a CommCare **deliver
-app**; its form schema is fetchable via the CommCare Application API (`/a/{domain}/api/v0.5/
-application/`) — which Scout's `commcare_metadata.py` *already* knows how to parse into
-`form_definitions`. Work:
-- Resolve the opportunity's deliver-app id/domain and fetch its CommCare app structure, storing
-  normalized `form_definitions` into `TenantMetadata.metadata` (same slot CommCare ingestion uses).
+form definitions** (per code review). Real Connect exposes
+`GET /export/opportunity/{id}/app_structure/?app_type=both` (verified in `dimagi/commcare-connect`
+`data_export`), returning `{"learn_app": <HQ app JSON|null>, "deliver_app": <HQ app JSON|null>}`.
+**Connect proxies to CommCare HQ server-side using the opportunity's stored API key**, so the caller
+needs only the Connect OAuth `export` scope — **no CommCare HQ credentials.** Each app is HQ
+application JSON, the exact shape Scout's `commcare_metadata.py::_extract_form_definitions` already
+parses into `form_definitions`. Work:
+- Add `_fetch_app_structure()` to `ConnectMetadataLoader`, pass the non-null `learn_app`/`deliver_app`
+  into the existing `_extract_form_definitions`, and include the result in the metadata dict so the
+  discover phase stores it in `TenantMetadata.metadata` (same slot CommCare ingestion uses).
 - Confirm sources `visits`, `users`, `completed_works`, `completed_module` materialize for a real
-  opportunity (largely existing behavior).
+  opportunity (existing behavior — no new loaders).
 
 Acceptance: a real Connect opportunity materializes `raw_*` tables **and** its deliver-app form
 schema lands in `TenantMetadata.metadata`, ready for auto-modeling (§4.2).

@@ -34,10 +34,10 @@
 - Test: `tests/test_connect_metadata_loader.py` (create if absent)
 
 **Interfaces:**
-- Consumes: `ConnectBaseLoader._get(url)` (returns `requests.Response`, raises `ConnectAuthError` on 401/403); `self.base_url`, `self.opportunity_id`.
-- Produces: `ConnectMetadataLoader.load()` returns a dict that now ALSO contains key `form_definitions: dict[str, FormDef]` where `FormDef = {"name": str, "module_name": str, "deliver_unit": str, "questions": [{"label": str, "value": str, "type": str, "repeat": bool, "options": list[str] | None}]}`, keyed by a stable form key (xmlns or deliver_unit slug). This matches the CommCare `form_definitions` shape consumed by `_build_jsonb_annotations` and the new Connect staging (Task 4).
+- Consumes: `ConnectBaseLoader._get(url)` (returns `requests.Response`, raises `ConnectAuthError` on 401/403); `self.base_url`, `self.opportunity_id`. **Reuses** `mcp_server.loaders.commcare_metadata._extract_form_definitions` (module-level fn taking a list of HQ app JSON dicts → `form_definitions` keyed by xmlns) and `_extract_case_types`.
+- Produces: `ConnectMetadataLoader.load()` returns a dict that now ALSO contains `form_definitions: dict[str, FormDef]` **in the exact CommCare shape** produced by `_extract_form_definitions` — keyed by xmlns, each `FormDef = {"name", "app_name", "module_name", "case_type", "questions": [...]}`. This is identical to what `_build_jsonb_annotations` and CommCare staging already consume, maximizing reuse.
 
-**Connect endpoint:** `GET {base_url}/export/opportunity/{id}/app_structure/` returns the deliver-app form schema (single object). Normalize it to the `form_definitions` shape above.
+**Connect endpoint (verified in `dimagi/commcare-connect` `data_export` app):** `GET {base_url}/export/opportunity/{id}/app_structure/?app_type=both` returns `{"learn_app": <HQ app JSON | null>, "deliver_app": <HQ app JSON | null>}`. Each app is the full CommCare HQ application structure (`{"id", "name", "modules": [{"name", "forms": [{"xmlns", "name", "questions": [...]}]}]}`). **Connect proxies to HQ server-side via the opportunity's stored `api_key`** — the caller needs only the Connect OAuth `export` scope; NO CommCare HQ credentials. Normalize by passing the non-null apps as a list straight into the existing `_extract_form_definitions([...])`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -47,21 +47,32 @@ from unittest import mock
 
 from mcp_server.loaders.connect_metadata import ConnectMetadataLoader
 
+# Real Connect /app_structure/ shape: {"learn_app": <HQ app JSON>, "deliver_app": <HQ app JSON>}
+# Each app is HQ application JSON: app -> modules -> forms -> questions.
 APP_STRUCTURE_PAYLOAD = {
-    "deliver_units": [
-        {
-            "slug": "muac_visit",
-            "name": "MUAC Visit",
-            "module_name": "Delivery",
-            "xmlns": "http://openrosa.org/formdesigner/muac1",
-            "questions": [
-                {"label": "MUAC (cm)", "value": "/data/muac_group/muac",
-                 "type": "Decimal", "repeat": False},
-                {"label": "MUAC confirmed", "value": "/data/muac_group/muac_confirmed",
-                 "type": "Select", "repeat": False, "options": ["yes", "no"]},
-            ],
-        }
-    ]
+    "learn_app": None,
+    "deliver_app": {
+        "id": "app_deliver",
+        "name": "MUAC Deliver",
+        "modules": [
+            {
+                "name": "Delivery",
+                "case_type": "beneficiary",
+                "forms": [
+                    {
+                        "xmlns": "http://openrosa.org/formdesigner/muac1",
+                        "name": "MUAC Visit",
+                        "questions": [
+                            {"label": "MUAC (cm)", "value": "/data/muac_group/muac",
+                             "tag": "input", "type": "Decimal", "repeat": False},
+                            {"label": "MUAC confirmed", "value": "/data/muac_group/muac_confirmed",
+                             "tag": "select1", "type": "Select", "repeat": False},
+                        ],
+                    }
+                ],
+            }
+        ],
+    },
 }
 
 
@@ -73,20 +84,20 @@ def _loader():
     )
 
 
-def test_load_includes_normalized_form_definitions():
+def test_load_includes_form_definitions_from_app_structure():
     loader = _loader()
     with mock.patch.object(loader, "_fetch_org_data", return_value={"organizations": [], "programs": [], "opportunities": []}), \
          mock.patch.object(loader, "_fetch_opportunity_detail", return_value={"name": "Demo", "id": 1237}), \
          mock.patch.object(loader, "_fetch_app_structure", return_value=APP_STRUCTURE_PAYLOAD):
         result = loader.load()
 
+    # _extract_form_definitions keys by xmlns (CommCare shape):
     fd = result["form_definitions"]
-    assert "muac_visit" in fd
-    form = fd["muac_visit"]
-    assert form["deliver_unit"] == "muac_visit"
+    assert "http://openrosa.org/formdesigner/muac1" in fd
+    form = fd["http://openrosa.org/formdesigner/muac1"]
     q = {item["value"]: item for item in form["questions"]}
     assert q["/data/muac_group/muac"]["type"] == "Decimal"
-    assert q["/data/muac_group/muac_confirmed"]["options"] == ["yes", "no"]
+    assert q["/data/muac_group/muac_confirmed"]["label"] == "MUAC confirmed"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -100,40 +111,10 @@ Expected: FAIL — `ConnectMetadataLoader` has no `_fetch_app_structure`, and `l
 # mcp_server/loaders/connect_metadata.py
 import logging
 
+from mcp_server.loaders.commcare_metadata import _extract_case_types, _extract_form_definitions
 from mcp_server.loaders.connect_base import ConnectBaseLoader
 
 logger = logging.getLogger(__name__)
-
-
-def _normalize_app_structure(payload: dict) -> dict:
-    """Normalize a Connect /app_structure/ payload into form_definitions shape.
-
-    Keyed by deliver-unit slug. Each value carries name, module_name, deliver_unit,
-    and a list of question dicts: {label, value, type, repeat, options}.
-    """
-    form_definitions: dict[str, dict] = {}
-    for du in payload.get("deliver_units", []):
-        slug = du.get("slug") or du.get("xmlns") or du.get("name", "")
-        if not slug:
-            continue
-        questions = []
-        for q in du.get("questions", []):
-            questions.append(
-                {
-                    "label": q.get("label", q.get("value", "")),
-                    "value": q.get("value", ""),
-                    "type": q.get("type", "Text"),
-                    "repeat": bool(q.get("repeat", False)),
-                    "options": q.get("options"),
-                }
-            )
-        form_definitions[slug] = {
-            "name": du.get("name", slug),
-            "module_name": du.get("module_name", ""),
-            "deliver_unit": slug,
-            "questions": questions,
-        }
-    return form_definitions
 
 
 class ConnectMetadataLoader(ConnectBaseLoader):
@@ -142,15 +123,20 @@ class ConnectMetadataLoader(ConnectBaseLoader):
     def load(self) -> dict:
         org_data = self._fetch_org_data()
         opp_detail = self._fetch_opportunity_detail()
+        form_definitions: dict = {}
+        case_types: list = []
         try:
             app_structure = self._fetch_app_structure()
-            form_definitions = _normalize_app_structure(app_structure)
+            # Real Connect returns {"learn_app": <HQ app JSON|null>, "deliver_app": ...}.
+            # Each app is HQ application JSON; reuse the CommCare extractors verbatim.
+            apps = [a for a in (app_structure.get("deliver_app"), app_structure.get("learn_app")) if a]
+            form_definitions = _extract_form_definitions(apps)
+            case_types = _extract_case_types(apps)
         except Exception:
             logger.exception(
                 "Failed to fetch app_structure for opportunity %s; continuing without form_definitions",
                 self.opportunity_id,
             )
-            form_definitions = {}
 
         logger.info(
             "Loaded metadata for Connect opportunity %s: %s (%d forms)",
@@ -164,6 +150,7 @@ class ConnectMetadataLoader(ConnectBaseLoader):
             "programs": org_data.get("programs", []),
             "all_opportunities": org_data.get("opportunities", []),
             "form_definitions": form_definitions,
+            "case_types": case_types,
         }
 
     def _fetch_org_data(self) -> dict:
@@ -176,8 +163,10 @@ class ConnectMetadataLoader(ConnectBaseLoader):
 
     def _fetch_app_structure(self) -> dict:
         url = f"{self.base_url}/export/opportunity/{self.opportunity_id}/app_structure/"
-        return self._get(url).json()
+        return self._get(url, params={"app_type": "both"}).json()
 ```
+
+> **Verify at task start:** confirm `_extract_form_definitions` / `_extract_case_types` are importable module-level names in `mcp_server/loaders/commcare_metadata.py` (the verbatim extract shows they are called from `CommCareMetadataLoader.load`). Confirm `ConnectBaseLoader._get` accepts a `params=` kwarg; if it does not, add the query string to the URL instead.
 
 - [ ] **Step 4: Run test to verify it passes**
 
