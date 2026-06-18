@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.utils import timezone
@@ -594,11 +594,10 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.upsert_connect_assets") as mock_upsert,
             patch(
-                "mcp_server.services.materializer.upsert_connect_assets"
-            ) as mock_upsert,
-            patch(
-                "mcp_server.services.materializer.sync_column_notes"
+                "mcp_server.services.materializer.sync_column_notes",
+                new_callable=AsyncMock,
             ) as mock_sync,
         ):
             schema = self._make_schema()
@@ -611,15 +610,10 @@ class TestRunPipeline:
             # non-None sentinel so the if-tenant_meta branch is entered.
             fake_tenant_meta = MagicMock()
             fake_tenant_meta.metadata = {"form_definitions": {"visit_form": {}}}
-            mock_tenant_meta_cls.objects.filter.return_value.first.return_value = (
-                fake_tenant_meta
-            )
+            mock_tenant_meta_cls.objects.filter.return_value.first.return_value = fake_tenant_meta
 
             mock_asset_cls.objects.filter.return_value.exists.return_value = False
             mock_upsert.return_value = {"created": 1, "updated": 0, "deleted": 0, "total": 1}
-            # sync_column_notes is an async function; mock as a regular callable
-            # since async_to_sync wraps it inside run_pipeline.
-            mock_sync.return_value = None
 
             conn = MagicMock()
             mock_conn.return_value = conn

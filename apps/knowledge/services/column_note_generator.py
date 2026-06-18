@@ -7,12 +7,13 @@ _extract_form_definitions in apps/transformations/services/commcare_staging.py):
     {<xmlns>: {"questions": [{"label": str, "value": str, "type": str, "repeat": bool,
                                "options"?: list | None, "choices"?: list | None}, ...]}, ...}
 
-Derives column names using the same _column_name_from_path helper as Task 3
-(staging column construction) so names stay aligned.
+Derives column names using visit_column_map from connect_staging so that
+the final deduped column names always match the staging columns produced by
+_generate_stg_visits — including collision-suffixed names like ``status_2``.
 """
 
 from apps.knowledge.models import TableKnowledge
-from apps.transformations.services.commcare_staging import _column_name_from_path
+from apps.transformations.services.connect_staging import visit_column_map
 
 
 async def sync_column_notes(workspace, table_name: str, form_definitions: dict) -> TableKnowledge:
@@ -21,37 +22,28 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
     from question label + type + choices/options across all forms in
     *form_definitions*.
 
-    Column names are derived via _column_name_from_path to match the staging
-    column names produced by Task 3 exactly.
+    Column names are derived via visit_column_map to match the staging column
+    names produced by _generate_stg_visits exactly, including any collision-
+    suffixed names (e.g. ``status_2`` when ``status`` is a base column).
 
     Returns the upserted TableKnowledge instance.
     """
     column_notes: dict[str, str] = {}
 
-    for _xmlns, form_def in form_definitions.items():
-        for question in form_def.get("questions", []):
-            # Skip repeat groups — they stage to separate tables
-            if question.get("repeat"):
-                continue
+    for question, col_name in visit_column_map(form_definitions):
+        label = question.get("label", col_name)
+        qtype = question.get("type", "")
 
-            value_path = question.get("value", "")
-            if not value_path:
-                continue
+        # Build note string: "label — type" (optionally "; values: a, b, c")
+        note = f"{label} — {qtype}"
 
-            col_name = _column_name_from_path(value_path)
-            label = question.get("label", col_name)
-            qtype = question.get("type", "")
+        # Accept either "options" or "choices" key (tolerate missing / None)
+        raw_choices = question.get("options") or question.get("choices")
+        if raw_choices:
+            values_str = ", ".join(str(c) for c in raw_choices)
+            note = f"{note}; values: {values_str}"
 
-            # Build note string: "label — type" (optionally "; values: a, b, c")
-            note = f"{label} — {qtype}"
-
-            # Accept either "options" or "choices" key (tolerate missing / None)
-            raw_choices = question.get("options") or question.get("choices")
-            if raw_choices:
-                values_str = ", ".join(str(c) for c in raw_choices)
-                note = f"{note}; values: {values_str}"
-
-            column_notes[col_name] = note
+        column_notes[col_name] = note
 
     existing = await TableKnowledge.objects.filter(
         workspace=workspace, table_name=table_name

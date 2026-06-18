@@ -36,6 +36,33 @@ _VISIT_BASE_COLUMNS = [
 ]
 
 
+# ── Single source of truth for stg_visits column naming ──────────────────────
+
+
+def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
+    """Return an ordered list of (question, final_column_name) for stg_visits.
+
+    Applies the same base-column seeding and :func:`_unique_alias` deduplication
+    that :func:`_generate_stg_visits` uses, guaranteeing that the column names
+    returned here are byte-for-byte identical to those emitted in the staging SQL.
+
+    Only non-repeat questions with a non-empty ``value`` path are included —
+    repeat-group children are staged in separate tables and excluded here.
+    """
+    seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
+    result: list[tuple[dict, str]] = []
+    for _deliver_unit, form_def in form_definitions.items():
+        for q in form_def.get("questions", []):
+            if q.get("repeat"):
+                continue
+            value_path = q.get("value", "")
+            if not value_path:
+                continue
+            col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
+            result.append((q, col_name))
+    return result
+
+
 # ── Visit staging asset ──────────────────────────────────────────────────────
 
 
@@ -49,22 +76,12 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
     lines = ["SELECT"]
     select_parts: list[str] = [f"    {col}" for col in _VISIT_BASE_COLUMNS]
 
-    # Seed seen_aliases from base column names so question aliases that collide
-    # get a numeric suffix.
-    seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
-
-    for _deliver_unit, form_def in form_definitions.items():
-        for q in form_def.get("questions", []):
-            if q.get("repeat"):
-                continue
-            value_path = q.get("value", "")
-            if not value_path:
-                continue
-            json_path = _question_path_to_json_path(value_path)
-            col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
-            raw_expr = f"form_json #>> {json_path}"
-            q_type = q.get("type")
-            select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
+    for q, col_name in visit_column_map(form_definitions):
+        value_path = q.get("value", "")
+        json_path = _question_path_to_json_path(value_path)
+        raw_expr = f"form_json #>> {json_path}"
+        q_type = q.get("type")
+        select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_visits")
