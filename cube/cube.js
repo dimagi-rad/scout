@@ -85,27 +85,43 @@ module.exports = {
    * Isolate the compiled data model per tenant schema.
    * Cube caches one compiled model per appId — using schema_name ensures
    * each tenant resolves COMPILE_CONTEXT.security_context.schema_name correctly.
+   *
+   * NOTE: securityContext can be undefined for unauthenticated requests (the
+   * dev-mode Playground) and for background work that carries no context.
+   * Guard against it so Cube returns an empty model instead of crashing with
+   * "Cannot read properties of undefined (reading 'schema_name')".
    */
   contextToAppId: ({ securityContext }) =>
-    `SCOUT_${securityContext.schema_name}`,
+    `SCOUT_${(securityContext && securityContext.schema_name) || "anonymous"}`,
 
   /**
    * Isolate the query orchestrator (pre-aggregation + cache) per tenant schema.
    */
   contextToOrchestratorId: ({ securityContext }) =>
-    `SCOUT_${securityContext.schema_name}`,
+    `SCOUT_${(securityContext && securityContext.schema_name) || "anonymous"}`,
 
   /**
    * Load per-workspace model files from cube/model/<schema_name>/.
    *
    * The Task 7 generator writes YAML files here after generating the model.
-   * If the directory is missing or empty, FileRepository returns an empty
-   * repository — Cube compiles an empty model, which is safe and returns
-   * an empty schema rather than erroring out.
+   * If the directory is missing or empty (or securityContext is absent),
+   * FileRepository returns an empty repository — Cube compiles an empty model,
+   * which is safe and returns an empty schema rather than erroring out.
    *
-   * @param {{ securityContext: { schema_name: string } }} ctx
+   * @param {{ securityContext?: { schema_name?: string } }} ctx
    * @returns {FileRepository}
    */
   repositoryFactory: ({ securityContext }) =>
-    new FileRepository(`model/${securityContext.schema_name}`),
+    new FileRepository(
+      `model/${(securityContext && securityContext.schema_name) || "__anonymous__"}`
+    ),
+
+  /**
+   * No predefined background-refresh contexts: Scout builds pre-aggregations
+   * lazily on query (with a valid securityContext). Returning [] avoids Cube's
+   * scheduled refresh running contextToAppId with an undefined securityContext.
+   * For production pre-agg warmup, populate this with the active workspaces'
+   * { securityContext: { workspace_id, schema_name } } entries.
+   */
+  scheduledRefreshContexts: () => [],
 };
