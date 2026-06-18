@@ -8,6 +8,7 @@ Example of implementing a custom OAuth2 provider for django-allauth.
 Follow this pattern for other identity providers.
 """
 
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 
@@ -86,6 +87,22 @@ class CommCareProvider(OAuth2Provider):
             "first_name": data.get("first_name", ""),
             "last_name": data.get("last_name", ""),
         }
+
+    def extract_email_addresses(self, data: dict) -> list[EmailAddress]:
+        """Return the user's email as a verified address.
+
+        allauth's base implementation returns ``[]``, which makes allauth fall
+        back to creating an *unverified* EmailAddress from ``User.email``. CommCare
+        HQ uses the email as the login identifier and confirms it at signup, so we
+        trust it as verified. A verified address is what lets the cross-provider
+        account-link/merge (see ``apps.users.signals.reconcile_existing_user_on_login``)
+        recognise the same person across providers instead of stranding a
+        duplicate, email-less account.
+        """
+        email = data.get("email")
+        if not email:
+            return []
+        return [EmailAddress(email=email, verified=True, primary=True)]
 
 
 # Required by django-allauth to discover this provider
