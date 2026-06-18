@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.credential_resolver import CredentialResolutionError
 from apps.workspaces import tasks as workspaces_tasks
 from apps.workspaces.models import (
     MaterializationRun,
@@ -21,6 +22,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.tasks import _run_pipeline_with_progress, materialize_workspace
+from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 from mcp_server.services.materializer import MaterializationCancelled
 
 
@@ -110,6 +112,37 @@ async def test_materialize_workspace_records_failure(
     assert result["all_succeeded"] is False
     assert result["tenants"][0]["success"] is False
     assert "upstream API down" in result["tenants"][0]["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
+    workspace, tenant_membership_obj, context_with_job_id
+):
+    """A team-mismatch credential failure must surface a distinct, actionable
+    re-authorize message — NOT the generic "No credential configured" — so a
+    user logged into the wrong OCS team is told to re-connect (finding 07#3)."""
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+    ):
+        mock_cred.side_effect = CredentialResolutionError(
+            AUTH_TOKEN_EXPIRED,
+            "Your sign-in is scoped to a different OCS team than this chatbot "
+            "(team-a). Please re-connect to team team-a.",
+        )
+        result = await materialize_workspace(
+            context_with_job_id,
+            workspace_id=str(workspace.id),
+            user_id="",
+        )
+
+    assert result["all_succeeded"] is False
+    tenant_result = result["tenants"][0]
+    assert tenant_result["success"] is False
+    assert "No credential configured" not in tenant_result["error"]
+    assert "re-connect" in tenant_result["error"]
+    assert tenant_result["error_code"] == AUTH_TOKEN_EXPIRED
 
 
 @pytest.fixture

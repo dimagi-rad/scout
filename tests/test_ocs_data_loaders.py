@@ -262,7 +262,14 @@ def test_participant_loader_maps_dedicated_endpoint_fields():
 
 
 def test_participant_loader_queries_chatbot_scoped_endpoint():
-    """The loader hits /api/participants filtered by the tenant's chatbot."""
+    """The loader hits /api/participants filtered by the tenant's chatbot.
+
+    The OCS ParticipantView reads ``request.query_params.get("experiment")``
+    (apps/api/views/participants.py), NOT ``chatbot`` — sending ``chatbot``
+    is silently ignored and returns the WHOLE team's participant roster plus
+    every chatbot's per-participant ``data``, a cross-chatbot PII leak. The
+    correct filter param is ``experiment`` keyed to the experiment public id.
+    """
     loader = OCSParticipantLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     page = MagicMock(status_code=200)
     page.json.return_value = {"results": [], "next": None}
@@ -270,7 +277,9 @@ def test_participant_loader_queries_chatbot_scoped_endpoint():
         list(loader.load_pages())
     args, kwargs = mock_get.call_args
     assert args[0] == f"{BASE_URL}/api/participants"
-    assert kwargs["params"] == {"chatbot": "exp-1"}
+    assert kwargs["params"] == {"experiment": "exp-1"}
+    # Guard against a regression to the ignored param name.
+    assert "chatbot" not in kwargs["params"]
 
 
 # ---------------------------------------------------------------------------
