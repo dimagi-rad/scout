@@ -47,7 +47,7 @@ from typing import Any
 import yaml
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
 from apps.transformations.services.cube_model_schema import CubeModel
@@ -229,7 +229,7 @@ def _write_files_sync(files: list[CubeFile], write_dir: str) -> None:
 def _default_model_client() -> Any:
     """Build the default ChatAnthropic client matching apps/agents convention."""
     return ChatAnthropic(
-        model=getattr(settings, "DEFAULT_LLM_MODEL", "claude-opus-4-8"),
+        model=settings.DEFAULT_LLM_MODEL,
         max_tokens=4096,
     )
 
@@ -272,7 +272,9 @@ def _model_to_files(model: CubeModel, schema_name: str, write_dir: str) -> list[
     # Emit one YAML file per cube
     for cube in model.cubes:
         cube_data = {"cubes": [cube.model_dump(exclude_none=True)]}
-        cube_yaml = yaml.dump(cube_data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        cube_yaml = yaml.dump(
+            cube_data, default_flow_style=False, allow_unicode=True, sort_keys=False
+        )
         path = str(base / f"{cube.name}.yml")
         files.append(CubeFile(path=path, yaml=cube_yaml))
 
@@ -360,6 +362,10 @@ async def generate_cube_model(
     except (yaml.YAMLError, ValidationError, ValueError) as exc:
         logger.warning("Cube model validation failed on first attempt: %s", exc)
         # --- Repair round-trip ---
+        # Include the bad output as an AIMessage so the LLM sees the full
+        # prior turn (human → ai → human) rather than two consecutive human
+        # messages, which violates the Anthropic turn-alternation contract.
+        bad_raw_yaml = raw_yaml
         repair_msg = HumanMessage(
             content=(
                 f"The YAML you returned failed validation with this error:\n\n{exc}\n\n"
@@ -367,7 +373,10 @@ async def generate_cube_model(
                 "no prose or markdown fences. Remember the multi-tenant sql_table rule."
             )
         )
-        raw_yaml = await _call_model(model_client, [system_msg, user_msg, repair_msg])
+        raw_yaml = await _call_model(
+            model_client,
+            [system_msg, user_msg, AIMessage(content=bad_raw_yaml), repair_msg],
+        )
         try:
             data = _parse_yaml(raw_yaml)
             model = _validate_cube_model(data)
@@ -381,5 +390,14 @@ async def generate_cube_model(
 
     # --- Write files ---
     await asyncio.to_thread(_write_files_sync, files, write_dir)
+
+    # Observability: log generation summary.
+    # NOTE: a dedicated CubeModelRun audit model is deferred to pipeline-wiring.
+    logger.info(
+        "Generated Cube model: schema=%r cubes=%d write_dir=%r",
+        schema_name,
+        len(model.cubes),
+        write_dir,
+    )
 
     return files

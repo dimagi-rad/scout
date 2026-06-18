@@ -80,13 +80,6 @@ class Measure(BaseModel):
     description: str | None = None
     public: bool | None = None
 
-    @model_validator(mode="after")
-    def sql_required_for_non_count(self) -> Measure:
-        """Measures other than 'count' should have an sql expression."""
-        # Permissive: only warn-level; don't block valid Cube YAML that
-        # omits sql on count_distinct referencing the primary key implicitly.
-        return self
-
 
 # ---------------------------------------------------------------------------
 # Join
@@ -163,11 +156,16 @@ class Cube(BaseModel):
     @field_validator("sql_table")
     @classmethod
     def sql_table_has_compile_context(cls, v: str | None) -> str | None:
-        """Soft-check that sql_table uses COMPILE_CONTEXT for multi-tenancy.
+        """Enforce that sql_table uses COMPILE_CONTEXT for multi-tenancy.
 
-        This is enforced hard in tests; here we validate at the schema level
-        so callers get a clear error message when the template is missing.
+        This is validated at the schema level so callers get a clear error
+        message when the multi-tenant template is missing.
         """
+        if v is not None and "COMPILE_CONTEXT" not in v:
+            raise ValueError(
+                f"sql_table {v!r} must use COMPILE_CONTEXT.security_context.schema_name"
+                " for multi-tenant schema isolation"
+            )
         return v
 
 
