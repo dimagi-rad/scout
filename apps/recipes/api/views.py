@@ -16,8 +16,9 @@ from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.recipes.models import Recipe, RecipeRun
+from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner, VariableValidationError
+from apps.recipes.tasks import run_recipe
 from apps.users.decorators import async_login_required
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
 from apps.workspaces.workspace_resolver import aresolve_workspace
@@ -125,23 +126,38 @@ async def recipe_run_view(request, workspace_id, recipe_id):
         return JsonResponse(serializer.errors, status=400)
     variable_values = serializer.validated_data.get("variable_values", {})
 
+    # Validate variables (and apply defaults) synchronously so the client gets a
+    # 400 in-band; only a valid request creates a run and dispatches work.
     try:
-        runner = RecipeRunner(recipe=recipe, variable_values=variable_values, user=user)
-        run = await runner.execute_async()
+        values = RecipeRunner.validate_and_default(recipe, variable_values)
     except VariableValidationError as e:
         return JsonResponse({"error": str(e), "errors": e.errors}, status=400)
+
+    # Execution is async: a recipe may block on a materialization (loading fresh
+    # data before building its dashboard), which must not hold the HTTP request
+    # open. Create the run PENDING, defer the background task, and return 202;
+    # the client polls GET .../runs/<id>/ for progress and the final result.
+    try:
+        run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        await run_recipe.defer_async(recipe_run_id=str(run.id))
     except Exception as e:
         # Don't leak internal exception detail to the client; log it behind a
         # short ref and return the ref (mirrors apps/chat/views.py).
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
-        logger.exception("Error running recipe %s [ref=%s]", recipe_id, error_ref)
+        logger.exception("Error dispatching recipe %s [ref=%s]", recipe_id, error_ref)
         return JsonResponse({"error": f"Recipe run failed. Ref: {error_ref}"}, status=500)
 
     # Reset the inactivity TTL on user-initiated recipe runs.
     await touch_workspace_schemas(workspace)
 
     data = await sync_to_async(lambda: RecipeRunSerializer(run).data)()
-    return JsonResponse(data, status=201)
+    return JsonResponse(data, status=202)
 
 
 class RecipeRunListView(APIView):

@@ -66,6 +66,76 @@ class TestTeardownSchemaUnbound:
         assert "list_tables" in tool_names
 
 
+class TestHeadlessMode:
+    """interactive=False swaps the interactive MCP run_materialization (fire-and-
+    ack) for the headless blocking tool, and emits blocking prompt guidance."""
+
+    def _fake_mcp_tool(self, name):
+        t = MagicMock()
+        t.name = name
+        return t
+
+    def test_build_tools_headless_swaps_in_blocking_materialization(self):
+        from apps.agents.graph.base import _build_tools
+
+        mcp_tools = [self._fake_mcp_tool("query"), self._fake_mcp_tool("run_materialization")]
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+
+        headless = _build_tools(workspace, None, mcp_tools, interactive=False, job_id=7)
+        rm = [t for t in headless if t.name == "run_materialization"]
+        assert len(rm) == 1, "exactly one run_materialization tool"
+        # The headless tool replaces the MCP one (different object identity).
+        assert rm[0] not in mcp_tools
+        assert callable(getattr(rm[0], "coroutine", None))  # async StructuredTool
+
+    def test_build_tools_interactive_keeps_mcp_materialization(self):
+        from apps.agents.graph.base import _build_tools
+
+        mcp_rm = self._fake_mcp_tool("run_materialization")
+        mcp_tools = [self._fake_mcp_tool("query"), mcp_rm]
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+
+        interactive = _build_tools(workspace, None, mcp_tools, interactive=True)
+        rm = [t for t in interactive if t.name == "run_materialization"]
+        assert rm == [mcp_rm], "interactive path keeps the original MCP tool untouched"
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_headless_no_data_prompt_is_blocking_not_resume(self, tenant, user):
+        from apps.agents.graph.base import _fetch_schema_context
+
+        interactive = await _fetch_schema_context(tenant, user, interactive=True)
+        headless = await _fetch_schema_context(tenant, user, interactive=False)
+
+        assert "run_materialization" in headless
+        # Interactive tells the agent to end its turn and wait for an async resume.
+        assert "end your turn" in interactive.lower()
+        # Headless must NOT — it has no resume path; it blocks and continues.
+        assert "end your turn" not in headless.lower()
+        assert "block" in headless.lower()
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_headless_in_progress_prompt_does_not_trigger_second_materialization(
+        self, tenant, user
+    ):
+        """When a materialization is already in progress, the headless prompt
+        must NOT tell the agent "no data loaded → call run_materialization" (that
+        starts a 2nd parallel run). It gets distinct in-progress guidance."""
+        from apps.agents.graph.base import _fetch_schema_context
+        from apps.workspaces.models import SchemaState, TenantSchema
+
+        await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_inprog", state=SchemaState.MATERIALIZING
+        )
+        msg = await _fetch_schema_context(tenant, user, interactive=False)
+
+        assert "run_materialization" in msg  # still the only path to data, headless
+        assert "no data has been loaded" not in msg.lower()  # would imply "start one"
+        assert "end your turn" not in msg.lower()  # no async resume in headless
+        assert "in progress" in msg.lower()  # acknowledges the in-flight load
+
+
 class TestSystemPrompt:
     """Verify the system prompt includes data availability instructions."""
 

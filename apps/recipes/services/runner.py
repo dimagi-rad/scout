@@ -58,34 +58,52 @@ class RecipeRunner:
         recipe: Recipe,
         variable_values: dict[str, Any],
         user: User,
+        *,
+        run: RecipeRun,
         graph: CompiledStateGraph | None = None,
+        job_id: int | None = None,
     ) -> None:
         self.recipe = recipe
         self.variable_values = variable_values.copy()
         self.user = user
         self._provided_graph = graph
         self._graph: CompiledStateGraph | None = None
-        self._run: RecipeRun | None = None
+        # The caller (recipe_run_view -> run_recipe task) creates the RecipeRun
+        # so the endpoint can return its id immediately (202) and the worker
+        # updates that same row in place. The runner always operates on it.
+        self._run: RecipeRun = run
+        # The enclosing Procrastinate job id, forwarded to the headless
+        # materialization tool for MaterializationRun traceability.
+        self._job_id: int | None = job_id
         self._thread_id: str = ""
         self._oauth_tokens: dict = {}
 
-    def validate_variables(self) -> None:
-        """Validate that all required variables are provided."""
-        errors = self.recipe.validate_variable_values(self.variable_values)
-
+    @staticmethod
+    def validate_and_default(recipe: Recipe, variable_values: dict[str, Any]) -> dict[str, Any]:
+        """Validate ``variable_values`` against ``recipe`` and return a copy with
+        recipe defaults applied. Raises ``VariableValidationError`` on missing
+        required variables. The run endpoint uses this to validate (and return a
+        400) before creating the RecipeRun, without constructing a runner.
+        """
+        errors = recipe.validate_variable_values(variable_values)
         if errors:
             logger.warning(
                 "Variable validation failed for recipe %s: %s",
-                self.recipe.name,
+                recipe.name,
                 errors,
             )
             raise VariableValidationError(errors)
 
-        # Apply defaults for optional variables not provided
-        for var_def in self.recipe.variables:
+        values = dict(variable_values)
+        for var_def in recipe.variables:
             var_name = var_def.get("name")
-            if var_name and var_name not in self.variable_values and "default" in var_def:
-                self.variable_values[var_name] = var_def["default"]
+            if var_name and var_name not in values and "default" in var_def:
+                values[var_name] = var_def["default"]
+        return values
+
+    def validate_variables(self) -> None:
+        """Validate this run's variable values, applying defaults in place."""
+        self.variable_values = self.validate_and_default(self.recipe, self.variable_values)
 
     async def _build_graph(self) -> CompiledStateGraph:
         """Build or return the agent graph for execution (async-first)."""
@@ -106,6 +124,13 @@ class RecipeRunner:
                 mcp_tools=mcp_tools,
                 oauth_tokens=self._oauth_tokens,
                 conversation_id=self._thread_id or None,
+                # A recipe is a HEADLESS run: no chat Thread, no checkpointer, no
+                # async-resume path. interactive=False gives the agent the
+                # blocking materialize tool (not the fire-and-ack MCP one, which
+                # would crash on the synthetic thread_id) and blocking prompt
+                # guidance. job_id is forwarded for MaterializationRun traceability.
+                interactive=False,
+                job_id=self._job_id,
             )
 
         return self._graph
@@ -154,14 +179,11 @@ class RecipeRunner:
         """Execute the recipe asynchronously."""
         self.validate_variables()
 
-        self._run = await RecipeRun.objects.acreate(
-            recipe=self.recipe,
-            status=RecipeRunStatus.RUNNING,
-            variable_values=self.variable_values,
-            step_results=[],
-            started_at=timezone.now(),
-            run_by=self.user,
-        )
+        # The run is always created by the caller (the run_recipe task); mark it
+        # RUNNING as execution begins.
+        self._run.status = RecipeRunStatus.RUNNING
+        self._run.started_at = timezone.now()
+        await self._run.asave(update_fields=["status", "started_at"])
 
         self._thread_id = f"recipe-run-{self._run.id}"
 

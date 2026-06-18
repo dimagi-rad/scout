@@ -16,6 +16,35 @@ User = get_user_model()
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_run_materialization_rejects_non_uuid_thread_id():
+    """A non-UUID thread_id (e.g. the recipe runner's synthetic
+    "recipe-run-<id>") must fail cleanly with a validation error instead of
+    raising ValueError out of the Thread UUIDField cast. Regression guard for
+    the recipe materialization crash (SCOUT-DJANGO-1R/1S)."""
+    user = await User.objects.acreate_user(email="nonuuid@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-nonuuid", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id="tnu", provider="commcare", canonical_name="NonUUID Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(tenant=tenant, user=user)
+
+    result = await run_materialization(
+        workspace_id=str(ws.id),
+        user_id=str(user.id),
+        thread_id="recipe-run-f3be369b-d867-4ef8-aa0d-a74f21101c18",
+        tool_call_id="tc-nonuuid",
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert "thread" in result["error"]["message"].lower()
+    # Must not have raised, and must not have created any ThreadJob.
+    assert not await ThreadJob.objects.aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_run_materialization_returns_started_immediately_and_creates_threadjob():
     user = await User.objects.acreate_user(email="a@b.c", password="x")
     ws = await Workspace.objects.acreate(name="W", created_by=user)
