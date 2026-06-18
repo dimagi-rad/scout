@@ -58,9 +58,12 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         # (tasks imports build_agent_graph for the resume path). This mirrors the
         # established pattern in apps/agents/tools/recipe_tool.py, which imports
         # apps.recipes.models inside the tool body for the same reason.
-        from apps.workspaces.tasks import materialize_workspace_core
+        from apps.workspaces.tasks import materialize_workspace_blocking
 
-        summary = await materialize_workspace_core(workspace_id, user_id, job_id)
+        # Blocking + dedupe-aware: waits for any in-progress materialization on
+        # this workspace's tenants before starting its own, so a recipe never
+        # triggers a parallel run against the same tenant schema.
+        summary = await materialize_workspace_blocking(workspace_id, user_id, job_id)
         tenants = summary.get("tenants", [])
         loaded = sum(1 for t in tenants if t.get("success"))
         view_schema = summary.get("view_schema")

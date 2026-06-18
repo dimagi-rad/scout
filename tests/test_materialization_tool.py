@@ -23,7 +23,7 @@ async def test_headless_materialization_tool_blocks_and_reports_completion(
             "view_schema": None,
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_core", _fake_core)
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
 
     tool = create_materialization_tool(workspace, user, job_id=99)
     assert tool.name == "run_materialization"
@@ -46,7 +46,7 @@ async def test_headless_materialization_tool_reports_failure(workspace, user, mo
             "view_schema": None,
         }
 
-    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_core", _fake_core)
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
 
     tool = create_materialization_tool(workspace, user)
     result = await tool.ainvoke({})

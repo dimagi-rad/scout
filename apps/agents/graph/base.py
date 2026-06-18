@@ -233,6 +233,18 @@ _HEADLESS_MATERIALIZE_GUIDANCE = (
     "`status: completed`, continue with the requested analysis; the data is ready."
 )
 
+# Headless guidance when a materialization is ALREADY in progress. The headless
+# `run_materialization` tool waits for the in-flight load rather than starting a
+# parallel one, so we still route the agent to it — but we must NOT say "no data
+# loaded" (that would read as "start one"), matching the interactive path's
+# "don't trigger another" intent.
+_HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
+    "A data load is already in progress for this workspace. Call "
+    "`run_materialization` to ensure fresh data — it WAITS for the in-progress "
+    "load to finish (it does not start a parallel one) and returns when the data "
+    "is ready. Then continue with the requested analysis in the same run."
+)
+
 
 async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
@@ -269,7 +281,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
     if ts.state == SchemaState.MATERIALIZING:
         if not interactive:
-            return _HEADLESS_MATERIALIZE_GUIDANCE
+            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return (
             "A materialization is already in progress in the background. Do NOT "
             "trigger another one and do NOT call other data tools (the data is "
@@ -366,7 +378,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
 
     if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
         if not interactive:
-            return _HEADLESS_MATERIALIZE_GUIDANCE
+            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return (
             "A materialization is already in progress in the background. Do NOT "
             "trigger another one and do NOT call other data tools (the data is "

@@ -303,6 +303,78 @@ async def test_materialize_workspace_core_runs_without_deferring_resume(
     defer_mock.assert_not_awaited()  # core must never defer the resume task
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_blocking_runs_immediately_when_idle(
+    workspace, tenant, tenant_membership_obj, monkeypatch
+):
+    """With no in-progress materialization, the headless blocking entrypoint
+    runs the core immediately without waiting."""
+    core = {"n": 0}
+
+    async def fake_core(wid, uid="", jid=None):
+        core["n"] += 1
+        return {"all_succeeded": True, "tenants": [], "view_schema": None}
+
+    slept = {"n": 0}
+
+    async def fake_sleep(_delay):
+        slept["n"] += 1
+
+    monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
+    monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
+
+    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id))
+
+    assert slept["n"] == 0  # nothing in progress → no waiting
+    assert core["n"] == 1
+    assert result["all_succeeded"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_materialize_workspace_blocking_waits_out_in_progress_run(
+    workspace, tenant, tenant_membership_obj, monkeypatch
+):
+    """If a materialization is already ACTIVE for one of the workspace's
+    tenants, the blocking entrypoint WAITS for it to clear before starting its
+    own — never running two in parallel against the same tenant schema."""
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="t_wait", state=SchemaState.MATERIALIZING
+    )
+    run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+    )
+
+    core = {"n": 0, "when_slept": None}
+
+    async def fake_core(wid, uid="", jid=None):
+        core["n"] += 1
+        core["when_slept"] = slept["n"]
+        return {"all_succeeded": True, "tenants": [], "view_schema": None}
+
+    slept = {"n": 0}
+
+    async def fake_sleep(_delay):
+        # Clear the in-progress run on the first poll so the wait loop exits.
+        slept["n"] += 1
+        await MaterializationRun.objects.filter(id=run.id).aupdate(
+            state=MaterializationRun.RunState.COMPLETED
+        )
+
+    monkeypatch.setattr(workspaces_tasks, "materialize_workspace_core", fake_core)
+    monkeypatch.setattr("apps.workspaces.tasks.asyncio.sleep", fake_sleep)
+
+    result = await workspaces_tasks.materialize_workspace_blocking(str(workspace.id))
+
+    assert slept["n"] >= 1  # it waited for the in-progress run
+    assert core["n"] == 1  # then ran its own
+    assert core["when_slept"] >= 1  # core ran AFTER the wait, not before
+    assert result["all_succeeded"] is True
+
+
 # ---------------------------------------------------------------------------
 # _run_pipeline_with_progress closure
 # ---------------------------------------------------------------------------

@@ -114,6 +114,27 @@ class TestHeadlessMode:
         assert "end your turn" not in headless.lower()
         assert "block" in headless.lower()
 
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_headless_in_progress_prompt_does_not_trigger_second_materialization(
+        self, tenant, user
+    ):
+        """When a materialization is already in progress, the headless prompt
+        must NOT tell the agent "no data loaded → call run_materialization" (that
+        starts a 2nd parallel run). It gets distinct in-progress guidance."""
+        from apps.agents.graph.base import _fetch_schema_context
+        from apps.workspaces.models import SchemaState, TenantSchema
+
+        await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_inprog", state=SchemaState.MATERIALIZING
+        )
+        msg = await _fetch_schema_context(tenant, user, interactive=False)
+
+        assert "run_materialization" in msg  # still the only path to data, headless
+        assert "no data has been loaded" not in msg.lower()  # would imply "start one"
+        assert "end your turn" not in msg.lower()  # no async resume in headless
+        assert "in progress" in msg.lower()  # acknowledges the in-flight load
+
 
 class TestSystemPrompt:
     """Verify the system prompt includes data availability instructions."""

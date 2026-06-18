@@ -371,6 +371,56 @@ async def materialize_workspace_core(
     }
 
 
+async def _await_in_progress_materializations(
+    workspace_id: str, *, poll_interval: float = 2.0, max_wait_seconds: float = 1800.0
+) -> None:
+    """Block until no materialization is ACTIVE for this workspace's tenants.
+
+    Headless callers (recipes) call this before starting their own run so they
+    do not execute a parallel materialization against the same tenant schemas —
+    the pipeline drops & recreates ``raw_*`` tables, so concurrent runs corrupt
+    each other. Best-effort: on timeout, log and return so the caller proceeds.
+    """
+    tenant_ids = [
+        wt.tenant_id async for wt in WorkspaceTenant.objects.filter(workspace_id=workspace_id)
+    ]
+    if not tenant_ids:
+        return
+    # Poll the cross-process MaterializationRun state (another worker owns the
+    # in-flight run, so there is no in-process Event to await). Bounded for-loop
+    # rather than `while True` to keep a hard ceiling on the wait.
+    max_polls = max(1, int(max_wait_seconds / poll_interval))
+    for _ in range(max_polls):
+        in_progress = await MaterializationRun.objects.filter(
+            tenant_schema__tenant_id__in=tenant_ids,
+            state__in=list(MaterializationRun.ACTIVE_STATES),
+        ).aexists()
+        if not in_progress:
+            return
+        await asyncio.sleep(poll_interval)
+    logger.warning(
+        "materialize_workspace_blocking: still waiting on an in-progress materialization "
+        "of workspace %s after ~%.0fs; proceeding",
+        workspace_id,
+        max_wait_seconds,
+    )
+
+
+async def materialize_workspace_blocking(
+    workspace_id: str, user_id: str = "", job_id: int | None = None
+) -> dict:
+    """Ensure the workspace is materialized, blocking until done.
+
+    Unlike the bare ``materialize_workspace_core``, this first WAITS for any
+    materialization already in progress for the workspace's tenants to finish,
+    then runs a fresh one — so a headless recipe never starts a second, parallel
+    materialization against the same tenant schema (which the interactive path
+    avoids by telling the agent not to). Returns the core summary shape.
+    """
+    await _await_in_progress_materializations(workspace_id)
+    return await materialize_workspace_core(workspace_id, user_id, job_id)
+
+
 @task(pass_context=True)
 async def materialize_workspace(
     context,
