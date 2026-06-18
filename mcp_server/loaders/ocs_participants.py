@@ -23,8 +23,13 @@ The endpoint is cursor-paginated (``{"next": ..., "previous": ...,
         ],
     }
 
-We pass ``chatbot=<experiment_id>`` so the participant list (and each
-participant's ``data`` array) is scoped to this tenant's chatbot.
+We pass ``experiment=<experiment_id>`` so the participant list (and each
+participant's ``data`` array) is scoped to this tenant's chatbot. The OCS
+``ParticipantView`` reads only the ``experiment`` query param
+(``request.query_params.get("experiment")``); an earlier ``chatbot`` param was
+silently ignored, returning the WHOLE team roster plus every chatbot's
+per-participant ``data`` into a single-chatbot tenant schema (cross-chatbot
+PII disclosure — arch #245 finding 12#3).
 """
 
 from __future__ import annotations
@@ -43,8 +48,10 @@ class OCSParticipantLoader(OCSBaseLoader):
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/participants"
         # Scope to this tenant's chatbot so the participant list and each
-        # participant's per-chatbot ``data`` array are limited to it.
-        params = {"chatbot": self.experiment_id}
+        # participant's per-chatbot ``data`` array are limited to it. The OCS
+        # ParticipantView filters on the ``experiment`` query param; ``chatbot``
+        # is silently ignored and leaks the whole team roster (arch #245).
+        params = {"experiment": self.experiment_id}
         total = 0
         # Cursor pagination — no ``count`` field, so totals are always None.
         for raw_page, _page_total in self._paginate(url, params=params):

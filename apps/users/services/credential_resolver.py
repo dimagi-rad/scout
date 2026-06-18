@@ -14,8 +14,26 @@ from apps.users.services.token_refresh import (
     refresh_oauth_token,
     token_needs_refresh,
 )
+from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
 logger = logging.getLogger(__name__)
+
+
+class CredentialResolutionError(Exception):
+    """Raised when a credential exists but cannot be used for a *known,
+    actionable* reason (e.g. the user's OAuth token is now scoped to a
+    different team than the chatbot they're materializing).
+
+    Distinct from ``aresolve_credential`` returning ``None`` (which means no
+    usable credential could be found for an opaque reason — missing connection,
+    decrypt failure, etc.). Callers should surface ``message`` to the user and
+    may key UI/remediation off ``code`` (an ``mcp_server.envelope`` error code).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 def _social_token_qs(user, provider: str):
@@ -89,8 +107,19 @@ async def aresolve_credential(membership) -> dict | None:
         .select_related("account", "app")
         .afirst()
     )
-    if not token_obj or _oauth_team_mismatch(membership, token_obj):
+    if not token_obj:
         return None
+    if _oauth_team_mismatch(membership, token_obj):
+        # The user is signed in to a different team than this chatbot. Fail
+        # closed (never serve another team's token), but surface a distinct,
+        # actionable error so the user is told to re-connect — not the generic
+        # "No credential configured" (arch #245 finding 07#3).
+        raise CredentialResolutionError(
+            AUTH_TOKEN_EXPIRED,
+            "Your sign-in is scoped to a different team than this chatbot's "
+            f"team ({membership.team_slug}). Please re-connect to team "
+            f"'{membership.team_slug}' to materialize it.",
+        )
 
     return await _aresolve_oauth_credential(token_obj, conn.provider)
 

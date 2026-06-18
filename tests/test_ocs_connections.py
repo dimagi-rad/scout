@@ -18,9 +18,13 @@ from django.utils import timezone
 from apps.users.adapters import encrypt_credential
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.api_key_providers.base import TenantDescriptor
-from apps.users.services.credential_resolver import aresolve_credential
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    aresolve_credential,
+)
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import resolve_ocs_chatbots
+from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
 
 def _mock_async_client(mocker, fake_get):
@@ -182,6 +186,11 @@ def _mock_token_qs(mocker, *, team, token="tok"):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_resolve_oauth_fails_closed_on_team_mismatch(user, mocker):
+    """A team-mismatch must fail closed AND be distinguishable from the
+    generic "no credential" case: it raises CredentialResolutionError with the
+    AUTH_TOKEN_EXPIRED code and an actionable, re-authorize-oriented message so
+    the user is told to re-connect, not just that "no credential is configured"
+    (finding 07#3)."""
     conn = await TenantConnection.objects.acreate(
         user=user, provider="ocs", credential_type=TenantConnection.OAUTH
     )
@@ -190,7 +199,12 @@ async def test_resolve_oauth_fails_closed_on_team_mismatch(user, mocker):
         user=user, tenant=tenant, connection=conn, team_slug="team-a"
     )
     _mock_token_qs(mocker, team="team-b")
-    assert await aresolve_credential(tm) is None
+    with pytest.raises(CredentialResolutionError) as exc_info:
+        await aresolve_credential(tm)
+    assert exc_info.value.code == AUTH_TOKEN_EXPIRED
+    # Distinct, actionable message — not the generic "No credential configured".
+    assert "No credential configured" not in str(exc_info.value)
+    assert "team-a" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -366,9 +380,10 @@ async def test_remove_connection_archives_memberships(user):
 @pytest.mark.django_db(transaction=True)
 async def test_reported_bug_oauth_team_switch_fails_closed(user, mocker):
     """OAuth team A imports chatbots → add API key for team B → re-login OAuth as
-    team B. The team-A chatbot must resolve to None (NOT the team-B token), while
-    the team-B chatbot resolves via its API key. This is the regression that
-    motivated the feature."""
+    team B. The team-A chatbot must fail closed (NOT serve the team-B token),
+    while the team-B chatbot resolves via its API key. This is the regression
+    that motivated the feature. Fail-closed now surfaces a distinct, actionable
+    re-authorize error rather than a silent None (arch #245 finding 07#3)."""
 
     acct = await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
@@ -408,7 +423,11 @@ async def test_reported_bug_oauth_team_switch_fails_closed(user, mocker):
     # team-A chatbot fails closed (must NOT fetch with the team-b token → no 404 bug).
     # Mirror the production call sites, which select_related("connection", "user").
     tm_a = await TenantMembership.objects.select_related("connection", "user").aget(id=tm_a.id)
-    assert await aresolve_credential(tm_a) is None
+    with pytest.raises(CredentialResolutionError) as exc_info:
+        await aresolve_credential(tm_a)
+    # Fail closed: the team-b token is never returned; the error is actionable.
+    assert exc_info.value.code == AUTH_TOKEN_EXPIRED
+    assert "team-a" in str(exc_info.value)
     # team-B chatbot still resolves via its own API key
     tm_b = await TenantMembership.objects.select_related("connection", "user").aget(id=tm_b.id)
     assert await aresolve_credential(tm_b) == {"type": "api_key", "value": "kb"}

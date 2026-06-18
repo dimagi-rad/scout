@@ -14,7 +14,10 @@ sources:
     # counted in sessions because OCS exposes no message total (issue #221).
     progress_unit: sessions
   - name: participants
-    description: "Participants with name, platform, and per-chatbot custom data (from the dedicated participant API)"
+    # Scoped to this tenant's chatbot via the ``experiment`` query param on
+    # /api/participants — NOT ``chatbot`` (which OCS ignores, leaking the whole
+    # team roster + every chatbot's per-participant data; arch #245).
+    description: "Participants with name, platform, and per-chatbot custom data (from the dedicated participant API, scoped to this experiment)"
 
 metadata_discovery:
   description: "Fetch experiment detail from OCS API"

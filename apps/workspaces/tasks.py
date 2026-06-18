@@ -21,7 +21,10 @@ from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
-from apps.users.services.credential_resolver import aresolve_credential
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    aresolve_credential,
+)
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -158,7 +161,15 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     # Step 2: Resolve credential and run materialization pipeline. This task
     # runs as an async job, so it must use the async resolver — the sync one
     # issues ORM queries that raise SynchronousOnlyOperation here.
-    credential = await aresolve_credential(membership)
+    try:
+        credential = await aresolve_credential(membership)
+    except CredentialResolutionError as e:
+        # Actionable credential failure (e.g. token scoped to a different team).
+        # Surface the distinct message + code so the user is told to re-connect
+        # rather than seeing the generic "No credential available"
+        # (arch #245 finding 07#3).
+        await _drop_schema_and_fail(new_schema)
+        return {"error": e.message, "error_code": e.code}
     if credential is None:
         await _drop_schema_and_fail(new_schema)
         return {"error": "No credential available"}
@@ -277,7 +288,22 @@ async def materialize_workspace_core(
             )
             continue
 
-        credential = await aresolve_credential(tm)
+        try:
+            credential = await aresolve_credential(tm)
+        except CredentialResolutionError as e:
+            # Actionable failure (e.g. token scoped to a different team) —
+            # surface a distinct message + code so the user knows to
+            # re-connect, not the generic "No credential configured"
+            # (arch #245 finding 07#3).
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "success": False,
+                    "error": e.message,
+                    "error_code": e.code,
+                }
+            )
+            continue
         if credential is None:
             tenant_results.append(
                 {
