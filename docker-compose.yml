@@ -86,6 +86,32 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # Cube Core semantic layer (REST :4000, SQL API pg-wire :15432)
+  # Connects to the managed DB where tenant schemas (t_<id>, ws_<hash>) live.
+  # In dev that is the same platform-db; in production point CUBEJS_DB_* at
+  # the separate managed-data Postgres (matching MANAGED_DATABASE_URL).
+  cube:
+    image: cubejs/cube:latest
+    ports:
+      - "4000:4000"      # REST API / Playground
+      - "15432:15432"    # SQL API (pg-wire)
+    environment:
+      CUBEJS_DEV_MODE: "true"
+      CUBEJS_DB_TYPE: postgres
+      CUBEJS_DB_HOST: platform-db
+      CUBEJS_DB_PORT: "5432"
+      CUBEJS_DB_NAME: agent_platform
+      CUBEJS_DB_USER: platform
+      CUBEJS_DB_PASS: ${PLATFORM_DB_PASSWORD:-devpassword}
+      CUBEJS_API_SECRET: ${CUBEJS_API_SECRET}
+      CUBEJS_PG_SQL_PORT: "15432"
+    volumes:
+      - ./cube:/cube/conf
+    depends_on:
+      platform-db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   platform_data:
   static_files:
