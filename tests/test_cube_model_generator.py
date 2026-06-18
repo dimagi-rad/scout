@@ -354,3 +354,12 @@ async def test_generate_cube_model_repair_round_trip(tmp_path: Path) -> None:
             assert "COMPILE_CONTEXT" in sql_table, (
                 f"After repair, cube '{cube['name']}' is still missing COMPILE_CONTEXT"
             )
+
+
+def test_cube_model_sql_table_without_compile_context_raises():
+    with pytest.raises(ValueError, match="COMPILE_CONTEXT"):
+        CubeModel(
+            cubes=[
+                {"name": "test", "sql_table": "myschema.visits", "measures": [], "dimensions": []}
+            ]
+        )
