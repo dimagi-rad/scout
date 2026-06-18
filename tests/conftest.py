@@ -5,6 +5,8 @@ Pytest configuration and fixtures for Scout tests.
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.users.models import Tenant, TenantMembership
+
 
 @pytest.fixture
 def user(db):
@@ -50,10 +52,6 @@ def tenant_membership(db, user, tenant):
 @pytest.fixture
 def connect_tenant_membership(db):
     """Create a TenantMembership for a commcare_connect tenant."""
-    from django.contrib.auth import get_user_model
-
-    from apps.users.models import Tenant, TenantMembership
-
     User = get_user_model()
     connect_user = User.objects.create_user(
         email="connect@example.com",
