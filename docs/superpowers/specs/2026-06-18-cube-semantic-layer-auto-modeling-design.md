@@ -43,25 +43,35 @@ evaluation harness.
 ## 2. Goals / non-goals
 
 **Goals**
-- Get synthetic Connect data into Scout as a real data source (test fuel).
+- **Run the POC first and foremost against real CommCare Connect data.** Scout already has a
+  working Connect pipeline (`pipelines/connect_sync.yml`, `ConnectMetadataLoader`), so the POC
+  is not blocked on any external work.
 - **Auto-model** a Cube semantic layer from Connect/CommCare **app structure** (form schemas)
   + Scout's existing knowledge — not hand-written YAML.
 - Let the agent query governed measures, falling back to raw SQL when unmodeled (seamless to
   the user — "it's just magic").
 - Produce an **evaluation** comparing free-SQL vs via-Cube answers → an adoption verdict.
 - Build the **self-improving loop** that grows the model from usage (persist knowledge).
+- **Secondarily**, add synthetic connect-labs data as a reproducible alternate source (same
+  Connect export shape) once connect-labs#637 lands — primarily to strengthen the eval (§4.5).
+
+**Data-source priority.** Real Connect is the primary POC fuel; connect-labs synthetic is a
+follow-on. The auto-modeling, Cube, agent, and eval components are **data-source-agnostic** —
+they operate on whatever Connect data is materialized, so adding the synthetic source later is
+purely an additional loader/credential, not a redesign.
 
 **Non-goals**
 - Cube Cloud / hosted MCP / D3 (we use Cube Core in Docker).
 - Replacing raw-SQL access wholesale — Cube is additive; we migrate domains incrementally.
 - Exposing Cube or any modeling concept to end users. Users only ever chat.
-- Real (non-synthetic) Connect ingestion changes beyond what reuse naturally provides.
+- Blocking the POC on the synthetic connect-labs source.
 
 ## 3. End-state architecture
 
 ```
-connect-labs /api/export/  (incl. app_structure)            [external dep: connect-labs#637]
-      │   Scout Connect loader, re-pointed at synthetic base URL + PAT
+PRIMARY:  real CommCare Connect  (existing Connect pipeline + deliver-app CommCare app structure)
+SECONDARY: connect-labs /api/export/ (incl. app_structure)   [external dep: connect-labs#637]
+      │   Scout Connect loader (same export shape; synthetic = different base URL + PAT)
       ▼
 managed Postgres:  raw_visits, raw_users, raw_completed_works, raw_completed_module
       +  TenantMetadata.metadata.app_structure   ← deliver-app form schema (semantic source)
@@ -83,33 +93,47 @@ managed Postgres:  raw_visits, raw_users, raw_completed_works, raw_completed_mod
 
 ## 4. Components
 
-### 4.1 Connect-labs synthetic source (M1)
+### 4.1 Connect data source
 
-**Reuse first.** Scout already has a Connect pipeline (`pipelines/connect_sync.yml`,
-provider `commcare_connect`) and Connect loaders incl. a `ConnectMetadataLoader`, plus a base
-loader (`mcp_server/loaders/commcare_base.py`) that already supports OAuth Bearer **and** API
-key/PAT auth and TastyPie-style pagination. The synthetic source is the *same Connect export
-shape* at a different base URL with a different token.
+The auto-modeling thesis needs two things from the data source: the materialized `raw_*` tables
+**and** the deliver-app **form schema** (the semantic source). Both come from Connect.
 
-Work:
-- **Credential / connection:** add a connection type for the connect-labs synthetic API —
-  base URL + MCP PAT, stored via the existing Fernet-encrypted `TenantConnection`
-  (`apps/users/models.py`) and resolved by `credential_resolver`. (PAT minted at
-  `connect-labs /labs/mcp/tokens/`.)
-- **Pipeline:** `pipelines/connect_labs_sync.yml` (or parameterize `connect_sync.yml` with a
-  base URL) covering sources `visits`, `users`, `completed_works`, `completed_module`.
-  Pagination envelope is `{results, next, count}`; honor `?page_size=`.
-- **app_structure fetch (the key gap):** extend the Connect metadata loader to call
-  `GET /api/export/opportunity/{id}/app_structure/` and store the deliver-app form schema into
-  `TenantMetadata.metadata` (same JSONB slot CommCare app structure uses), normalized to the
-  `form_definitions` shape (`questions: [{label, value, type, repeat, options?}]`).
-- **Discovery:** use `GET /api/export/opportunities/` to enumerate accessible synthetic opps.
+#### 4.1a Real CommCare Connect — PRIMARY (M1)
 
-Acceptance: a synthetic opp materializes `raw_*` tables into the managed schema and its
-deliver-app form schema lands in `TenantMetadata.metadata`.
+**Reuse first.** Scout already has a Connect pipeline (`pipelines/connect_sync.yml`, provider
+`commcare_connect`) and Connect loaders incl. a `ConnectMetadataLoader`, plus a base loader
+(`mcp_server/loaders/commcare_base.py`) supporting OAuth Bearer / API-key auth and pagination.
+A real Connect opportunity is already connectable in Scout via existing CommCare Connect OAuth.
 
-> **Decoupling:** M1 can develop against a recorded fixture/stub of the #637 API so Scout work
-> is not blocked on connect-labs landing.
+The one real gap: **`ConnectMetadataLoader` fetches org/program structure but NOT the deliver-app
+form definitions** (per code review). A Connect opportunity is backed by a CommCare **deliver
+app**; its form schema is fetchable via the CommCare Application API (`/a/{domain}/api/v0.5/
+application/`) — which Scout's `commcare_metadata.py` *already* knows how to parse into
+`form_definitions`. Work:
+- Resolve the opportunity's deliver-app id/domain and fetch its CommCare app structure, storing
+  normalized `form_definitions` into `TenantMetadata.metadata` (same slot CommCare ingestion uses).
+- Confirm sources `visits`, `users`, `completed_works`, `completed_module` materialize for a real
+  opportunity (largely existing behavior).
+
+Acceptance: a real Connect opportunity materializes `raw_*` tables **and** its deliver-app form
+schema lands in `TenantMetadata.metadata`, ready for auto-modeling (§4.2).
+
+#### 4.1b connect-labs synthetic — SECONDARY (after #637)
+
+Same Connect export shape at a different base URL with a PAT — so it's an additional
+loader/credential, not a redesign. Useful as reproducible demo data and, importantly, for the
+eval (§4.5) because the synthetic manifest carries **known ground truth** (declared KPIs, seeded
+anomalies). Work, once connect-labs#637 lands:
+- **Credential:** base URL + MCP PAT (minted at `connect-labs /labs/mcp/tokens/`), stored via the
+  existing Fernet-encrypted `TenantConnection` and resolved by `credential_resolver`.
+- **Pipeline:** `pipelines/connect_labs_sync.yml` (or parameterize `connect_sync.yml` with a base
+  URL) hitting `/api/export/...`; envelope `{results, next, count}`; honor `?page_size=`.
+- **app_structure:** read it directly from `GET /api/export/opportunity/{id}/app_structure/`
+  (the generator emits it per #637) into the same `form_definitions` slot.
+- **Discovery:** `GET /api/export/opportunities/`.
+
+> Until #637 lands, the synthetic path can also be stubbed against a recorded fixture — but it is
+> not on the POC critical path; real Connect is.
 
 ### 4.2 Auto-modeling engine (M2 + M3 output) — the heart
 
@@ -171,8 +195,12 @@ New `apps/evals` (no existing eval framework in Scout today):
 - **Runner:** answers each golden question both ways via the agent, deterministically compares
   result sets, and uses an LLM judge for semantic equivalence; aggregates a scorecard
   (correctness, consistency across runs, latency, and # questions Cube could answer at all).
-- **Seed set:** ~8–15 representative questions over the synthetic MUAC/CHW domain (counts,
-  rates by archetype/week, flagged-visit analysis, payment reconciliation).
+- **Seed set:** ~8–15 representative questions over the connected opportunity's domain (counts,
+  rates by worker/time, flagged-visit analysis, payment reconciliation).
+- **Ground truth:** real Connect has none, so its eval scores via reference-SQL + LLM-judge.
+  The synthetic connect-labs source (§4.1b) is materially better here — its manifest declares
+  KPIs and seeded anomalies, giving objective ground truth — so when #637 lands, the eval should
+  add a synthetic opportunity for a higher-confidence verdict. Real-Connect eval runs first.
 - Output: a report that is the **go/no-go evidence** for adoption.
 
 ### 4.6 Self-improving loop + curation (M5) — persist knowledge over time
@@ -191,17 +219,22 @@ New `apps/evals` (no existing eval framework in Scout today):
 
 | Phase | Delivers | Reuse / build | Independent value |
 |---|---|---|---|
-| M1 | Connect-labs loader/pipeline → `raw_*` + `app_structure` | Reuse Connect loader/creds/pipeline; add app_structure | Synthetic Connect data in Scout |
+| M1 | **Real Connect** ingestion → `raw_*` + deliver-app `app_structure` | Reuse Connect pipeline; add deliver-app form-schema fetch | Real Connect data ready to auto-model |
 | M2 | Enriched auto-staging + auto `column_notes` | Improve `commcare_staging.py` | Better answers *without* Cube; lifts eval baseline |
 | M3 | Cube Core + generated model + `semantic_query`/`semantic_catalog` | New + generator | Governed-metric querying |
 | M4 | Eval framework: free-SQL vs Cube | New (`apps/evals`) | **Adoption decision, with data** |
 | M5 | Self-improving loop + curation gate | New | Persist knowledge over time |
+| M1b | connect-labs **synthetic** source (parallel/after #637) | Add loader/credential; reuse all of M2–M5 | Reproducible demo + ground-truth eval |
+
+M1–M5 run against real Connect and are the critical path. **M1b is parallel and non-blocking** —
+it slots a second data source under the same M2–M5 machinery once connect-labs#637 lands.
 
 ## 6. External dependency
 
 - **connect-labs#637** — expose authenticated `/api/export/` endpoints serving synthetic data,
-  including a generator-emitted `app_structure.json`. Tracked separately; Scout develops M1
-  against a recorded fixture until it lands.
+  including a generator-emitted `app_structure.json`. **Gates only the secondary synthetic
+  source (M1b), not the POC.** The M1–M5 critical path runs against real Connect and does not
+  depend on it.
 
 ## 7. Risks & open questions (resolve during planning)
 
