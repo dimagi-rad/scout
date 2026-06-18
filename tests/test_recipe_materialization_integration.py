@@ -14,7 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
-from apps.recipes.models import Recipe, RecipeRunStatus
+from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
 
 
@@ -67,7 +67,14 @@ async def test_recipe_agent_materializes_headlessly_without_crash(workspace, use
         patch("apps.recipes.services.runner.get_user_oauth_tokens", new=AsyncMock(return_value={})),
         patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
     ):
-        run = await RecipeRunner(recipe, {}, user, job_id=55).execute_async()
+        run_row = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values={},
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, {}, user, run=run_row, job_id=55).execute_async()
 
     # No UUID crash — the run completed.
     assert run.status == RecipeRunStatus.COMPLETED, run.step_results

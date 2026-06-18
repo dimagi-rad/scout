@@ -128,9 +128,8 @@ async def recipe_run_view(request, workspace_id, recipe_id):
 
     # Validate variables (and apply defaults) synchronously so the client gets a
     # 400 in-band; only a valid request creates a run and dispatches work.
-    runner = RecipeRunner(recipe=recipe, variable_values=variable_values, user=user)
     try:
-        runner.validate_variables()
+        values = RecipeRunner.validate_and_default(recipe, variable_values)
     except VariableValidationError as e:
         return JsonResponse({"error": str(e), "errors": e.errors}, status=400)
 
@@ -143,7 +142,7 @@ async def recipe_run_view(request, workspace_id, recipe_id):
             recipe=recipe,
             run_by=user,
             status=RecipeRunStatus.PENDING,
-            variable_values=runner.variable_values,
+            variable_values=values,
             step_results=[],
         )
         await run_recipe.defer_async(recipe_run_id=str(run.id))

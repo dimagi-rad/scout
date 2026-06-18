@@ -585,12 +585,32 @@ class TestRecipeRunModel:
 class TestRecipeRunner:
     """Tests for the RecipeRunner async path with a provided (mocked) agent graph."""
 
+    def test_validate_and_default_applies_defaults(self, recipe):
+        """validate_and_default returns a copy with recipe defaults filled in,
+        so the view can validate + default without constructing a runner."""
+        values = RecipeRunner.validate_and_default(recipe, {"start_date": "2024-01-01"})
+        assert values["region"] == "North"  # default applied
+        assert values["limit"] == 10  # default applied
+        assert values["start_date"] == "2024-01-01"
+
+    def test_validate_and_default_raises_on_missing_required(self, recipe):
+        """start_date has no default, so omitting it is a validation error."""
+        with pytest.raises(VariableValidationError):
+            RecipeRunner.validate_and_default(recipe, {"region": "North", "limit": 10})
+
     @pytest.mark.asyncio
     async def test_recipe_runner_validates_variables(self, recipe, user, recipe_step_1):
         """RecipeRunner.execute_async raises VariableValidationError on missing vars."""
         invalid_values = {"region": "North", "limit": 10}  # start_date missing
+        run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=invalid_values,
+            step_results=[],
+        )
 
-        runner = RecipeRunner(recipe, invalid_values, user, graph=Mock())
+        runner = RecipeRunner(recipe, invalid_values, user, run=run, graph=Mock())
         with pytest.raises(VariableValidationError):
             await runner.execute_async()
 
@@ -612,7 +632,14 @@ class TestRecipeRunner:
         stub_graph.ainvoke = AsyncMock(return_value={"messages": []})
         mock_build.return_value = stub_graph
 
-        await RecipeRunner(recipe, values, user, job_id=123).execute_async()
+        run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        await RecipeRunner(recipe, values, user, run=run, job_id=123).execute_async()
 
         kwargs = mock_build.await_args.kwargs
         assert kwargs["interactive"] is False
@@ -628,7 +655,14 @@ class TestRecipeRunner:
             return_value={"messages": [Mock(content="Result", tool_calls=[])]}
         )
 
-        run = await RecipeRunner(recipe, values, user, graph=mock_graph).execute_async()
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
 
         assert run is not None
         assert isinstance(run, RecipeRun)
@@ -645,7 +679,14 @@ class TestRecipeRunner:
             return_value={"messages": [Mock(content="Mocked response", tool_calls=[])]}
         )
 
-        run = await RecipeRunner(recipe, values, user, graph=mock_graph).execute_async()
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
 
         assert len(run.step_results) == 1
         assert run.step_results[0]["step_order"] == 1
@@ -662,7 +703,14 @@ class TestRecipeRunner:
             return_value={"messages": [Mock(content="Mocked response", tool_calls=[])]}
         )
 
-        run = await RecipeRunner(recipe, values, user, graph=mock_graph).execute_async()
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
 
         step_result = run.step_results[0]
         assert "East" in step_result["prompt"]
@@ -675,7 +723,14 @@ class TestRecipeRunner:
         mock_graph = Mock()
         mock_graph.ainvoke = AsyncMock(side_effect=Exception("Agent execution failed"))
 
-        run = await RecipeRunner(recipe, values, user, graph=mock_graph).execute_async()
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
 
         assert run.status == RecipeRunStatus.FAILED
         assert len(run.step_results) > 0
@@ -691,7 +746,14 @@ class TestRecipeRunner:
             return_value={"messages": [Mock(content="Success", tool_calls=[])]}
         )
 
-        run = await RecipeRunner(recipe, values, user, graph=mock_graph).execute_async()
+        _run = await RecipeRun.objects.acreate(
+            recipe=recipe,
+            run_by=user,
+            status=RecipeRunStatus.PENDING,
+            variable_values=values,
+            step_results=[],
+        )
+        run = await RecipeRunner(recipe, values, user, run=_run, graph=mock_graph).execute_async()
 
         assert run.status == RecipeRunStatus.COMPLETED
         assert run.completed_at is not None

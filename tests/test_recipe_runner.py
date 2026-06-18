@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from apps.recipes.models import Recipe, RecipeRunStatus
+from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.recipes.services.runner import RecipeRunner
 from mcp_server.server import mcp as scout_mcp
 
@@ -108,7 +108,16 @@ async def test_execute_async_builds_real_graph_and_flows_workspace_id(recipe, us
                 return_value=_fake_llm_driving_get_schema_status(),
             ),
         ):
-            run = await RecipeRunner(recipe=recipe, variable_values=values, user=user).execute_async()
+            run_row = await RecipeRun.objects.acreate(
+                recipe=recipe,
+                run_by=user,
+                status=RecipeRunStatus.PENDING,
+                variable_values=values,
+                step_results=[],
+            )
+            run = await RecipeRunner(
+                recipe=recipe, variable_values=values, user=user, run=run_row
+            ).execute_async()
 
     assert run.status == RecipeRunStatus.COMPLETED, run.step_results
     step = run.step_results[0]
