@@ -27,6 +27,7 @@ COMPILE_CONTEXT note:
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, field_validator, model_validator
@@ -133,6 +134,9 @@ class View(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_CUBE_NAME_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
 class Cube(BaseModel):
     """A single Cube cube definition."""
 
@@ -146,6 +150,24 @@ class Cube(BaseModel):
     title: str | None = None
     description: str | None = None
     public: bool | None = None
+
+    @field_validator("name")
+    @classmethod
+    def name_is_safe_identifier(cls, v: str) -> str:
+        """Enforce a safe identifier pattern for Cube.name.
+
+        The generated file path includes the cube name
+        (cube/model/<schema_name>/<name>.yml).  Rejecting names that contain
+        path-separator characters or start with digits provides defense-in-depth
+        against path traversal and odd filenames produced by an LLM-generated
+        model.
+        """
+        if not _CUBE_NAME_RE.match(v):
+            raise ValueError(
+                f"Cube name {v!r} is not a valid identifier. "
+                "Must match ^[a-zA-Z_][a-zA-Z0-9_]*$"
+            )
+        return v
 
     @model_validator(mode="after")
     def sql_table_or_sql_present(self) -> Cube:

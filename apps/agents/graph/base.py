@@ -62,7 +62,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# MCP tools that require a context ID (tenant_id) injected from state
+# MCP tools that require a context ID (tenant_id) injected from state.
+#
+# ``workspace_id`` is hidden from the LLM-facing schema (see ``_llm_tool_schemas``)
+# AND overridden server-side with the authoritative value from agent state
+# (see ``_make_injecting_tool_node``) for every tool in this set. Both mechanisms
+# consult this single frozenset, so adding a name here enables both protections.
+#
+# ``semantic_query`` and ``semantic_catalog`` MUST be here: they call
+# ``load_workspace_context(<workspace_id>)`` inside the MCP server, so a
+# LLM-supplied ``workspace_id`` referencing another tenant's workspace would
+# produce a JWT for that workspace — a cross-tenant data read. Server-side
+# injection ensures the authoritative ``workspace_id`` from agent state is
+# always used regardless of what the LLM sends.
 MCP_TOOL_NAMES = frozenset(
     {
         "list_tables",
@@ -72,6 +84,8 @@ MCP_TOOL_NAMES = frozenset(
         "run_materialization",
         "get_schema_status",
         "get_lineage",
+        "semantic_query",
+        "semantic_catalog",
     }
 )
 
