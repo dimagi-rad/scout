@@ -80,7 +80,7 @@ def test_upsert_connect_assets_creates_stg_visits(connect_tenant):
     tenant_meta = _FakeTenantMeta(FORM_DEFS)
     result = upsert_connect_assets(connect_tenant, tenant_meta)
 
-    assert result["created"] >= 1
+    assert result["created"] == 1
     assert result["total"] >= 1
 
     asset = TransformationAsset.objects.get(
@@ -137,7 +137,7 @@ def test_upsert_connect_assets_sweeps_orphaned_assets(connect_tenant):
 
     # Re-upsert with same (no-repeat) form_defs — orphan should be swept
     result = upsert_connect_assets(connect_tenant, tenant_meta)
-    assert result["deleted"] >= 1
+    assert result["deleted"] == 1
     assert not TransformationAsset.objects.filter(
         name="stg_visits__repeat_old_group",
         scope=TransformationScope.SYSTEM,
