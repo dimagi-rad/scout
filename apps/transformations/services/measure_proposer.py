@@ -39,6 +39,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from apps.knowledge.models import AgentLearning, ModelGapSignal
 from apps.transformations.services.cube_model_generator import CubeFile, _call_model, _parse_yaml
 from apps.transformations.services.cube_model_schema import CubeModel
 
@@ -228,8 +229,6 @@ async def propose_measures(
         model_client = _default_model_client()
 
     # --- Gather inputs via async ORM ---
-    from apps.knowledge.models import AgentLearning, ModelGapSignal
-
     gap_signals: list[dict] = []
     async for sig in ModelGapSignal.objects.filter(workspace=workspace).order_by("-created_at"):
         gap_signals.append(
