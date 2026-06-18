@@ -31,8 +31,14 @@ COPY . .
 # Install the project itself (fast — deps already installed)
 RUN uv pip install --system --no-deps -e .
 
-# Collect static files at build time (not on every container start)
-RUN DJANGO_SECRET_KEY=build-placeholder python manage.py collectstatic --noinput
+# Collect static files at build time (not on every container start).
+# DJANGO_SETTINGS_MODULE is set inline (build-layer scope only, never leaks to the
+# runtime container) because manage.py now refuses to default to development
+# settings (see config/settings_guard.py, arch #248/08#5) and .env is .dockerignore'd.
+# The static manifest (whitenoise CompressedManifestStaticFilesStorage) lives in
+# base.py, so the collected output is identical across settings modules.
+RUN DJANGO_SETTINGS_MODULE=config.settings.development DJANGO_SECRET_KEY=build-placeholder \
+    python manage.py collectstatic --noinput
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
