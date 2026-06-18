@@ -316,6 +316,44 @@ class TestArtifactSandboxView:
                 f"'*'; found: {target_arg!r}"
             )
 
+    def test_sandbox_live_query_fetch_respects_script_prefix(
+        self, authenticated_client, artifact, workspace
+    ):
+        """The in-iframe live-query fetch must honor FORCE_SCRIPT_NAME (issue #248, 04#8b).
+
+        On the labs deployment Scout is mounted under /scout (FORCE_SCRIPT_NAME),
+        and nginx only proxies /scout/api/... A root-relative '/api/...' fetch
+        from the sandbox HTML would hit the host root and 404. The sandbox must
+        prefix the request with the request's SCRIPT_NAME.
+        """
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/",
+            SCRIPT_NAME="/scout",
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+
+        # The injected base must be the request's script prefix...
+        assert 'const API_BASE = "/scout";' in content
+        # ...and the live-query fetch must be built from it (not a bare
+        # leading-slash path that bypasses the mount point).
+        assert "fetch(API_BASE + '/api/workspaces/'" in content
+
+    def test_sandbox_live_query_fetch_at_root_mount(
+        self, authenticated_client, artifact, workspace
+    ):
+        """With no script prefix the fetch URL stays root-relative (no double slash)."""
+        response = authenticated_client.get(
+            f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
+        )
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        # Empty base → fetch resolves to a clean root-relative URL at runtime.
+        assert 'const API_BASE = "";' in content
+        assert "fetch(API_BASE + '/api/workspaces/'" in content
+
     def test_sandbox_csp_headers(self, authenticated_client, artifact, workspace):
         """Test that CSP headers are set correctly for security."""
         response = authenticated_client.get(

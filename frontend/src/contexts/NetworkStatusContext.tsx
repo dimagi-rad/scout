@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react"
+import { withBasePath } from "@/config"
 
 export type NetworkStatus = "online" | "offline" | "reconnecting"
 
@@ -26,7 +27,7 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
     async function checkHealth() {
       if (!polling) return
       try {
-        const res = await fetch("/health/", { method: "GET", cache: "no-store" })
+        const res = await fetch(withBasePath("/health/"), { method: "GET", cache: "no-store" })
         if (res.ok) {
           if (wasOfflineRef.current) {
             wasOfflineRef.current = false

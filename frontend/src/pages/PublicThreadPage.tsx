@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { BASE_PATH } from "@/config"
+import { parseShareToken, shareApiUrl } from "@/lib/shareToken"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -55,8 +55,7 @@ function formatDateTime(dateString: string): string {
 }
 
 function getTokenFromPath(): string | undefined {
-  const match = window.location.pathname.match(/^\/shared\/threads\/([^/]+)/)
-  return match?.[1]
+  return parseShareToken(window.location.pathname, "threads")
 }
 
 function isArtifactTool(part: MessagePart): boolean {
@@ -231,7 +230,7 @@ export function PublicThreadPage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`${BASE_PATH}/api/chat/threads/shared/${token}/`)
+    fetch(shareApiUrl("threads", token))
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Thread not found" : "Failed to load thread")
         return res.json()

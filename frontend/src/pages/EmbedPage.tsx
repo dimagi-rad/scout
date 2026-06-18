@@ -15,7 +15,8 @@ import { ConnectionsPage } from "@/pages/ConnectionsPage"
 import { WorkspacesPage } from "@/pages/WorkspacesPage"
 import { WorkspaceDetailPage } from "@/pages/WorkspaceDetailPage"
 import { useEmbedMessaging } from "@/hooks/useEmbedMessaging"
-import { useEmbedParams } from "@/hooks/useEmbedParams"
+import { useEmbedParams, type EmbedMode, type EmbedTheme } from "@/hooks/useEmbedParams"
+import { EmbedSettingsProvider, useEmbedSettings } from "@/contexts/EmbedSettingsContext"
 
 const embedRouter = createBrowserRouter([
   {
@@ -50,10 +51,20 @@ const embedRouter = createBrowserRouter([
 ], { basename: BASE_PATH || undefined })
 
 export function EmbedPage() {
+  const { mode, theme } = useEmbedParams()
+  return (
+    <EmbedSettingsProvider initialMode={mode} initialTheme={theme}>
+      <EmbedApp />
+    </EmbedSettingsProvider>
+  )
+}
+
+function EmbedApp() {
   const authStatus = useAppStore((s) => s.authStatus)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const ensureTenant = useAppStore((s) => s.domainActions.ensureTenant)
   const { tenant, provider } = useEmbedParams()
+  const { setMode, setTheme } = useEmbedSettings()
 
   const handleCommand = useCallback((type: string, payload: Record<string, unknown>) => {
     if (type === "scout:set-tenant") {
@@ -64,9 +75,19 @@ export function EmbedPage() {
       }
     }
     if (type === "scout:set-mode") {
-      console.log("[Scout Embed] set-mode:", payload.mode)
+      // Apply the requested mode (and optional theme) live, instead of merely
+      // logging it (issue #248, 06#6).
+      if (typeof payload.mode === "string") {
+        setMode(payload.mode as EmbedMode)
+      }
+      if (typeof payload.theme === "string") {
+        setTheme(payload.theme as EmbedTheme)
+      }
     }
-  }, [ensureTenant])
+    if (type === "scout:set-theme" && typeof payload.theme === "string") {
+      setTheme(payload.theme as EmbedTheme)
+    }
+  }, [ensureTenant, setMode, setTheme])
 
   const { sendEvent } = useEmbedMessaging(handleCommand)
 

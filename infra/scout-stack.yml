@@ -1,5 +1,31 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Scout production infrastructure
+Description: Scout production infrastructure (EC2 + Kamal). Does NOT cover the connect-labs deploy.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOY-TARGET DRIFT — READ BEFORE ASSUMING THIS DESCRIBES EVERY ENVIRONMENT
+# (issue #248, 11#1, documentation-only)
+#
+# This template describes the *Scout production* stack only: a single EC2
+# instance running all containers via Kamal, plus RDS + ElastiCache, in the
+# Scout-owned AWS account. It is deployed as the `scout-production` stack by
+# `.github/workflows/deploy.yml`.
+#
+# The *connect-labs* deployment is a DIFFERENT, OUT-OF-REPO target:
+#   - ECS Fargate (cluster `labs-jj-cluster`, services labs-jj-scout-web /
+#     -mcp / -worker), NOT EC2/Kamal.
+#   - A separate AWS account: 858923557655 (ECR registry
+#     858923557655.dkr.ecr.us-east-1.amazonaws.com).
+#   - Served under the /scout path prefix (FORCE_SCRIPT_NAME, see
+#     config/settings/connectlabs.py + frontend/nginx.prod.conf).
+#   - Deployed by `.github/workflows/deploy-labs.yml`, which only builds and
+#     pushes images + updates ECS services; the Fargate task definitions,
+#     ALB, networking, and IAM for that account live OUTSIDE this repository.
+#
+# There is therefore no single CloudFormation/IaC source of truth for the labs
+# environment in this repo. Changes to networking, task definitions, or the ALB
+# for connect-labs must be made in that external infra, not here. See
+# DEPLOYMENT.md ("Connect-labs (ECS Fargate)") for the fuller note.
+# ─────────────────────────────────────────────────────────────────────────────
 
 Parameters:
   EC2KeyPairName:
