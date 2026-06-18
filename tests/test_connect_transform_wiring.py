@@ -161,12 +161,14 @@ def test_column_note_wiring_loop_populates_table_knowledge(connect_tenant, conne
     for ws in connect_tenant.workspaces.all():
         async_to_sync(sync_column_notes)(ws, "stg_visits", form_defs)
 
-    # Assert TableKnowledge exists for the workspace
+    # Assert TableKnowledge exists for the workspace.
+    # "/data/status" collides with the base column "status" so visit_column_map
+    # dedupes it to "status_2" — note key must match the actual staging column name.
     tk = TableKnowledge.objects.get(workspace=connect_workspace, table_name="stg_visits")
     assert "muac" in tk.column_notes
     assert "Decimal" in tk.column_notes["muac"]
-    assert "status" in tk.column_notes
-    assert "green" in tk.column_notes["status"]
+    assert "status_2" in tk.column_notes
+    assert "green" in tk.column_notes["status_2"]
 
 
 @pytest.mark.django_db(transaction=True)
