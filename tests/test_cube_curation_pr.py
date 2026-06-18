@@ -9,9 +9,9 @@ reads or writes to the real working tree.
 
 Assertions
 ----------
-1. With 1 CubeFile:
-   a. A branch+commit+push+``gh pr create`` sequence was issued through the runner
-      (in that order; no merge commands anywhere).
+1. With 1 CubeFile (clean tree):
+   a. A status-check + branch+commit+push+``gh pr create`` sequence was issued
+      through the runner (in that order; no merge commands anywhere).
    b. The proposed YAML was written under ``cube/model/…`` inside the temp root.
    c. The returned dict contains ``"branch"`` and ``"pr_url"``.
    d. NO merge command (``git merge`` / ``gh pr merge``) was issued.
@@ -19,12 +19,17 @@ Assertions
 2. Empty ``cube_files``:
    - Runner is never called.
    - Returns ``{"branch": None, "pr_url": None}``.
+
+3. Dirty tree:
+   - open_curation_pr raises RuntimeError before any branch is created.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+
+import pytest
 
 from apps.transformations.services.cube_curation_pr import open_curation_pr
 
@@ -43,10 +48,26 @@ class FakeResult:
 
 
 class FakeRunner:
-    """Records all commands passed to it and returns canned results."""
+    """Records all commands passed to it and returns canned results.
 
-    def __init__(self, gh_pr_url: str = "https://github.com/org/repo/pull/42"):
+    Parameters
+    ----------
+    gh_pr_url:
+        URL returned by the simulated ``gh pr create`` call.
+    dirty_tree:
+        When True, ``git status --porcelain`` returns non-empty output so that
+        the clean-tree precheck raises ``RuntimeError``.  Defaults to False
+        (clean tree).
+    """
+
+    def __init__(
+        self,
+        gh_pr_url: str = "https://github.com/org/repo/pull/42",
+        *,
+        dirty_tree: bool = False,
+    ):
         self._gh_pr_url = gh_pr_url
+        self._dirty_tree = dirty_tree
         self.calls: list[list[str]] = []
 
     def __call__(
@@ -58,6 +79,10 @@ class FakeRunner:
         check: bool = True,
     ) -> FakeResult:
         self.calls.append(list(cmd))
+        # Simulate dirty/clean working tree for ``git status --porcelain``
+        if cmd[:2] == ["git", "status"] and "--porcelain" in cmd:
+            stdout = " M modified_file.py\n" if self._dirty_tree else ""
+            return FakeResult(stdout=stdout)
         # For ``gh pr create`` return a fake PR URL
         if len(cmd) >= 3 and cmd[:3] == ["gh", "pr", "create"]:
             return FakeResult(stdout=self._gh_pr_url)
@@ -141,37 +166,42 @@ cubes:
 
     # (a) Correct sequence of git/gh commands
     calls = runner.calls
-    assert len(calls) == 5, f"Expected 5 calls, got {len(calls)}: {calls}"
+    assert len(calls) == 6, f"Expected 6 calls, got {len(calls)}: {calls}"
+
+    # Step 0: git status --porcelain (clean-tree precheck)
+    assert calls[0][0] == "git"
+    assert calls[0][1] == "status"
+    assert "--porcelain" in calls[0]
 
     # Step 1: git checkout -b <branch>
-    assert calls[0][0] == "git"
-    assert calls[0][1] == "checkout"
-    assert calls[0][2] == "-b"
-    assert calls[0][3] == branch_name
+    assert calls[1][0] == "git"
+    assert calls[1][1] == "checkout"
+    assert calls[1][2] == "-b"
+    assert calls[1][3] == branch_name
 
     # Step 2: git add
-    assert calls[1][0] == "git"
-    assert calls[1][1] == "add"
+    assert calls[2][0] == "git"
+    assert calls[2][1] == "add"
 
     # Step 3: git commit
-    assert calls[2][0] == "git"
-    assert calls[2][1] == "commit"
-    assert any(workspace_id in arg for arg in calls[2]), (
-        f"commit message should mention workspace_id; got {calls[2]}"
+    assert calls[3][0] == "git"
+    assert calls[3][1] == "commit"
+    assert any(workspace_id in arg for arg in calls[3]), (
+        f"commit message should mention workspace_id; got {calls[3]}"
     )
 
     # Step 4: git push --set-upstream origin <branch>
-    assert calls[3][0] == "git"
-    assert calls[3][1] == "push"
-    assert "--set-upstream" in calls[3]
-    assert branch_name in calls[3]
+    assert calls[4][0] == "git"
+    assert calls[4][1] == "push"
+    assert "--set-upstream" in calls[4]
+    assert branch_name in calls[4]
 
     # Step 5: gh pr create
-    assert calls[4][0] == "gh"
-    assert calls[4][1] == "pr"
-    assert calls[4][2] == "create"
-    assert "--base" in calls[4]
-    assert "main" in calls[4]
+    assert calls[5][0] == "gh"
+    assert calls[5][1] == "pr"
+    assert calls[5][2] == "create"
+    assert "--base" in calls[5]
+    assert "main" in calls[5]
 
     # (b) YAML was written into tmp_path/cube/model/proposals/visits.yml
     target = tmp_path / "cube" / "model" / "proposals" / "visits.yml"
@@ -243,3 +273,36 @@ def test_open_curation_pr_never_issues_merge(tmp_path: Path) -> None:
         f"Merge command found — curation gate must NEVER auto-merge. "
         f"Commands issued: {runner.calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: dirty working tree → RuntimeError before branch creation
+# ---------------------------------------------------------------------------
+
+
+def test_open_curation_pr_dirty_tree_raises(tmp_path: Path) -> None:
+    """
+    When the working tree is dirty, open_curation_pr must:
+    - Raise RuntimeError with a clear message before creating any branch.
+    - Never call git checkout -b or any subsequent command.
+    """
+    runner = FakeRunner(dirty_tree=True)
+    cube_file = CubeFile(
+        path="cube/model/proposals/visits.yml",
+        yaml="cubes:\n  - name: visits\n    sql_table: x\n",
+    )
+
+    with pytest.raises(RuntimeError, match="working tree must be clean"):
+        open_curation_pr(
+            [cube_file],
+            workspace_id="aaaabbbb-0000-1111-2222-333333333333",
+            branch_name="cube/proposed-measures-aaaabbbb-20240101-120000",
+            runner=runner,
+            repo_root=str(tmp_path),
+        )
+
+    # Only the status precheck call should have been made; no branch was created.
+    assert len(runner.calls) == 1, (
+        f"Expected only 1 runner call (git status), got {len(runner.calls)}: {runner.calls}"
+    )
+    assert runner.calls[0][:2] == ["git", "status"]

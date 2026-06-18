@@ -90,16 +90,94 @@ async def test_judge_exact_no_llm_call():
 
 
 @pytest.mark.asyncio
-async def test_judge_exact_order_independent():
-    """Row order and column name differences don't affect deterministic exact match."""
+async def test_judge_exact_row_order_independent():
+    """Row ORDER within the result set does not affect deterministic exact match."""
+    # Same column name, same values, different row order
     free = [{"a": 1}, {"a": 2}]
-    cube = [{"X.a": "2"}, {"X.a": "1"}]  # different order, different col name, same values
+    cube = [{"a": 2}, {"a": 1}]
 
     client = _fake_llm_client({"match": False, "confidence": 0.5, "equivalence": "failed"})
     verdict = await judge_equivalence("Q?", free, cube, model_client=client)
 
     assert verdict["equivalence"] == "exact"
     assert verdict["match"] is True
+    client.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_judge_exact_column_order_independent():
+    """Column ORDER within a row does not affect deterministic exact match (same names)."""
+    # Same column names, same values, different key insertion order
+    free = [{"a": 1, "b": 2}]
+    cube = [{"b": 2, "a": 1}]
+
+    client = _fake_llm_client({"match": False, "confidence": 0.5, "equivalence": "failed"})
+    verdict = await judge_equivalence("Q?", free, cube, model_client=client)
+
+    assert verdict["equivalence"] == "exact"
+    assert verdict["match"] is True
+    client.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_judge_different_column_names_calls_llm():
+    """Different column names in a multi-row or multi-column result must call the LLM.
+
+    The old (buggy) values-only comparison treated {"x": 1} as equal to {"y": 1}.
+    The corrected behaviour defers to the LLM so the judge can inspect semantics.
+    """
+    llm_verdict = {"match": True, "confidence": 0.9, "equivalence": "exact"}
+    client = _fake_llm_client(llm_verdict)
+
+    # Two rows, different column names -- NOT a 1x1 scalar, so fast path does not apply.
+    free = [{"a": 1}, {"a": 2}]
+    cube = [{"X.a": 2}, {"X.a": 1}]
+
+    verdict = await judge_equivalence("Q?", free, cube, model_client=client)
+
+    # LLM must have been invoked (not short-circuited to "exact" on value alone)
+    client.ainvoke.assert_called_once()
+    # LLM verdict is passed through
+    assert verdict["equivalence"] == "exact"
+    assert verdict["match"] is True
+
+
+@pytest.mark.asyncio
+async def test_judge_column_swap_different_values_calls_llm():
+    """A column-swap where values are assigned to the WRONG column must call the LLM."""
+    llm_verdict = {"match": False, "confidence": 0.95, "equivalence": "failed"}
+    client = _fake_llm_client(llm_verdict)
+
+    # Column swap: free has a=1,b=2 but cube has a=2,b=1 — semantically different.
+    free = [{"a": 1, "b": 2}]
+    cube = [{"a": 2, "b": 1}]
+
+    verdict = await judge_equivalence("Q?", free, cube, model_client=client)
+
+    client.ainvoke.assert_called_once()
+    assert verdict["match"] is False
+
+
+@pytest.mark.asyncio
+async def test_judge_1x1_scalar_different_column_name_exact():
+    """1×1 scalar results with different column names use the fast path (still exact).
+
+    This is the canonical case: free SQL returns {"count": 42} and Cube returns
+    {"Users.count": 42}.  A lone scalar is unambiguous regardless of column label.
+    """
+    client = _fake_llm_client({"match": True, "confidence": 0.5, "equivalence": "approximate"})
+
+    verdict = await judge_equivalence(
+        "How many?",
+        free_result=[{"count": 42}],
+        cube_result=[{"Users.count": 42}],
+        model_client=client,
+    )
+
+    assert verdict["equivalence"] == "exact"
+    assert verdict["match"] is True
+    assert verdict["confidence"] == 1.0
+    # LLM must NOT have been called (fast path)
     client.ainvoke.assert_not_called()
 
 

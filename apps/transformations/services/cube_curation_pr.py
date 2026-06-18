@@ -133,6 +133,25 @@ def open_curation_pr(
     root = Path(repo_root) if repo_root else _REPO_ROOT
 
     # -----------------------------------------------------------------------
+    # 0. Precheck: require a clean working tree before creating a branch.
+    #    A dirty tree causes `git checkout -b` to carry over uncommitted changes
+    #    and makes the resulting PR diff misleading.  We abort early so the
+    #    caller can stash/commit first.
+    # -----------------------------------------------------------------------
+    status_result = runner(
+        ["git", "status", "--porcelain"],
+        cwd=str(root),
+        capture_output=True,
+        check=True,
+    )
+    if status_result.stdout.strip():
+        raise RuntimeError(
+            "working tree must be clean to open a curation PR — "
+            f"uncommitted changes detected:\n{status_result.stdout.strip()}"
+        )
+    logger.debug("Working tree is clean; proceeding with branch creation.")
+
+    # -----------------------------------------------------------------------
     # 1. Write proposed YAML files into the target paths
     # -----------------------------------------------------------------------
     written_paths: list[str] = []

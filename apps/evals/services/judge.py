@@ -13,8 +13,11 @@ Public API
 Two-phase approach
 ------------------
 1. **Cheap deterministic check**: normalise both result sets (sort rows,
-   normalise values to strings, ignore column-name differences) and compare.
-   Identical normalised sets → ``exact`` match, confidence 1.0, no LLM call.
+   normalise values to strings, preserve column-name identity) and compare.
+   Column names are included in the key so ``{"x": 1}`` ≠ ``{"y": 1}``.
+   Special case: a 1-row × 1-cell result ignores the column name (a lone
+   scalar is unambiguous).  Identical normalised sets → ``exact`` match,
+   confidence 1.0, no LLM call.
 
 2. **LLM semantic judge**: when results don't trivially match, invoke
    ``model_client`` (injectable; defaults to ChatAnthropic using
@@ -99,23 +102,49 @@ def _normalise_value(v: Any) -> str:
         return s
 
 
-def _normalise_row(row: Any) -> frozenset[str]:
-    """Convert a row (dict or list) to a frozenset of normalised value strings.
+def _normalise_row(row: Any) -> frozenset[tuple[str, str]]:
+    """Convert a row (dict or list) to a frozenset of (normalised_key, normalised_value) tuples.
 
-    Column names are intentionally ignored: the deterministic check compares
-    VALUES only, which handles the common case where free-SQL returns
-    ``{"count": 42}`` and Cube returns ``{"Users.count": 42}``.
+    Column identity is preserved so that ``{"x": 1}`` and ``{"y": 1}`` are NOT
+    considered equal — a column-name mismatch means the deterministic check does
+    not short-circuit, and the LLM judge is invoked instead.
+
+    Row-ordering across columns within one row is irrelevant (frozenset), so
+    ``{"a": 1, "b": 2}`` and ``{"b": 2, "a": 1}`` are still equal.
+
+    For positional results (list/tuple) the index is used as the key so column
+    order is preserved.
+
+    Special fast-path (caller responsibility): single-cell 1×1 results skip
+    column-name comparison entirely (see ``_normalise_result``).
     """
     if isinstance(row, dict):
-        return frozenset(_normalise_value(v) for v in row.values())
+        return frozenset(
+            (_normalise_value(k), _normalise_value(v)) for k, v in row.items()
+        )
     if isinstance(row, (list, tuple)):
-        return frozenset(_normalise_value(v) for v in row)
-    # Scalar — treat as a single-value row
-    return frozenset([_normalise_value(row)])
+        return frozenset(
+            (str(i), _normalise_value(v)) for i, v in enumerate(row)
+        )
+    # Scalar — treat as a single-value row with a placeholder key
+    return frozenset([("_", _normalise_value(row))])
 
 
-def _normalise_result(result: Any) -> list[frozenset[str]]:
-    """Return a sorted list of normalised rows for order-independent comparison."""
+def _normalise_result(result: Any) -> list[frozenset[tuple[str, str]]]:
+    """Return a sorted list of normalised rows for order-independent comparison.
+
+    Each row becomes a ``frozenset`` of ``(normalised_key, normalised_value)``
+    pairs so column identity is preserved.  Sorting the list makes row order
+    irrelevant for the deterministic comparison.
+
+    Special 1×1 fast path
+    ---------------------
+    When the entire result is exactly **one row with exactly one cell**, column
+    names are replaced with a canonical placeholder (``"_"``) before returning.
+    A lone scalar aggregate (e.g. ``[{"count": 42}]`` vs ``[{"Users.count": 42}]``)
+    is unambiguous regardless of the column label, so the deterministic check
+    fires in this case even though column names differ.
+    """
     if result is None:
         return []
     if isinstance(result, list):
@@ -127,6 +156,13 @@ def _normalise_result(result: Any) -> list[frozenset[str]]:
         rows = [result]
 
     normalised = [_normalise_row(r) for r in rows]
+
+    # 1x1 fast path: one row, one cell -> strip column name so that
+    # {"count": 42} and {"Users.count": 42} both become {("_", "42")}.
+    if len(normalised) == 1 and len(normalised[0]) == 1:
+        ((_key, value),) = normalised[0]
+        normalised = [frozenset([("_", value)])]
+
     return sorted(normalised, key=lambda s: sorted(s))
 
 
@@ -212,8 +248,12 @@ async def judge_equivalence(
 
     Phase 1 — Deterministic normalised compare
     ------------------------------------------
-    Both result sets are normalised (values only, order-independent) and
-    compared.  If they match → return ``exact`` / match=True / confidence=1.0
+    Both result sets are normalised (column-identity preserved, order-independent)
+    and compared.  Column names are kept so that ``[{"x": 1}]`` vs ``[{"y": 1}]``
+    does NOT short-circuit to "exact".  Exception: if both results are exactly
+    1 row × 1 cell, column names are ignored (a lone scalar aggregate like
+    ``[{"count": 42}]`` vs ``[{"Users.count": 42}]`` is unambiguous).  When the
+    deterministic check fires → return ``exact`` / match=True / confidence=1.0
     without calling the LLM.
 
     Phase 2 — LLM semantic judge
