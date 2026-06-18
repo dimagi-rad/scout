@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 
+from apps.common.identifiers import dbt_column_alias, dbt_model_name
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
@@ -86,15 +87,6 @@ def _column_name_from_path(value_path: str) -> str:
     return slugify_model_name(value_path.rsplit("/", 1)[-1])
 
 
-def _unique_alias(base: str, seen: dict[str, int]) -> str:
-    """Return a unique column alias, appending ``_2``, ``_3`` etc. on collision."""
-    if base not in seen:
-        seen[base] = 1
-        return base
-    seen[base] += 1
-    return f"{base}_{seen[base]}"
-
-
 def _typed_expression(expr: str, question_type: str | None) -> str:
     """Wrap *expr* with a NULLIF + cast if the question type requires it."""
     cast = _TYPE_CAST.get(question_type or "")
@@ -137,14 +129,14 @@ def _generate_case_type_asset(
             select_parts.append(f"    {expr}")
 
     for prop in properties:
-        col = _unique_alias(slugify_model_name(prop), seen_aliases)
+        col = dbt_column_alias(slugify_model_name(prop), seen_aliases)
         select_parts.append(f"    properties->>'{_sql_escape(prop)}' AS \"{col}\"")
 
     lines.append(",\n".join(select_parts))
     lines.append("FROM raw_cases")
     lines.append(f"WHERE case_type = '{_sql_escape(case_type_name)}'")
 
-    model_name = f"stg_case_{slugify_model_name(case_type_name)}"
+    model_name = dbt_model_name(f"stg_case_{slugify_model_name(case_type_name)}")
     return TransformationAsset(
         name=model_name,
         description=f"Staging model for {case_type_name} cases",
@@ -189,7 +181,7 @@ def _generate_form_asset(
         if not value_path:
             continue
         json_path = _question_path_to_json_path(value_path)
-        col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
+        col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
         raw_expr = f"form_data #>> {json_path}"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -198,7 +190,7 @@ def _generate_form_asset(
     lines.append("FROM raw_forms")
     lines.append(f"WHERE xmlns = '{_sql_escape(form_xmlns)}'")
 
-    model_name = f"stg_form_{model_name_slug}"
+    model_name = dbt_model_name(f"stg_form_{model_name_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Staging model for form: {form_def.get('name', form_xmlns)}",
@@ -218,7 +210,9 @@ def _generate_repeat_group_asset(
     """Generate a staging asset for a repeat group child table."""
     group_json_path = _question_path_to_json_path(group_path)
     group_slug = slugify_model_name(group_path.rsplit("/", 1)[-1])
-    parent_model = f"stg_form_{form_name_slug}"
+    # Must match the parent form asset's (possibly hash-bounded) name so ref()
+    # resolves — both derive from the same slug via the same helper.
+    parent_model = dbt_model_name(f"stg_form_{form_name_slug}")
 
     lines = ["SELECT"]
     select_parts: list[str] = [
@@ -233,7 +227,7 @@ def _generate_repeat_group_asset(
         if not value_path:
             continue
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
+        col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -245,7 +239,7 @@ def _generate_repeat_group_asset(
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_data #> {group_json_path} IS NOT NULL")
 
-    model_name = f"{parent_model}__repeat_{group_slug}"
+    model_name = dbt_model_name(f"{parent_model}__repeat_{group_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Repeat group '{group_slug}' from {parent_model}",

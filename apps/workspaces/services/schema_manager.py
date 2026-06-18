@@ -17,32 +17,26 @@ import psycopg.sql
 from django.conf import settings
 from django.utils import timezone
 
+from apps.common.identifiers import (
+    PG_MAX_IDENTIFIER_BYTES,
+    dbt_role_name,
+    readonly_role_name,
+    refresh_schema_name,
+    sanitize_identifier,
+    tenant_schema_name,
+)
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
 
 logger = logging.getLogger(__name__)
 
-# PostgreSQL truncates identifiers to 63 bytes (NAMEDATALEN - 1). Tenant view
+# Postgres truncates identifiers to 63 bytes (NAMEDATALEN - 1). Tenant view
 # names are composed as ``{prefix}__{table}``; we cap the prefix well below this
 # so a generous table-name budget remains, and hard-fail if a final name still
-# exceeds the limit.
-_PG_MAX_IDENTIFIER_BYTES = 63
+# exceeds the limit. The 63-byte limit and all name minting now live in
+# ``apps.common.identifiers`` (arch #235); ``readonly_role_name`` / ``dbt_role_name``
+# are imported above and re-exported here for existing call sites.
 _MAX_VIEW_PREFIX_LEN = 32
-
-
-def readonly_role_name(schema_name: str) -> str:
-    """Derive the read-only PostgreSQL role name for a schema."""
-    return f"{schema_name}_ro"
-
-
-def dbt_role_name(schema_name: str) -> str:
-    """Derive the low-privilege dbt role name for a schema (issue #241).
-
-    dbt assumes this role (via ``SET ROLE`` in its profile) when materializing
-    transformation assets, so user-authored SQL runs with rights on this schema
-    only — never as the full ``MANAGED_DATABASE_URL`` superuser.
-    """
-    return f"{schema_name}_dbt"
 
 
 def get_managed_db_connection():
@@ -67,40 +61,73 @@ class SchemaManager:
     def provision(self, tenant) -> TenantSchema:
         """Get or create a schema for the tenant.
 
-        Checks for an existing active schema by schema_name so that multiple
-        users in the same tenant share one schema rather than colliding on the
-        unique constraint.
+        Matches an existing schema by the ``tenant`` foreign key — never by
+        schema_name (arch #235). Matching by name let a sanitized-name collision
+        (Connect ``123`` / OCS ``123``; ``a-b`` / ``a_b``) hand one tenant another
+        tenant's live ACTIVE schema. Multiple users in the same tenant still share
+        one schema because they share the tenant FK.
+
+        Resolution order, all scoped to this tenant:
+
+        1. The current live schema (ACTIVE/MATERIALIZING), most-recently-accessed.
+           A blue-green refresh's not-yet-promoted ``_r`` schema is PROVISIONING
+           during its load, so it is correctly skipped here and the old base is
+           returned; once promoted (ACTIVE, freshly touched) it sorts first and
+           becomes the resolved schema.
+        2. Otherwise resurrect the most-recently-active EXPIRED record in place,
+           reusing its stored name (preserves the physical schema; this is the
+           tenant's own row, so no cross-tenant risk).
+        3. Otherwise mint a brand-new collision-safe name via
+           ``tenant_schema_name`` (keyed on ``(provider, external_id)``).
+
+        Existing records keep their stored name, so live physical schemas need no
+        rename/migration.
         """
         from django.db import IntegrityError
 
-        schema_name = self._sanitize_schema_name(tenant.external_id)
-
-        existing = TenantSchema.objects.filter(
-            schema_name=schema_name,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-        ).first()
-
-        if existing:
+        live = (
+            TenantSchema.objects.filter(
+                tenant=tenant,
+                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            )
+            .order_by("-last_accessed_at")
+            .first()
+        )
+        if live:
             # Ensure the physical schema still exists — it may have been
             # dropped externally while the Django record remained ACTIVE.
-            self._ensure_physical_schema(schema_name)
-            existing.touch()
-            return existing
+            self._ensure_physical_schema(live.schema_name)
+            live.touch()
+            return live
 
-        try:
-            ts = TenantSchema.objects.create(
-                tenant=tenant,
-                schema_name=schema_name,
-                state=SchemaState.PROVISIONING,
-            )
-        except IntegrityError:
-            # Race condition: another process created the record between our
-            # filter and create. Re-fetch and return it.
-            ts = TenantSchema.objects.get(schema_name=schema_name)
-            if ts.state in (SchemaState.ACTIVE, SchemaState.MATERIALIZING):
-                return ts
-            # Fall through: record exists but isn't active yet; let this
-            # caller attempt the CREATE SCHEMA (IF NOT EXISTS is safe).
+        resurrectable = (
+            TenantSchema.objects.filter(tenant=tenant, state=SchemaState.EXPIRED)
+            .order_by("-last_accessed_at")
+            .first()
+        )
+        if resurrectable:
+            schema_name = resurrectable.schema_name
+            ts = resurrectable
+            created = False
+        else:
+            schema_name = tenant_schema_name(tenant.provider, tenant.external_id)
+            created = True
+            try:
+                ts = TenantSchema.objects.create(
+                    tenant=tenant,
+                    schema_name=schema_name,
+                    state=SchemaState.PROVISIONING,
+                )
+            except IntegrityError:
+                # Race: another process created this tenant's record between our
+                # lookup and create. The name is deterministic per tenant, so
+                # this row belongs to the same tenant — re-fetch and return it.
+                created = False
+                ts = TenantSchema.objects.get(schema_name=schema_name)
+                if ts.state in (SchemaState.ACTIVE, SchemaState.MATERIALIZING):
+                    return ts
+                # Fall through: record exists but isn't active yet; let this
+                # caller attempt the CREATE SCHEMA (IF NOT EXISTS is safe).
 
         try:
             conn = get_managed_db_connection()
@@ -116,9 +143,11 @@ class SchemaManager:
             finally:
                 conn.close()
         except Exception:
-            # Clean up the PROVISIONING record so the next attempt can retry
-            # rather than hitting the unique constraint.
-            ts.delete()
+            # Clean up only a record WE created this call, so the next attempt
+            # can retry rather than hitting the unique constraint. A resurrected
+            # pre-existing record is left in place.
+            if created:
+                ts.delete()
             raise
 
         # Activating here covers both the fresh-create path and the
@@ -183,7 +212,9 @@ class SchemaManager:
         is responsible for creating the physical schema and dispatching the
         Celery task (refresh_tenant_schema) to run the materialization.
         """
-        schema_name = f"{self._sanitize_schema_name(tenant.external_id)}_r{uuid.uuid4().hex[:8]}"
+        schema_name = refresh_schema_name(
+            tenant.provider, tenant.external_id, token=uuid.uuid4().hex[:8]
+        )
         return TenantSchema.objects.create(
             tenant=tenant,
             schema_name=schema_name,
@@ -288,7 +319,7 @@ class SchemaManager:
             ts.tenant_id: ts
             for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
         }
-        tenant_schemas: list[tuple[str, str]] = []  # (schema_name, tenant_external_id)
+        tenant_schemas: list[tuple[str, Tenant]] = []  # (schema_name, tenant)
         for tenant in tenants:
             ts = active_schemas.get(tenant.id)
             if ts is None:
@@ -296,7 +327,7 @@ class SchemaManager:
                     f"Tenant '{tenant.external_id}' has no active schema. "
                     "Run a data refresh for this tenant before building the view schema."
                 )
-            tenant_schemas.append((ts.schema_name, tenant.external_id))
+            tenant_schemas.append((ts.schema_name, tenant))
 
         view_schema_name = self._view_schema_name(workspace.id)
 
@@ -326,8 +357,11 @@ class SchemaManager:
             tenant_prefixes: list[
                 tuple[str, str, str]
             ] = []  # (schema_name, tenant_external_id, prefix)
-            for schema_name, tenant_external_id in tenant_schemas:
-                tenant_obj = Tenant.objects.get(external_id=tenant_external_id)
+            for schema_name, tenant_obj in tenant_schemas:
+                tenant_external_id = tenant_obj.external_id
+                # Use the tenant object threaded from above — NOT a lookup by
+                # external_id, which raises MultipleObjectsReturned when the id is
+                # shared across providers (arch #235).
                 prefix = self._view_prefix(tenant_obj)
                 if prefix in prefix_to_tenant:
                     raise ValueError(
@@ -356,7 +390,7 @@ class SchemaManager:
                 )
                 for (table_name,) in cursor.fetchall():
                     view_name = f"{prefix}__{table_name}"
-                    if len(view_name.encode("utf-8")) > _PG_MAX_IDENTIFIER_BYTES:
+                    if len(view_name.encode("utf-8")) > PG_MAX_IDENTIFIER_BYTES:
                         oversized_views.append(view_name)
                         continue
                     if view_name in seen_view_names:
@@ -758,9 +792,10 @@ class SchemaManager:
             )
 
     def _sanitize_schema_name(self, tenant_id: str) -> str:
-        """Convert a tenant_id to a valid PostgreSQL schema name."""
-        name = tenant_id.lower().replace("-", "_")
-        name = "".join(c for c in name if c.isalnum() or c == "_")
-        if name and name[0].isdigit():
-            name = f"t_{name}"
-        return name or "unknown"
+        """Sanitize an arbitrary string into a PostgreSQL identifier body.
+
+        Thin delegate to the shared ``sanitize_identifier`` (arch #235). Retained
+        because ``_view_prefix`` and tests reference it; collision-safe minting of
+        full schema names goes through ``tenant_schema_name``.
+        """
+        return sanitize_identifier(tenant_id)

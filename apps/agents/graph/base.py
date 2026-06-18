@@ -320,7 +320,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
     # Try full schema with columns
     try:
-        ctx = await load_tenant_context(tenant.external_id)
+        ctx = await load_tenant_context(tenant.external_id, tenant.provider)
         from apps.workspaces.models import TenantMetadata
 
         tenant_metadata = await TenantMetadata.objects.filter(

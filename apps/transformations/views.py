@@ -156,6 +156,11 @@ class TransformationRunViewSet(viewsets.ReadOnlyModelViewSet):
             if not workspace:
                 raise PermissionDenied("Workspace not found or you are not a member.")
 
+        # NOTE (arch #235, 04#6): this runs the dbt pipeline INLINE in the request
+        # thread, serialized only by an in-process threading.Lock in dbt_runner —
+        # so a worker-side materialization and an API trigger on the same schema
+        # are not mutually serialized across processes. The async-trigger redesign
+        # is tracked separately and is out of scope for the identifier-helper work.
         run = run_transformation_pipeline(
             tenant=tenant,
             schema_name=ts.schema_name,

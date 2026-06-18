@@ -15,11 +15,12 @@ from django.test import override_settings
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     SchemaState,
+    TenantSchema,
     Workspace,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from mcp_server.context import QueryContext
+from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
 
@@ -525,9 +526,6 @@ class TestLoadTenantContext:
 
     async def test_schema_name_in_context(self, tenant_membership):
         """Verify the schema name from TenantSchema flows into QueryContext.schema_name."""
-        from apps.workspaces.models import SchemaState, TenantSchema
-        from mcp_server.context import load_tenant_context
-
         await TenantSchema.objects.acreate(
             tenant=tenant_membership.tenant,
             schema_name="dimagi",
@@ -535,7 +533,7 @@ class TestLoadTenantContext:
         )
 
         with override_settings(MANAGED_DATABASE_URL="postgresql://user:pass@localhost:5432/scout"):
-            ctx = await load_tenant_context("test-domain")
+            ctx = await load_tenant_context("test-domain", "commcare")
 
         assert ctx.schema_name == "dimagi"
         assert ctx.tenant_id == "test-domain"
@@ -544,15 +542,10 @@ class TestLoadTenantContext:
         assert "search_path=dimagi" in ctx.connection_params["options"]
 
     async def test_raises_when_no_active_schema(self, tenant_membership):
-        from mcp_server.context import load_tenant_context
-
         with pytest.raises(ValueError, match="No active schema"):
-            await load_tenant_context("dimagi")
+            await load_tenant_context("dimagi", "commcare")
 
     async def test_raises_when_no_managed_db_url(self, tenant_membership):
-        from apps.workspaces.models import SchemaState, TenantSchema
-        from mcp_server.context import load_tenant_context
-
         await TenantSchema.objects.acreate(
             tenant=tenant_membership.tenant,
             schema_name="dimagi",
@@ -561,7 +554,30 @@ class TestLoadTenantContext:
 
         with override_settings(MANAGED_DATABASE_URL=""):
             with pytest.raises(ValueError, match="MANAGED_DATABASE_URL"):
-                await load_tenant_context("test-domain")
+                await load_tenant_context("test-domain", "commcare")
+
+    async def test_provider_predicate_resolves_correct_tenant(self):
+        """Two tenants sharing an external_id across providers must each resolve
+        to their OWN schema — external_id alone is ambiguous (arch #235)."""
+        connect = await Tenant.objects.acreate(
+            provider="commcare_connect", external_id="123", canonical_name="Opp 123"
+        )
+        ocs = await Tenant.objects.acreate(
+            provider="ocs", external_id="123", canonical_name="Bot 123"
+        )
+        await TenantSchema.objects.acreate(
+            tenant=connect, schema_name="connect_123", state=SchemaState.ACTIVE
+        )
+        await TenantSchema.objects.acreate(
+            tenant=ocs, schema_name="ocs_123", state=SchemaState.ACTIVE
+        )
+
+        with override_settings(MANAGED_DATABASE_URL="postgresql://u:p@localhost:5432/scout"):
+            connect_ctx = await load_tenant_context("123", "commcare_connect")
+            ocs_ctx = await load_tenant_context("123", "ocs")
+
+        assert connect_ctx.schema_name == "connect_123"
+        assert ocs_ctx.schema_name == "ocs_123"
 
 
 # ---------------------------------------------------------------------------

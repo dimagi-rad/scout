@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from django.conf import settings
 
+from apps.common.identifiers import readonly_role_name
 from apps.workspaces.models import SchemaState, TenantSchema, Workspace, WorkspaceViewSchema
 
 
@@ -27,8 +28,12 @@ class QueryContext:
 
     @property
     def readonly_role(self) -> str:
-        """Derive the read-only PostgreSQL role name for this context's schema."""
-        return f"{self.schema_name}_ro"
+        """Derive the read-only PostgreSQL role name for this context's schema.
+
+        Routes through the shared helper (arch #235) so the name stays within
+        Postgres's 63-byte limit even for a maximal schema name.
+        """
+        return readonly_role_name(self.schema_name)
 
 
 @dataclass(frozen=True)
@@ -44,17 +49,21 @@ class TenantContext:
     max_query_timeout_seconds: int = 30
 
 
-async def load_tenant_context(tenant_id: str) -> QueryContext:
+async def load_tenant_context(tenant_id: str, provider: str) -> QueryContext:
     """Load a QueryContext for a tenant from the managed database.
 
-    Uses the tenant_id (domain name) to find the TenantSchema and builds
-    a QueryContext pointing at the managed DB with the tenant's schema.
+    Uses ``(provider, external_id)`` — the tenant's full identity — to find the
+    TenantSchema and builds a QueryContext pointing at the managed DB with the
+    tenant's schema. ``provider`` is required (arch #235): external_id alone is
+    ambiguous, since a Connect opp and an OCS experiment can share an id and
+    would otherwise resolve to an arbitrary one of the two schemas.
     Resets the schema's inactivity TTL via touch().
 
     Raises ValueError if the tenant schema is not found or not active.
     """
     ts = await TenantSchema.objects.filter(
         tenant__external_id=tenant_id,
+        tenant__provider=provider,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
 
@@ -83,7 +92,7 @@ async def load_tenant_context(tenant_id: str) -> QueryContext:
 async def load_workspace_context(workspace_id: str) -> QueryContext:
     """Load a QueryContext for a workspace, routing correctly for multi-tenant.
 
-    - Single-tenant workspace (1 tenant): delegates to load_tenant_context(tenant.external_id).
+    - Single-tenant workspace (1 tenant): delegates to load_tenant_context(external_id, provider).
     - Multi-tenant workspace (2+ tenants): uses the WorkspaceViewSchema.
 
     Invariant: for a workspace, exactly one routing target exists at a time —
@@ -108,7 +117,7 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
 
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        return await load_tenant_context(tenant.external_id)
+        return await load_tenant_context(tenant.external_id, tenant.provider)
 
     # Multi-tenant: use the view schema
     try:
