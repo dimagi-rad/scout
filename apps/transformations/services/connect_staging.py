@@ -132,6 +132,54 @@ def _generate_connect_repeat_group_asset(
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
+def upsert_connect_assets(tenant, tenant_metadata) -> dict:
+    """Generate and upsert system staging TransformationAssets for a Connect tenant.
+
+    Mirrors :func:`~apps.transformations.services.commcare_staging.upsert_system_assets`
+    exactly but for the Connect deliver-app staging models (``stg_visits`` +
+    repeat-group children).
+
+    Calls :func:`generate_connect_assets`, then ``update_or_create`` for each asset,
+    and finally deletes any SYSTEM-scoped asset for this tenant whose model is no
+    longer generated from the current metadata (orphan sweep).
+
+    Only SYSTEM-scoped assets for this tenant are swept — user-authored
+    TENANT/WORKSPACE assets are never touched.
+
+    Returns ``{"created": int, "updated": int, "deleted": int, "total": int}``.
+    """
+    form_definitions = (tenant_metadata.metadata or {}).get("form_definitions", {})
+    assets = generate_connect_assets(form_definitions, tenant)
+
+    created = 0
+    updated = 0
+
+    for asset in assets:
+        _, was_created = TransformationAsset.objects.update_or_create(
+            name=asset.name,
+            scope=TransformationScope.SYSTEM,
+            tenant=tenant,
+            defaults={
+                "description": asset.description,
+                "sql_content": asset.sql_content,
+                "created_by": None,
+            },
+        )
+        if was_created:
+            created += 1
+        else:
+            updated += 1
+
+    current_names = {a.name for a in assets}
+    deleted, _ = (
+        TransformationAsset.objects.filter(tenant=tenant, scope=TransformationScope.SYSTEM)
+        .exclude(name__in=current_names)
+        .delete()
+    )
+
+    return {"created": created, "updated": updated, "deleted": deleted, "total": len(assets)}
+
+
 def generate_connect_assets(form_definitions: dict, tenant) -> list[TransformationAsset]:
     """Generate unsaved TransformationAsset instances for Connect staging.
 
