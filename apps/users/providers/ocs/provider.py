@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 
@@ -38,6 +39,20 @@ class OCSProvider(OAuth2Provider):
             "first_name": data.get("given_name", ""),
             "last_name": data.get("family_name", ""),
         }
+
+    def extract_email_addresses(self, data: dict) -> list[EmailAddress]:
+        """Return the user's email, trusted as verified only when OCS says so.
+
+        Unlike CommCare HQ/Connect, OCS exposes per-login verification via the
+        ``email_verified`` OIDC claim (open-chat-studio#3647). We mirror it rather
+        than trusting wholesale: ``verified=True`` only when OCS asserts the claim.
+        The claim is absent until that OCS change deploys, so this defaults closed
+        (unverified) — never over-trusting an email OCS hasn't confirmed.
+        """
+        email = data.get("email") or None
+        if not email:
+            return []
+        return [EmailAddress(email=email, verified=bool(data.get("email_verified")), primary=True)]
 
 
 provider_classes = [OCSProvider]

@@ -1,5 +1,6 @@
 """CommCare Connect OAuth2 provider for django-allauth."""
 
+from allauth.account.models import EmailAddress
 from allauth.socialaccount.providers.base import ProviderAccount
 from allauth.socialaccount.providers.oauth2.provider import OAuth2Provider
 
@@ -53,6 +54,21 @@ class CommCareConnectProvider(OAuth2Provider):
             "first_name": name,
             "last_name": "",
         }
+
+    def extract_email_addresses(self, data: dict) -> list[EmailAddress]:
+        """Return the user's email as a verified address.
+
+        Connect enforces mandatory email verification for web users (allauth
+        ``ACCOUNT_EMAIL_VERIFICATION = "mandatory"``), and the mobile email field
+        is read-only (sourced from ConnectID), so an email Connect returns is
+        verified upstream regardless of domain. Without this override allauth marks
+        every social email unverified, which strands email-less duplicate accounts
+        that the cross-provider merge then refuses to reconcile.
+        """
+        email = data.get("email") or None
+        if not email:
+            return []
+        return [EmailAddress(email=email, verified=True, primary=True)]
 
 
 provider_classes = [CommCareConnectProvider]
