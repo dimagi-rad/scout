@@ -327,6 +327,13 @@ TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default=DEPLOY_ENVIRONMEN
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
+# Cube semantic layer settings.
+# In Docker Compose the service is named "cube"; override via env in production.
+CUBEJS_API_SECRET = env("CUBEJS_API_SECRET", default="")
+CUBE_SQL_HOST = env("CUBE_SQL_HOST", default="localhost")  # Docker: "cube"
+CUBE_SQL_PORT = env.int("CUBE_SQL_PORT", default=15432)
+CUBE_REST_URL = env("CUBE_REST_URL", default="http://localhost:4000")
+
 # CommCare Connect API
 CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
