@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 
+from apps.workspaces.models import TenantMetadata
 from mcp_server.pipeline_registry import PipelineRegistry
 from mcp_server.services import materializer
 
@@ -22,8 +23,6 @@ def test_discover_persists_form_definitions(connect_tenant_membership):
         result = materializer._run_discover_phase(
             connect_tenant_membership, {"type": "api_key", "value": "t"}, pipeline
         )
-    from apps.workspaces.models import TenantMetadata
-
     tm = TenantMetadata.objects.get(tenant_membership=connect_tenant_membership)
     assert "muac_visit" in tm.metadata["form_definitions"]
     assert result["form_definitions"]["muac_visit"] == {"questions": []}
