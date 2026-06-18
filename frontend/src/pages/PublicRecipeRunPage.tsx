@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { BASE_PATH } from "@/config"
+import { parseShareToken, shareApiUrl } from "@/lib/shareToken"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -47,9 +47,8 @@ const statusStyles: Record<string, string> = {
 }
 
 function getTokenFromPath(): string | undefined {
-  // /shared/runs/{token}/ or /shared/runs/{token}
-  const match = window.location.pathname.match(/^\/shared\/runs\/([^/]+)/)
-  return match?.[1]
+  // /shared/runs/{token}/ or /shared/runs/{token}, optionally under a base path.
+  return parseShareToken(window.location.pathname, "runs")
 }
 
 export function PublicRecipeRunPage() {
@@ -60,7 +59,7 @@ export function PublicRecipeRunPage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`${BASE_PATH}/api/recipes/runs/shared/${token}/`)
+    fetch(shareApiUrl("runs", token))
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Run not found" : "Failed to load run")
         return res.json()

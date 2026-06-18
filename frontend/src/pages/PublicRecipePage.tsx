@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react"
-import { BASE_PATH } from "@/config"
+import { parseShareToken, shareApiUrl } from "@/lib/shareToken"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -39,9 +39,8 @@ function formatDate(dateString: string): string {
 }
 
 function getTokenFromPath(): string | undefined {
-  // /shared/recipes/{token}/ or /shared/recipes/{token}
-  const match = window.location.pathname.match(/^\/shared\/recipes\/([^/]+)/)
-  return match?.[1]
+  // /shared/recipes/{token}/ or /shared/recipes/{token}, optionally under a base path.
+  return parseShareToken(window.location.pathname, "recipes")
 }
 
 export function PublicRecipePage() {
@@ -52,7 +51,7 @@ export function PublicRecipePage() {
 
   useEffect(() => {
     if (!token) return
-    fetch(`${BASE_PATH}/api/recipes/shared/${token}/`)
+    fetch(shareApiUrl("recipes", token))
       .then((res) => {
         if (!res.ok) throw new Error(res.status === 404 ? "Recipe not found" : "Failed to load recipe")
         return res.json()

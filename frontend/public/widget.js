@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  var SCOUT_WIDGET_VERSION = "0.3.0-popup-fix";
+  var SCOUT_WIDGET_VERSION = "0.4.0-live-mode-theme";
 
   // Detect base URL from the script src, including any path prefix (e.g. /scout)
   var SCOUT_BASE = (function () {
@@ -144,6 +144,10 @@
 
   ScoutWidgetInstance.prototype.setMode = function (mode) {
     this._postMessage("scout:set-mode", { mode: mode });
+  };
+
+  ScoutWidgetInstance.prototype.setTheme = function (theme) {
+    this._postMessage("scout:set-theme", { theme: theme });
   };
 
   ScoutWidgetInstance.prototype.destroy = function () {

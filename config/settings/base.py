@@ -33,16 +33,34 @@ SECRET_KEY = env("DJANGO_SECRET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DJANGO_DEBUG", default=True)
 
+# Settings modules that carry the production security posture. connectlabs
+# inherits from production.py (see config/settings/connectlabs.py) so it must be
+# labeled "production" for telemetry even though its module name is not
+# ".production". Keep this list in sync with any new prod-posture module.
+PRODUCTION_SETTINGS_MODULES = (
+    "config.settings.production",
+    "config.settings.connectlabs",
+)
+
+
+def resolve_deploy_environment(settings_module: str) -> str:
+    """Map a DJANGO_SETTINGS_MODULE name to a deploy-environment label.
+
+    Any module that *is* or *inherits from* production (see
+    PRODUCTION_SETTINGS_MODULES) resolves to "production"; everything else is
+    "development". Matching the full module name — not just an ".production"
+    suffix — is what lets connectlabs (prod posture, non-".production" name) be
+    correctly tagged as production for Sentry / Task Badger (issue #248, 08#5).
+    """
+    return "production" if settings_module in PRODUCTION_SETTINGS_MODULES else "development"
+
+
 # Default deployment environment label for Sentry / Task Badger. Derived from the
 # settings module (set before settings load) rather than DEBUG: base.py defaults
 # DEBUG to True and production.py only flips it after this file is imported, so a
 # DEBUG-based default would freeze to "development" even under production settings.
 # An explicit SENTRY_ENVIRONMENT / TASKBADGER_ENVIRONMENT env var still wins.
-DEPLOY_ENVIRONMENT = (
-    "production"
-    if os.environ.get("DJANGO_SETTINGS_MODULE", "").endswith(".production")
-    else "development"
-)
+DEPLOY_ENVIRONMENT = resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", ""))
 
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 

@@ -2,13 +2,16 @@ import { Outlet } from "react-router-dom"
 import { Sidebar } from "@/components/Sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
-import { useEmbedParams } from "@/hooks/useEmbedParams"
 import { useAutoResize } from "@/hooks/useAutoResize"
 import { useAppStore } from "@/store/store"
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
+import { useEmbedSettings } from "@/contexts/EmbedSettingsContext"
 
 export function EmbedLayout() {
-  const { mode } = useEmbedParams()
+  // Live mode from the embed settings context so the widget's runtime
+  // scout:set-mode command takes effect (issue #248, 06#6), rather than the
+  // value frozen at first URL read.
+  const { mode } = useEmbedSettings()
   const showSidebar = mode === "full"
   const showArtifacts = mode === "full" || mode === "chat+artifacts"
   const activeDomainId = useAppStore((s) => s.activeDomainId)

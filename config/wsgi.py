@@ -11,6 +11,9 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")
+from config.settings_guard import require_settings_module
+
+# Fail fast rather than defaulting to development settings (issue #248, 08#5).
+require_settings_module(os.environ)
 
 application = get_wsgi_application()

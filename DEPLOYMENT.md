@@ -14,6 +14,33 @@ Pushes to `main` trigger an automated deployment via GitHub Actions.
 All infrastructure is defined in `infra/scout-stack.yml` (CloudFormation) and deployed
 as the `scout-production` stack in `us-east-1`.
 
+> **This describes the Scout *production* environment only.** The CloudFormation
+> template above is **not** a source of truth for the connect-labs deployment —
+> see [Connect-labs (ECS Fargate)](#connect-labs-ecs-fargate) below.
+
+### Connect-labs (ECS Fargate)
+
+Scout also runs on the **connect-labs** environment, which is a separate deploy
+target with **no in-repo IaC** (issue #248, finding 11#1):
+
+- **Compute:** ECS Fargate (cluster `labs-jj-cluster`; services
+  `labs-jj-scout-web`, `labs-jj-scout-mcp`, `labs-jj-scout-worker`) — **not**
+  EC2/Kamal like production.
+- **AWS account:** `858923557655` (ECR registry
+  `858923557655.dkr.ecr.us-east-1.amazonaws.com`) — distinct from the
+  Scout-production account.
+- **Path prefix:** served under `/scout` via `FORCE_SCRIPT_NAME`
+  (`config/settings/connectlabs.py`) and the nginx `/scout/...` locations
+  (`frontend/nginx.prod.conf`). Frontend builds set `VITE_BASE_PATH=/scout`.
+- **Deploy workflow:** `.github/workflows/deploy-labs.yml` only **builds and
+  pushes images and updates the ECS services**. The Fargate task definitions,
+  ALB, VPC/networking, and IAM roles for that account are managed **outside this
+  repository** and are not represented in `infra/scout-stack.yml`.
+
+Because of this drift, changes to the labs runtime topology (task definitions,
+ALB routing, scaling) must be made in that external infrastructure, not in this
+repo's CloudFormation template.
+
 ### Services (Kamal configs in `config/`)
 
 | Service | Config | Port | Public? |

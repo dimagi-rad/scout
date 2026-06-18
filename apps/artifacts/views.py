@@ -225,6 +225,14 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
     <script id="artifact-data" type="application/json" nonce="{{CSP_NONCE}}">{{ARTIFACT_DATA}}</script>
 
     <script nonce="{{CSP_NONCE}}">
+        // Base path Scout is mounted under (e.g. "/scout" on the labs deploy via
+        // FORCE_SCRIPT_NAME, "" at the root). Injected server-side so the
+        // in-iframe live-query fetch resolves under the deploy prefix instead of
+        // the host root (issue #248, 04#8b).
+        const API_BASE = "{{API_BASE}}";
+    </script>
+
+    <script nonce="{{CSP_NONCE}}">
         // Artifact rendering system
         const ArtifactRenderer = {
             container: null,
@@ -265,7 +273,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 if (artifact.has_live_queries) {
                     this.showLoading('Querying database...');
                     try {
-                        const resp = await fetch('/api/workspaces/' + artifact.workspace_id + '/artifacts/' + artifact.id + '/query-data/', {
+                        const resp = await fetch(API_BASE + '/api/workspaces/' + artifact.workspace_id + '/artifacts/' + artifact.id + '/query-data/', {
                             credentials: 'include',
                         });
                         if (!resp.ok) {
@@ -748,8 +756,14 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
 
-        # Inject the nonce and artifact data into the template
+        # Base prefix Scout is mounted under (FORCE_SCRIPT_NAME on the labs
+        # deploy → SCRIPT_NAME in the request meta). Trailing slash trimmed so
+        # the in-iframe fetch builds "<prefix>/api/..." without a double slash.
+        api_base = request.META.get("SCRIPT_NAME", "").rstrip("/")
+
+        # Inject the nonce, base prefix, and artifact data into the template.
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
+        html_content = html_content.replace("{{API_BASE}}", api_base)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
 
         response = HttpResponse(html_content, content_type="text/html")

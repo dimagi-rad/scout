@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { useAppStore } from "@/store/store"
 import { X, Eye, Database, RefreshCw, Loader2, FileDown } from "lucide-react"
 import { api } from "@/api/client"
+import { withBasePath } from "@/config"
 
 interface QueryResult {
   name: string
@@ -204,7 +205,7 @@ export function ArtifactPanel() {
             <iframe
               ref={iframeRef}
               key={artifactId}
-              src={activeDomainId ? `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/` : ""}
+              src={activeDomainId ? withBasePath(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/`) : ""}
               className="flex-1 w-full"
               // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
               // served same-origin and session-authenticated, and it executes
