@@ -24,19 +24,39 @@ from apps.transformations.services.commcare_staging import (
 
 logger = logging.getLogger(__name__)
 
-# Base columns always present on raw_visits.
+# Base columns selected straight from raw_visits (must match the raw_visits
+# schema written by materializer._write_connect_visits — there is NO user_id
+# column there; the worker identity is `username`). These are the always-present
+# visit dimensions; `form_json` is the JSON source for the flattened columns.
 _VISIT_BASE_COLUMNS = [
     "visit_id",
     "opportunity_id",
-    "user_id",
+    "username",
     "entity_id",
+    "entity_name",
+    "visit_date",
     "status",
+    "flagged",
     "deliver_unit_id",
     "form_json",
 ]
 
 
 # ── Single source of truth for stg_visits column naming ──────────────────────
+
+
+def _is_structural_question(q: dict) -> bool:
+    """True for group/structural container questions that carry no scalar data.
+
+    Real CommCare apps include Group/FieldList containers (``is_group: true``,
+    tag ``group``, type ``Group``) that hold no answer and would otherwise
+    flatten into always-NULL columns.
+    """
+    if q.get("is_group"):
+        return True
+    tag = (q.get("tag") or "").lower()
+    qtype = (q.get("type") or "").lower()
+    return tag in {"group", "fieldlist"} or qtype in {"group", "fieldlist"}
 
 
 def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
@@ -46,14 +66,18 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     that :func:`_generate_stg_visits` uses, guaranteeing that the column names
     returned here are byte-for-byte identical to those emitted in the staging SQL.
 
-    Only non-repeat questions with a non-empty ``value`` path are included —
-    repeat-group children are staged in separate tables and excluded here.
+    Only non-repeat, non-group questions with a non-empty ``value`` path are
+    included — repeat-group children are staged in separate tables, and group/
+    structural containers (``is_group``/tag ``group``/type ``Group``) carry no
+    scalar data and would otherwise become always-NULL junk columns.
     """
     seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
     result: list[tuple[dict, str]] = []
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
             if q.get("repeat"):
+                continue
+            if _is_structural_question(q):
                 continue
             value_path = q.get("value", "")
             if not value_path:
