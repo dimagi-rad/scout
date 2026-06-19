@@ -47,6 +47,11 @@ scenes:
   show: Land on the Scout workspaces home; the eleven KMC opportunities are visible
     as separate, unaligned sources.
   title: Amara has eleven opps she can't line up
+  url: /workspaces
+  actions:
+  - { kind: wait_for, target: "Your workspaces" }
+  - { kind: scroll_to, target: "Labs Opp 10012" }
+  - { kind: hold, seconds: 2, note: "eleven separate Labs Opp workspaces, not yet comparable" }
 - concept_claim: Amara composes eleven opportunities into one workspace and Scout
     provisions a combined view schema for them.
   design_intent: Reuse the existing multi-tenant composition so the demo rides proven
@@ -69,6 +74,13 @@ scenes:
   provenance: S9
   show: Create a new workspace, then add the 11 KMC opportunities to it as tenants.
   title: Amara pools all eleven into one workspace
+  url: /workspaces/kmc-cross-opp/b357b50f-1776-4536-a8ed-52a55e60c5d7
+  actions:
+  - { kind: wait_for, target: "KMC Cross-Opp" }
+  - { kind: click, target: "Data sources" }
+  - { kind: wait_for, target: "11 connected sources" }
+  - { kind: scroll_to, target: "Labs Opp 10022" }
+  - { kind: hold, seconds: 2, note: "all eleven opps pooled into one workspace" }
 - concept_claim: Amara names clinical outcomes in plain language and Scout records
     them as canonical measures without her referencing any field.
   design_intent: The expert speaks domain language; the canonical measure catalog
@@ -94,6 +106,12 @@ scenes:
     on weight gain, mortality, daily kangaroo-care hours, and the danger-sign referral
     rate, sliced sensibly.
   title: Amara asks for what she wants, in her own words
+  url: /workspaces/kmc-cross-opp/b357b50f-1776-4536-a8ed-52a55e60c5d7/chat
+  actions:
+  - { kind: wait_for, target: "How can I assist you today?" }
+  - { kind: click, target: "css:textarea" }
+  - { kind: type, value: "Build a detailed dashboard on weight gain, mortality, daily kangaroo-care hours, and the danger-sign referral rate, sliced by opportunity." }
+  - { kind: hold, seconds: 3, note: "Amara names the outcomes in plain language, no CommCare field" }
 - concept_claim: Scout resolves each canonical measure to a per-opportunity SQL expression
     using question labels and form roles, with confidence shown.
   design_intent: Auto-modeling does the per-app understanding; labels and form/module
@@ -117,6 +135,16 @@ scenes:
   show: Show the resolver mapping each canonical measure to a per-opportunity field,
     with confidence and the label it matched on.
   title: Scout finds each measure inside each different app
+  url: /crossopp
+  actions:
+  - { kind: wait_for, target: "Cross-Opp Dashboard" }
+  - { kind: click, target: "testid:domain-selector", note: "active workspace defaults to a demo; switch to KMC Cross-Opp" }
+  - { kind: click, target: "testid:domain-item-b357b50f-1776-4536-a8ed-52a55e60c5d7" }
+  - { kind: wait_for, target: "testid:crossopp-dashboard-table" }
+  - { kind: scroll_to, target: "How each number was computed" }
+  - { kind: click, target: "css:[data-testid='crossopp-measure-mortality'] button" }
+  - { kind: wait_for, target: "Is the baby alive?" }
+  - { kind: hold, seconds: 2.5, note: "resolver mapped mortality to child_alive per opp via the question label" }
 - concept_claim: Scout aligns the same measure across opps that use different field
     names and flags the opp where it is genuinely absent.
   design_intent: Semantic resolution recovers exactly the measures a lexical name-match
@@ -135,6 +163,11 @@ scenes:
   show: 'Show the coverage of birth_weight across opps: resolved in 10/11 with differing
     underlying field names, flagged absent in 1.'
   title: It works even where the apps share no column name
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-measure-birth_weight" }
+  - { kind: click, target: "css:[data-testid='crossopp-measure-birth_weight'] button" }
+  - { kind: wait_for, target: "resolved field" }
+  - { kind: hold, seconds: 2.5, note: "same concept recovered across opps despite differing nested field paths" }
 - concept_claim: Scout unions the eleven opps into one table aliased on shared canonical
     columns with opportunity_id on every row.
   design_intent: Aliasing each opp's expression to canonical names makes UNION ALL
@@ -153,6 +186,9 @@ scenes:
   show: 'Show the canonical union: one combined table where each row carries opportunity_id
     and the shared canonical measure columns.'
   title: Eleven opps line up in one comparable table
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-dashboard-table" }
+  - { kind: hold, seconds: 2.5, note: "the union: every opp contributes the same canonical columns, one row each" }
 - concept_claim: Amara sees weight gain and mortality compared across all eleven opportunities,
     sliced by opportunity, from one prompt.
   design_intent: One Cube model on the canonical union with opportunity_id as the
@@ -176,6 +212,9 @@ scenes:
   show: 'Render the cross-opp dashboard: weight gain, mortality, daily kangaroo-care
     hours, and the danger-sign referral rate as charts/tables sliced by opportunity_id.'
   title: Amara reads weight gain and mortality across all eleven
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-row-10019" }
+  - { kind: hold, seconds: 2.5, note: "weight gain and mortality side by side across all eleven opps" }
 - concept_claim: Each dashboard column is backed by a named canonical measure with
     a plain-language definition and a count of how many opportunities resolved it.
   design_intent: Trust starts with the vocabulary — show that every number traces
@@ -194,6 +233,10 @@ scenes:
   show: Scroll to "How each number was computed"; show the four canonical measures,
     each with its coverage count (e.g. mortality resolved in 11 of 11 opportunities).
   title: Amara opens the catalog behind the numbers
+  actions:
+  - { kind: click, target: "css:[data-testid='crossopp-measure-birth_weight'] button", note: "collapse to the catalog of all four measures" }
+  - { kind: scroll_to, target: "How each number was computed" }
+  - { kind: hold, seconds: 2.5, note: "every number backed by a named measure with an X/11 resolved count" }
 - concept_claim: Expanding a measure reveals, per opportunity, the app field it resolved
     to, the question label it matched on, and a confidence score.
   design_intent: Make the per-app divergence concrete — the same clinical concept,
@@ -212,6 +255,11 @@ scenes:
   show: Click the mortality measure; the per-opp table shows each opportunity's resolved
     field, the matched question label, and the confidence.
   title: Amara sees how each app resolved the same measure
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-measure-mortality" }
+  - { kind: click, target: "css:[data-testid='crossopp-measure-mortality'] button" }
+  - { kind: wait_for, target: "Is the baby alive?" }
+  - { kind: hold, seconds: 3, note: "per-opp: resolved field, matched label, confidence" }
 - concept_claim: One click reveals the generated Cube model — each opportunity's per-tenant
     SQL and the canonical expression Cube actually executes for the measure.
   design_intent: Remove the black box — the literal generated model, not a paraphrase,
@@ -230,6 +278,12 @@ scenes:
   show: Click "Show the generated Cube model"; reveal the per-opp Tier-1 cube SQL
     and the canonical measure expression Cube runs.
   title: Amara reveals the exact SQL Cube runs
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-show-model" }
+  - { kind: click, target: "testid:crossopp-show-model" }
+  - { kind: wait_for, target: "testid:crossopp-model-yaml" }
+  - { kind: scroll_to, target: "testid:crossopp-model-yaml" }
+  - { kind: hold, seconds: 3, note: "the exact generated Cube model: per-opp SQL + canonical expression" }
 - concept_claim: Amara traces a single figure to the field, label, and SQL that produced
     it, confirming the number rather than trusting it.
   design_intent: Close the loop — the inspection ends by matching the resolved field
@@ -250,6 +304,11 @@ scenes:
   show: Match the resolved field and SQL expression for opp 10012 back to its mortality
     figure in the dashboard table.
   title: Amara matches the SQL back to the number
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-model-yaml" }
+  - { kind: hold, seconds: 2, note: "the SQL: (child_alive = 'no')" }
+  - { kind: scroll_to, target: "testid:crossopp-dashboard-table" }
+  - { kind: hold, seconds: 3, note: "match it back to opp 10012's mortality figure at the top of the table" }
 - concept_claim: Amara confirms the dashboard reads only her eleven opportunities
     and shares it by a single stable link.
   design_intent: 'Production-real trust: DB-enforced isolation plus stable canonical
@@ -274,4 +333,7 @@ scenes:
   show: Show the query scoped to only the workspace's 11 schemas (isolation) and stable
     measure ids, then share the dashboard link.
   title: Amara trusts it, then shares it
+  actions:
+  - { kind: scroll_to, target: "testid:crossopp-model-yaml" }
+  - { kind: hold, seconds: 3, note: "each opp cube reads only its own schema (t_100XX_*) — DB-scoped isolation; canonical measure names are stable" }
 why_brief: kmc-cross-opp-semantic-dashboard.why_brief.yaml
