@@ -20,6 +20,16 @@ const measureLabel = (col: string): string =>
 
 export function CrossOppPage() {
   const workspaceId = useAppStore((s) => s.activeDomainId)
+  if (!workspaceId) {
+    return <div className="p-6 text-sm text-muted-foreground">Select a workspace.</div>
+  }
+  // Key on workspaceId so switching workspaces remounts the dashboard, resetting
+  // all per-workspace state (error, data, expanded measure) instead of leaving a
+  // stale error banner or another workspace's data behind.
+  return <CrossOppDashboard key={workspaceId} workspaceId={workspaceId} />
+}
+
+function CrossOppDashboard({ workspaceId }: { workspaceId: string }) {
   const [dash, setDash] = useState<DashboardResponse | null>(null)
   const [insp, setInsp] = useState<InspectorResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -27,7 +37,6 @@ export function CrossOppPage() {
   const [showModel, setShowModel] = useState(false)
 
   useEffect(() => {
-    if (!workspaceId) return
     let active = true
     const fail = (e: unknown) => {
       if (active) setError(e instanceof Error ? e.message : String(e))
@@ -48,10 +57,6 @@ export function CrossOppPage() {
       active = false
     }
   }, [workspaceId])
-
-  if (!workspaceId) {
-    return <div className="p-6 text-sm text-muted-foreground">Select a workspace.</div>
-  }
 
   const measureCols = dash ? dash.columns.slice(1) : []
 
