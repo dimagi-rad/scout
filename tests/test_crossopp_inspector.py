@@ -50,3 +50,31 @@ def test_inspector_payload_groups_lineage_with_coverage_and_provenance():
     absent = next(o for o in bw["opps"] if o["opportunity_id"] == "10020")
     assert absent["status"] == "absent"
     assert absent["column"] == ""
+
+
+def test_dashboard_query_sql_built_from_model():
+    from apps.workspaces.api.crossopp_views import dashboard_query_sql
+
+    model = (
+        "cubes:\n"
+        "- name: opp_10012\n"
+        "  sql: SELECT 1\n"  # per-opp cube: no measures, skipped
+        "- name: kmc_cross_opp\n"
+        "  sql: SELECT 1\n"
+        "  dimensions:\n"
+        "  - {name: opportunity_id, sql: opportunity_id, type: string}\n"
+        "  measures:\n"
+        "  - {name: visits, type: count}\n"
+        "  - {name: birth_weight, sql: birth_weight, type: avg}\n"
+    )
+    sql = dashboard_query_sql(model)
+    assert "FROM kmc_cross_opp" in sql
+    assert "MEASURE(visits)" in sql
+    assert "MEASURE(birth_weight)" in sql
+    assert "GROUP BY opportunity_id ORDER BY opportunity_id" in sql
+
+
+def test_dashboard_query_sql_none_without_blended_cube():
+    from apps.workspaces.api.crossopp_views import dashboard_query_sql
+
+    assert dashboard_query_sql("cubes:\n- name: opp_1\n  sql: SELECT 1\n") is None
