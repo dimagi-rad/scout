@@ -118,17 +118,15 @@ async def test_propose_measures_novel(workspace) -> None:
     - 'revenue_sum' IS present (novel measure included).
     - 'count' is NOT present (dedupe removed the already-existing measure).
     """
-    from asgiref.sync import sync_to_async
-
     # Seed a ModelGapSignal
-    await sync_to_async(ModelGapSignal.objects.create)(
+    await ModelGapSignal.objects.acreate(
         workspace=workspace,
         question="What is the total revenue per order?",
         sql="SELECT SUM(amount) FROM orders",
     )
 
     # Seed a high-signal AgentLearning (aggregation category)
-    await sync_to_async(AgentLearning.objects.create)(
+    await AgentLearning.objects.acreate(
         workspace=workspace,
         description="Use SUM(amount) for revenue; amount is in cents.",
         category="aggregation",
@@ -178,10 +176,8 @@ async def test_propose_measures_fully_deduped(workspace) -> None:
     - Fake client returns only a 'count' measure (already in existing model).
     - Result should be an empty list.
     """
-    from asgiref.sync import sync_to_async
-
     # Seed a gap signal so the proposer has something to work with
-    await sync_to_async(ModelGapSignal.objects.create)(
+    await ModelGapSignal.objects.acreate(
         workspace=workspace,
         question="How many orders were placed?",
         sql="SELECT COUNT(*) FROM orders",
