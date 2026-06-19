@@ -4,6 +4,7 @@ import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatRoute } from "@/components/ChatPanel/ChatRoute"
 import { ChatRedirect } from "@/components/ChatPanel/ChatRedirect"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
+import { CrossOppPage } from "@/pages/CrossOppPage"
 import { DataDictionaryPage } from "@/pages/DataDictionaryPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
 import { RecipesPage } from "@/pages/RecipesPage"
@@ -35,6 +36,7 @@ export const router = createBrowserRouter([
       { path: "recipes/:id", element: <RecipesPage /> },
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
       { path: "data-dictionary", element: <DataDictionaryPage /> },
+      { path: "crossopp", element: <CrossOppPage /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
       { path: "workspaces/:workspaceId", element: <WorkspaceDetailPage /> },
