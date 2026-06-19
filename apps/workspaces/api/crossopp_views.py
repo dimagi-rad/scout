@@ -6,6 +6,9 @@ the confidence, the status, and the per-opp SQL expression — plus the full gen
 model (the actual union SQL Cube runs). Everything a user needs to verify the analysis.
 """
 
+# ruff: noqa: S608 — composes Cube *Semantic* SQL from model-derived cube/measure names
+# (not user input), run through Cube's SQL API, not a raw parameterized DB query.
+
 from __future__ import annotations
 
 from pathlib import Path
