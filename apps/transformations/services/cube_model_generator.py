@@ -37,7 +37,6 @@ caller is not blocked.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -50,6 +49,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import ValidationError
 
+from apps.transformations.services.connect_staging import visit_column_map
 from apps.transformations.services.cube_model_schema import CubeModel
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,16 @@ CRITICAL RULES:
 8. Seed KPI measures: muac_confirmation_rate, approval_rate, flag_rate (as type: number).
 9. Include a 'program_health' view at the end of the YAML referencing key cubes.
 10. Carry the form question's 'label' as the dimension 'title' field.
+11. MEASURES ARE THE PRIORITY — they are the governed metrics this layer exists to
+    serve. ALWAYS produce a rich set (10-25): counts, count_distinct of key entities,
+    averages of numeric clinical/quantitative fields, and rate measures
+    (e.g. 100.0 * SUM(CASE WHEN <flag>='yes' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0))
+    over meaningful yes/no or status fields. Emit measures even for wide tables.
+12. For WIDE tables (many columns), DO NOT make every column a dimension. Select the
+    ~15-40 most analytically useful dimensions: identifiers, status/category fields,
+    time fields, geography, and the key categorical fields a program manager would
+    slice by. Fold the rest into measures or omit them. Prefer a focused, useful model
+    over an exhaustive one.
 """
 
 
@@ -148,13 +158,30 @@ def _build_user_prompt(
             parts.append("\n".join(col_lines))
         parts.append("")
 
-    # Form definitions (labels for dimension titles)
+    # Form definitions rendered as a DENSE column -> meaning map (label/type/choices)
+    # so the LLM sees the real semantics of every staged column. Previously this
+    # json.dumps(...)[:4000] truncated real apps to ~0.5% of their schema, so the
+    # model was built from column names alone — the form labels never reached the LLM.
     if form_definitions:
-        parts.append("## Form definitions (use 'label' as dimension title)\n")
-        try:
-            parts.append(json.dumps(form_definitions, indent=2)[:4000])
-        except (TypeError, ValueError):
-            parts.append(str(form_definitions)[:4000])
+        parts.append(
+            "## Column meanings (from the deliver-app form schema)\n"
+            "Use the label as the dimension title; use type/choices to choose measures.\n"
+        )
+        meaning_lines = []
+        for question, col_name in visit_column_map(form_definitions):
+            label = question.get("label") or col_name
+            if isinstance(label, dict):  # CommCare labels can be {"en": "..."} translation dicts
+                label = next(iter(label.values()), col_name)
+            qtype = question.get("type", "")
+            choices = question.get("options") or question.get("choices")
+            line = f"  - {col_name}: {label} ({qtype})"
+            if choices:
+                line += f"; choices: {', '.join(str(c) for c in choices)}"
+            meaning_lines.append(line)
+        rendered = "\n".join(meaning_lines)
+        if len(rendered) > 60000:  # generous safety cap; real apps fit well under this
+            rendered = rendered[:60000] + "\n  … (truncated)"
+        parts.append(rendered)
         parts.append("")
 
     # Business knowledge / KPI hints
@@ -230,7 +257,9 @@ def _default_model_client() -> Any:
     """Build the default ChatAnthropic client matching apps/agents convention."""
     return ChatAnthropic(
         model=settings.DEFAULT_LLM_MODEL,
-        max_tokens=4096,
+        # Real CommCare apps have hundreds of columns; 4096 exhausted the budget
+        # before the measures section, producing dimension-only models.
+        max_tokens=16384,
     )
 
 
