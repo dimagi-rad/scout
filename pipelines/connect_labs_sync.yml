@@ -1,0 +1,62 @@
+pipeline: connect_labs_sync
+description: >
+  Sync data from CommCare Connect Labs synthetic/mirror API.
+  Uses the same Connect loaders as connect_sync but points at
+  CONNECT_LABS_API_URL (the connect-labs export mirror, connect-labs#637)
+  with a PAT credential instead of the production Connect API.
+  Live ingestion requires: connect-labs#637 deployed, a registered synthetic
+  opportunity, and CONNECT_LABS_API_URL + PAT configured in the environment.
+version: "1.0"
+provider: commcare_connect_labs
+
+sources:
+  - name: visits
+    description: "User visit records with form data (synthetic)"
+  - name: users
+    description: "FLW/worker roster (synthetic)"
+    resumable: false
+  - name: completed_works
+    description: "Completed work records (synthetic)"
+    resumable: false
+  - name: payments
+    description: "Payment records (synthetic)"
+    resumable: false
+  - name: invoices
+    description: "Invoice records (synthetic)"
+    resumable: false
+  - name: assessments
+    description: "Assessment results (synthetic)"
+    resumable: false
+  - name: completed_modules
+    description: "Learn module completions (synthetic)"
+    resumable: false
+
+metadata_discovery:
+  description: "Fetch opportunity detail and org/program structure from Connect Labs API"
+
+relationships:
+  - from_table: raw_visits
+    from_column: username
+    to_table: raw_users
+    to_column: username
+    description: "Visits reference the FLW who performed them"
+  - from_table: raw_completed_works
+    from_column: username
+    to_table: raw_users
+    to_column: username
+    description: "Completed works reference the FLW"
+  - from_table: raw_payments
+    from_column: username
+    to_table: raw_users
+    to_column: username
+    description: "Payments reference the FLW who earned them"
+  - from_table: raw_assessments
+    from_column: username
+    to_table: raw_users
+    to_column: username
+    description: "Assessments reference the FLW"
+  - from_table: raw_completed_modules
+    from_column: username
+    to_table: raw_users
+    to_column: username
+    description: "Module completions reference the FLW"

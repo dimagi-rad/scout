@@ -24,19 +24,54 @@ from apps.transformations.services.commcare_staging import (
 
 logger = logging.getLogger(__name__)
 
-# Base columns always present on raw_visits.
+# Base columns selected straight from raw_visits (must match the raw_visits
+# schema written by materializer._write_connect_visits — there is NO user_id
+# column there; the worker identity is `username`). These are the always-present
+# visit dimensions; `form_json` is the JSON source for the flattened columns.
 _VISIT_BASE_COLUMNS = [
     "visit_id",
     "opportunity_id",
-    "user_id",
+    "username",
     "entity_id",
+    "entity_name",
+    "visit_date",
     "status",
+    "flagged",
     "deliver_unit_id",
     "form_json",
 ]
 
 
 # ── Single source of truth for stg_visits column naming ──────────────────────
+
+
+def _is_structural_question(q: dict) -> bool:
+    """True for group/structural container questions that carry no scalar data.
+
+    Real CommCare apps include Group/FieldList containers (``is_group: true``,
+    tag ``group``, type ``Group``) that hold no answer and would otherwise
+    flatten into always-NULL columns.
+    """
+    if q.get("is_group"):
+        return True
+    tag = (q.get("tag") or "").lower()
+    qtype = (q.get("type") or "").lower()
+    return tag in {"group", "fieldlist"} or qtype in {"group", "fieldlist"}
+
+
+def _to_form_json_path(value_path: str) -> str:
+    """Map a deliver-app question xpath to its ``raw_visits.form_json`` JSON path.
+
+    CommCare nests a visit's submitted answers under ``form_json['form']``, so the
+    xpath instance root (the first segment, e.g. ``data`` in ``/data/muac``) maps to
+    ``form``: ``/data/muac_group/muac`` -> ``ARRAY['form','muac_group','muac']``.
+    Without this the extraction targets ``form_json -> data -> ...`` and yields all
+    NULLs against real visit data (verified against live labs synthetic visits).
+    """
+    segments = [s for s in value_path.split("/") if s]
+    if segments:
+        segments[0] = "form"
+    return _question_path_to_json_path("/" + "/".join(segments))
 
 
 def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
@@ -46,14 +81,18 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     that :func:`_generate_stg_visits` uses, guaranteeing that the column names
     returned here are byte-for-byte identical to those emitted in the staging SQL.
 
-    Only non-repeat questions with a non-empty ``value`` path are included —
-    repeat-group children are staged in separate tables and excluded here.
+    Only non-repeat, non-group questions with a non-empty ``value`` path are
+    included — repeat-group children are staged in separate tables, and group/
+    structural containers (``is_group``/tag ``group``/type ``Group``) carry no
+    scalar data and would otherwise become always-NULL junk columns.
     """
     seen_aliases: dict[str, int] = {col: 1 for col in _VISIT_BASE_COLUMNS}
     result: list[tuple[dict, str]] = []
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
             if q.get("repeat"):
+                continue
+            if _is_structural_question(q):
                 continue
             value_path = q.get("value", "")
             if not value_path:
@@ -78,7 +117,7 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
 
     for q, col_name in visit_column_map(form_definitions):
         value_path = q.get("value", "")
-        json_path = _question_path_to_json_path(value_path)
+        json_path = _to_form_json_path(value_path)
         raw_expr = f"form_json #>> {json_path}"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -107,7 +146,7 @@ def _generate_connect_repeat_group_asset(
     Mirrors ``commcare_staging._generate_repeat_group_asset`` but targets
     ``stg_visits`` as the parent and ``form_json`` as the JSON column.
     """
-    group_json_path = _question_path_to_json_path(group_path)
+    group_json_path = _to_form_json_path(group_path)
     group_slug = slugify_model_name(group_path.rsplit("/", 1)[-1])
     parent_model = "stg_visits"
 
@@ -128,10 +167,20 @@ def _generate_connect_repeat_group_asset(
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
 
+    # Coerce a non-array value to a 1-element array: CommCare serializes a
+    # single-instance repeat (and field-list groups) as a JSON object, not an
+    # array, and jsonb_array_elements() errors ("cannot extract elements from an
+    # object") on non-arrays. Wrapping a lone object keeps single-instance repeats
+    # working while real multi-instance arrays pass through unchanged.
+    array_src = (
+        f"CASE WHEN jsonb_typeof(f.form_json #> {group_json_path}) = 'array' "
+        f"THEN f.form_json #> {group_json_path} "
+        f"ELSE jsonb_build_array(f.form_json #> {group_json_path}) END"
+    )
     lines.append(",\n".join(select_parts))
     lines.append(f"FROM {{{{ ref('{parent_model}') }}}} f,")
     lines.append("LATERAL jsonb_array_elements(")
-    lines.append(f"    f.form_json #> {group_json_path}")
+    lines.append(f"    {array_src}")
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_json #> {group_json_path} IS NOT NULL")
 

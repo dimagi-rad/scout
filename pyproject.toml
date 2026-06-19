@@ -97,6 +97,7 @@ python_files = ["test_*.py"]
 addopts = "-v --tb=short -m 'not smoke'"
 markers = [
     "smoke: end-to-end smoke tests requiring live credentials (run with: pytest -m smoke)",
+    "cube_e2e: live Cube + DB e2e tests (run with: CUBE_E2E=1 pytest -m cube_e2e)",
 ]
 
 [dependency-groups]

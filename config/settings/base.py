@@ -96,6 +96,7 @@ INSTALLED_APPS = [
     "apps.recipes",
     "apps.chat",
     "apps.transformations",
+    "apps.evals",
 ]
 
 MIDDLEWARE = [
@@ -339,6 +340,10 @@ CUBE_REST_URL = env(
 
 # CommCare Connect API
 CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
+# Connect-Labs synthetic export mirror (connect-labs#637).
+# When set, commcare_connect_labs pipelines use this as their base URL.
+# Requires a registered synthetic opportunity and a PAT credential.
+CONNECT_LABS_API_URL = env("CONNECT_LABS_API_URL", default="")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
