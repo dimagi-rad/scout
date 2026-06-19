@@ -167,10 +167,20 @@ def _generate_connect_repeat_group_asset(
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
 
+    # Coerce a non-array value to a 1-element array: CommCare serializes a
+    # single-instance repeat (and field-list groups) as a JSON object, not an
+    # array, and jsonb_array_elements() errors ("cannot extract elements from an
+    # object") on non-arrays. Wrapping a lone object keeps single-instance repeats
+    # working while real multi-instance arrays pass through unchanged.
+    array_src = (
+        f"CASE WHEN jsonb_typeof(f.form_json #> {group_json_path}) = 'array' "
+        f"THEN f.form_json #> {group_json_path} "
+        f"ELSE jsonb_build_array(f.form_json #> {group_json_path}) END"
+    )
     lines.append(",\n".join(select_parts))
     lines.append(f"FROM {{{{ ref('{parent_model}') }}}} f,")
     lines.append("LATERAL jsonb_array_elements(")
-    lines.append(f"    f.form_json #> {group_json_path}")
+    lines.append(f"    {array_src}")
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_json #> {group_json_path} IS NOT NULL")
 
