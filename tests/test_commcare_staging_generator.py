@@ -793,3 +793,51 @@ class TestUpsertSystemAssets:
         upsert_system_assets(tenant, tenant_metadata)
 
         assert TransformationAsset.objects.filter(id=user_asset.id).exists()
+
+
+class TestDbtNameLengthGuard:
+    """arch #235 — dbt model names from provider-controlled metadata must stay
+    within Postgres's 63-byte identifier limit, and long names sharing a 63-byte
+    prefix must remain distinct physical relations."""
+
+    def test_long_case_type_name_is_bounded(self, tenant):
+        long_name = "a" * 100
+        assets = generate_system_assets(tenant, _make_metadata(case_types=[{"name": long_name}]))
+        assert len(assets) == 1
+        assert len(assets[0].name.encode("utf-8")) <= 63
+
+    def test_two_long_case_names_sharing_prefix_are_distinct(self, tenant):
+        n1 = "z" * 80 + "_alpha"
+        n2 = "z" * 80 + "_beta"
+        assets = generate_system_assets(
+            tenant, _make_metadata(case_types=[{"name": n1}, {"name": n2}])
+        )
+        names = {a.name for a in assets}
+        assert len(names) == 2
+        for a in assets:
+            assert len(a.name.encode("utf-8")) <= 63
+
+    def test_repeat_group_ref_matches_bounded_parent_form_name(self, tenant):
+        """When a long form name forces the parent model name to be hashed, the
+        repeat child's ref() must still point at the SAME bounded parent name.
+        (At this extreme length the child name is also truncated, so identify the
+        assets by generation order: parent first, then its repeat child.)"""
+        long_form = "f" * 90
+        metadata = _make_metadata(
+            form_definitions={
+                "http://x/long": {
+                    "name": long_form,
+                    "questions": [
+                        {"value": "/data/rg/child_name", "repeat": "/data/rg"},
+                    ],
+                }
+            }
+        )
+        assets = generate_system_assets(tenant, metadata)
+        assert len(assets) == 2
+        parent, child = assets[0], assets[1]
+        assert len(parent.name.encode("utf-8")) <= 63
+        assert len(child.name.encode("utf-8")) <= 63
+        assert parent.name != child.name
+        # ref() integrity: the child references the parent's actual (bounded) name.
+        assert f"ref('{parent.name}')" in child.sql_content

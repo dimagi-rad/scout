@@ -6,6 +6,8 @@ import psycopg.sql
 import pytest
 from django.utils import timezone
 
+from apps.common.identifiers import tenant_schema_name
+from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
 from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
@@ -24,7 +26,10 @@ class TestSchemaManager:
             mgr = SchemaManager()
             ts = mgr.provision(tenant_membership.tenant)
 
-        assert ts.schema_name == mgr._sanitize_schema_name(tenant_membership.tenant.external_id)
+        tenant = tenant_membership.tenant
+        # Schema names are now minted by the shared collision-safe helper, keyed
+        # on (provider, external_id) — not the bare sanitized external_id.
+        assert ts.schema_name == tenant_schema_name(tenant.provider, tenant.external_id)
         assert ts.state == "active"
         assert TenantSchema.objects.count() == 1
         # Verify DDL was executed
@@ -120,6 +125,124 @@ def test_provision_resurrects_expired_schema_and_refreshes_ttl(tenant_membership
     assert ts.last_accessed_at >= before
     # The stale timestamp must be gone.
     assert ts.last_accessed_at > stale
+
+
+@pytest.mark.django_db(transaction=True)
+class TestProvisionCollisionSafety:
+    """arch #235 — provision() must never route one tenant into another's schema.
+
+    The managed-DB connection is mocked (no physical DDL); these assertions are
+    purely about which TenantSchema row each tenant gets.
+    """
+
+    @staticmethod
+    def _mock_conn():
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value = cursor
+        cursor.fetchone.return_value = None  # roles don't exist yet
+        return conn
+
+    def test_cross_provider_same_external_id_distinct_schemas(self, db):
+        """Connect opp '123' and OCS experiment '123' must get different schemas."""
+        connect = Tenant.objects.create(
+            provider="commcare_connect", external_id="123", canonical_name="Opp 123"
+        )
+        ocs = Tenant.objects.create(provider="ocs", external_id="123", canonical_name="Bot 123")
+
+        mgr = SchemaManager()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            ts_connect = mgr.provision(connect)
+            ts_ocs = mgr.provision(ocs)
+
+        assert ts_connect.schema_name != ts_ocs.schema_name
+        assert ts_connect.tenant_id == connect.id
+        assert ts_ocs.tenant_id == ocs.id
+        assert TenantSchema.objects.count() == 2
+
+    def test_punctuation_collision_distinct_schemas(self, db):
+        """external_ids that sanitize to the same base must still get distinct schemas."""
+        t1 = Tenant.objects.create(provider="commcare", external_id="a-b", canonical_name="A B")
+        t2 = Tenant.objects.create(provider="commcare", external_id="a_b", canonical_name="A_B")
+
+        mgr = SchemaManager()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            ts1 = mgr.provision(t1)
+            ts2 = mgr.provision(t2)
+
+        assert ts1.schema_name != ts2.schema_name
+        assert TenantSchema.objects.count() == 2
+
+    def test_provision_matches_by_tenant_fk_not_schema_name(self, db):
+        """A second tenant must NOT be handed the first tenant's existing schema
+        even if both sanitize to the same legacy name."""
+        first = Tenant.objects.create(provider="commcare", external_id="dom", canonical_name="Dom")
+        # Simulate a legacy row created under the old bare-sanitized scheme.
+        TenantSchema.objects.create(tenant=first, schema_name="dom", state=SchemaState.ACTIVE)
+        second = Tenant.objects.create(provider="ocs", external_id="dom", canonical_name="Dom OCS")
+
+        mgr = SchemaManager()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            ts_second = mgr.provision(second)
+
+        assert ts_second.tenant_id == second.id
+        assert ts_second.schema_name != "dom"
+
+    def test_existing_schema_matched_by_fk_keeps_its_name(self, db):
+        """An existing ACTIVE schema is returned by tenant FK and keeps its stored
+        (possibly legacy) name — no rename, so no data migration is required."""
+        tenant = Tenant.objects.create(
+            provider="commcare", external_id="legacy-dom", canonical_name="Legacy"
+        )
+        legacy = TenantSchema.objects.create(
+            tenant=tenant, schema_name="legacy_dom", state=SchemaState.ACTIVE
+        )
+
+        mgr = SchemaManager()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            ts = mgr.provision(tenant)
+
+        assert ts.pk == legacy.pk
+        assert ts.schema_name == "legacy_dom"
+        assert TenantSchema.objects.count() == 1
+
+    def test_provision_ignores_in_flight_refresh_schema(self, db):
+        """A blue-green refresh creates a transient PROVISIONING ``_r`` schema for
+        the same tenant (with last_accessed_at NULL — which sorts first). provision
+        must return the live ACTIVE base, NOT the half-built refresh schema."""
+        tenant = Tenant.objects.create(provider="commcare", external_id="dom", canonical_name="Dom")
+        base = TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name="dom_base",
+            state=SchemaState.ACTIVE,
+            last_accessed_at=timezone.now() - timedelta(hours=1),
+        )
+        # In-flight refresh row: PROVISIONING, last_accessed_at left NULL.
+        TenantSchema.objects.create(
+            tenant=tenant, schema_name="dom_r1a2b3c4", state=SchemaState.PROVISIONING
+        )
+
+        mgr = SchemaManager()
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            ts = mgr.provision(tenant)
+
+        assert ts.pk == base.pk
+        assert ts.schema_name == "dom_base"
 
 
 @pytest.mark.django_db
@@ -360,6 +483,36 @@ class TestSchemaManagerRoleTeardown:
             pytest.raises(RuntimeError),
         ):
             SchemaManager().teardown(ts)
+
+
+@pytest.mark.django_db
+class TestBuildViewSchemaProviderSafety:
+    """arch #235 — build_view_schema must not break when an external_id is shared
+    across providers (the old Tenant.objects.get(external_id=) raised
+    MultipleObjectsReturned and broke the whole multi-tenant build)."""
+
+    def test_tolerates_cross_provider_duplicate_external_id(self, workspace, tenant):
+        # The workspace's tenant is (commcare, test-domain). A stray tenant under
+        # another provider shares the external_id.
+        Tenant.objects.create(
+            provider="ocs", external_id=tenant.external_id, canonical_name="OCS dup"
+        )
+        TenantSchema.objects.create(tenant=tenant, schema_name="test_domain", state="active")
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_conn.cursor.return_value = mock_cursor
+        mock_conn.closed = False
+        mock_cursor.fetchall.return_value = []  # no tables
+        mock_cursor.fetchone.return_value = None
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            vs = SchemaManager().build_view_schema(workspace)
+
+        assert vs.state == SchemaState.ACTIVE
 
 
 @pytest.mark.django_db
