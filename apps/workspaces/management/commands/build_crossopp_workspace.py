@@ -20,6 +20,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
+from apps.transformations.models import CrossOppMeasureLineage
 from apps.transformations.services.crossopp_cube_builder import OppRef, render_crossopp_model
 from apps.transformations.services.measure_resolver import (
     CanonicalMeasureSpec,
@@ -120,6 +121,26 @@ class Command(BaseCommand):
         # ── Resolve every measure for every opp (async LLM) ──────────────────────
         self.stdout.write(self.style.MIGRATE_HEADING(f"\n  Resolving {len(STARTER_MEASURES)} measures x {len(opps)} opps ..."))
         resolutions_by_opp = asyncio.run(self._resolve_all(opps, candidates_by_opp))
+
+        # ── Persist lineage (powers the transparency inspector) ───────────────────
+        for opp in opps:
+            for m in STARTER_MEASURES:
+                r = resolutions_by_opp.get(opp.external_id, {}).get(m.name)
+                if r is None:
+                    continue
+                CrossOppMeasureLineage.objects.update_or_create(
+                    workspace=workspace,
+                    opportunity_id=opp.external_id,
+                    measure=m.name,
+                    defaults={
+                        "column": r.column or "",
+                        "source_path": r.source_path or "",
+                        "matched_label": r.matched_label or "",
+                        "sql_expression": r.sql_expression or "",
+                        "confidence": r.confidence,
+                        "status": r.status,
+                    },
+                )
 
         # ── Render + write the model ─────────────────────────────────────────────
         model_yaml = render_crossopp_model(BLENDED_CUBE, opps, STARTER_MEASURES, resolutions_by_opp)
