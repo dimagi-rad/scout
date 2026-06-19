@@ -36,6 +36,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.cube_roles import provision_workspace_ro_role
 from apps.workspaces.services.schema_manager import SchemaManager
 
 LABS_PROVIDER = "commcare_connect_labs"
@@ -109,6 +110,12 @@ class Command(BaseCommand):
             workspace=workspace, defaults={"schema_name": ws_hash, "state": SchemaState.ACTIVE}
         )
         self.stdout.write(f"  [view-schema] {ws_hash} (ACTIVE, routing only)")
+
+        # Least-privilege role: USAGE + SELECT on ONLY this workspace's tenant schemas, so a
+        # query for this workspace can never reach another's data (reviewer concern #302).
+        # Cube connects as this role per request via driverFactory (deployment integration).
+        ro_role = provision_workspace_ro_role(ws_hash, [o.schema_name for o in opps])
+        self.stdout.write(f"  [ro-role] {ro_role} (USAGE+SELECT on {len(opps)} schemas only)")
 
         # ── Resolve every measure for every opp (async LLM) ──────────────────────
         self.stdout.write(self.style.MIGRATE_HEADING(f"\n  Resolving {len(STARTER_MEASURES)} measures x {len(opps)} opps ..."))

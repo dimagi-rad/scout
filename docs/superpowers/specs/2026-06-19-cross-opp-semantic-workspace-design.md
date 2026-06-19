@@ -184,13 +184,14 @@ sound only because the tenants share a database.
   LLM-churned. Regeneration only updates per-tenant expressions additively, so artifacts /
   golden queries / saved comparisons keep working. Generated models are persisted + diffed,
   not regenerated-from-scratch.
-- **Tenant isolation (#302):** today Cube connects to Postgres as the `platform` superuser
-  with no per-request role, and `semantic_query` forwards arbitrary SQL — isolation rests
-  entirely on Cube's model surface. This design hardens it: Cube (or the per-workspace
-  connection) uses a **least-privilege role granted USAGE only on the workspace's
-  constituent schemas**; canonical views reference only `COMPILE_CONTEXT.schema_name`; and
-  we ship a **negative test** proving a cross-schema query is *refused*, not just that the
-  right one succeeds.
+- **Tenant isolation (#302):** Cube connects to Postgres as the `platform` superuser today,
+  so isolation rests on Cube's model surface. This adds DB-layer defense-in-depth — SHIPPED:
+  a per-workspace **least-privilege role** `<ws_hash>_ro` granted USAGE + SELECT on ONLY the
+  workspace's constituent tenant schemas (`provision_workspace_ro_role`), with a **negative
+  test** (`tests/e2e/test_tenant_isolation_live.py`) proving a role scoped to workspace A is
+  *refused* on workspace B's schema. REMAINING deployment integration: a Cube `driverFactory`
+  that connects as `<schema_name>_ro` per request (keyed on the JWT's `schema_name`) instead
+  of `platform`, so the running container actually uses the scoped role.
 - **Knowledge layering (#305):** the resolver reads per-**tenant** `TableKnowledge` /
   column notes (the data source), not per-workspace — overrides attach to the tenant
   mapping.
