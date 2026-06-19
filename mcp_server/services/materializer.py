@@ -1338,6 +1338,23 @@ def _json_or_none(value: Any) -> str | None:
     return json.dumps(value)
 
 
+def _int_or_none(value: Any) -> int | None:
+    """Coerce a value to int, or return None for SQL NULL.
+
+    The Connect Labs synthetic API returns empty-string ``""`` for nullable
+    FK-integer fields (``deliver_unit``, ``completed_work``) where the
+    production Connect API returns ``null``. This helper converts both
+    ``None`` and ``""`` to Python ``None`` so psycopg writes SQL NULL
+    instead of raising ``InvalidTextRepresentation`` on a BIGINT column.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 _CONNECT_VISITS_INSERT = psql.SQL(
     """
     INSERT INTO {schema}.raw_visits
@@ -1540,7 +1557,11 @@ def _write_connect_visits(
                 r.get("visit_id"),
                 r.get("opportunity_id"),
                 r.get("username", ""),
-                r.get("deliver_unit"),
+                # deliver_unit / completed_work are nullable FK ints. The Connect Labs
+                # synthetic API returns "" (empty string) where production returns null;
+                # _int_or_none coerces both to Python None so psycopg writes SQL NULL
+                # rather than raising InvalidTextRepresentation on the BIGINT column.
+                _int_or_none(r.get("deliver_unit")),
                 r.get("entity_id", ""),
                 r.get("entity_name", ""),
                 r.get("visit_date"),
@@ -1550,7 +1571,7 @@ def _write_connect_visits(
                 r.get("flagged"),
                 _json_or_none(r.get("flag_reason")),
                 json.dumps(r.get("form_json") or {}),
-                r.get("completed_work"),
+                _int_or_none(r.get("completed_work")),
                 r.get("status_modified_date"),
                 r.get("review_status", ""),
                 r.get("review_created_on"),
