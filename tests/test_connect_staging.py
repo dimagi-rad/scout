@@ -59,6 +59,10 @@ def test_generates_visit_staging_with_typed_columns(connect_tenant):
     assert "form_json" in sql
     assert "muac" in sql  # column derived from /data/muac_group/muac
     assert "muac_confirmed" in sql
+    # Answers nest under form_json['form'] (CommCare instance root -> 'form'), NOT
+    # form_json['data'] — extracting from 'data' yields all-NULLs vs real visit data.
+    assert "'form','muac_group','muac'" in sql
+    assert "'data','muac_group','muac'" not in sql
     # Repeat question is NOT inlined into stg_visits:
     assert "child_name" not in sql
 
