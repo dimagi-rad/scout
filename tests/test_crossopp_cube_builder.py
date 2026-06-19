@@ -46,8 +46,10 @@ def test_opp_cube_aliases_resolved_expressions():
     cube = build_opp_cube(opp, MEASURES, res)
     assert cube["name"] == "opp_10012"
     assert "FROM t_10012_62a6d140.stg_visits" in cube["sql"]
-    # numeric measure aliased straight; rate measure wrapped to 0.0/1.0 numeric
-    assert "CAST(child_weight_birth AS NUMERIC) AS birth_weight" in cube["sql"]
+    # numeric measure: safe regex-guarded cast on the resolved column (placeholders -> NULL)
+    assert "(child_weight_birth)::numeric" in cube["sql"]
+    assert "AS birth_weight" in cube["sql"]
+    # rate measure wrapped to 0.0/1.0 numeric
     assert "CASE WHEN (child_referred = 'yes') THEN 1.0 ELSE 0.0 END AS danger_sign_referral_rate" in cube["sql"]
 
 

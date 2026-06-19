@@ -48,17 +48,29 @@ def opp_cube_name(external_id: str) -> str:
     return f"opp_{external_id}"
 
 
+# Matches any string PostgreSQL can parse as a number (mirrors commcare_staging's guard).
+_NUM_RE = r"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"
+
+
+def _safe_numeric(column: str) -> str:
+    """Regex-guarded numeric cast so synthetic placeholder text (e.g. "sample-223") becomes
+    NULL instead of raising a cast error — stg_visits columns may be text."""
+    return f"CASE WHEN NULLIF({column}::text, '') ~ '{_NUM_RE}' THEN ({column})::numeric ELSE NULL END"
+
+
 def _measure_select(measure: CanonicalMeasureSpec, resolution: MeasureResolution | None) -> str:
     """The per-opp SELECT term aliasing a measure to its canonical column.
 
-    Absent → ``NULL`` (so the blended avg ignores that opp). A ``rate`` measure's boolean
-    expression is turned into a 0.0/1.0 numeric so the blended cube can average it.
+    Absent → ``NULL`` (so the blended avg ignores that opp). A ``numeric`` measure is
+    safe-cast from its resolved column (placeholders → NULL, never a hard cast error); a
+    ``rate`` measure's boolean expression becomes a 0.0/1.0 numeric the blended cube averages.
     """
     if resolution is None or resolution.status == "absent" or not resolution.sql_expression:
         return f"NULL AS {measure.name}"
     if measure.kind == "rate":
         return f"CASE WHEN {resolution.sql_expression} THEN 1.0 ELSE 0.0 END AS {measure.name}"
-    return f"{resolution.sql_expression} AS {measure.name}"
+    column = resolution.column or resolution.sql_expression
+    return f"{_safe_numeric(column)} AS {measure.name}"
 
 
 def build_opp_cube(
