@@ -59,6 +59,21 @@ def _is_structural_question(q: dict) -> bool:
     return tag in {"group", "fieldlist"} or qtype in {"group", "fieldlist"}
 
 
+def _to_form_json_path(value_path: str) -> str:
+    """Map a deliver-app question xpath to its ``raw_visits.form_json`` JSON path.
+
+    CommCare nests a visit's submitted answers under ``form_json['form']``, so the
+    xpath instance root (the first segment, e.g. ``data`` in ``/data/muac``) maps to
+    ``form``: ``/data/muac_group/muac`` -> ``ARRAY['form','muac_group','muac']``.
+    Without this the extraction targets ``form_json -> data -> ...`` and yields all
+    NULLs against real visit data (verified against live labs synthetic visits).
+    """
+    segments = [s for s in value_path.split("/") if s]
+    if segments:
+        segments[0] = "form"
+    return _question_path_to_json_path("/" + "/".join(segments))
+
+
 def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     """Return an ordered list of (question, final_column_name) for stg_visits.
 
@@ -102,7 +117,7 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
 
     for q, col_name in visit_column_map(form_definitions):
         value_path = q.get("value", "")
-        json_path = _question_path_to_json_path(value_path)
+        json_path = _to_form_json_path(value_path)
         raw_expr = f"form_json #>> {json_path}"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -131,7 +146,7 @@ def _generate_connect_repeat_group_asset(
     Mirrors ``commcare_staging._generate_repeat_group_asset`` but targets
     ``stg_visits`` as the parent and ``form_json`` as the JSON column.
     """
-    group_json_path = _question_path_to_json_path(group_path)
+    group_json_path = _to_form_json_path(group_path)
     group_slug = slugify_model_name(group_path.rsplit("/", 1)[-1])
     parent_model = "stg_visits"
 
