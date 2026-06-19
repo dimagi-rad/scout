@@ -1,0 +1,221 @@
+auth:
+  type: session
+base_url: http://localhost:5173
+name: kmc-cross-opp-semantic-dashboard
+narrative: Amara runs the KMC program's eleven delivery opportunities and walks in
+  wanting to know where preterm babies are actually gaining weight and surviving —
+  but every opportunity ran a slightly different CommCare app, so she has never been
+  able to line them up. She logs into Scout, spins up a fresh workspace, and pools
+  all eleven opportunities into it as one set. She asks, in plain English, for a dashboard
+  on weight gain, mortality, daily kangaroo-care hours, and the danger-sign referral
+  rate — and Scout works out, opportunity by opportunity, which field means "birth
+  weight" and which means "child alive", aligning apps that share no column name.
+  Within a moment she is reading weight gain and mortality side by side across all
+  eleven opps, broken out by opportunity. Then, because she is about to act on it,
+  she opens a number, sees the canonical measure it came from, how each opportunity
+  resolved to its own field, and the exact SQL — and decides for herself whether to
+  trust it before sharing it with her team.
+narrative_locked: true
+narrative_locked_at: '2026-06-19T18:23:58.485883+00:00'
+narrative_synced_at: '2026-06-19T18:23:58.353395+00:00'
+narrative_synced_hash: 79e1fc118e5324b6ad03d23fe914ecf51561ceef6f69ba50019a917b6a4dc935
+narrative_synced_version: 2
+personas:
+  amara:
+    color: '#7C3AED'
+    intro: Amara oversees eleven KMC delivery opportunities and wants to compare clinical
+      outcomes across them; she knows the program cold but not how each CommCare app
+      is built.
+    name: Amara
+    role: KMC Program Manager
+review_mode: human
+scenes:
+- concept_claim: Scout shows the eleven KMC opportunities as separate sources that
+    cannot yet be compared together.
+  design_intent: Open on the real pain — fragmentation across structurally-different
+    apps — before any feature appears.
+  features:
+  - description: Workspaces home page lists the user's available tenants/opportunities.
+    id: workspaces-home
+    verify: 'Playwright: load /, assert the 11 KMC opportunity names render in the
+      source list'
+  narrative: 'Amara opens Scout already knowing her problem: eleven KMC opportunities,
+    each on a slightly different app, and no way to see weight gain or mortality across
+    all of them at once.'
+  persona: amara
+  provenance: S1
+  show: Land on the Scout workspaces home; the eleven KMC opportunities are visible
+    as separate, unaligned sources.
+  title: Amara has eleven opps she can't line up
+- concept_claim: Amara composes eleven opportunities into one workspace and Scout
+    provisions a combined view schema for them.
+  design_intent: Reuse the existing multi-tenant composition so the demo rides proven
+    machinery, not a rebuild.
+  features:
+  - description: Create-workspace flow that yields an empty workspace owned by the
+      user.
+    id: create-workspace
+    verify: 'Playwright: click New Workspace, fill name ''KMC Cross-Opp'', assert
+      workspace detail page loads'
+  - description: Add multiple opportunities to a workspace via the add-tenant action
+      (POST /api/workspaces/<id>/tenants/).
+    id: add-tenants
+    verify: 'pytest: POST 11 tenant_ids, assert WorkspaceViewSchema rebuild is queued
+      and 11 WorkspaceTenant rows exist'
+  narrative: Amara creates a new workspace, names it KMC Cross-Opp, and drops all
+    eleven opportunities into it as a single set — Scout already lets her compose
+    many opportunities into one workspace.
+  persona: amara
+  provenance: S9
+  show: Create a new workspace, then add the 11 KMC opportunities to it as tenants.
+  title: Amara pools all eleven into one workspace
+- concept_claim: Amara names clinical outcomes in plain language and Scout records
+    them as canonical measures without her referencing any field.
+  design_intent: The expert speaks domain language; the canonical measure catalog
+    is the vocabulary, not CommCare paths.
+  features:
+  - description: Workspace-scoped canonical measure catalog storing domain concepts
+      (name, description, type, aggregation).
+    id: canonical-measure-catalog
+    verify: 'pytest: create CanonicalMeasure ''birth_weight'' on a workspace, assert
+      it persists scoped to that workspace'
+  - description: Agent turns a natural-language dashboard request into named canonical
+      measures (weight gain, mortality, kangaroo-care hours, danger-sign referral
+      rate).
+    id: nl-prompt-to-measures
+    verify: 'pytest: feed the prompt, assert >=4 canonical measures are created including
+      weight_gain, mortality, kmc_hours and danger_sign_referral_rate'
+  narrative: Amara types one plain-English request — a dashboard on weight gain, mortality,
+    daily kangaroo-care hours, and the danger-sign referral rate — naming the outcomes
+    she cares about, not any CommCare field.
+  persona: amara
+  provenance: S3
+  show: Open the workspace chat and enter a natural-language prompt asking for a dashboard
+    on weight gain, mortality, daily kangaroo-care hours, and the danger-sign referral
+    rate, sliced sensibly.
+  title: Amara asks for what she wants, in her own words
+- concept_claim: Scout resolves each canonical measure to a per-opportunity SQL expression
+    using question labels and form roles, with confidence shown.
+  design_intent: Auto-modeling does the per-app understanding; labels and form/module
+    role are the resolution signals.
+  features:
+  - description: Per-tenant LLM resolver mapping a canonical measure to a SQL expression
+      over that tenant's stg_visits, grounded in label/form/module/case_type/type/options.
+    id: measure-resolver
+    verify: 'pytest: resolve birth_weight for opp 10012, assert it maps to the Double
+      entry question child_weight_birth, not the DataBindOnly copy'
+  - description: MeasureMapping model storing measure x tenant -> expression, confidence,
+      provenance, override.
+    id: mapping-store
+    verify: 'pytest: assert a MeasureMapping row exists per (measure, tenant) with
+      confidence and provenance populated'
+  narrative: For every opportunity, Scout reads that app's questions and labels and
+    works out which field is birth weight and which is child-alive — preferring the
+    real entry question over a calculated copy.
+  persona: amara
+  provenance: S4
+  show: Show the resolver mapping each canonical measure to a per-opportunity field,
+    with confidence and the label it matched on.
+  title: Scout finds each measure inside each different app
+- concept_claim: Scout aligns the same measure across opps that use different field
+    names and flags the opp where it is genuinely absent.
+  design_intent: Semantic resolution recovers exactly the measures a lexical name-match
+    would drop (the 10/11 case).
+  features:
+  - description: 'Per-measure coverage view: which opps resolved, which are absent,
+      the matched field per opp.'
+    id: coverage-matrix
+    verify: 'Playwright: open coverage for birth_weight, assert 10 opps show a mapped
+      field and 1 shows ''absent'''
+  narrative: Amara sees birth weight resolved for ten of the eleven opps even though
+    the apps name and nest the field differently — the one app that never collected
+    it is flagged, not silently dropped.
+  persona: amara
+  provenance: S2
+  show: 'Show the coverage of birth_weight across opps: resolved in 10/11 with differing
+    underlying field names, flagged absent in 1.'
+  title: It works even where the apps share no column name
+- concept_claim: Scout unions the eleven opps into one table aliased on shared canonical
+    columns with opportunity_id on every row.
+  design_intent: Aliasing each opp's expression to canonical names makes UNION ALL
+    well-defined in the existing ws_<hash> schema.
+  features:
+  - description: Extend build_view_schema to emit per-tenant canonical aliased views
+      + a UNION ALL over them in ws_<hash>.
+    id: canonical-union-builder
+    verify: 'pytest: build the union over 2 tenants with differently-named birth-weight
+      fields, assert canonical_visits aligns and counts sum'
+  narrative: Amara watches the eleven opportunities snap into one aligned set — every
+    opp contributing the same canonical columns, so the numbers are finally comparable
+    rather than eleven incompatible shapes.
+  persona: amara
+  provenance: S5
+  show: 'Show the canonical union: one combined table where each row carries opportunity_id
+    and the shared canonical measure columns.'
+  title: Eleven opps line up in one comparable table
+- concept_claim: Amara sees weight gain and mortality compared across all eleven opportunities,
+    sliced by opportunity, from one prompt.
+  design_intent: One Cube model on the canonical union with opportunity_id as the
+    comparison dimension answers the NL prompt.
+  features:
+  - description: One Cube model targeting ws_<hash>.canonical_visits with measures
+      on canonical columns and opportunity_id dimension.
+    id: crossopp-cube-model
+    verify: 'cube_e2e: semantic_query for weight_gain and mortality grouped by opportunity_id
+      returns one row per opp'
+  - description: Shareable dashboard artifact rendering the requested indicators sliced
+      by opportunity.
+    id: dashboard-artifact
+    verify: 'Playwright: assert the dashboard shows weight_gain + mortality + kmc_hours
+      + danger_sign_referral_rate with an opportunity breakdown'
+  narrative: Within a moment Amara is reading weight gain and mortality side by side
+    across all eleven opportunities, broken out by opportunity, plus the daily kangaroo-care
+    hours and danger-sign referral rate she asked for.
+  persona: amara
+  provenance: S6
+  show: 'Render the cross-opp dashboard: weight gain, mortality, daily kangaroo-care
+    hours, and the danger-sign referral rate as charts/tables sliced by opportunity_id.'
+  title: Amara reads weight gain and mortality across all eleven
+- concept_claim: Amara opens any figure and sees its canonical definition, per-opp
+    field mappings, and the exact SQL that produced it.
+  design_intent: 'Trust comes from traceability: definition, mapping, and SQL are
+    one click from the number.'
+  features:
+  - description: Inspector surface that, from a dashboard figure, shows the canonical
+      measure def, per-tenant mappings, and the generated SQL.
+    id: measure-inspector
+    verify: 'Playwright: click a figure, assert the panel shows the measure description,
+      per-opp field list, and a SQL block'
+  narrative: Before she acts on it, Amara clicks the mortality figure and reads its
+    canonical definition, how each opportunity resolved to its own field, and the
+    exact SQL behind the number.
+  persona: amara
+  provenance: S7
+  show: 'From a dashboard figure, open the inspector: canonical measure definition,
+    per-opp resolved mappings, and the generated SQL.'
+  title: Amara opens a number and sees how it was made
+- concept_claim: Amara confirms the dashboard reads only her eleven opportunities
+    and shares it by a single stable link.
+  design_intent: 'Production-real trust: DB-enforced isolation plus stable canonical
+    identity make the shared artifact safe to act on.'
+  features:
+  - description: Cube connects via a workspace-scoped read-only role with USAGE only
+      on the workspace's constituent schemas; a negative test proves a foreign-schema
+      query is refused.
+    id: least-privilege-role
+    verify: 'pytest: a query for a schema outside the workspace''s tenants is refused,
+      not returned'
+  - description: A dashboard share link that renders the same cross-opp artifact for
+      a teammate.
+    id: shareable-dashboard-link
+    verify: 'Playwright: open the share link in a fresh session, assert the same indicators
+      and opportunity breakdown render'
+  narrative: Amara confirms the numbers came only from her eleven opportunities and
+    that the measure names she is about to circulate will not shift under her, then
+    shares the dashboard with her team as one link.
+  persona: amara
+  provenance: S8
+  show: Show the query scoped to only the workspace's 11 schemas (isolation) and stable
+    measure ids, then share the dashboard link.
+  title: Amara trusts it, then shares it
+why_brief: kmc-cross-opp-semantic-dashboard.why_brief.yaml

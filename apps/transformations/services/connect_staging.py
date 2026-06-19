@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import logging
 
+from apps.common.identifiers import dbt_column_alias
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _column_name_from_path,
     _question_path_to_json_path,
     _sql_escape,
     _typed_expression,
-    _unique_alias,
     slugify_model_name,
 )
 
@@ -77,7 +77,7 @@ def _to_form_json_path(value_path: str) -> str:
 def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     """Return an ordered list of (question, final_column_name) for stg_visits.
 
-    Applies the same base-column seeding and :func:`_unique_alias` deduplication
+    Applies the same base-column seeding and :func:`dbt_column_alias` deduplication
     that :func:`_generate_stg_visits` uses, guaranteeing that the column names
     returned here are byte-for-byte identical to those emitted in the staging SQL.
 
@@ -97,7 +97,7 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
             value_path = q.get("value", "")
             if not value_path:
                 continue
-            col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
+            col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
             result.append((q, col_name))
     return result
 
@@ -162,7 +162,7 @@ def _generate_connect_repeat_group_asset(
         if not value_path:
             continue
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = _unique_alias(_column_name_from_path(value_path), seen_aliases)
+        col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')

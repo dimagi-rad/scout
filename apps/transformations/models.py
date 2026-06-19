@@ -191,3 +191,36 @@ class TransformationAssetRun(models.Model):
 
     def __str__(self):
         return f"AssetRun({self.asset.name}, {self.status})"
+
+
+class CrossOppMeasureLineage(models.Model):
+    """Per-opp resolution provenance for a cross-opp workspace measure.
+
+    Cube remains the measure catalog; this is the *lineage* the transparency inspector
+    shows so a user can confirm Cube's number — for each (workspace, opp, measure): which
+    app field it resolved to, the human label it matched on, the confidence, and the exact
+    SQL expression. Written by ``build_crossopp_workspace`` from the resolver's output.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="measure_lineage",
+    )
+    opportunity_id = models.CharField(max_length=64)
+    measure = models.CharField(max_length=128)
+    column = models.CharField(max_length=255, blank=True, default="")
+    source_path = models.CharField(max_length=512, blank=True, default="")
+    matched_label = models.TextField(blank=True, default="")
+    sql_expression = models.TextField(blank=True, default="")
+    confidence = models.FloatField(default=0.0)
+    status = models.CharField(max_length=20)  # resolved | low_confidence | absent
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ["workspace", "opportunity_id", "measure"]
+        ordering = ["measure", "opportunity_id"]
+
+    def __str__(self):
+        return f"{self.measure}@{self.opportunity_id} ({self.status})"

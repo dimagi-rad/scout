@@ -18,7 +18,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from asgiref.sync import sync_to_async
 
 from apps.evals.models import EvalRun, GoldenQuery
 from apps.evals.services.judge import judge_equivalence
@@ -256,7 +255,7 @@ async def test_judge_empty_vs_empty_exact():
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_persists_correct_run_count(workspace):
     """run_eval(runs=3) persists exactly 3 EvalRun rows."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="Count users",
         question="How many users are there?",
@@ -273,7 +272,7 @@ async def test_run_eval_persists_correct_run_count(workspace):
     )
 
     assert len(runs) == 3
-    db_count = await sync_to_async(EvalRun.objects.filter(golden_query=gq).count)()
+    db_count = await EvalRun.objects.filter(golden_query=gq).acount()
     assert db_count == 3
 
 
@@ -281,7 +280,7 @@ async def test_run_eval_persists_correct_run_count(workspace):
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_fields_captured(workspace):
     """EvalRun rows carry correct sql, query, result, ms, and scoring fields."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="Revenue",
         question="Total revenue?",
@@ -318,7 +317,7 @@ async def test_run_eval_fields_captured(workspace):
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_use_preagg_true(workspace):
     """use_preagg=True is stored on all EvalRun rows."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="Preagg test",
         question="Any?",
@@ -342,7 +341,7 @@ async def test_run_eval_use_preagg_true(workspace):
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_use_preagg_false_default(workspace):
     """use_preagg defaults to False."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="No preagg",
         question="Any?",
@@ -365,7 +364,7 @@ async def test_run_eval_use_preagg_false_default(workspace):
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_judge_verdict_stored(workspace):
     """The judge's verdict is stored correctly on EvalRun."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="Mismatch",
         question="Any?",
@@ -394,7 +393,7 @@ async def test_run_eval_judge_verdict_stored(workspace):
 @pytest.mark.django_db(transaction=True)
 async def test_run_eval_latency_captured(workspace):
     """free_sql_ms and cube_ms are captured (from fake paths' ms fields)."""
-    gq = await sync_to_async(GoldenQuery.objects.create)(
+    gq = await GoldenQuery.objects.acreate(
         workspace=workspace,
         title="Latency",
         question="Speed test?",
