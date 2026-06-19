@@ -16,10 +16,10 @@ narrative: Amara runs the KMC program's eleven delivery opportunities and walks 
   resolved to its own field, and the exact SQL — and decides for herself whether to
   trust it before sharing it with her team.
 narrative_locked: true
-narrative_locked_at: '2026-06-19T18:23:58.485883+00:00'
-narrative_synced_at: '2026-06-19T18:23:58.353395+00:00'
-narrative_synced_hash: 79e1fc118e5324b6ad03d23fe914ecf51561ceef6f69ba50019a917b6a4dc935
-narrative_synced_version: 2
+narrative_locked_at: '2026-06-19T22:59:13.061853+00:00'
+narrative_synced_at: '2026-06-19T22:59:14.429709+00:00'
+narrative_synced_hash: db80529ad6a43589bdec23e30f3dbc5e71e2736461b54b9016155e872922e6af
+narrative_synced_version: 3
 personas:
   amara:
     color: '#7C3AED'
@@ -176,24 +176,80 @@ scenes:
   show: 'Render the cross-opp dashboard: weight gain, mortality, daily kangaroo-care
     hours, and the danger-sign referral rate as charts/tables sliced by opportunity_id.'
   title: Amara reads weight gain and mortality across all eleven
-- concept_claim: Amara opens any figure and sees its canonical definition, per-opp
-    field mappings, and the exact SQL that produced it.
-  design_intent: 'Trust comes from traceability: definition, mapping, and SQL are
-    one click from the number.'
+- concept_claim: Each dashboard column is backed by a named canonical measure with
+    a plain-language definition and a count of how many opportunities resolved it.
+  design_intent: Trust starts with the vocabulary — show that every number traces
+    to a defined concept, not an ad-hoc column the expert has to take on faith.
   features:
-  - description: Inspector surface that, from a dashboard figure, shows the canonical
-      measure def, per-tenant mappings, and the generated SQL.
-    id: measure-inspector
-    verify: 'Playwright: click a figure, assert the panel shows the measure description,
-      per-opp field list, and a SQL block'
-  narrative: Before she acts on it, Amara clicks the mortality figure and reads its
-    canonical definition, how each opportunity resolved to its own field, and the
-    exact SQL behind the number.
+  - description: A "How each number was computed" panel listing every canonical measure
+      with its plain-language description and an X/11 resolved coverage count.
+    id: measure-catalog-panel
+    verify: 'Playwright: scroll to the "How each number was computed" panel, assert
+      the four canonical measures each show an X/11 resolved coverage count'
+  narrative: Before she acts on the numbers, Amara opens the panel beneath the dashboard
+    that names every measure in plain language and shows, for each, how many of the
+    eleven opportunities resolved it.
   persona: amara
   provenance: S7
-  show: 'From a dashboard figure, open the inspector: canonical measure definition,
-    per-opp resolved mappings, and the generated SQL.'
-  title: Amara opens a number and sees how it was made
+  show: Scroll to "How each number was computed"; show the four canonical measures,
+    each with its coverage count (e.g. mortality resolved in 11 of 11 opportunities).
+  title: Amara opens the catalog behind the numbers
+- concept_claim: Expanding a measure reveals, per opportunity, the app field it resolved
+    to, the question label it matched on, and a confidence score.
+  design_intent: Make the per-app divergence concrete — the same clinical concept,
+    eleven differently-built apps, one matched human label and field for each.
+  features:
+  - description: 'Per-opp mapping table inside an expanded measure: opportunity, resolved
+      field, matched question label, confidence, and SQL expression for each opp.'
+    id: per-opp-mapping-table
+    verify: 'Playwright: click the mortality measure, assert the expanded table shows
+      11 opp rows each with a resolved field, a matched label, and a confidence value'
+  narrative: She expands mortality and sees, opportunity by opportunity, which field
+    each app used and the human question label Scout matched on — for instance the
+    field child_alive matched on the question "Is the baby alive?".
+  persona: amara
+  provenance: S7
+  show: Click the mortality measure; the per-opp table shows each opportunity's resolved
+    field, the matched question label, and the confidence.
+  title: Amara sees how each app resolved the same measure
+- concept_claim: One click reveals the generated Cube model — each opportunity's per-tenant
+    SQL and the canonical expression Cube actually executes for the measure.
+  design_intent: Remove the black box — the literal generated model, not a paraphrase,
+    is one click from the figure so the expert can audit what really runs.
+  features:
+  - description: '"Show the generated Cube model" reveals the YAML model: per-opp
+      Tier-1 cubes selecting from each tenant schema plus the canonical measure expressions.'
+    id: generated-model-reveal
+    verify: 'Playwright: click "Show the generated Cube model", assert a YAML block
+      renders containing per-opp cube SQL that selects from each tenant schema'
+  narrative: Amara clicks "Show the generated Cube model" and reads the exact SQL
+    — each opportunity's cube selecting from its own schema, and the canonical expression
+    such as child_alive = 'no' that defines the measure.
+  persona: amara
+  provenance: S7
+  show: Click "Show the generated Cube model"; reveal the per-opp Tier-1 cube SQL
+    and the canonical measure expression Cube runs.
+  title: Amara reveals the exact SQL Cube runs
+- concept_claim: Amara traces a single figure to the field, label, and SQL that produced
+    it, confirming the number rather than trusting it.
+  design_intent: Close the loop — the inspection ends by matching the resolved field
+    and SQL back to the exact dashboard cell, turning a plausible number into a confirmed
+    one.
+  features:
+  - description: The resolved field and SQL expression shown for an opportunity match
+      the value rendered in that opportunity's row of the dashboard table.
+    id: figure-to-sql-traceability
+    verify: 'Playwright: read the mortality value for opp 10012 in the dashboard table,
+      assert the inspector shows opp 10012 resolved to child_alive with a matching
+      SQL expression'
+  narrative: With the field and SQL in front of her, Amara matches them back to the
+    mortality figure for opp 10012 in the table — the number is confirmed, not taken
+    on faith, and she is ready to share it.
+  persona: amara
+  provenance: S7
+  show: Match the resolved field and SQL expression for opp 10012 back to its mortality
+    figure in the dashboard table.
+  title: Amara matches the SQL back to the number
 - concept_claim: Amara confirms the dashboard reads only her eleven opportunities
     and shares it by a single stable link.
   design_intent: 'Production-real trust: DB-enforced isolation plus stable canonical
