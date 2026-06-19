@@ -1,0 +1,176 @@
+schema_version: 1
+narrative_slug: kmc-cross-opp-semantic-dashboard
+problem: >-
+  An operations expert who knows KMC programs but not CommCare app internals cannot today
+  compare clinical delivery (weight gain, mortality, danger signs) across the 11 KMC
+  opportunities and trust the result, because each opp's app is structurally different and
+  Scout has no way to align them on shared meaning.
+
+spine:
+  - id: S1
+    claim: >-
+      Ops experts need to compare clinical outcomes across the 11 KMC opps, but the apps are
+      structurally different — 351–651 scalar visit fields each, opp 10012's stg_visits is 731
+      columns wide.
+    rationale: >-
+      The 11 opps run the same program but diverged into different CommCare apps; a comparison
+      that matters (weight gain, mortality) has to span all of them despite that divergence.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-011
+
+  - id: S2
+    claim: >-
+      Aligning the apps lexically — by matching field paths or names — silently drops the
+      measures that matter most.
+    rationale: >-
+      Across all 11 apps only 197 field paths are identical and just ~32 are clinical; the key
+      clinical measures (child_weight_birth, danger_sign_positive, breath counts, hypothermia,
+      kmc_status) sit at 10/11, so a strict path-intersection excludes exactly them.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-012
+
+  - id: S3
+    claim: >-
+      Alignment must instead be semantic: a workspace-scoped catalog of canonical measures
+      defined in plain domain language, that the expert speaks and the system resolves.
+    rationale: >-
+      If the expert names "weight gain" once, the burden of finding it in each app shifts from
+      the human to the system — which is the only thing that scales across structurally-different apps.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-001
+
+  - id: S4
+    claim: >-
+      Resolving each canonical measure to a per-app SQL expression is an auto-model task: an LLM
+      maps it using the stored app structure — question label, form/module role, case_type, entry-vs-calc
+      type, and choice options.
+    rationale: >-
+      The human label ("Stable SVN weight at the time of birth (in grams)") is the stable semantic
+      bridge across apps where paths diverge; Scout already stores this structure and already has a
+      per-schema model-generation engine to extend.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-009
+      - kind: implemented
+        ref: EV-007
+
+  - id: S5
+    claim: >-
+      Aliasing each opp's resolved expressions to shared canonical column names makes a UNION ALL
+      align cleanly, inside the ws_<hash> schema Scout already provisions for multi-tenant workspaces.
+    rationale: >-
+      When every opp's SELECT lands on the same canonical names (NULL where a concept is absent),
+      the union is well-defined regardless of how different the apps are; the composition layer already exists.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-003
+      - kind: implemented
+        ref: EV-004
+      - kind: implemented
+        ref: EV-005
+
+  - id: S6
+    claim: >-
+      One Cube model over the canonical union, with opportunity_id as the comparison dimension,
+      lets the expert ask in natural language and get a comparable cross-opp dashboard.
+    rationale: >-
+      Measures defined once on the canonical columns are computed identically for every opp, so the
+      cross-opp numbers are apples-to-apples; Scout's Cube routing + semantic_query already deliver this for one tenant.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-006
+      - kind: implemented
+        ref: EV-008
+
+  - id: S7
+    claim: >-
+      The comparison is trustworthy only if the expert can verify it — inspect each canonical
+      measure definition, each opp's resolved mapping, and the underlying SQL.
+    rationale: >-
+      An ops expert will not stake decisions on a black-box number; the ability to trace a figure
+      back to its definition and SQL is what converts a plausible dashboard into a trusted one.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-015
+
+  - id: S8
+    claim: >-
+      For this to be production-real, canonical-measure identity must stay stable across model
+      regenerations and tenant isolation must be enforced at the database, not just the model surface.
+    rationale: >-
+      Churning measure names breaks every artifact built on them, and Cube connecting as the
+      Postgres superuser means isolation currently rests entirely on the model surface — both are
+      the reviewer's explicit bar.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-013
+      - kind: implemented
+        ref: EV-014
+
+  - id: S9
+    claim: >-
+      This is an extension of working Scout machinery, not a rebuild — multi-tenant composition and
+      Cube routing already work end-to-end for a single tenant.
+    rationale: >-
+      The new surface is the canonical catalog, the resolver, the canonical union, and the
+      transparency view; everything underneath them already passes its e2e tests.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-005
+      - kind: implemented
+        ref: EV-008
+
+gaps:
+  - id: G1
+    type: RESEARCH
+    claim_ref: S4
+    detail: >-
+      Resolver accuracy on real apps is unproven — whether the LLM correctly maps canonical
+      measures (weight gain, mortality, danger signs) to the right fields across all 11 apps,
+      preferring real entry questions over DataBindOnly calc copies and scoping to the Visit form.
+    proposed_action: >-
+      Build the resolver and measure mapping accuracy against a hand-checked sample across the 11
+      opps; surface confidence + provenance for each mapping.
+
+  - id: G2
+    type: CAPABILITY
+    claim_ref: S5
+    detail: >-
+      The canonical UNION builder does not exist yet — build_view_schema currently emits per-tenant
+      pass-through views (prefix__table), not canonical aliased views unioned on shared names.
+    proposed_action: >-
+      Phase 1: extend build_view_schema to emit canonical aliased views + a UNION ALL over the
+      workspace's tenants.
+
+  - id: G3
+    type: CAPABILITY
+    claim_ref: S8
+    detail: >-
+      A least-privilege DB role for the workspace and a negative cross-schema isolation test are
+      not yet implemented; Cube connects as the platform superuser.
+    proposed_action: >-
+      Phase 1: have Cube connect via a ws-scoped read-only role (USAGE only on the workspace's
+      constituent schemas) and add a test proving a foreign-schema query is refused.
+
+  - id: G4
+    type: RESEARCH
+    claim_ref: S2
+    detail: >-
+      Synthetic labs data values are mostly placeholders (connect-labs #670), so demo numbers will
+      not be clinically realistic even when correctly aligned — structure/correctness is what is
+      provable now, not clinical realism.
+    proposed_action: >-
+      Treat realism as a separate lever; in the demo, foreground the alignment + verifiability, and
+      caption that values are synthetic.
