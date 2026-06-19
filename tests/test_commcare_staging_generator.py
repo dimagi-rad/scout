@@ -6,6 +6,7 @@ import pytest
 
 from apps.transformations.models import TransformationScope
 from apps.transformations.services.commcare_staging import (
+    _typed_expression,
     generate_system_assets,
     slugify_model_name,
     upsert_system_assets,
@@ -215,6 +216,59 @@ def _make_full_metadata():
     )
 
 
+# ── _typed_expression safe-cast tests ─────────────────────────────────────
+
+
+class TestTypedExpression:
+    """Verify _typed_expression generates SQL that handles malformed numeric data.
+
+    The synthetic Connect-Labs data contains float strings where Int questions
+    are expected (e.g. "44.8107...") and placeholder strings where Decimal/
+    Double questions are expected (e.g. "sample-67").  Both must become NULL
+    rather than raising a PostgreSQL cast error.
+    """
+
+    def test_int_uses_numeric_then_integer_cast(self):
+        sql = _typed_expression("col", "Int")
+        # Double cast handles float strings: "44.8" -> numeric -> 44 (integer)
+        assert "::numeric::integer" in sql
+
+    def test_int_uses_regex_guard(self):
+        sql = _typed_expression("col", "Int")
+        # Regex guard wraps the expression in a CASE WHEN so non-numeric strings
+        # (e.g. "sample-67") produce NULL instead of a cast error
+        assert "CASE WHEN" in sql
+        assert "~" in sql  # regex operator present
+
+    def test_decimal_uses_numeric_cast(self):
+        sql = _typed_expression("col", "Decimal")
+        assert "::numeric" in sql
+
+    def test_decimal_uses_regex_guard(self):
+        sql = _typed_expression("col", "Decimal")
+        assert "CASE WHEN" in sql
+
+    def test_double_uses_regex_guard(self):
+        sql = _typed_expression("col", "Double")
+        assert "CASE WHEN" in sql
+        assert "::numeric" in sql
+
+    def test_text_returns_raw_expr(self):
+        # Text fields must not be wrapped — return as-is
+        sql = _typed_expression("col", "Text")
+        assert sql == "col"
+        assert "CASE WHEN" not in sql
+
+    def test_date_uses_direct_nullif_cast(self):
+        # Date fields use a plain NULLIF + ::date (no regex guard)
+        sql = _typed_expression("col", "Date")
+        assert sql == "NULLIF(col, '')::date"
+
+    def test_none_type_returns_raw_expr(self):
+        sql = _typed_expression("col", None)
+        assert sql == "col"
+
+
 # ── Slugification tests ────────────────────────────────────────────────────
 
 
@@ -313,7 +367,11 @@ class TestFormGeneration:
         assets = generate_system_assets(tenant, _make_full_metadata())
         reg_asset = next(a for a in assets if a.name == "stg_form_patient_registration")
         sql = reg_asset.sql_content
-        assert "NULLIF(form_data #>> ARRAY['data','age']::text[], '')::integer AS \"age\"" in sql
+        # Int fields use a regex guard (CASE WHEN) + double cast (::numeric::integer) so
+        # that float strings ("44.8") and non-numeric strings ("sample-x") never raise a
+        # "invalid input syntax for type integer" error at query time.
+        assert "::numeric::integer" in sql
+        assert '"age"' in sql
 
     def test_form_sql_date_cast(self, tenant):
         assets = generate_system_assets(tenant, _make_full_metadata())
@@ -405,7 +463,9 @@ class TestRepeatGroupGeneration:
             for a in generate_system_assets(tenant, _make_full_metadata())
             if "__repeat_" in a.name
         )
-        assert '::integer AS "child_age"' in repeat.sql_content
+        # Int fields use the safe regex-guarded double cast (::numeric::integer)
+        assert "::numeric::integer" in repeat.sql_content
+        assert '"child_age"' in repeat.sql_content
 
     def test_repeat_sql_uses_original_field_name_for_json_key(self, tenant):
         """JSON key should use the original leaf name, not the slugified alias."""

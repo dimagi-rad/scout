@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # ── Type-casting map ────────────────────────────────────────────────────────
 # CommCare question type → PostgreSQL cast suffix (None means TEXT / no cast).
+# Numeric types use a two-step cast: first to numeric (handles float strings
+# like "44.8") then to integer.  Date/DateTime keep a direct cast.
 _TYPE_CAST: dict[str, str | None] = {
     "Text": None,
     "Barcode": None,
@@ -24,12 +26,21 @@ _TYPE_CAST: dict[str, str | None] = {
     "Select": None,
     "MultiSelect": None,
     "GeoPoint": None,
-    "Int": "::integer",
+    "Int": "::numeric::integer",
     "Double": "::numeric",
     "Decimal": "::numeric",
     "Date": "::date",
     "DateTime": "::timestamp",
 }
+
+# Question types where the raw JSON value may be a non-parseable string (e.g.
+# synthetic placeholder values like "sample-67").  For these types we add a
+# regex guard so the NULLIF cast returns NULL instead of raising an error.
+# The regex matches any string that could be a valid decimal number (including
+# scientific notation), and is intentionally permissive — an empty string is
+# already handled by the outer NULLIF(..., '') so only truly non-numeric
+# strings need to be guarded here.
+_NUMERIC_TYPES: frozenset[str] = frozenset({"Int", "Double", "Decimal"})
 
 # CommCare core case columns that are always present on raw_cases.
 _CASE_CORE_COLUMNS = [
@@ -88,10 +99,33 @@ def _column_name_from_path(value_path: str) -> str:
 
 
 def _typed_expression(expr: str, question_type: str | None) -> str:
-    """Wrap *expr* with a NULLIF + cast if the question type requires it."""
-    cast = _TYPE_CAST.get(question_type or "")
+    """Wrap *expr* with a safe cast if the question type requires it.
+
+    For numeric types (Int, Double, Decimal) a regex guard is applied so that
+    non-parseable strings (e.g. synthetic placeholder values like "sample-67")
+    silently return NULL instead of raising a cast error.  Int fields also go
+    through ``::numeric`` first so float strings like "44.8" are accepted and
+    truncated to an integer rather than raising "invalid input syntax for type
+    integer".
+
+    For date/datetime types a plain ``NULLIF(..., '')::cast`` is used — these
+    fields are expected to be well-formed ISO strings in production and test
+    data.
+    """
+    q_type = question_type or ""
+    cast = _TYPE_CAST.get(q_type)
     if cast is None:
         return expr
+    if q_type in _NUMERIC_TYPES:
+        # Regex pattern matches any string that PostgreSQL can parse as a
+        # number: optional sign, digits, optional decimal point + digits,
+        # optional exponent.  Non-matching values become NULL.
+        _num_re = r"^-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$"
+        return (
+            f"CASE WHEN NULLIF({expr}, '') ~ '{_num_re}'"
+            f" THEN NULLIF({expr}, ''){cast}"
+            f" ELSE NULL END"
+        )
     return f"NULLIF({expr}, ''){cast}"
 
 
