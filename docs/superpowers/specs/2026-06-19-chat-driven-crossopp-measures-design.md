@@ -10,6 +10,19 @@ every opportunity, validates with you when it has doubt, commits it, and answers
 per-opp field/label/confidence/SQL one expand away, exactly like the `/crossopp` inspector
 and like opening "what's underneath" an artifact.
 
+**Core principle — one engine, two spec sources (both/and).** A `CanonicalMeasureSpec`
+(name, description, kind) is the single input to a shared engine that resolves it across opps,
+gates on doubt, commits additively, and renders lineage. *Where the spec comes from is just a
+front door:*
+
+- **On-demand (question-driven):** the agent extracts the specs a cross-opp question needs.
+- **Proposer (app-driven):** an LLM reads the workspace's app structure and proposes the specs
+  for "what data analysis is most likely" — the auto-model scaffolding.
+
+The proposer emits the same specs and runs the **identical** resolve→gate→commit code. Firing
+the proposer *proactively* (ahead of any question, e.g. on workspace setup) is therefore just a
+trigger choice, not new machinery — built as an invokable capability, left un-scheduled for now.
+
 ## 0. Definition of done
 
 In the **KMC Cross-Opp** workspace chat:
@@ -28,6 +41,10 @@ In the **KMC Cross-Opp** workspace chat:
    field/label/confidence, and the exact SQL — inline in chat.
 5. Defining a new measure **never** changes the identity or expressions of existing measures
    (model stability; Simon #303).
+6. **Proposer path:** asking "what should I look at in these opps?" (or invoking
+   `propose_crossopp_measures`) makes Scout read the apps and propose a ranked measure catalog;
+   each accepted proposal runs the **same** resolve→doubt-gate→commit engine as a question would.
+   Confident proposals commit; doubtful ones surface the same approval card (batched).
 
 ## 1. What exists today (reuse, don't rebuild)
 
@@ -75,11 +92,12 @@ risky streaming core is untouched.
 
 | # | Component | Path | Responsibility |
 |---|---|---|---|
-| 1 | `crossopp_measure_service` | `apps/transformations/services/crossopp_measure_service.py` (new) | Extract resolve → regenerate-model → persist-lineage → reload-cube from the command into a reusable service with an **incremental `add_measure`** path. Additive: regenerating the model preserves every existing measure's id + expression. `build_crossopp_workspace` becomes a thin caller. |
+| 1 | `crossopp_measure_service` (the **shared engine**) | `apps/transformations/services/crossopp_measure_service.py` (new) | The trigger-agnostic core: given a `CanonicalMeasureSpec` + workspace, resolve across opps → classify doubt → commit (additive model regen + lineage + cube reload) or draft. Incremental `add_measure`; regenerating the model preserves every existing measure's id + expression. Every other component is either a **spec source** (2, 6) or a **surface** (3, 4) over this engine. `build_crossopp_workspace` becomes a thin caller that feeds it the starter specs. |
 | 2 | `define_crossopp_measure` tool | `apps/agents/tools/crossopp_measure_tool.py` (new) | Agent tool. Checks catalog; loads each opp's `form_definitions`; runs the resolver across the workspace's opps; classifies doubt; **commits** (no doubt) or **drafts + `needs_approval`** (doubt). Workspace-scoped (only the workspace's own tenants). |
 | 3 | `CrossOppMeasureDraft` model + approval API | `apps/transformations/models.py`, `apps/workspaces/api/crossopp_views.py` | Draft holds workspace, measure spec, the per-opp resolutions, flagged opps + shortlists, status, `thread_id`. `POST …/crossopp/measures/<draft>/approve` applies per-opp overrides → commit → resume thread. |
 | 4 | Frontend renderer | `frontend/src/components/ChatMessage/CrossOppMeasureOutput.tsx` (new) + a case in `renderToolOutput` | `committed` → expandable per-opp lineage card (mirror `/crossopp` inspector + `SqlHighlighter`). `needs_approval` → approval card: per flagged opp confirm / pick-from-shortlist / reject; confident opps collapsed. Submits to the approval API; on success the thread resumes. |
 | 5 | System-prompt guidance | `apps/agents/prompts/` | For a cross-opp question: consult `semantic_catalog`; if a needed measure is missing, call `define_crossopp_measure` **before** `semantic_query`. Name measures in plain domain language with a one-line description + kind (`numeric`/`rate`). |
+| 6 | `crossopp_measure_proposer` + `propose_crossopp_measures` tool/command | `apps/transformations/services/crossopp_measure_proposer.py` (new) + `apps/agents/tools/` | The app-driven spec source. An LLM reads the workspace's combined app structure (candidate fields across opps via `gather_measure_candidates`) and proposes a ranked list of `CanonicalMeasureSpec`s — "what data analysis is most likely." Each proposed spec flows through component 1 (same engine, same doubt gate). Replaces the hardcoded `STARTER_MEASURES`. Invokable on demand ("suggest measures for this workspace"); proactive scheduling deferred. |
 
 ## 4. Data flow
 
@@ -135,6 +153,8 @@ risky streaming core is untouched.
 - **Unit:** `add_measure` additive regen preserves existing measures (stability); doubt
   classification (all-confident vs any-low/absent); override application to a draft.
 - **Unit:** tool returns the `committed` vs `needs_approval` shapes correctly (fake resolver).
+- **Unit:** the proposer emits `CanonicalMeasureSpec`s from app structure (fake LLM), and each
+  flows through `add_measure` unchanged — proving the engine is trigger-agnostic (the both/and).
 - **Integration:** define a measure over 2 seeded tenants with divergently-named fields → cube
   model gains the measure, lineage persisted, `semantic_query` returns it per opp.
 - **API:** approve endpoint applies overrides, commits, and triggers the resume task.
@@ -145,10 +165,14 @@ risky streaming core is untouched.
 
 ## 9. Scope / non-goals
 
-- **In scope:** the chat-driven define→doubt-gate→approve→commit→answer loop for ONE cross-opp
-  workspace; inline approval UI (confirm / pick-from-shortlist / reject per flagged opp);
-  inline lineage rendering.
-- **Non-goals:** native `interrupt()` plumbing (use resume pattern); multi-workspace /
+- **In scope:** the shared measure engine (component 1) with **both** spec sources — the
+  chat-driven on-demand loop (define→doubt-gate→approve→commit→answer) **and** the app-driven
+  proposer ("what analysis is most likely" → same engine); inline approval UI (confirm /
+  pick-from-shortlist / reject per flagged opp); inline lineage rendering; for ONE cross-opp
+  workspace.
+- **Deferred (capability built, trigger not wired):** firing the proposer *proactively* ahead
+  of any question (e.g. auto-run on workspace setup / on a new opp arriving). The proposer is an
+  invokable tool/command now; scheduling it is a later trigger decision, not new machinery.
+- **Non-goals:** native `interrupt()` plumbing (use the resume pattern); multi-workspace /
   cross-workspace composition; free-form SQL editing in the approval UI (corrections are
-  shortlist-pick or chat); auto-bootstrapping a whole catalog from one prompt (we create the
-  measures a given question needs, on demand); improving synthetic data realism.
+  shortlist-pick or chat); improving synthetic data realism.
