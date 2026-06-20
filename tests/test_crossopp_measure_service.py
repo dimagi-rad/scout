@@ -65,3 +65,34 @@ def test_classify_doubt_flags_low_confidence_and_absent():
     assert has_doubt is True
     assert sorted(flagged) == ["b", "c"]
     assert classify_doubt({"a": R("resolved", 0.9)}) == (False, [])
+
+
+@pytest.mark.django_db
+def test_add_measure_is_additive_and_preserves_existing(workspace, tmp_path):
+    from apps.transformations.services import crossopp_measure_service as svc
+    from apps.transformations.services.crossopp_cube_builder import OppRef
+    from apps.transformations.services.measure_resolver import (
+        CanonicalMeasureSpec,
+        MeasureResolution,
+    )
+    opps = [OppRef("10012", "t_10012_x"), OppRef("10013", "t_10013_y")]
+    def R(col): return MeasureResolution("m", col, "p", col, 0.9, "resolved", "lbl", "why")
+    # First measure
+    svc.add_measure(workspace, CanonicalMeasureSpec("birth_weight", "g", "numeric"),
+                    {"10012": R("child_weight_birth"), "10013": R("birth_weight")},
+                    opps, model_root=str(tmp_path))
+    model_after_first = (tmp_path / svc._ws_hash(workspace) / "canonical.yml").read_text()
+    # Second measure
+    svc.add_measure(workspace, CanonicalMeasureSpec("kmc_hours", "hrs", "numeric"),
+                    {"10012": R("kmc_hours"), "10013": R("kmc_hours")},
+                    opps, model_root=str(tmp_path))
+    model_after_second = (tmp_path / svc._ws_hash(workspace) / "canonical.yml").read_text()
+    # birth_weight's per-opp SELECT terms are still present, unchanged (stability)
+    # _safe_numeric wraps the column in a CASE WHEN cast; check the actual rendered pattern
+    assert "child_weight_birth)::numeric ELSE NULL END AS birth_weight" in model_after_first
+    assert "child_weight_birth)::numeric ELSE NULL END AS birth_weight" in model_after_second
+    assert "AS kmc_hours" in model_after_second
+    # Both measures present in the blended cube
+    from apps.transformations.models import CrossOppMeasure, CrossOppMeasureLineage
+    assert set(CrossOppMeasure.objects.filter(workspace=workspace).values_list("name", flat=True)) == {"birth_weight", "kmc_hours"}
+    assert CrossOppMeasureLineage.objects.filter(workspace=workspace, measure="kmc_hours").count() == 2
