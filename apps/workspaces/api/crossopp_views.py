@@ -127,10 +127,12 @@ class CrossOppDashboardView(APIView):
         return Response({"sql": sql, **result})
 
 
-def _apply_overrides(draft, overrides, opps_cands):
+def _apply_overrides(draft, overrides):
     """Return resolutions dict (opp -> MeasureResolution) with the user's per-opp choices."""
     res = {o: svc.deserialize_resolution(d) for o, d in draft.resolutions.items()}
     for opp_id, choice in (overrides or {}).items():
+        if opp_id not in res:
+            continue
         action = choice.get("action")
         if action == "reject":
             r = res[opp_id]
@@ -195,7 +197,7 @@ class CrossOppMeasureApproveView(APIView):
         if draft.status != "pending":
             return Response({"error": f"draft already {draft.status}"}, status=409)
         opps, _ = svc.workspace_opps(workspace)
-        resolutions = _apply_overrides(draft, request.data.get("overrides", {}), None)
+        resolutions = _apply_overrides(draft, request.data.get("overrides", {}))
         lineage = svc.add_measure(workspace, draft.to_spec_like(), resolutions, opps)
         draft.status = "committed"
         draft.save(update_fields=["status"])
