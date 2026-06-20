@@ -224,3 +224,38 @@ class CrossOppMeasureLineage(models.Model):
 
     def __str__(self):
         return f"{self.measure}@{self.opportunity_id} ({self.status})"
+
+
+class CrossOppMeasure(models.Model):
+    """The human spec for a cross-opp canonical measure (the catalog of intent).
+
+    Cube holds the resolved per-opp SQL; this holds the name/description/kind a person
+    (or the proposer) chose, which we need to regenerate the model additively. One row
+    per (workspace, measure).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace", on_delete=models.CASCADE, related_name="measures"
+    )
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    kind = models.CharField(max_length=16, default="numeric")  # numeric | rate
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ["workspace", "name"]
+        ordering = ["name"]
+
+    def __str__(self):
+        return f"{self.name} ({self.kind})"
+
+    def to_spec(self):
+        from apps.transformations.services.measure_resolver import (
+            CanonicalMeasureSpec,
+        )
+
+        return CanonicalMeasureSpec(
+            name=self.name, description=self.description, kind=self.kind
+        )
