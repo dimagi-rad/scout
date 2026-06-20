@@ -147,7 +147,14 @@ def _apply_overrides(draft, overrides):
                 reason="user rejected",
             )
         elif action == "pick":
-            col = choice["column"]
+            col = choice.get("column")
+            if not col:
+                raise ValueError(f"pick action for opp {opp_id} missing column")
+            shortlist_cols = {s["column"] for s in (draft.shortlists.get(opp_id) or [])}
+            if col not in shortlist_cols:
+                raise ValueError(
+                    f"pick column {col!r} for opp {opp_id} is not in the draft shortlist"
+                )
             sql = col if draft.kind == "numeric" else f"({col} = 'yes')"
             res[opp_id] = dataclasses.replace(
                 res[opp_id],
@@ -197,7 +204,10 @@ class CrossOppMeasureApproveView(APIView):
         if draft.status != "pending":
             return Response({"error": f"draft already {draft.status}"}, status=409)
         opps, _ = svc.workspace_opps(workspace)
-        resolutions = _apply_overrides(draft, request.data.get("overrides", {}))
+        try:
+            resolutions = _apply_overrides(draft, request.data.get("overrides", {}))
+        except ValueError as exc:
+            return Response({"error": str(exc)}, status=400)
         lineage = svc.add_measure(workspace, draft.to_spec_like(), resolutions, opps)
         draft.status = "committed"
         draft.save(update_fields=["status"])

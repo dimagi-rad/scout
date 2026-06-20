@@ -50,4 +50,20 @@ describe("CrossOppMeasureOutput", () => {
     expect(screen.getByTestId("crossopp-approval-d1")).toBeInTheDocument()
     expect(screen.getByTestId("crossopp-approve-reject-10013")).toBeInTheDocument()
   })
+
+  it("renders proposed summary without crashing", () => {
+    render(
+      <CrossOppMeasureOutput
+        workspaceId="w1"
+        output={{
+          status: "proposed",
+          committed: ["birth_weight"],
+          needs_approval: [{ measure: "los", draft_id: "d1", flagged: ["10013"] }],
+        }}
+      />,
+    )
+    expect(screen.getByTestId("crossopp-proposed")).toBeInTheDocument()
+    expect(screen.getByText(/birth_weight/)).toBeInTheDocument()
+    expect(screen.getByText(/los/)).toBeInTheDocument()
+  })
 })

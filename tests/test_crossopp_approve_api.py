@@ -1,5 +1,7 @@
 """Tests for POST /api/workspaces/<id>/crossopp/measures/<draft_id>/approve/."""
 
+from unittest.mock import patch
+
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
@@ -11,9 +13,7 @@ User = get_user_model()
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_after_approval_reinvokes_agent(monkeypatch):
-    from unittest.mock import patch
-
+async def test_resume_after_approval_reinvokes_agent():
     from apps.workspaces import tasks
 
     user = await User.objects.acreate_user(email="resume_approval@b.c", password="x")
@@ -251,3 +251,72 @@ def test_approve_ignores_unknown_opp_id(workspace, user, monkeypatch):
     assert "10013" in captured["res"]
     assert captured["res"]["10012"].status == "resolved"
     assert captured["res"]["10013"].status == "low_confidence"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_approve_rejects_pick_column_not_in_shortlist(workspace, user, monkeypatch):
+    from apps.transformations.models import CrossOppMeasureDraft
+    from apps.transformations.services import crossopp_measure_service as svc
+    from apps.transformations.services.crossopp_cube_builder import OppRef
+
+    monkeypatch.setattr(
+        svc,
+        "workspace_opps",
+        lambda ws: ([OppRef("10012", "s"), OppRef("10013", "s2")], {}),
+    )
+    called = []
+
+    def fake_add(ws, spec, resolutions, opps, **k):
+        called.append(True)
+        return []
+
+    monkeypatch.setattr(svc, "add_measure", fake_add)
+    monkeypatch.setattr(
+        "apps.workspaces.api.crossopp_views._defer_measure_resume", lambda *a, **k: None
+    )
+
+    draft = CrossOppMeasureDraft.objects.create(
+        workspace=workspace,
+        name="los",
+        description="d",
+        kind="numeric",
+        thread_id="t1",
+        created_by=user,
+        status="pending",
+        resolutions={
+            "10013": {
+                "measure": "los",
+                "column": None,
+                "source_path": "",
+                "sql_expression": None,
+                "confidence": 0.2,
+                "status": "low_confidence",
+                "matched_label": "",
+                "reason": "",
+            },
+        },
+        flagged=["10013"],
+        # shortlist only has "stay_len" — "evil; DROP TABLE x" is NOT valid
+        shortlists={"10013": [{"column": "stay_len", "label": "Stay", "type": "Int"}]},
+    )
+
+    c = APIClient()
+    c.force_authenticate(user=user)
+
+    # Column not in shortlist → 400, svc.add_measure must NOT be called
+    resp = c.post(
+        f"/api/workspaces/{workspace.id}/crossopp/measures/{draft.id}/approve/",
+        {"overrides": {"10013": {"action": "pick", "column": "evil; DROP TABLE x"}}},
+        format="json",
+    )
+    assert resp.status_code == 400
+    assert "not in the draft shortlist" in resp.data["error"]
+    assert not called, "add_measure must not be called when column is invalid"
+
+    # Valid pick (column IS in shortlist) → 200
+    resp_ok = c.post(
+        f"/api/workspaces/{workspace.id}/crossopp/measures/{draft.id}/approve/",
+        {"overrides": {"10013": {"action": "pick", "column": "stay_len"}}},
+        format="json",
+    )
+    assert resp_ok.status_code == 200

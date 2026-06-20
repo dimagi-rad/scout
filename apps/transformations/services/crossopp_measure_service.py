@@ -152,7 +152,7 @@ async def ensure_measure_queryable_meta(
         ``True`` if the measure became queryable within the timeout, else ``False``.
     """
     target = f"{BLENDED_CUBE}.{measure_name}"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
     while loop.time() < deadline:
         meta = await _fetch_cube_meta(workspace)

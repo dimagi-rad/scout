@@ -28,6 +28,12 @@ export type MeasureOutput =
       resolved: { opp_id: string; column: string | null; confidence: number }[]
     }
   | { status: "exists"; measure: string; message?: string }
+  | {
+      status: "proposed"
+      committed: string[]
+      needs_approval: { measure: string; draft_id: string; flagged: string[] }[]
+      message?: string
+    }
 
 export function CrossOppMeasureOutput({
   workspaceId,
@@ -36,6 +42,25 @@ export function CrossOppMeasureOutput({
   workspaceId: string
   output: MeasureOutput
 }) {
+  if (output.status === "proposed") {
+    return (
+      <div data-testid="crossopp-proposed" className="space-y-1 text-xs">
+        {output.committed.length > 0 && (
+          <div>
+            <span className="font-medium">Committed:</span>{" "}
+            {output.committed.join(", ")}
+          </div>
+        )}
+        {output.needs_approval.length > 0 && (
+          <div>
+            <span className="font-medium">Needs approval:</span>{" "}
+            {output.needs_approval.map((n) => n.measure).join(", ")}
+          </div>
+        )}
+        {output.message && <div className="text-muted-foreground">{output.message}</div>}
+      </div>
+    )
+  }
   if (output.status === "exists") {
     return (
       <div className="text-xs text-muted-foreground">
@@ -159,12 +184,13 @@ function ApprovalCard({
             </button>
             <select
               data-testid={`crossopp-approve-pick-${f.opp_id}`}
-              onChange={(e) =>
+              onChange={(e) => {
+                if (e.target.value === "") return
                 setChoices((c) => ({
                   ...c,
                   [f.opp_id]: { action: "pick", column: e.target.value },
                 }))
-              }
+              }}
               className="rounded border px-1"
             >
               <option value="">pick field…</option>

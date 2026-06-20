@@ -265,16 +265,29 @@ async def resolve_measure(
 
     # Match by column (what the SQL reads) to recover the source xpath + label for provenance.
     matched = next((c for c in shortlist if c.column == result.column), None)
+    if matched is None:
+        # The LLM returned a column not in the candidate set — hallucinated output.
+        # Treat as absent rather than letting an untrusted column reach generated SQL.
+        return MeasureResolution(
+            measure=measure.name,
+            column=None,
+            source_path=None,
+            sql_expression=None,
+            confidence=result.confidence,
+            status="absent",
+            matched_label="",
+            reason="resolved column not in candidate set",
+        )
     status: Literal["resolved", "low_confidence", "absent"] = (
         "low_confidence" if result.confidence < _LOW_CONFIDENCE else "resolved"
     )
     return MeasureResolution(
         measure=measure.name,
         column=result.column,
-        source_path=matched.path if matched else None,
+        source_path=matched.path,
         sql_expression=result.sql_expression,
         confidence=result.confidence,
         status=status,
-        matched_label=matched.label if matched else "",
+        matched_label=matched.label,
         reason=result.reason,
     )

@@ -229,3 +229,26 @@ async def test_resolve_measure_short_circuits_when_no_clinical_candidates():
     )
     assert res.status == "absent"
     assert "no clinical entry fields" in res.reason
+
+
+@pytest.mark.asyncio
+async def test_resolve_measure_absent_when_column_not_in_shortlist():
+    """LLM returns a column that is NOT in the candidate set → treat as absent (FIX 2)."""
+    # The fake client returns a confident "resolved" result with a hallucinated column
+    fake = _FakeClient(
+        _ResolutionResult(
+            column="nonexistent_col",
+            sql_expression="nonexistent_col",
+            confidence=0.9,
+            status="resolved",
+            reason="confident but wrong",
+        )
+    )
+    # The real candidates do NOT include "nonexistent_col"
+    res = await resolve_measure(
+        _BIRTH_WEIGHT, gather_measure_candidates(FORM_DEFINITIONS), model_client=fake
+    )
+    assert res.status == "absent"
+    assert res.column is None
+    assert res.sql_expression is None
+    assert "not in candidate set" in res.reason
