@@ -94,5 +94,8 @@ def test_add_measure_is_additive_and_preserves_existing(workspace, tmp_path):
     assert "AS kmc_hours" in model_after_second
     # Both measures present in the blended cube
     from apps.transformations.models import CrossOppMeasure, CrossOppMeasureLineage
-    assert set(CrossOppMeasure.objects.filter(workspace=workspace).values_list("name", flat=True)) == {"birth_weight", "kmc_hours"}
+    names = set(
+        CrossOppMeasure.objects.filter(workspace=workspace).values_list("name", flat=True)
+    )
+    assert names == {"birth_weight", "kmc_hours"}
     assert CrossOppMeasureLineage.objects.filter(workspace=workspace, measure="kmc_hours").count() == 2

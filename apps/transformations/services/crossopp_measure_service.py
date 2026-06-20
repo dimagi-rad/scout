@@ -53,8 +53,6 @@ def load_workspace_specs_and_resolutions(workspace):
     Lets a single add be additive: re-render the whole model from what already exists
     plus the new measure.
     """
-    from apps.transformations.services.measure_resolver import CanonicalMeasureSpec  # noqa: F401
-
     specs = [m.to_spec() for m in CrossOppMeasure.objects.filter(workspace=workspace)]
     res: dict[str, dict] = {}
     for row in CrossOppMeasureLineage.objects.filter(workspace=workspace):
