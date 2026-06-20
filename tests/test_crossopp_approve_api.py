@@ -1,7 +1,45 @@
 """Tests for POST /api/workspaces/<id>/crossopp/measures/<draft_id>/approve/."""
 
 import pytest
+from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
+
+from apps.workspaces.models import Workspace
+
+User = get_user_model()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_after_approval_reinvokes_agent(monkeypatch):
+    from unittest.mock import patch
+
+    from apps.workspaces import tasks
+
+    user = await User.objects.acreate_user(email="resume_approval@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="WApproval", created_by=user)
+
+    seen = {}
+
+    class FakeAgent:
+        async def ainvoke(self, state, config):
+            seen["state"] = state
+            seen["config"] = config
+
+    async def fake_build(workspace, u, conversation_id=None):
+        return FakeAgent(), {}
+
+    with patch.object(tasks, "_build_agent_for_resume", fake_build):
+        out = await tasks.resume_thread_after_measure_approval(
+            None,
+            workspace_id=str(ws.id),
+            thread_id="thread-1",
+            measure_name="los",
+        )
+
+    assert out["status"] == "resumed"
+    assert "los" in seen["state"]["messages"][0].content
+    assert seen["config"]["configurable"]["thread_id"] == "thread-1"
 
 
 @pytest.mark.django_db(transaction=True)

@@ -1250,6 +1250,43 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
 
 
 @task(pass_context=True)
+async def resume_thread_after_measure_approval(
+    context, workspace_id: str, thread_id: str, measure_name: str
+) -> dict:
+    """After a cross-opp measure is approved+committed, nudge the agent to
+    continue the user's original request using the newly-defined measure.
+
+    Mirrors ``resume_thread_after_materialization`` but is simpler: no ThreadJob
+    aggregation, no terminal-state machine — just a single HumanMessage injection
+    and an ainvoke so the agent can query with ``semantic_query`` immediately.
+    """
+    workspace = await Workspace.objects.select_related("created_by").aget(id=workspace_id)
+    user = workspace.created_by
+
+    agent, oauth_tokens = await _build_agent_for_resume(
+        workspace, user, conversation_id=thread_id
+    )
+    body = (
+        f"{SYSTEM_RESUME_MARKER} Measure '{measure_name}' is now defined and queryable across "
+        f"the workspace's opportunities. Continue the user's original request using semantic_query."
+    )
+    input_state = {
+        "messages": [HumanMessage(content=body)],
+        "workspace_id": workspace_id,
+        "user_id": str(user.id),
+        "user_role": "analyst",
+        "thread_id": thread_id,
+    }
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
+        "oauth_tokens": oauth_tokens,
+    }
+    await agent.ainvoke(input_state, config)
+    return {"status": "resumed", "measure": measure_name}
+
+
+@task(pass_context=True)
 async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
     re-invoke the agent so it can respond to the original request with the
