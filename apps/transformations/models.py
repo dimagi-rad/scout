@@ -259,3 +259,37 @@ class CrossOppMeasure(models.Model):
         return CanonicalMeasureSpec(
             name=self.name, description=self.description, kind=self.kind
         )
+
+
+class CrossOppMeasureDraft(models.Model):
+    """A measure pending user approval because the resolver had doubt on >=1 opp.
+
+    Holds the full per-opp resolutions + the flagged opps + per-flagged-opp candidate
+    shortlists, so the approval card can offer confirm / pick / reject. Committed on
+    approve.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace", on_delete=models.CASCADE, related_name="measure_drafts"
+    )
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    kind = models.CharField(max_length=16, default="numeric")
+    resolutions = models.JSONField(default=dict)  # opp_id -> serialized MeasureResolution
+    flagged = models.JSONField(default=list)      # [opp_id, ...] low_confidence/absent
+    shortlists = models.JSONField(default=dict)   # opp_id -> [ {column,label,type}, ... ]
+    status = models.CharField(
+        max_length=16, default="pending"
+    )  # pending|committed|cancelled
+    thread_id = models.CharField(max_length=64, blank=True, default="")
+    created_by = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"draft:{self.name} ({self.status})"
