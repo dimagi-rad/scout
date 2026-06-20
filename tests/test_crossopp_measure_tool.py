@@ -29,7 +29,7 @@ async def test_define_measure_commits_when_no_doubt(workspace, user, monkeypatch
 
     monkeypatch.setattr(svc, "ensure_measure_queryable_meta", ok)
 
-    [define] = t.create_crossopp_measure_tools(workspace, user, "thread-1")
+    define, _propose = t.create_crossopp_measure_tools(workspace, user, "thread-1")
     out = await define.ainvoke({"name": "birth_weight", "description": "g", "kind": "numeric"})
     assert out["status"] == "committed" and out["measure"] == "birth_weight"
 
@@ -60,7 +60,7 @@ async def test_define_measure_drafts_when_doubt(workspace, user, monkeypatch):
     monkeypatch.setattr(svc, "resolve_across_opps_from_candidates", fake_resolve)
     monkeypatch.setattr(svc, "shortlist_for_opp", lambda c: [{"column": "x", "label": "X", "type": "Int"}])
 
-    [define] = t.create_crossopp_measure_tools(workspace, user, "thread-1")
+    define, _propose = t.create_crossopp_measure_tools(workspace, user, "thread-1")
     out = await define.ainvoke({"name": "los", "description": "days", "kind": "numeric"})
     assert out["status"] == "needs_approval"
     assert out["flagged"][0]["opp_id"] == "10013"
@@ -76,3 +76,11 @@ async def test_define_tool_registered_in_agent(workspace, user):
 
     tools = _build_tools(workspace, user, mcp_tools=[], conversation_id="t-1")
     assert any(getattr(t, "name", "") == "define_crossopp_measure" for t in tools)
+
+
+def test_propose_tool_in_factory(workspace, user):
+    from apps.agents.tools import crossopp_measure_tool as t
+
+    tools = t.create_crossopp_measure_tools(workspace, user, "thread-1")
+    names = [getattr(tool, "name", "") for tool in tools]
+    assert "propose_crossopp_measures" in names

@@ -79,4 +79,52 @@ def create_crossopp_measure_tools(workspace, user, conversation_id=None) -> list
         }
 
     define_crossopp_measure.name = "define_crossopp_measure"
-    return [define_crossopp_measure]
+
+    @tool
+    async def propose_crossopp_measures(limit: int = 8) -> dict:
+        """Propose the measures most worth comparing across these opportunities (reads the
+        apps). Commits the confident ones and returns any that need your approval."""
+        from asgiref.sync import sync_to_async
+
+        from apps.transformations.models import CrossOppMeasure, CrossOppMeasureDraft
+        from apps.transformations.services import crossopp_measure_proposer as prop
+        from apps.transformations.services import crossopp_measure_service as svc
+
+        opps, cands = await sync_to_async(svc.workspace_opps)(workspace)
+        specs = await prop.propose_measures(cands, limit=limit)
+        committed, pending = [], []
+        for spec in specs:
+            if await CrossOppMeasure.objects.filter(workspace=workspace, name=spec.name).aexists():
+                continue
+            resolutions = await svc.resolve_across_opps_from_candidates(spec, cands)
+            has_doubt, flagged = svc.classify_doubt(resolutions)
+            if not has_doubt:
+                await svc.aadd_measure(workspace, spec, resolutions, opps)
+                committed.append(spec.name)
+            else:
+                d = await CrossOppMeasureDraft.objects.acreate(
+                    workspace=workspace,
+                    name=spec.name,
+                    description=spec.description,
+                    kind=spec.kind,
+                    thread_id=conversation_id or "",
+                    created_by=user,
+                    status="pending",
+                    resolutions={o: svc.serialize_resolution(r) for o, r in resolutions.items()},
+                    flagged=flagged,
+                    shortlists={
+                        o: svc.shortlist_for_opp(cands.get(o, [])) for o in flagged
+                    },
+                )
+                pending.append({"measure": spec.name, "draft_id": str(d.id), "flagged": flagged})
+        if committed:
+            await svc.ensure_measure_queryable_meta(workspace, committed[-1])
+        return {
+            "status": "proposed",
+            "committed": committed,
+            "needs_approval": pending,
+            "message": f"Committed {len(committed)}; {len(pending)} need approval.",
+        }
+
+    propose_crossopp_measures.name = "propose_crossopp_measures"
+    return [define_crossopp_measure, propose_crossopp_measures]
