@@ -47,3 +47,21 @@ def test_measure_draft_holds_resolutions_and_flagged(workspace, user):
     )
     assert d.flagged == ["10013"]
     assert d.shortlists["10013"][0]["column"] == "stay_len"
+
+
+def test_classify_doubt_flags_low_confidence_and_absent():
+    from apps.transformations.services.crossopp_measure_service import classify_doubt
+    from apps.transformations.services.measure_resolver import MeasureResolution
+
+    def R(status, conf):
+        return MeasureResolution("m", "c", "p", "c=1", conf, status, "lbl", "why")
+
+    res = {
+        "a": R("resolved", 0.9),
+        "b": R("low_confidence", 0.3),
+        "c": R("absent", 0.0),
+    }
+    has_doubt, flagged = classify_doubt(res)
+    assert has_doubt is True
+    assert sorted(flagged) == ["b", "c"]
+    assert classify_doubt({"a": R("resolved", 0.9)}) == (False, [])
