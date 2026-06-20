@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import os
 
+import httpx
 import pytest
 
 pytestmark = [
@@ -88,8 +89,13 @@ async def test_define_then_query_new_measure():
                 "kind": _TEST_MEASURE_KIND,
             }
         )
+    except (ImportError, AttributeError, TypeError, NameError, KeyError):
+        raise  # code bug — must fail, not skip
+    except httpx.HTTPError as exc:
+        pytest.skip(f"live Cube/LLM transport error: {exc}")
     except Exception as exc:
-        pytest.skip(f"define_crossopp_measure raised an exception (LLM/network?): {exc}")
+        # external LLM/provider error — skip, but only as a last resort
+        pytest.skip(f"live resolve unavailable: {exc}")
 
     status = out.get("status")
 
