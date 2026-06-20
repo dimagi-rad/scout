@@ -20,6 +20,8 @@ import type {
   ListTablesOutput,
   GetMetadataOutput,
 } from "./ToolOutput"
+import { CrossOppMeasureOutput } from "./CrossOppMeasureOutput"
+import type { MeasureOutput } from "./CrossOppMeasureOutput"
 
 function parseOutput(output: unknown): unknown {
   if (typeof output === "string") {
@@ -49,7 +51,11 @@ function parseOutput(output: unknown): unknown {
   return output
 }
 
-function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode | null {
+function renderToolOutput(
+  toolName: string,
+  rawOutput: unknown,
+  workspaceId?: string,
+): React.ReactNode | null {
   const output = parseOutput(rawOutput)
   if (output == null || typeof output !== "object") return null
 
@@ -62,6 +68,14 @@ function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode
       return <ListTablesOutputComponent output={output as ListTablesOutput} />
     case "get_metadata":
       return <GetMetadataOutputComponent output={output as GetMetadataOutput} />
+    case "define_crossopp_measure":
+    case "propose_crossopp_measures":
+      return (
+        <CrossOppMeasureOutput
+          workspaceId={workspaceId ?? ""}
+          output={output as MeasureOutput}
+        />
+      )
     default:
       return null
   }
@@ -130,6 +144,8 @@ const AUTO_EXPAND_TOOLS = new Set([
   "describe_table",
   "list_tables",
   "get_metadata",
+  "define_crossopp_measure",
+  "propose_crossopp_measures",
 ])
 
 interface ToolCallPartProps {
@@ -194,7 +210,9 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
 
   const isErrored = part.state === "output-error"
   const richOutput =
-    hasOutput && part.output != null && !isErrored ? renderToolOutput(toolName, part.output) : null
+    hasOutput && part.output != null && !isErrored
+      ? renderToolOutput(toolName, part.output, workspaceId)
+      : null
   // Fallback text for the <pre> view: an output-error part carries its message
   // in errorText (no `output`); otherwise show the raw output when no rich card
   // matched. Either way, the <pre> renders the FULL text — the historical

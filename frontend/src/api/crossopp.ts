@@ -32,9 +32,26 @@ export interface InspectorResponse {
   model_yaml: string
 }
 
+export interface ApproveResponse {
+  status: string
+  measure: string
+  lineage: unknown[]
+}
+
+export const approveMeasure = (
+  workspaceId: string,
+  draftId: string,
+  overrides: Record<string, { action: "confirm" | "pick" | "reject"; column?: string }>,
+) =>
+  api.post<ApproveResponse>(
+    `/api/workspaces/${workspaceId}/crossopp/measures/${draftId}/approve/`,
+    { overrides },
+  )
+
 export const crossOppApi = {
   dashboard: (workspaceId: string) =>
     api.get<DashboardResponse>(`/api/workspaces/${workspaceId}/crossopp/dashboard/`),
   inspector: (workspaceId: string) =>
     api.get<InspectorResponse>(`/api/workspaces/${workspaceId}/crossopp/inspector/`),
+  approveMeasure,
 }
