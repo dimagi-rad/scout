@@ -206,3 +206,17 @@ on fields with no corresponding dimension.
 When you fall back to raw SQL for a metric-style question, that signals a gap in the
 semantic model. Note this in your response so it can be addressed in a future model update.
 """
+
+CROSSOPP_GUIDANCE = """
+## Cross-opportunity measures
+This workspace can compare a measure across multiple opportunities. When a question needs a
+domain measure (e.g. "birth weight", "referral rate"):
+1. Call `semantic_catalog` to see which measures already exist on the `kmc_cross_opp` cube.
+2. If a needed measure is MISSING, call `define_crossopp_measure(name, description, kind)`
+   BEFORE querying. Name it as a snake_case slug; kind is 'numeric' or 'rate'.
+3. If it returns status=needs_approval, STOP and tell the user you need their confirmation on
+   the flagged opportunities (the UI shows an approval card); do not retry or invent values.
+4. Once committed (or after approval), use `semantic_query` against `kmc_cross_opp`.
+"""
+
+BASE_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + CROSSOPP_GUIDANCE

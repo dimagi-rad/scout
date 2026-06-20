@@ -67,3 +67,12 @@ async def test_define_measure_drafts_when_doubt(workspace, user, monkeypatch):
     from apps.transformations.models import CrossOppMeasureDraft
 
     assert await CrossOppMeasureDraft.objects.filter(id=out["draft_id"]).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_define_tool_registered_in_agent(workspace, user):
+    from apps.agents.graph.base import _build_tools
+
+    tools = _build_tools(workspace, user, mcp_tools=[], conversation_id="t-1")
+    assert any(getattr(t, "name", "") == "define_crossopp_measure" for t in tools)
