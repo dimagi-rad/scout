@@ -108,6 +108,62 @@ from apps.transformations.services.measure_resolver import (  # noqa: E402,I001
 from apps.users.models import TenantMembership  # noqa: E402
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant  # noqa: E402
 
+import asyncio  # noqa: E402
+import httpx  # noqa: E402
+from django.conf import settings  # noqa: E402
+from mcp_server.services.semantic import mint_cube_jwt  # noqa: E402
+
+
+async def _fetch_cube_meta(workspace) -> dict:
+    """Fetch raw Cube /v1/meta JSON for the given workspace.
+
+    Mints a short-lived JWT scoped to the workspace's schema and calls the
+    Cube REST API, mirroring the pattern used by ``semantic_catalog``.
+    """
+    schema_name = _ws_hash(workspace)
+    token = mint_cube_jwt(str(workspace.id), schema_name)
+    meta_url = f"{settings.CUBE_REST_URL.rstrip('/')}/v1/meta"
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            meta_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def ensure_measure_queryable_meta(
+    workspace, measure_name: str, *, timeout_s: float = 15, interval_s: float = 0.5
+) -> bool:
+    """Poll Cube /v1/meta until *measure_name* appears in the blended cube.
+
+    Cube recompiles models asynchronously on file change (dev-mode hot-reload).
+    This polls until ``BLENDED_CUBE.<measure_name>`` is visible or the deadline
+    is exceeded.
+
+    Args:
+        workspace: Workspace ORM instance (provides id + schema_name via ``_ws_hash``).
+        measure_name: Unqualified measure name, e.g. ``"kmc_hours"``.
+        timeout_s: Total seconds to wait before giving up (default 15).
+        interval_s: Seconds between poll attempts (default 0.5).
+
+    Returns:
+        ``True`` if the measure became queryable within the timeout, else ``False``.
+    """
+    target = f"{BLENDED_CUBE}.{measure_name}"
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + timeout_s
+    while loop.time() < deadline:
+        meta = await _fetch_cube_meta(workspace)
+        for cube in meta.get("cubes", []):
+            if cube.get("name") == BLENDED_CUBE and any(
+                m.get("name") == target for m in cube.get("measures", [])
+            ):
+                return True
+        await asyncio.sleep(interval_s)
+    return False
+
 LABS_PROVIDER = "commcare_connect_labs"
 
 

@@ -114,3 +114,30 @@ def test_resolve_across_opps_uses_resolver_per_opp():
     res = asyncio.run(svc.resolve_across_opps_from_candidates(spec, cands))
     assert set(res) == {"10012", "10013"}
     assert all(r.status == "absent" for r in res.values())
+
+
+def test_ensure_measure_queryable_polls_meta(monkeypatch, workspace):
+    import asyncio  # noqa: I001
+    from apps.transformations.services import crossopp_measure_service as svc
+
+    calls = {"n": 0}
+
+    async def fake_meta(ws):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            return {
+                "cubes": [
+                    {
+                        "name": "kmc_cross_opp",
+                        "measures": [{"name": "kmc_cross_opp.kmc_hours"}],
+                    }
+                ]
+            }
+        return {"cubes": []}
+
+    monkeypatch.setattr(svc, "_fetch_cube_meta", fake_meta)
+    ok = asyncio.run(
+        svc.ensure_measure_queryable_meta(workspace, "kmc_hours", timeout_s=2, interval_s=0.01)
+    )
+    assert ok is True
+    assert calls["n"] >= 2
