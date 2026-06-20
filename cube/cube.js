@@ -42,6 +42,7 @@
 
 const jwt = require("jsonwebtoken");
 const { FileRepository } = require("@cubejs-backend/server-core");
+const { PostgresDriver } = require("@cubejs-backend/postgres-driver");
 
 module.exports = {
   /**
@@ -79,6 +80,41 @@ module.exports = {
         schema_name,
       },
     };
+  },
+
+  /**
+   * Connect to Postgres under the workspace's least-privilege read-only role
+   * instead of the base superuser — DB-layer tenant isolation (reviewer #302,
+   * design §7). `provision_workspace_ro_role` creates `<schema_name>_ro` with
+   * USAGE + SELECT on ONLY that workspace's constituent schemas; pinning the
+   * connection's session role to it (libpq `-c role=...`, applied at connect
+   * for every connection in this tenant's pool) means a query for one workspace
+   * can never read another's data — even via a misconfigured model or an
+   * injected column expression. The pool is already per-tenant
+   * (contextToOrchestratorId is keyed on schema_name), so each pool is pinned
+   * to exactly one role.
+   *
+   * Scope: cross-opp workspaces (`ws_<hash>` schemas) have a provisioned role,
+   * so they are pinned. Single-tenant (`t_<id>`) and anonymous (dev Playground)
+   * contexts keep the base connection — no `_ro` role is provisioned for those
+   * yet, and pinning to a non-existent role would refuse the connection.
+   *
+   * @param {{ securityContext?: { schema_name?: string } }} ctx
+   */
+  driverFactory: ({ securityContext }) => {
+    const base = {
+      host: process.env.CUBEJS_DB_HOST,
+      port: process.env.CUBEJS_DB_PORT,
+      database: process.env.CUBEJS_DB_NAME,
+      user: process.env.CUBEJS_DB_USER,
+      password: process.env.CUBEJS_DB_PASS,
+    };
+    const schema = securityContext && securityContext.schema_name;
+    if (schema && schema.startsWith("ws_")) {
+      // Pin every connection in this workspace's pool to its read-only role.
+      return new PostgresDriver({ ...base, options: `-c role=${schema}_ro` });
+    }
+    return new PostgresDriver(base);
   },
 
   /**
