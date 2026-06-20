@@ -16,18 +16,13 @@ ANTHROPIC_API_KEY (the resolver calls the LLM).
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 from django.core.management.base import BaseCommand
 
 from apps.transformations.models import CrossOppMeasureLineage
-from apps.transformations.services.crossopp_cube_builder import OppRef, render_crossopp_model
-from apps.transformations.services.measure_resolver import (
-    CanonicalMeasureSpec,
-    gather_measure_candidates,
-    resolve_measure,
-)
-from apps.users.models import Tenant, TenantMembership, User
+from apps.transformations.services import crossopp_measure_service as svc
+from apps.transformations.services.measure_resolver import CanonicalMeasureSpec
+from apps.users.models import Tenant, User
 from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
@@ -68,7 +63,11 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         name = options["name"]
         opp_ids = options["opps"]
-        self.stdout.write(self.style.MIGRATE_HEADING(f"=== build_crossopp_workspace: {name} ({len(opp_ids)} opps) ==="))
+        self.stdout.write(
+            self.style.MIGRATE_HEADING(
+                f"=== build_crossopp_workspace: {name} ({len(opp_ids)} opps) ==="
+            )
+        )
 
         user = User.objects.get(email=ADMIN_USER_EMAIL)
         workspace, ws_created = Workspace.objects.get_or_create(
@@ -77,27 +76,35 @@ class Command(BaseCommand):
         WorkspaceMembership.objects.get_or_create(
             workspace=workspace, user=user, defaults={"role": WorkspaceRole.MANAGE}
         )
-        self.stdout.write(f"  [workspace] {workspace.name} id={workspace.id} ({'created' if ws_created else 'existing'})")
+        self.stdout.write(
+            f"  [workspace] {workspace.name} id={workspace.id}"
+            f" ({'created' if ws_created else 'existing'})"
+        )
 
-        # ── Collect each opp's schema + measure candidates (sync ORM) ────────────
-        opps: list[OppRef] = []
-        candidates_by_opp = {}
+        # ── Attach tenants to the workspace (sync ORM) ───────────────────────────
         for ext in opp_ids:
             try:
                 tenant = Tenant.objects.get(provider=LABS_PROVIDER, external_id=ext)
             except Tenant.DoesNotExist:
-                self.stderr.write(self.style.ERROR(f"  opp {ext}: tenant not found — run seed_connect_labs first"))
+                self.stderr.write(
+                    self.style.ERROR(
+                        f"  opp {ext}: tenant not found — run seed_connect_labs first"
+                    )
+                )
                 continue
             schema = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).first()
             if schema is None:
                 self.stderr.write(self.style.ERROR(f"  opp {ext}: no active schema"))
                 continue
             WorkspaceTenant.objects.get_or_create(workspace=workspace, tenant=tenant)
-            tm = TenantMembership.objects.filter(tenant=tenant).first()
-            form_defs = (getattr(getattr(tm, "metadata", None), "metadata", None) or {}).get("form_definitions", {})
-            opps.append(OppRef(ext, schema.schema_name))
-            candidates_by_opp[ext] = gather_measure_candidates(form_defs)
-            self.stdout.write(f"  [opp {ext}] schema={schema.schema_name} candidates={len(candidates_by_opp[ext])}")
+            self.stdout.write(f"  [opp {ext}] attached schema={schema.schema_name}")
+
+        # ── Collect opps + candidates from the service ───────────────────────────
+        opps, candidates_by_opp = svc.workspace_opps(workspace)
+        for opp in opps:
+            self.stdout.write(
+                f"  [opp {opp.external_id}] candidates={len(candidates_by_opp[opp.external_id])}"
+            )
 
         if not opps:
             self.stderr.write(self.style.ERROR("No usable opps; aborting."))
@@ -118,37 +125,26 @@ class Command(BaseCommand):
         ro_role = provision_workspace_ro_role(ws_hash, [o.schema_name for o in opps])
         self.stdout.write(f"  [ro-role] {ro_role} (USAGE+SELECT on {len(opps)} schemas only)")
 
-        # ── Resolve every measure for every opp (async LLM) ──────────────────────
-        self.stdout.write(self.style.MIGRATE_HEADING(f"\n  Resolving {len(STARTER_MEASURES)} measures x {len(opps)} opps ..."))
-        resolutions_by_opp = asyncio.run(self._resolve_all(opps, candidates_by_opp))
+        # ── Resolve + commit measures via the shared service ─────────────────────
+        self.stdout.write(
+            self.style.MIGRATE_HEADING(
+                f"\n  Resolving {len(STARTER_MEASURES)} measures x {len(opps)} opps ..."
+            )
+        )
+        for m in STARTER_MEASURES:
+            resolutions = asyncio.run(svc.resolve_across_opps_from_candidates(m, candidates_by_opp))
+            svc.add_measure(workspace, m, resolutions, opps)
+        self.stdout.write(
+            self.style.SUCCESS(f"  committed {len(STARTER_MEASURES)} measures via service")
+        )
 
-        # ── Persist lineage (powers the transparency inspector) ───────────────────
-        for opp in opps:
-            for m in STARTER_MEASURES:
-                r = resolutions_by_opp.get(opp.external_id, {}).get(m.name)
-                if r is None:
-                    continue
-                CrossOppMeasureLineage.objects.update_or_create(
-                    workspace=workspace,
-                    opportunity_id=opp.external_id,
-                    measure=m.name,
-                    defaults={
-                        "column": r.column or "",
-                        "source_path": r.source_path or "",
-                        "matched_label": r.matched_label or "",
-                        "sql_expression": r.sql_expression or "",
-                        "confidence": r.confidence,
-                        "status": r.status,
-                    },
-                )
+        # ── Coverage report (read back from persisted lineage) ───────────────────
+        lineage_rows = CrossOppMeasureLineage.objects.filter(workspace=workspace)
+        lineage_map: dict[str, dict[str, str]] = {}
+        for row in lineage_rows:
+            lineage_map.setdefault(row.opportunity_id, {})[row.measure] = row.status
 
-        # ── Render + write the model ─────────────────────────────────────────────
-        model_yaml = render_crossopp_model(BLENDED_CUBE, opps, STARTER_MEASURES, resolutions_by_opp)
-        model_path = Path("cube/model") / ws_hash / "canonical.yml"
-        model_path.parent.mkdir(parents=True, exist_ok=True)
-        model_path.write_text(model_yaml)
-
-        # ── Coverage report ──────────────────────────────────────────────────────
+        model_path = f"cube/model/{ws_hash}/canonical.yml"
         self.stdout.write(self.style.SUCCESS("\n=== DONE ==="))
         self.stdout.write(f"  workspace_id : {workspace.id}")
         self.stdout.write(f"  schema_name  : {ws_hash}")
@@ -157,17 +153,7 @@ class Command(BaseCommand):
         for m in STARTER_MEASURES:
             cells = []
             for opp in opps:
-                r = resolutions_by_opp.get(opp.external_id, {}).get(m.name)
-                mark = {"resolved": "Y", "low_confidence": "?", "absent": "-"}.get(getattr(r, "status", "absent"), "-")
+                status = lineage_map.get(opp.external_id, {}).get(m.name, "absent")
+                mark = {"resolved": "Y", "low_confidence": "?", "absent": "-"}.get(status, "-")
                 cells.append(f"{opp.external_id}:{mark}")
             self.stdout.write(f"    {m.name:28} {' '.join(cells)}")
-
-    async def _resolve_all(self, opps, candidates_by_opp):
-        out: dict[str, dict] = {}
-        for opp in opps:
-            cands = candidates_by_opp[opp.external_id]
-            rmap = {}
-            for m in STARTER_MEASURES:
-                rmap[m.name] = await resolve_measure(m, cands)
-            out[opp.external_id] = rmap
-        return out
