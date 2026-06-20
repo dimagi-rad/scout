@@ -14,7 +14,7 @@ from asgiref.sync import sync_to_async
 from django.db import transaction
 
 from apps.transformations.models import CrossOppMeasure, CrossOppMeasureLineage
-from apps.transformations.services.crossopp_cube_builder import (  # noqa: F401
+from apps.transformations.services.crossopp_cube_builder import (
     OppRef,
     render_crossopp_model,
 )
@@ -101,3 +101,42 @@ def add_measure(workspace, spec, resolutions, opps, *, model_root="cube/model"):
 
 
 aadd_measure = sync_to_async(add_measure)
+
+from apps.transformations.services.measure_resolver import (  # noqa: E402,I001
+    gather_measure_candidates, resolve_measure, _clinical_entry_candidates,
+)
+from apps.users.models import TenantMembership  # noqa: E402
+from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant  # noqa: E402
+
+LABS_PROVIDER = "commcare_connect_labs"
+
+
+def workspace_opps(workspace):
+    """Active opps in the workspace + their stg_visits field candidates (sync ORM)."""
+    opps, cands = [], {}
+    for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant"):
+        tenant = wt.tenant
+        schema = TenantSchema.objects.filter(tenant=tenant, state=SchemaState.ACTIVE).first()
+        if schema is None:
+            continue
+        tm = TenantMembership.objects.filter(tenant=tenant).first()
+        form_defs = (getattr(getattr(tm, "metadata", None), "metadata", None) or {}).get(
+            "form_definitions", {}
+        )
+        opps.append(OppRef(tenant.external_id, schema.schema_name))
+        cands[tenant.external_id] = gather_measure_candidates(form_defs)
+    return opps, cands
+
+
+async def resolve_across_opps_from_candidates(spec, candidates_by_opp, *, model_client=None):
+    out = {}
+    for opp_id, cands in candidates_by_opp.items():
+        out[opp_id] = await resolve_measure(spec, cands, model_client=model_client)
+    return out
+
+
+def shortlist_for_opp(candidates) -> list[dict]:
+    return [
+        {"column": c.column, "label": c.label, "type": c.type}
+        for c in _clinical_entry_candidates(candidates)
+    ]

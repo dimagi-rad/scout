@@ -99,3 +99,18 @@ def test_add_measure_is_additive_and_preserves_existing(workspace, tmp_path):
     )
     assert names == {"birth_weight", "kmc_hours"}
     assert CrossOppMeasureLineage.objects.filter(workspace=workspace, measure="kmc_hours").count() == 2
+
+
+@pytest.mark.django_db
+def test_resolve_across_opps_uses_resolver_per_opp():
+    import asyncio  # noqa: I001
+    from apps.transformations.services import crossopp_measure_service as svc
+    from apps.transformations.services.measure_resolver import CanonicalMeasureSpec
+    spec = CanonicalMeasureSpec("mortality", "child died", "rate")
+    cands = {"10012": [], "10013": []}
+    class FakeClient:  # resolve_measure(model_client=...) path returns absent for [] candidates
+        pass
+    # With empty candidates resolve_measure returns 'absent' without an LLM call.
+    res = asyncio.run(svc.resolve_across_opps_from_candidates(spec, cands))
+    assert set(res) == {"10012", "10013"}
+    assert all(r.status == "absent" for r in res.values())
