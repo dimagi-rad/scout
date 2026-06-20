@@ -61,12 +61,16 @@ def _safe_numeric(column: str) -> str:
 def _measure_select(measure: CanonicalMeasureSpec, resolution: MeasureResolution | None) -> str:
     """The per-opp SELECT term aliasing a measure to its canonical column.
 
-    Absent → ``NULL`` (so the blended avg ignores that opp). A ``numeric`` measure is
-    safe-cast from its resolved column (placeholders → NULL, never a hard cast error); a
-    ``rate`` measure's boolean expression becomes a 0.0/1.0 numeric the blended cube averages.
+    Absent → a TYPED ``NULL::numeric`` (so the blended avg ignores that opp). The cast is
+    required: an untyped ``NULL`` is ``unknown`` and a ``UNION ALL`` of an untyped-NULL branch
+    with a numeric branch fails ("UNION types text and numeric cannot be matched"). Both
+    measure kinds land on numeric below (safe-cast value, or 0.0/1.0 rate), so an absent term
+    must be ``numeric`` too for every opp to align. A ``numeric`` measure is safe-cast from its
+    resolved column (placeholders → NULL, never a hard cast error); a ``rate`` measure's
+    boolean expression becomes a 0.0/1.0 numeric the blended cube averages.
     """
     if resolution is None or resolution.status == "absent" or not resolution.sql_expression:
-        return f"NULL AS {measure.name}"
+        return f"NULL::numeric AS {measure.name}"
     if measure.kind == "rate":
         return f"CASE WHEN {resolution.sql_expression} THEN 1.0 ELSE 0.0 END AS {measure.name}"
     column = resolution.column or resolution.sql_expression

@@ -62,7 +62,8 @@ def test_opp_cube_emits_null_for_absent_measure():
         ),
     }
     cube = build_opp_cube(opp, MEASURES, res)
-    assert "NULL AS birth_weight" in cube["sql"]
+    # Typed NULL so a UNION ALL with a numeric branch from another opp aligns.
+    assert "NULL::numeric AS birth_weight" in cube["sql"]
     assert "AS danger_sign_referral_rate" in cube["sql"]
 
 
@@ -106,3 +107,24 @@ def test_render_model_is_valid_yaml_with_all_cubes():
     assert names == [opp_cube_name("10012"), opp_cube_name("10020"), "kmc_cross_opp"]
     blended = model["cubes"][-1]
     assert "{opp_10012.sql()}" in blended["sql"]
+
+
+def test_absent_measure_renders_typed_null_for_union_safety():
+    """A measure present (numeric) in one opp and absent in another must union cleanly.
+
+    Regression: an untyped ``NULL AS m`` makes ``UNION ALL`` fail with "UNION types text and
+    numeric cannot be matched" against the numeric branch. The absent term must be
+    ``NULL::numeric`` so every opp's column type aligns.
+    """
+    measures = [CanonicalMeasureSpec("successful_feeds", "feeds in last 24h", "numeric")]
+    opps = [OppRef("10012", "t_10012_a"), OppRef("10022", "t_10022_b")]
+    resolutions_by_opp = {
+        "10012": {"successful_feeds": _res("successful_feeds", None, None, status="absent")},
+        "10022": {
+            "successful_feeds": _res("successful_feeds", "successful_feeds", "successful_feeds")
+        },
+    }
+    model_yaml = render_crossopp_model("kmc_cross_opp", opps, measures, resolutions_by_opp)
+    # The absent branch is typed, never a bare untyped NULL.
+    assert "NULL::numeric AS successful_feeds" in model_yaml
+    assert "NULL AS successful_feeds" not in model_yaml
