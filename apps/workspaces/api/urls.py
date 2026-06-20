@@ -6,7 +6,7 @@ Nested under /api/workspaces/<workspace_id>/
 
 from django.urls import path
 
-from .crossopp_views import CrossOppDashboardView, CrossOppInspectorView
+from .crossopp_views import CrossOppDashboardView, CrossOppInspectorView, CrossOppMeasureApproveView
 from .jobs_views import active_jobs_view, cancel_job_view
 from .materialization_views import materialization_cancel_view, materialization_retry_view
 from .views import DataDictionaryView, RefreshSchemaView, RefreshStatusView, TableDetailView
@@ -34,6 +34,11 @@ urlpatterns = [
     ),
     path("crossopp/inspector/", CrossOppInspectorView.as_view(), name="crossopp_inspector"),
     path("crossopp/dashboard/", CrossOppDashboardView.as_view(), name="crossopp_dashboard"),
+    path(
+        "crossopp/measures/<uuid:draft_id>/approve/",
+        CrossOppMeasureApproveView.as_view(),
+        name="crossopp_measure_approve",
+    ),
     path("jobs/active/", active_jobs_view, name="active_jobs"),
     path(
         "jobs/<uuid:thread_job_id>/cancel/",

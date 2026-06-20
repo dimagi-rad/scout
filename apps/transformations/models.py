@@ -293,3 +293,9 @@ class CrossOppMeasureDraft(models.Model):
 
     def __str__(self):
         return f"draft:{self.name} ({self.status})"
+
+    def to_spec_like(self):
+        """Return a CanonicalMeasureSpec from this draft's name/description/kind."""
+        from apps.transformations.services.measure_resolver import CanonicalMeasureSpec
+
+        return CanonicalMeasureSpec(name=self.name, description=self.description, kind=self.kind)

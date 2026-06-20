@@ -11,6 +11,7 @@ model (the actual union SQL Cube runs). Everything a user needs to verify the an
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import yaml
@@ -20,7 +21,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.transformations.models import CrossOppMeasureLineage
+from apps.transformations.models import CrossOppMeasureDraft, CrossOppMeasureLineage
+from apps.transformations.services import crossopp_measure_service as svc
 from apps.workspaces.models import Workspace
 from apps.workspaces.services.schema_manager import SchemaManager
 from mcp_server.services.semantic import semantic_query
@@ -123,3 +125,79 @@ class CrossOppDashboardView(APIView):
             return Response({"error": "no blended cube in the model"}, status=404)
         result = async_to_sync(semantic_query)(sql, workspace_id=str(workspace.id))
         return Response({"sql": sql, **result})
+
+
+def _apply_overrides(draft, overrides, opps_cands):
+    """Return resolutions dict (opp -> MeasureResolution) with the user's per-opp choices."""
+    res = {o: svc.deserialize_resolution(d) for o, d in draft.resolutions.items()}
+    for opp_id, choice in (overrides or {}).items():
+        action = choice.get("action")
+        if action == "reject":
+            r = res[opp_id]
+            res[opp_id] = dataclasses.replace(
+                r,
+                measure=draft.name,
+                column=None,
+                source_path=None,
+                sql_expression=None,
+                status="absent",
+                matched_label="",
+                reason="user rejected",
+            )
+        elif action == "pick":
+            col = choice["column"]
+            sql = col if draft.kind == "numeric" else f"({col} = 'yes')"
+            res[opp_id] = dataclasses.replace(
+                res[opp_id],
+                measure=draft.name,
+                column=col,
+                source_path=None,
+                sql_expression=sql,
+                confidence=1.0,
+                status="resolved",
+                matched_label="(user)",
+                reason="user picked",
+            )
+        elif action == "confirm":
+            r = res[opp_id]
+            res[opp_id] = dataclasses.replace(
+                r,
+                confidence=1.0,
+                status="resolved",
+                reason="user confirmed",
+            )
+    return res
+
+
+def _defer_measure_resume(workspace, thread_id, measure_name):
+    from asgiref.sync import async_to_sync as _ats
+
+    from apps.workspaces.tasks import resume_thread_after_measure_approval
+
+    _ats(resume_thread_after_measure_approval.defer_async)(
+        workspace_id=str(workspace.id), thread_id=thread_id, measure_name=measure_name
+    )
+
+
+class CrossOppMeasureApproveView(APIView):
+    """POST /api/workspaces/<id>/crossopp/measures/<draft_id>/approve/
+
+    Applies per-opp overrides (confirm / pick / reject) to the draft's resolutions,
+    calls add_measure to commit the lineage + regenerate the Cube model, marks the draft
+    committed, and defers the resume task to unblock the waiting agent thread.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id, draft_id):
+        workspace = get_object_or_404(Workspace, id=workspace_id, memberships__user=request.user)
+        draft = get_object_or_404(CrossOppMeasureDraft, id=draft_id, workspace=workspace)
+        if draft.status != "pending":
+            return Response({"error": f"draft already {draft.status}"}, status=409)
+        opps, _ = svc.workspace_opps(workspace)
+        resolutions = _apply_overrides(draft, request.data.get("overrides", {}), None)
+        lineage = svc.add_measure(workspace, draft.to_spec_like(), resolutions, opps)
+        draft.status = "committed"
+        draft.save(update_fields=["status"])
+        _defer_measure_resume(workspace, draft.thread_id, draft.name)
+        return Response({"status": "committed", "measure": draft.name, "lineage": lineage})
