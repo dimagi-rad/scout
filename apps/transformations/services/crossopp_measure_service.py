@@ -185,10 +185,18 @@ def workspace_opps(workspace):
 
 
 async def resolve_across_opps_from_candidates(spec, candidates_by_opp, *, model_client=None):
-    out = {}
-    for opp_id, cands in candidates_by_opp.items():
-        out[opp_id] = await resolve_measure(spec, cands, model_client=model_client)
-    return out
+    """Resolve the measure for every opp CONCURRENTLY.
+
+    The per-opp LLM calls are independent, so we fan them out with asyncio.gather
+    instead of awaiting them one-by-one. Sequential resolution over ~11 opps took
+    ~50s — long enough that the chat stream gave up before the tool returned.
+    Concurrent resolution collapses that to roughly one call's latency.
+    """
+    opp_ids = list(candidates_by_opp)
+    results = await asyncio.gather(
+        *(resolve_measure(spec, candidates_by_opp[o], model_client=model_client) for o in opp_ids)
+    )
+    return dict(zip(opp_ids, results, strict=True))
 
 
 def shortlist_for_opp(candidates) -> list[dict]:
