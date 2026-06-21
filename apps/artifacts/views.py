@@ -23,6 +23,7 @@ from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 from mcp_server.context import load_workspace_context
 from mcp_server.services.query import execute_query
+from mcp_server.services.semantic import semantic_query
 
 from .models import Artifact
 from .services.export import ArtifactExporter
@@ -870,6 +871,27 @@ class ArtifactQueryDataView(View):
             sql = entry.get("sql", "")
             if not sql:
                 results.append({"name": name, "error": "Empty SQL query"})
+                continue
+
+            # Semantic-layer (Cube) queries — those using MEASURE(...) over a cube — must
+            # run through the Cube SQL API, not raw Postgres. This is what lets an artifact
+            # be backed by the cross-opp semantic layer (e.g. a growth curve from
+            # avg_visit_weight / ci95_visit_weight) rather than only raw per-tenant SQL.
+            if "measure(" in sql.lower():
+                sresult = await semantic_query(sql, workspace_id=str(artifact.workspace_id))
+                if sresult.get("error"):
+                    results.append({"name": name, "error": sresult["error"]})
+                else:
+                    rows = sresult.get("rows", []) or []
+                    results.append(
+                        {
+                            "name": name,
+                            "columns": sresult.get("columns", []),
+                            "rows": rows,
+                            "row_count": len(rows),
+                            "truncated": False,
+                        }
+                    )
                 continue
 
             result = await execute_query(ctx, sql)
