@@ -79,8 +79,14 @@ def _is_transient_overload(exc: BaseException) -> bool:
 
 
 def _sse(chunk: dict) -> str:
-    """Format a chunk as an SSE data event."""
-    return f"data: {json.dumps(chunk)}\n\n"
+    """Format a chunk as an SSE data event.
+
+    ``default=str`` is a safety net: a chunk must never crash the whole stream
+    because some nested value isn't JSON-serializable (e.g. langchain injects a
+    ``ToolRuntime`` into tool inputs). Such values are stringified rather than
+    raising — though ``_redact_tool_input`` already drops them for tool cards.
+    """
+    return f"data: {json.dumps(chunk, default=str)}\n\n"
 
 
 def _tool_content_to_str(output: Any) -> str:
@@ -118,7 +124,18 @@ def _redact_tool_input(raw_input: Any) -> dict:
     """
     if not isinstance(raw_input, dict):
         return {}
-    return {k: v for k, v in raw_input.items() if k not in INJECTED_TOOL_PARAMS}
+    out: dict = {}
+    for k, v in raw_input.items():
+        if k in INJECTED_TOOL_PARAMS:
+            continue
+        # Drop values langchain injects that aren't real, displayable arguments
+        # (e.g. a ToolRuntime) — they're not JSON-serializable and not user input.
+        try:
+            json.dumps(v)
+        except (TypeError, ValueError):
+            continue
+        out[k] = v
+    return out
 
 
 def _truncate_tool_output(content: str) -> str:
@@ -289,13 +306,18 @@ async def langgraph_to_ui_stream(
                     input_state.get("project_id", ""),
                 )
 
-                # The ToolMessage carries the authoritative LLM toolu_ id; use
-                # it so this output pairs with the input part the frontend keyed
-                # its per-card affordances off of. Fall back to the start map /
-                # run_id when (rarely) absent.
+                # Pair this output with the EXACT id on_tool_start emitted for
+                # this run, so the AI SDK client always finds the matching input
+                # part. For MCP tools that id is the injected toolu_ id (so the
+                # per-card affordances keyed on ThreadJob.tool_call_id still
+                # work); for LOCAL tools (create_artifact, define_crossopp_measure)
+                # it is the run_id, because they get no injected tool_call_id.
+                # Preferring the ToolMessage's toolu_ id here would diverge from
+                # the local tool's run_id input part → "No tool invocation found
+                # for tool call ID toolu_..." and the whole turn fails.
                 tool_call_id = (
-                    getattr(tool_output, "tool_call_id", None)
-                    or run_to_tool_call_id.get(run_id or "")
+                    run_to_tool_call_id.get(run_id or "")
+                    or getattr(tool_output, "tool_call_id", None)
                     or run_id
                     or uuid.uuid4().hex
                 )

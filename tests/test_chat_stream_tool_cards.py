@@ -173,3 +173,41 @@ async def test_tool_output_not_double_indented():
     # Compact: round-trips and has no indentation newlines from indent=2.
     assert json.loads(out) == payload
     assert '\n  "' not in out
+
+
+@pytest.mark.asyncio
+async def test_local_tool_output_id_matches_its_start_id():
+    """Local tools (create_artifact, define_crossopp_measure) get NO injected
+    tool_call_id, so on_tool_start emits the run_id. on_tool_end MUST reuse that
+    same id rather than the ToolMessage's (different) toolu_ id — otherwise the
+    AI SDK client errors 'No tool invocation found for tool call ID toolu_...'
+    and the whole chat turn fails.
+    """
+    tm = ToolMessage(
+        content=json.dumps({"status": "committed", "measure": "x"}),
+        tool_call_id="toolu_LOCAL999",
+    )
+    events = [
+        {
+            "event": "on_tool_start",
+            "run_id": "run-local-1",
+            "name": "define_crossopp_measure",
+            # No tool_call_id in the input — local tools aren't injected with it.
+            "data": {"input": {"name": "x", "description": "y", "kind": "numeric"}},
+        },
+        {
+            "event": "on_tool_end",
+            "run_id": "run-local-1",
+            "name": "define_crossopp_measure",
+            "data": {"output": tm},
+        },
+    ]
+    chunks = await _run(events)
+    ins = [c for c in chunks if c["type"] == "tool-input-available"]
+    outs = [c for c in chunks if c["type"] == "tool-output-available"]
+    assert ins and outs
+    # The output's id must match an emitted input id, or the client can't pair them.
+    input_ids = {c["toolCallId"] for c in ins}
+    assert outs[0]["toolCallId"] in input_ids, (
+        f"output id {outs[0]['toolCallId']} has no matching input id {input_ids}"
+    )
