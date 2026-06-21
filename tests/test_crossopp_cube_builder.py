@@ -128,3 +128,36 @@ def test_absent_measure_renders_typed_null_for_union_safety():
     # The absent branch is typed, never a bare untyped NULL.
     assert "NULL::numeric AS successful_feeds" in model_yaml
     assert "NULL AS successful_feeds" not in model_yaml
+
+
+def test_blended_cube_exposes_per_visit_growth_dims_and_measures():
+    """The cross-opp cube auto-exposes per-visit canonical dimensions (age_days,
+    birthweight_band) + visit-weight measures (avg + CI) so a cross-opp growth
+    curve comes from the semantic layer — not a hand-built view. Visit fields are
+    resolved per-opp (so heterogeneous apps align)."""
+    measures = [CanonicalMeasureSpec("birth_weight", "newborn weight in grams", "numeric")]
+    opps = [OppRef("10012", "t_10012_a"), OppRef("10020", "t_10020_b")]
+    res = {
+        "10012": {"birth_weight": _res("birth_weight", "child_weight_birth", "child_weight_birth")},
+        "10020": {"birth_weight": _res("birth_weight", "birth_weight", "birth_weight")},
+    }
+    # Per-visit fields resolved to DIFFERENT columns per opp (the heterogeneity).
+    visit_res = {
+        "10012": {
+            "visit_weight": _res("visit_weight", "child_weight_visit", "child_weight_visit"),
+            "age_days": _res("age_days", "child_age", "child_age"),
+        },
+        "10020": {
+            "visit_weight": _res("visit_weight", "child_weight", "child_weight"),
+            "age_days": _res("age_days", "child_age", "child_age"),
+        },
+    }
+    model = render_crossopp_model("kmc_cross_opp", opps, measures, res, visit_resolutions_by_opp=visit_res)
+    # Per-opp cubes carry each opp's OWN visit-weight column (aligned to canonical name).
+    assert "child_weight_visit)::numeric ELSE NULL END AS visit_weight" in model  # opp 10012
+    assert "(child_weight)::numeric ELSE NULL END AS visit_weight" in model       # opp 10020 (different col!)
+    # Blended cube exposes the growth dimensions + measures.
+    assert "name: age_days" in model
+    assert "name: birthweight_band" in model
+    assert "name: avg_visit_weight" in model
+    assert "name: ci95_visit_weight" in model

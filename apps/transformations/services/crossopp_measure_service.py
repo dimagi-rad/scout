@@ -7,6 +7,8 @@ on-demand agent tool and the app-driven proposer.
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from django.db import transaction
 
 from apps.transformations.models import CrossOppMeasure, CrossOppMeasureLineage
 from apps.transformations.services.crossopp_cube_builder import (
+    VISIT_FIELDS,
     OppRef,
     render_crossopp_model,
 )
@@ -64,6 +67,42 @@ def load_workspace_specs_and_resolutions(workspace):
     return specs, res
 
 
+def regenerate_model(workspace, opps, *, model_root="cube/model"):
+    """Re-render + write the full Cube model from the workspace's persisted state.
+
+    Includes the per-visit growth surface whenever visit-field resolutions
+    (VISIT_FIELDS) have been persisted as lineage — so the surface survives every
+    later additive regen (e.g. a chat-defined measure), not just the build."""
+    specs, res_by_opp = load_workspace_specs_and_resolutions(workspace)
+    visit_present = any(any(f in r for f in VISIT_FIELDS) for r in res_by_opp.values())
+    model_yaml = render_crossopp_model(
+        BLENDED_CUBE, opps, specs, res_by_opp,
+        visit_resolutions_by_opp=res_by_opp if visit_present else None,
+    )
+    path = Path(model_root) / _ws_hash(workspace) / "canonical.yml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(model_yaml)
+
+
+def add_visit_field(workspace, field_name, resolutions, opps, *, model_root="cube/model"):
+    """Persist a canonical PER-VISIT field's per-opp resolutions, then regenerate the model.
+
+    Visit fields (VISIT_FIELDS) are stored as lineage rows like measures but have no
+    CrossOppMeasure catalog entry, so they surface as cube dimensions/visit-measures
+    (via render's visit path) rather than as averaged measures."""
+    with transaction.atomic():
+        for opp_id, r in resolutions.items():
+            CrossOppMeasureLineage.objects.update_or_create(
+                workspace=workspace, opportunity_id=opp_id, measure=field_name,
+                defaults={
+                    "column": r.column or "", "source_path": r.source_path or "",
+                    "matched_label": r.matched_label or "", "sql_expression": r.sql_expression or "",
+                    "confidence": r.confidence, "status": r.status,
+                },
+            )
+    regenerate_model(workspace, opps, model_root=model_root)
+
+
 def add_measure(workspace, spec, resolutions, opps, *, model_root="cube/model"):
     """Commit ONE measure: upsert spec + lineage, regenerate the full model additively, write it.
 
@@ -84,12 +123,7 @@ def add_measure(workspace, spec, resolutions, opps, *, model_root="cube/model"):
                 },
             )
 
-    specs, res_by_opp = load_workspace_specs_and_resolutions(workspace)
-    model_yaml = render_crossopp_model(BLENDED_CUBE, opps, specs, res_by_opp)
-    ws_hash = _ws_hash(workspace)
-    path = Path(model_root) / ws_hash / "canonical.yml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(model_yaml)
+    regenerate_model(workspace, opps, model_root=model_root)
 
     return [
         {
@@ -103,9 +137,10 @@ def add_measure(workspace, spec, resolutions, opps, *, model_root="cube/model"):
 aadd_measure = sync_to_async(add_measure)
 
 from apps.transformations.services.measure_resolver import (  # noqa: E402,I001
-    gather_measure_candidates, resolve_measure, _clinical_entry_candidates,
+    FieldCandidate, gather_measure_candidates, resolve_measure, _clinical_entry_candidates,
 )
 from apps.users.models import TenantMembership  # noqa: E402
+from django.db import connection  # noqa: E402
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceTenant  # noqa: E402
 
 import asyncio  # noqa: E402
@@ -167,8 +202,87 @@ async def ensure_measure_queryable_meta(
 LABS_PROVIDER = "commcare_connect_labs"
 
 
+def _stg_visits_columns(schema_name: str) -> list[str]:
+    """The physical columns of an opp's stg_visits (system-minted schema name)."""
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = 'stg_visits' ORDER BY column_name",
+            [schema_name],
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _derived_column_candidates(schema_name: str, form_columns: set[str]) -> list[FieldCandidate]:
+    """Offer staging-DERIVED stg_visits columns (not backed by a form question) to the
+    resolver. Form fields cover entered values (e.g. visit weight); derived columns like
+    ``child_age`` (age in days, computed by staging) are real, resolvable fields too — so
+    per-visit concepts that aren't form entries can still align across opps."""
+    return [
+        FieldCandidate(
+            path=f"/stg_visits/{col}", json_path="", column=col,
+            label=col.replace("_", " "), type="DerivedColumn",
+            form_name="stg_visits", module_name="derived", case_type="visit", is_entry=True,
+        )
+        for col in _stg_visits_columns(schema_name)
+        if col not in form_columns
+    ]
+
+
+def _attach_samples(candidates, schema_name: str):
+    """Attach a few real per-column sample values so the resolver can spot which columns
+    hold real data vs placeholder garbage (e.g. child_age '17.881' vs child_age_2 'sample-101').
+
+    Samples a bounded window and keeps the first few distinct non-empty values per column."""
+    wanted = {c.column for c in candidates}
+    with connection.cursor() as cur:
+        # Random window, not the first N rows: clinical fields (e.g. child_age) are sparse —
+        # the leading rows can be all learn/quiz visits, hiding the real values.
+        cur.execute(
+            f'SELECT * FROM "{schema_name}".stg_visits ORDER BY random() LIMIT 800'  # noqa: S608 system-minted schema
+        )
+        names = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    samples: dict[str, list[str]] = {}
+    for idx, name in enumerate(names):
+        if name not in wanted:
+            continue
+        seen: list[str] = []
+        for r in rows:
+            v = r[idx]
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s and s not in seen:
+                seen.append(s)
+            if len(seen) >= 4:
+                break
+        samples[name] = seen
+    return [dataclasses.replace(c, samples=tuple(samples.get(c.column, ()))) for c in candidates]
+
+
+_PLACEHOLDER_RE = re.compile(r"^sample[-_]\d+$", re.IGNORECASE)
+
+
+def _drop_placeholder_columns(candidates):
+    """Drop columns whose sampled values are ALL synthetic placeholders (e.g. 'sample-101').
+
+    These never hold a real measure, and removing them both de-noises the resolver shortlist
+    and shrinks the prompt (the synthetic seed has hundreds of such filler columns). Columns
+    with no samples are kept — they may be sparse-but-real (resolved by label)."""
+    return [
+        c
+        for c in candidates
+        if not (c.samples and all(_PLACEHOLDER_RE.match(v) for v in c.samples))
+    ]
+
+
 def workspace_opps(workspace):
-    """Active opps in the workspace + their stg_visits field candidates (sync ORM)."""
+    """Active opps in the workspace + their stg_visits field candidates (sync ORM).
+
+    Candidates = form-question fields PLUS the staging-derived stg_visits columns, each
+    carrying real sample values, so the resolver can align both entered and computed fields
+    (e.g. age_days -> child_age, not the placeholder child_age_2) across heterogeneous apps."""
     opps, cands = [], {}
     for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant"):
         tenant = wt.tenant
@@ -179,8 +293,17 @@ def workspace_opps(workspace):
         form_defs = (getattr(getattr(tm, "metadata", None), "metadata", None) or {}).get(
             "form_definitions", {}
         )
+        form_cands = gather_measure_candidates(form_defs)
+        # Gate derived candidates on form ENTRY columns only: a calculated form field
+        # (is_entry=False, e.g. child_age) is dropped by the clinical-entry shortlist, so we
+        # must re-offer its physical column as a derived (is_entry=True) candidate or the
+        # resolver never sees the real value.
+        derived = _derived_column_candidates(
+            schema.schema_name, {c.column for c in form_cands if c.is_entry}
+        )
         opps.append(OppRef(tenant.external_id, schema.schema_name))
-        cands[tenant.external_id] = gather_measure_candidates(form_defs)
+        sampled = _attach_samples(form_cands + derived, schema.schema_name)
+        cands[tenant.external_id] = _drop_placeholder_columns(sampled)
     return opps, cands
 
 

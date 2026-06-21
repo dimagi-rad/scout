@@ -52,6 +52,19 @@ STARTER_MEASURES = [
     ),
 ]
 
+# Canonical PER-VISIT fields (the growth surface). Resolved per opp like measures, but
+# they become cube dimensions/visit-measures (age_days, birthweight_band, avg_visit_weight,
+# ci95) rather than averaged measures — so per-visit cross-opp analysis (growth curves)
+# works from the semantic layer across heterogeneous apps.
+VISIT_FIELD_SPECS = [
+    CanonicalMeasureSpec(
+        "visit_weight", "the infant's body weight in grams measured at this visit", "numeric"
+    ),
+    CanonicalMeasureSpec(
+        "age_days", "the infant's age in days at the time of this visit", "numeric"
+    ),
+]
+
 
 class Command(BaseCommand):
     help = "Assemble a cross-opp workspace over several labs opps and generate its Cube model."
@@ -136,6 +149,24 @@ class Command(BaseCommand):
             svc.add_measure(workspace, m, resolutions, opps)
         self.stdout.write(
             self.style.SUCCESS(f"  committed {len(STARTER_MEASURES)} measures via service")
+        )
+
+        # ── Resolve + persist the per-visit canonical fields (growth surface) ─────
+        self.stdout.write(
+            self.style.MIGRATE_HEADING(
+                f"\n  Resolving {len(VISIT_FIELD_SPECS)} per-visit fields x {len(opps)} opps ..."
+            )
+        )
+        for f in VISIT_FIELD_SPECS:
+            resolutions = asyncio.run(svc.resolve_across_opps_from_candidates(f, candidates_by_opp))
+            svc.add_visit_field(workspace, f.name, resolutions, opps)
+            cov = " ".join(
+                f"{opp.external_id}:{(resolutions.get(opp.external_id).column or '-') if resolutions.get(opp.external_id) else '-'}"
+                for opp in opps
+            )
+            self.stdout.write(f"    {f.name:12} -> {cov}")
+        self.stdout.write(
+            self.style.SUCCESS(f"  committed {len(VISIT_FIELD_SPECS)} per-visit fields (growth surface)")
         )
 
         # ── Coverage report (read back from persisted lineage) ───────────────────

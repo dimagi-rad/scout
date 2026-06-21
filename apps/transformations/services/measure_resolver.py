@@ -66,6 +66,8 @@ class FieldCandidate:
     module_name: str  # e.g. "Visit Management"
     case_type: str  # e.g. "child"
     is_entry: bool  # True = real data-entry question; False = DataBindOnly/Trigger copy
+    samples: tuple[str, ...] = ()  # a few real values from stg_visits — lets the resolver
+    # avoid placeholder/garbage columns (e.g. child_age_2 = "sample-101") it can't spot by label
 
 
 def _localized(value) -> str:
@@ -171,7 +173,7 @@ class _ResolutionResult(BaseModel):
 
 
 _LOW_CONFIDENCE = 0.5
-_MAX_SHORTLIST = 150
+_MAX_SHORTLIST = 250
 
 _SYSTEM_PROMPT = (
     "You map ONE clinical program measure to a single field in a CommCare app's visit data. "
@@ -184,7 +186,12 @@ _SYSTEM_PROMPT = (
     "event occurred (it will be averaged into a 0..1 rate).\n"
     "- Write sql_expression over the staged columns by their snake_case column name "
     "(given as `column=`), e.g. child_weight_birth, or (danger_sign_positive = 'yes').\n"
-    "- Prefer fields from the clinical visit/registration forms; ignore learn/quiz content."
+    "- Prefer fields from the clinical visit/registration forms; ignore learn/quiz content.\n"
+    "- Each candidate shows `samples=` (real values). Use them to break ties and to AVOID "
+    "placeholder/garbage columns: if a column's samples are clearly synthetic fillers "
+    "(e.g. 'sample-101', 'sample-51') or otherwise don't match the measure's expected shape "
+    "(a numeric measure needs numeric-looking samples), do NOT pick it — prefer the column "
+    "whose samples actually look like the measure, or status=absent if none do."
 )
 
 
@@ -204,7 +211,8 @@ def _clinical_entry_candidates(candidates: list[FieldCandidate]) -> list[FieldCa
 
 def _build_messages(measure: CanonicalMeasureSpec, shortlist: list[FieldCandidate]) -> list:
     lines = [
-        f"- column={c.column} | type={c.type} | form={c.form_name}/{c.module_name} | label={c.label!r}"
+        f"- column={c.column} | type={c.type} | form={c.form_name}/{c.module_name} "
+        f"| label={c.label!r} | samples={list(c.samples)}"
         for c in shortlist
     ]
     human = (
