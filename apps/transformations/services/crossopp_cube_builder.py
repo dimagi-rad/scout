@@ -162,6 +162,9 @@ def build_blended_cube(
 
     if with_visit_fields:
         dimensions.append({"name": "age_days", "sql": "floor(age_days)", "type": "number"})
+        # Weekly bin: per-day points are sparse/noisy for a growth curve; grouping by
+        # age_week gives a smooth, well-powered line (more children per point).
+        dimensions.append({"name": "age_week", "sql": "floor(age_days / 7)", "type": "number"})
         # The band needs the birth_weight measure column; only emit it when resolved.
         if any(m.name == "birth_weight" for m in measures):
             dimensions.append(

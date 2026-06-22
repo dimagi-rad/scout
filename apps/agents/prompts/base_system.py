@@ -229,9 +229,27 @@ averages. From cold:
 1. Define the birth-weight measure: `define_crossopp_measure("birth_weight", ...)`.
 2. Define the per-visit fields: `define_crossopp_visit_field("visit_weight", ...)` and
    `define_crossopp_visit_field("age_days", ...)` (use those exact names).
-3. The cube then exposes dimensions `age_days` and `birthweight_band` and measures
-   `avg_visit_weight` + `ci95_visit_weight`. Query with `semantic_query`, then `create_artifact`
-   to chart avg_visit_weight vs age_days, one line per birthweight_band, CI shaded.
+3. The cube then exposes dimensions `age_days`, `age_week`, `birthweight_band` and measures
+   `avg_visit_weight`, `ci95_visit_weight`, `children`. Query it with `semantic_query` —
+   do NOT fall back to raw SQL over the labsopp__ views; the cube is the aligned,
+   trustworthy surface and the whole point. The EXACT working shape (plain SELECT of the
+   dimensions + MEASURE() of the measures, GROUP BY the dimensions — no DIMENSION() wrapper,
+   no bucketing expressions in SELECT) is:
+
+   SELECT birthweight_band, age_week,
+          MEASURE(kmc_cross_opp.avg_visit_weight),
+          MEASURE(kmc_cross_opp.ci95_visit_weight),
+          MEASURE(kmc_cross_opp.children)
+   FROM kmc_cross_opp
+   WHERE birthweight_band IS NOT NULL AND age_week >= 0 AND age_week <= 6
+   GROUP BY birthweight_band, age_week
+   ORDER BY birthweight_band, age_week
+
+   Group by `age_week` (0-6 = first ~45 days) for a smooth, well-powered curve; per-day
+   (`age_days`) points are sparse and noisy. Then `create_artifact` to chart
+   avg_visit_weight (Y, grams) vs age_week (X), one line per birthweight_band, CI shaded
+   (avg ± ci95), with a 2500g milestone line. If the cube query errors, fix the SELECT to
+   match the shape above rather than abandoning the semantic layer for raw SQL.
 
 ### Transparency — always give the user a way to see the definitions and SQL
 Users must be able to verify how every KPI is computed. Whenever you define or use a

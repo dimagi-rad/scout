@@ -158,6 +158,7 @@ def test_blended_cube_exposes_per_visit_growth_dims_and_measures():
     assert "(child_weight)::numeric ELSE NULL END AS visit_weight" in model       # opp 10020 (different col!)
     # Blended cube exposes the growth dimensions + measures.
     assert "name: age_days" in model
+    assert "name: age_week" in model  # weekly binning for a smooth, well-powered curve
     assert "name: birthweight_band" in model
     assert "name: avg_visit_weight" in model
     assert "name: ci95_visit_weight" in model
