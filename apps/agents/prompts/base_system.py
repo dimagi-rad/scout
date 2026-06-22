@@ -209,14 +209,39 @@ semantic model. Note this in your response so it can be addressed in a future mo
 
 CROSSOPP_GUIDANCE = """
 ## Cross-opportunity measures
-This workspace can compare a measure across multiple opportunities. When a question needs a
-domain measure (e.g. "birth weight", "referral rate"):
-1. Call `semantic_catalog` to see which measures already exist on the `kmc_cross_opp` cube.
+This workspace can compare data across multiple opportunities whose apps DIFFER (the same
+concept lives in a different column per opp). The semantic layer aligns them. You may be
+starting COLD — no measures or dimensions defined yet; build what the question needs.
+
+### Aggregate measures (one number per opp)
+For a question like "birth weight" or "referral rate":
+1. Call `semantic_catalog` to see what already exists on the `kmc_cross_opp` cube.
 2. If a needed measure is MISSING, call `define_crossopp_measure(name, description, kind)`
-   BEFORE querying. Name it as a snake_case slug; kind is 'numeric' or 'rate'.
-3. If it returns status=needs_approval, STOP and tell the user you need their confirmation on
-   the flagged opportunities (the UI shows an approval card); do not retry or invent values.
-4. Once committed (or after approval), use `semantic_query` against `kmc_cross_opp`.
+   BEFORE querying (snake_case slug; kind 'numeric' or 'rate'). This also bootstraps the
+   cube the first time, so it works on a cold workspace.
+3. If it returns needs_approval, STOP and tell the user to confirm the flagged opps (the UI
+   shows an approval card); do not retry or invent values.
+4. Then use `semantic_query` against `kmc_cross_opp`.
+
+### Per-visit / longitudinal analysis (group-by or over-time, e.g. a growth curve)
+A growth curve (weight by age, banded by birth weight) needs PER-VISIT fields, not just
+averages. From cold:
+1. Define the birth-weight measure: `define_crossopp_measure("birth_weight", ...)`.
+2. Define the per-visit fields: `define_crossopp_visit_field("visit_weight", ...)` and
+   `define_crossopp_visit_field("age_days", ...)` (use those exact names).
+3. The cube then exposes dimensions `age_days` and `birthweight_band` and measures
+   `avg_visit_weight` + `ci95_visit_weight`. Query with `semantic_query`, then `create_artifact`
+   to chart avg_visit_weight vs age_days, one line per birthweight_band, CI shaded.
+
+### Transparency — always give the user a way to see the definitions and SQL
+Users must be able to verify how every KPI is computed. Whenever you define or use a
+measure/field:
+- The tool returns a per-opp `lineage` (the resolved column + SQL per opportunity). Surface it,
+  and tell the user plainly: each measure/field card in the chat is EXPANDABLE to show exactly
+  which column it mapped to in each opportunity and the SQL behind it, and the same per-opp
+  definitions + SQL are in the Data Dictionary. Offer to walk through any KPI's definition.
+- Never present a number without making its definition reachable. If the user asks "how is
+  this calculated?", show the lineage (resolved column + SQL) for that measure across opps.
 """
 
 BASE_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + CROSSOPP_GUIDANCE
