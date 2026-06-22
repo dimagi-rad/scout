@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from asgiref.sync import async_to_sync
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -739,7 +740,17 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
-        has_live_queries = bool(artifact.source_queries)
+        # Run any live source_queries server-side and EMBED the results. The sandbox iframe
+        # is sandboxed WITHOUT allow-same-origin (opaque "null" origin), so its own fetch to
+        # /query-data is blocked by CORS — a live-query artifact could never self-hydrate and
+        # showed "Data Fetch Error". Embedding the results (already merged into the same shape
+        # the client mergeQueryResults() produces) lets the iframe render with NO fetch.
+        # has_live_queries is therefore False for the iframe; the parent Data tab still
+        # fetches its own copy same-origin.
+        embedded_data = artifact.data or {}
+        if artifact.source_queries:
+            queries = async_to_sync(_execute_artifact_source_queries)(artifact)
+            embedded_data = _merge_query_results_into_data(queries, embedded_data)
 
         # Serialize artifact data for embedding in the template
         artifact_json = json.dumps(
@@ -749,10 +760,11 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
                 "title": artifact.title,
                 "type": artifact.artifact_type,
                 "code": artifact.code,
-                "data": artifact.data if not has_live_queries else {},
-                "has_live_queries": has_live_queries,
+                "data": embedded_data,
+                "has_live_queries": False,
                 "version": artifact.version,
-            }
+            },
+            default=_json_safe,
         )
         # Escape </script> in JSON to prevent breaking out of the script tag
         artifact_json = artifact_json.replace("</", "<\\/")
@@ -818,6 +830,90 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+async def _execute_artifact_source_queries(artifact) -> list[dict]:
+    """Run an artifact's source_queries and return per-query results.
+
+    Routes each query: a Cube/semantic query (uses MEASURE(...)) goes through the Cube
+    SQL API; everything else is raw SQL against the workspace's query schema (via
+    load_workspace_context). Shared by the live Data-tab endpoint and the server-side
+    embed used by the sandbox VIEW tab. Errors are per-query, never raised."""
+    if not artifact.source_queries:
+        return []
+    try:
+        ctx = await load_workspace_context(str(artifact.workspace_id))
+    except Exception as e:
+        msg = str(e)
+        return [
+            {"name": entry.get("name", f"query_{i}"), "error": msg}
+            for i, entry in enumerate(artifact.source_queries)
+        ]
+
+    results: list[dict] = []
+    for i, entry in enumerate(artifact.source_queries):
+        name = entry.get("name", f"query_{i}")
+        sql = entry.get("sql", "")
+        if not sql:
+            results.append({"name": name, "error": "Empty SQL query"})
+            continue
+
+        # Semantic-layer (Cube) queries — those using MEASURE(...) over a cube — must run
+        # through the Cube SQL API, not raw Postgres, so an artifact can be backed by the
+        # cross-opp semantic layer (e.g. a growth curve from avg_visit_weight / ci95).
+        if "measure(" in sql.lower():
+            sresult = await semantic_query(sql, workspace_id=str(artifact.workspace_id))
+            if sresult.get("error"):
+                results.append({"name": name, "error": sresult["error"]})
+            else:
+                rows = sresult.get("rows", []) or []
+                results.append(
+                    {
+                        "name": name,
+                        "columns": sresult.get("columns", []),
+                        "rows": rows,
+                        "row_count": len(rows),
+                        "truncated": False,
+                    }
+                )
+            continue
+
+        result = await execute_query(ctx, sql)
+        if not result.get("success", True) or result.get("error"):
+            error_info = result.get("error", {})
+            msg = (
+                error_info.get("message", "Query failed")
+                if isinstance(error_info, dict)
+                else str(error_info)
+            )
+            results.append({"name": name, "error": msg})
+        else:
+            results.append(
+                {
+                    "name": name,
+                    "columns": result.get("columns", []),
+                    "rows": result.get("rows", []),
+                    "row_count": result.get("row_count", 0),
+                    "truncated": result.get("truncated", False),
+                }
+            )
+    return results
+
+
+def _merge_query_results_into_data(queries: list[dict], static_data: dict) -> dict:
+    """Mirror the sandbox's mergeQueryResults() in Python: key each query's rows by name
+    as a list of {column: value} dicts, so an embedded (no-fetch) artifact renders the same
+    as a client-fetched one. Values are coerced JSON-safe."""
+    merged = dict(static_data or {})
+    for q in queries:
+        if q.get("error"):
+            continue
+        cols = q.get("columns", []) or []
+        merged[q["name"]] = [
+            {c: _json_safe(v) for c, v in zip(cols, row, strict=False)}
+            for row in (q.get("rows", []) or [])
+        ]
+    return merged
+
+
 class ArtifactQueryDataView(View):
     """
     Executes an artifact's source_queries via the MCP query service and returns results.
@@ -846,75 +942,7 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
-        if not artifact.source_queries:
-            return JsonResponse({"queries": [], "static_data": artifact.data or {}})
-
-        if artifact.workspace is None:
-            return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
-
-        # Route through load_workspace_context so single- vs multi-tenant
-        # workspaces resolve to the correct schema (t_* vs ws_* view schema) and
-        # the inactivity TTL is touched on the right schema.
-        try:
-            ctx = await load_workspace_context(str(artifact.workspace_id))
-        except Exception as e:
-            error_msg = str(e)
-            results = [
-                {"name": entry.get("name", f"query_{i}"), "error": error_msg}
-                for i, entry in enumerate(artifact.source_queries)
-            ]
-            return JsonResponse({"queries": results, "static_data": artifact.data or {}})
-
-        results = []
-        for i, entry in enumerate(artifact.source_queries):
-            name = entry.get("name", f"query_{i}")
-            sql = entry.get("sql", "")
-            if not sql:
-                results.append({"name": name, "error": "Empty SQL query"})
-                continue
-
-            # Semantic-layer (Cube) queries — those using MEASURE(...) over a cube — must
-            # run through the Cube SQL API, not raw Postgres. This is what lets an artifact
-            # be backed by the cross-opp semantic layer (e.g. a growth curve from
-            # avg_visit_weight / ci95_visit_weight) rather than only raw per-tenant SQL.
-            if "measure(" in sql.lower():
-                sresult = await semantic_query(sql, workspace_id=str(artifact.workspace_id))
-                if sresult.get("error"):
-                    results.append({"name": name, "error": sresult["error"]})
-                else:
-                    rows = sresult.get("rows", []) or []
-                    results.append(
-                        {
-                            "name": name,
-                            "columns": sresult.get("columns", []),
-                            "rows": rows,
-                            "row_count": len(rows),
-                            "truncated": False,
-                        }
-                    )
-                continue
-
-            result = await execute_query(ctx, sql)
-
-            if not result.get("success", True) or result.get("error"):
-                error_info = result.get("error", {})
-                msg = (
-                    error_info.get("message", "Query failed")
-                    if isinstance(error_info, dict)
-                    else str(error_info)
-                )
-                results.append({"name": name, "error": msg})
-            else:
-                results.append(
-                    {
-                        "name": name,
-                        "columns": result.get("columns", []),
-                        "rows": result.get("rows", []),
-                        "row_count": result.get("row_count", 0),
-                        "truncated": result.get("truncated", False),
-                    }
-                )
-
+        results = await _execute_artifact_source_queries(artifact)
         return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
 
