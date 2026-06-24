@@ -46,11 +46,14 @@ from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import Any
 
+from asgiref.sync import async_to_sync
 from django.utils import timezone
 from psycopg import sql as psql
 
+from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.commcare_staging import upsert_system_assets
+from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
@@ -246,6 +249,30 @@ def run_pipeline(
             except Exception:
                 logger.exception(
                     "Failed to generate system assets for %s; continuing pipeline",
+                    tenant_membership.tenant.external_id,
+                )
+
+        # Generate Connect staging assets + column notes from discovered metadata.
+        # Failures are isolated — the pipeline continues regardless.
+        if pipeline.provider == "commcare_connect":
+            try:
+                tenant_meta = TenantMetadata.objects.filter(
+                    tenant_membership=tenant_membership
+                ).first()
+                if tenant_meta:
+                    asset_result = upsert_connect_assets(tenant_membership.tenant, tenant_meta)
+                    logger.info(
+                        "Connect assets for %s: %d created, %d updated",
+                        tenant_membership.tenant.external_id,
+                        asset_result["created"],
+                        asset_result["updated"],
+                    )
+                    form_defs = (tenant_meta.metadata or {}).get("form_definitions", {})
+                    for ws in tenant_membership.tenant.workspaces.all():
+                        async_to_sync(sync_column_notes)(ws, "stg_visits", form_defs)
+            except Exception:
+                logger.exception(
+                    "Failed to generate Connect assets for %s; continuing pipeline",
                     tenant_membership.tenant.external_id,
                 )
 

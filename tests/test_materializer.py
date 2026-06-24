@@ -1,5 +1,5 @@
 from datetime import timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.utils import timezone
@@ -563,6 +563,74 @@ class TestRunPipeline:
         assert sources["completed_works"]["rows"] == 0
         # Sanity-check that update_fields includes result/state.
         assert "result" in result_kwargs.get("update_fields", [])
+
+    def test_commcare_connect_branch_invokes_upsert_and_sync_column_notes(self):
+        """The commcare_connect staging branch in run_pipeline must:
+        1. Call upsert_connect_assets once with the tenant, given a TenantMetadata row.
+        2. Call sync_column_notes once per workspace linked to the tenant.
+        Regression guard: catches guard/variable typos and missing calls.
+        """
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_connect",
+            description="",
+            version="1.0",
+            provider="commcare_connect",
+            sources=[SourceConfig(name="users")],
+        )
+        tm = self._make_tm(tenant_id="42")
+
+        # Fake workspace so the per-workspace loop fires once.
+        fake_workspace = MagicMock()
+        tm.tenant.workspaces.all.return_value = [fake_workspace]
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata") as mock_tenant_meta_cls,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
+            patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.upsert_connect_assets") as mock_upsert,
+            patch(
+                "mcp_server.services.materializer.sync_column_notes",
+                new_callable=AsyncMock,
+            ) as mock_sync,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {}
+            mock_users.return_value.load_pages.return_value = iter([])
+
+            # Wire TenantMetadata.objects.filter(...).first() to return a
+            # non-None sentinel so the if-tenant_meta branch is entered.
+            fake_tenant_meta = MagicMock()
+            fake_tenant_meta.metadata = {"form_definitions": {"visit_form": {}}}
+            mock_tenant_meta_cls.objects.filter.return_value.first.return_value = fake_tenant_meta
+
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            mock_upsert.return_value = {"created": 1, "updated": 0, "deleted": 0, "total": 1}
+
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+
+            result = run_pipeline(tm, {"type": "api_key", "value": "x"}, pipeline)
+
+        assert result["status"] == "completed"
+
+        # Branch guard: upsert_connect_assets called exactly once with the tenant.
+        mock_upsert.assert_called_once_with(tm.tenant, fake_tenant_meta)
+
+        # Per-workspace loop: sync_column_notes called once for the one workspace.
+        assert mock_sync.call_count == 1
+        sync_call = mock_sync.call_args
+        assert sync_call.args[0] == fake_workspace
+        assert sync_call.args[1] == "stg_visits"
 
     def test_failed_first_source_marks_run_failed_not_partial(self):
         """If the very first source fails, no source has committed, so the
