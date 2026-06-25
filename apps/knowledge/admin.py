@@ -1,6 +1,7 @@
 """Admin configuration for Knowledge models."""
 
 from django.contrib import admin
+from django.utils.html import format_html
 
 from .models import (
     AgentLearning,
@@ -139,9 +140,11 @@ class AgentLearningAdmin(admin.ModelAdmin):
             color = "orange"
         else:
             color = "red"
-        return f'<span style="color: {color}; font-weight: bold;">{score:.0%}</span>'
-
-    confidence_badge.allow_tags = True
+        return format_html(
+            '<span style="color: {}; font-weight: bold;">{}</span>',
+            color,
+            f"{score:.0%}",
+        )
 
     @admin.action(description="Approve learnings (activate + increase confidence)")
     def approve_learnings(self, request, queryset):
