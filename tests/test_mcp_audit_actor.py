@@ -14,6 +14,7 @@ import logging
 import pytest
 
 from mcp_server.envelope import tool_context
+from mcp_server.server import query
 
 
 @pytest.mark.asyncio
@@ -51,8 +52,6 @@ async def test_tool_context_omits_empty_actor(caplog):
 async def test_query_tool_threads_actor_into_audit(caplog):
     """The real ``query`` MCP tool must thread the injected user/thread into the
     audit record so the trail has an actor, not just a workspace id."""
-    from mcp_server.server import query
-
     # Empty workspace_id short-circuits with a VALIDATION_ERROR before any DB
     # work, but the audit line is still emitted on context exit — which is where
     # the actor must appear.

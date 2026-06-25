@@ -21,13 +21,14 @@ import logging
 
 import pytest
 
+import config.settings.production as prod
+from apps.chat import stream
+
 
 def test_production_logging_routes_agent_audit_logger():
     """Production LOGGING must configure ``scout.agent.audit`` at INFO so the
     agent tool-call audit trail is actually emitted (not swallowed by root
     WARNING)."""
-    import config.settings.production as prod
-
     # Reload so we read the module's declared LOGGING regardless of which
     # settings module the test session booted under.
     importlib.reload(prod)
@@ -44,8 +45,6 @@ def test_production_logging_routes_agent_audit_logger():
 
 def test_production_logging_routes_mcp_audit_logger():
     """The MCP-side audit logger must likewise be routed in production."""
-    import config.settings.production as prod
-
     importlib.reload(prod)
     loggers = prod.LOGGING["loggers"]
     assert "mcp_server.audit" in loggers or loggers.get("mcp_server", {}).get("level") == "INFO", (
@@ -62,7 +61,6 @@ async def test_stream_audit_line_logs_workspace_id_not_empty_project_id(caplog):
     Regression: the line logged ``input_state.get("project_id")`` which is always
     empty because the state carries ``workspace_id``. It must log the workspace id.
     """
-    from apps.chat import stream
 
     # Minimal fake agent that emits a single on_tool_end event.
     class _FakeOutput:
