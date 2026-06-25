@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
+from apps.knowledge.models import AgentLearning, TableKnowledge
+
 if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
@@ -134,9 +136,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
             - message: Confirmation or error message
             - tables_affected: List of tables the learning applies to
         """
-        # Import here to avoid circular imports
-        from apps.knowledge.models import AgentLearning
-
         # Validate inputs
         if not description or len(description.strip()) < 20:
             return {
@@ -164,9 +163,21 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 "tables_affected": [],
             }
 
-        # Validate tables exist in the workspace's data dictionary
-        dd = workspace.data_dictionary or {}
-        known_tables = set(dd.get("tables", {}).keys())
+        # Validate tables against a LIVE source of known table names.
+        #
+        # The previous implementation read the dead ``Workspace.data_dictionary``
+        # field, which is never written, so ``known_tables`` was always empty and
+        # this validation was permanently skipped (arch #262, finding 05#9). We
+        # instead consult the logical table names the knowledge layer actually
+        # tracks (TableKnowledge is keyed by logical table name after #262's
+        # 01#5 fix). This is a soft warning only — we never reject the learning,
+        # since a table may be valid without yet having an annotation row.
+        known_tables = {
+            name
+            async for name in TableKnowledge.objects.filter(workspace=workspace).values_list(
+                "table_name", flat=True
+            )
+        }
 
         if known_tables:
             unknown_tables = [t for t in tables if t not in known_tables]
@@ -176,7 +187,7 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                     unknown_tables,
                     list(known_tables)[:5],
                 )
-                # Don't fail - the table might be valid but not in the cached dictionary
+                # Don't fail - the table might be valid but not yet annotated.
 
         # Check for duplicate learnings (same description for same tables)
         existing = await AgentLearning.objects.filter(
