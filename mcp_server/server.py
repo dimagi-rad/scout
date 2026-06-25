@@ -107,7 +107,7 @@ async def _resolve_pipeline_config(ts, last_run):
 
 
 @mcp.tool()
-async def list_tables(workspace_id: str = "") -> dict:
+async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """List all tables in the workspace's database schema.
 
     Returns table names, types, descriptions, row counts, and materialization timestamps.
@@ -115,8 +115,12 @@ async def list_tables(workspace_id: str = "") -> dict:
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("list_tables", workspace_id) as tc:
+    async with tool_context(
+        "list_tables", workspace_id, user_id=user_id, thread_id=thread_id
+    ) as tc:
         try:
             ctx = await _resolve_mcp_context(workspace_id)
         except (ValueError, _ValidationError) as e:
@@ -176,7 +180,9 @@ async def list_tables(workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def describe_table(table_name: str, workspace_id: str = "") -> dict:
+async def describe_table(
+    table_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
+) -> dict:
     """Get detailed metadata for a specific table.
 
     Returns columns (name, type, nullable, default, description) and a table description.
@@ -185,8 +191,12 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
     Args:
         table_name: Name of the table to describe.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("describe_table", workspace_id, table_name=table_name) as tc:
+    async with tool_context(
+        "describe_table", workspace_id, user_id=user_id, thread_id=thread_id, table_name=table_name
+    ) as tc:
         try:
             ctx = await _resolve_mcp_context(workspace_id)
         except (ValueError, _ValidationError) as e:
@@ -231,7 +241,7 @@ async def describe_table(table_name: str, workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def get_metadata(workspace_id: str = "") -> dict:
+async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Get a complete metadata snapshot for the workspace's database.
 
     Returns all tables with their columns, descriptions, and table relationships
@@ -239,8 +249,12 @@ async def get_metadata(workspace_id: str = "") -> dict:
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("get_metadata", workspace_id) as tc:
+    async with tool_context(
+        "get_metadata", workspace_id, user_id=user_id, thread_id=thread_id
+    ) as tc:
         try:
             ctx = await _resolve_mcp_context(workspace_id)
         except (ValueError, _ValidationError) as e:
@@ -289,7 +303,9 @@ async def get_metadata(workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def get_lineage(model_name: str, workspace_id: str = "") -> dict:
+async def get_lineage(
+    model_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
+) -> dict:
     """Get the transformation lineage for a model.
 
     Returns the chain of transformations from the given model back to the raw
@@ -300,8 +316,12 @@ async def get_lineage(model_name: str, workspace_id: str = "") -> dict:
     Args:
         model_name: Name of the model to trace lineage for.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("get_lineage", workspace_id, model_name=model_name) as tc:
+    async with tool_context(
+        "get_lineage", workspace_id, user_id=user_id, thread_id=thread_id, model_name=model_name
+    ) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
@@ -333,7 +353,7 @@ async def get_lineage(model_name: str, workspace_id: str = "") -> dict:
 
 
 @mcp.tool()
-async def query(sql: str, workspace_id: str = "") -> dict:
+async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Execute a read-only SQL query against the workspace's database.
 
     The query is validated for safety (SELECT only, no dangerous functions),
@@ -342,8 +362,12 @@ async def query(sql: str, workspace_id: str = "") -> dict:
     Args:
         sql: A SQL SELECT query to execute.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("query", workspace_id, sql=sql) as tc:
+    async with tool_context(
+        "query", workspace_id, user_id=user_id, thread_id=thread_id, sql=sql
+    ) as tc:
         try:
             ctx = await _resolve_mcp_context(workspace_id)
         except (ValueError, _ValidationError) as e:
@@ -544,7 +568,9 @@ async def run_materialization(
             server-side); persisted on ThreadJob so the resume task can
             attribute its work to the right call.
     """
-    async with tool_context("run_materialization", workspace_id) as tc:
+    async with tool_context(
+        "run_materialization", workspace_id, user_id=user_id, thread_id=thread_id
+    ) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
@@ -665,7 +691,7 @@ async def run_materialization(
 
 
 @mcp.tool()
-async def get_schema_status(workspace_id: str = "") -> dict:
+async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
     """Check whether data has been loaded for this workspace.
 
     Returns schema existence, state, last materialization timestamp, and table
@@ -674,8 +700,12 @@ async def get_schema_status(workspace_id: str = "") -> dict:
 
     Args:
         workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("get_schema_status", workspace_id) as tc:
+    async with tool_context(
+        "get_schema_status", workspace_id, user_id=user_id, thread_id=thread_id
+    ) as tc:
         if not workspace_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
