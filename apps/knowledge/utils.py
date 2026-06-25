@@ -25,7 +25,9 @@ def parse_frontmatter(text: str) -> tuple[str, list[str], str]:
         return title, [], body
 
     # Find closing ---
-    end_idx = text.index("---", 3)
+    end_idx = text.find("---", 3)
+    if end_idx == -1:
+        raise ValueError("Frontmatter is missing a closing '---' fence.")
     frontmatter_str = text[3:end_idx].strip()
     body = text[end_idx + 3 :].strip()
 

@@ -132,9 +132,16 @@ class KnowledgeRetriever:
                 lines.append(f"  - *Tables: {tables_str}*")
 
             if learning.confidence_score >= 0.8:
-                lines.append(
-                    f"  - *Confidence: {learning.confidence_score:.0%} "
-                    f"(applied {learning.times_applied} times)*"
-                )
+                # Only claim a usage count when the learning has actually been
+                # applied. times_applied effectively never increments today
+                # (arch #262, finding 05#9), so rendering "(applied 0 times)"
+                # implies usage that never happened.
+                if learning.times_applied > 0:
+                    lines.append(
+                        f"  - *Confidence: {learning.confidence_score:.0%} "
+                        f"(applied {learning.times_applied} times)*"
+                    )
+                else:
+                    lines.append(f"  - *Confidence: {learning.confidence_score:.0%}*")
 
         return "\n".join(lines)

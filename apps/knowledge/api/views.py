@@ -4,6 +4,8 @@ import io
 import logging
 import zipfile
 
+import yaml
+from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from rest_framework import status
@@ -238,15 +240,26 @@ class KnowledgeExportView(APIView):
         if err:
             return err
 
-        entries = KnowledgeEntry.objects.filter(workspace=workspace).order_by("title")
+        entries = KnowledgeEntry.objects.filter(workspace=workspace).order_by("title", "created_at")
 
         buf = io.BytesIO()
+        used_filenames: set[str] = set()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for entry in entries:
                 safe_title = "".join(
                     c if c.isalnum() or c in " -_" else "_" for c in entry.title
                 ).strip()[:80]
+                if not safe_title:
+                    safe_title = "untitled"
+                # Disambiguate duplicate-titled entries so distinct entries don't
+                # collapse onto one zip member and silently lose data on a
+                # round trip (arch #262, finding 05#8).
                 filename = f"{safe_title}.md"
+                suffix = 2
+                while filename in used_filenames:
+                    filename = f"{safe_title}_{suffix}.md"
+                    suffix += 1
+                used_filenames.add(filename)
                 content = render_frontmatter(entry.title, entry.tags or [], entry.content)
                 zf.writestr(filename, content)
 
@@ -281,38 +294,74 @@ class KnowledgeImportView(APIView):
             )
 
         try:
-            with zipfile.ZipFile(uploaded) as zf:
-                created = 0
-                updated = 0
-                for name in zf.namelist():
-                    if not name.endswith(".md"):
-                        continue
-                    raw = zf.read(name).decode("utf-8")
-                    title, tags, body = parse_frontmatter(raw)
-                    if not title:
-                        continue
-
-                    _, was_created = KnowledgeEntry.objects.update_or_create(
-                        workspace=workspace,
-                        title=title,
-                        defaults={
-                            "content": body,
-                            "tags": tags,
-                            "created_by": request.user,
-                        },
-                    )
-                    if was_created:
-                        created += 1
-                    else:
-                        updated += 1
-
+            zf = zipfile.ZipFile(uploaded)
         except zipfile.BadZipFile:
             return Response(
                 {"error": "Invalid zip file."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        return Response(
-            {"created": created, "updated": updated},
-            status=status.HTTP_200_OK,
-        )
+        created = 0
+        updated = 0
+        skipped = 0
+        errors: list[dict] = []
+
+        # Pool of pre-existing entry PKs per title, snapshotted before the import.
+        # Each pool entry is consumed at most once so that (a) re-importing an
+        # export updates the matching rows in place (idempotent), and (b) an
+        # export containing N duplicate-titled entries re-creates N entries
+        # rather than collapsing them onto one (arch #262, finding 05#8).
+        available_by_title: dict[str, list] = {}
+        for pk, title in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
+            "id", "title"
+        ):
+            available_by_title.setdefault(title, []).append(pk)
+
+        # The whole import is atomic: a hard DB failure rolls back the batch so
+        # we never leave a partially-applied import (arch #262, finding 05#8).
+        # Per-entry parse/decode errors are collected and reported rather than
+        # aborting the batch or 500ing.
+        try:
+            with zf, transaction.atomic():
+                for name in zf.namelist():
+                    if not name.endswith(".md"):
+                        continue
+                    try:
+                        raw = zf.read(name).decode("utf-8")
+                    except UnicodeDecodeError:
+                        errors.append({"file": name, "error": "File is not valid UTF-8."})
+                        continue
+                    try:
+                        title, tags, body = parse_frontmatter(raw)
+                    except (ValueError, yaml.YAMLError) as exc:
+                        errors.append({"file": name, "error": f"Malformed frontmatter: {exc}"})
+                        continue
+
+                    if not title:
+                        skipped += 1
+                        continue
+
+                    pool = available_by_title.get(title)
+                    if pool:
+                        pk = pool.pop(0)
+                        KnowledgeEntry.objects.filter(pk=pk).update(content=body, tags=tags)
+                        updated += 1
+                    else:
+                        KnowledgeEntry.objects.create(
+                            workspace=workspace,
+                            title=title,
+                            content=body,
+                            tags=tags,
+                            created_by=request.user,
+                        )
+                        created += 1
+        except Exception:
+            logger.exception("Knowledge import failed for workspace %s", workspace.id)
+            return Response(
+                {"error": "Import failed; no entries were imported.", "errors": errors},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        payload = {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
+        http_status = status.HTTP_207_MULTI_STATUS if errors else status.HTTP_200_OK
+        return Response(payload, status=http_status)

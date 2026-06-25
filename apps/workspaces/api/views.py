@@ -213,8 +213,25 @@ def _serialize_annotation(tk):
     }
 
 
-def _get_annotation(workspace, table_name):
-    """Return serialized TableKnowledge annotation for a table, or None."""
+def _logical_table_name(qualified_name: str) -> str:
+    """Return the stable logical table name from a (possibly) schema-qualified name.
+
+    TableKnowledge annotations are keyed by the *logical* table name (e.g.
+    ``cases``) rather than the physical, schema-qualified name (e.g.
+    ``commcare_xyz_r1a2b3c4.cases``). The physical schema is regenerated on every
+    refresh, so keying on it orphans annotations (arch #262, finding 01#5). The
+    logical name is the table portion after the final ``.`` and is stable across
+    refreshes.
+    """
+    return qualified_name.rsplit(".", 1)[-1]
+
+
+def _get_annotation(workspace, qualified_name):
+    """Return serialized TableKnowledge annotation for a table, or None.
+
+    Looks up by the stable logical table name (see _logical_table_name).
+    """
+    table_name = _logical_table_name(qualified_name)
     try:
         tk = TableKnowledge.objects.get(workspace=workspace, table_name=table_name)
         return _serialize_annotation(tk)
@@ -517,23 +534,38 @@ class TableDetailView(APIView):
                 return [line for line in value.splitlines() if line.strip()]
             return []
 
-        related_tables = data.get("related_tables", [])
-        if isinstance(related_tables, str):
-            related_tables = [t.strip() for t in related_tables.split(",") if t.strip()]
-
+        # Key annotations by the stable logical table name so they survive a
+        # schema refresh (arch #262, finding 01#5).
         tk, _ = TableKnowledge.objects.get_or_create(
             workspace=workspace,
-            table_name=qualified_name,
+            table_name=_logical_table_name(qualified_name),
             defaults={"description": "", "updated_by": request.user},
         )
-        tk.description = data.get("description", tk.description)
-        tk.use_cases = _to_list(data.get("use_cases", ""))
-        tk.data_quality_notes = _to_list(data.get("data_quality_notes", ""))
-        tk.refresh_frequency = data.get("refresh_frequency", tk.refresh_frequency)
-        tk.owner = data.get("owner", tk.owner)
-        tk.related_tables = related_tables
-        column_notes = data.get("column_notes", {})
-        tk.column_notes = column_notes if isinstance(column_notes, dict) else {}
+
+        # True partial-update semantics: only mutate a field when its key is
+        # actually present in the payload. The 1s-debounced frontend autosave
+        # omits curated fields (e.g. related_tables); clobbering them with a
+        # default would silently destroy admin-curated annotations the agent
+        # context retriever consumes (arch #262, finding 05#0).
+        if "description" in data:
+            tk.description = data.get("description") or ""
+        if "use_cases" in data:
+            tk.use_cases = _to_list(data.get("use_cases"))
+        if "data_quality_notes" in data:
+            tk.data_quality_notes = _to_list(data.get("data_quality_notes"))
+        if "refresh_frequency" in data:
+            tk.refresh_frequency = data.get("refresh_frequency") or ""
+        if "owner" in data:
+            tk.owner = data.get("owner") or ""
+        if "related_tables" in data:
+            related_tables = data.get("related_tables")
+            if isinstance(related_tables, str):
+                related_tables = [t.strip() for t in related_tables.split(",") if t.strip()]
+            tk.related_tables = related_tables if isinstance(related_tables, list) else []
+        if "column_notes" in data:
+            column_notes = data.get("column_notes")
+            tk.column_notes = column_notes if isinstance(column_notes, dict) else {}
+
         tk.updated_by = request.user
         tk.save()
 
