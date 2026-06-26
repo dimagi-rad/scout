@@ -1,20 +1,16 @@
 """
 Admin configuration for Recipe models.
+
+The runner executes a single ``Recipe.prompt`` (recipes/services/runner.py),
+not the vestigial ``RecipeStep`` rows. The admin now surfaces ``prompt`` and
+drops the RecipeStep inline / ModelAdmin so operators stop creating step rows
+nothing reads (arch #260, 11#5).
 """
 
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import Recipe, RecipeRun, RecipeStep
-
-
-class RecipeStepInline(admin.TabularInline):
-    """Inline admin for recipe steps."""
-
-    model = RecipeStep
-    extra = 1
-    ordering = ["order"]
-    fields = ["order", "prompt_template", "expected_tool", "description"]
+from .models import Recipe, RecipeRun
 
 
 @admin.register(Recipe)
@@ -24,20 +20,27 @@ class RecipeAdmin(admin.ModelAdmin):
     list_display = [
         "name",
         "workspace",
-        "step_count",
+        "prompt_preview",
         "variable_count",
         "is_shared",
         "created_by",
         "updated_at",
     ]
     list_filter = ["is_shared", "created_at", "workspace"]
-    search_fields = ["name", "description"]
+    search_fields = ["name", "description", "prompt"]
     readonly_fields = ["id", "share_token", "created_at", "updated_at"]
     autocomplete_fields = ["created_by"]
-    inlines = [RecipeStepInline]
 
     fieldsets = (
         (None, {"fields": ("id", "name", "description", "workspace")}),
+        (
+            "Prompt",
+            {
+                "fields": ("prompt",),
+                "description": "The prompt template the runner executes. "
+                "Supports {{variable}} placeholders and markdown.",
+            },
+        ),
         (
             "Variables",
             {
@@ -62,32 +65,16 @@ class RecipeAdmin(admin.ModelAdmin):
         ),
     )
 
-    @admin.display(description="Steps")
-    def step_count(self, obj):
-        return obj.steps.count()
+    @admin.display(description="Prompt")
+    def prompt_preview(self, obj):
+        preview = (obj.prompt or "")[:80]
+        if obj.prompt and len(obj.prompt) > 80:
+            preview += "..."
+        return preview or "-"
 
     @admin.display(description="Variables")
     def variable_count(self, obj):
         return len(obj.variables) if obj.variables else 0
-
-
-@admin.register(RecipeStep)
-class RecipeStepAdmin(admin.ModelAdmin):
-    """Admin interface for RecipeStep model."""
-
-    list_display = ["recipe", "order", "prompt_preview", "expected_tool"]
-    list_filter = ["recipe__workspace", "expected_tool"]
-    search_fields = ["prompt_template", "description", "recipe__name"]
-    autocomplete_fields = ["recipe"]
-    ordering = ["recipe", "order"]
-
-    @admin.display(description="Prompt")
-    def prompt_preview(self, obj):
-        """Show a truncated preview of the prompt template."""
-        preview = obj.prompt_template[:100]
-        if len(obj.prompt_template) > 100:
-            preview += "..."
-        return preview
 
 
 @admin.register(RecipeRun)
@@ -165,10 +152,8 @@ class RecipeRunAdmin(admin.ModelAdmin):
 
     @admin.display(description="Progress")
     def step_progress(self, obj):
-        """Show step progress as completed/total."""
-        total_steps = obj.recipe.steps.count()
-        completed_steps = len(obj.step_results)
-        return f"{completed_steps}/{total_steps}"
+        """Show how many step results were recorded for this run."""
+        return f"{len(obj.step_results)} step(s)"
 
     @admin.display(description="Duration")
     def duration_display(self, obj):

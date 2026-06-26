@@ -1,7 +1,9 @@
 """Register OAuth SocialApp records from environment variables.
 
-Reads COMMCARE_OAUTH_*, COMMCARE_CONNECT_OAUTH_*, GOOGLE_OAUTH_*, and
-GITHUB_OAUTH_* env vars and upserts the corresponding allauth SocialApp rows.
+Reads ``{PREFIX}_OAUTH_CLIENT_ID`` / ``{PREFIX}_OAUTH_CLIENT_SECRET`` for each
+provider and upserts the corresponding allauth SocialApp rows. The prefixes are:
+COMMCARE_OAUTH_*, CONNECT_OAUTH_*, OCS_OAUTH_*, GOOGLE_OAUTH_*, GITHUB_OAUTH_*
+(matching config/deploy.yml).
 
 Idempotent — safe to re-run after credential rotation or fresh DB setup.
 """
@@ -13,12 +15,15 @@ from django.contrib.sites.models import Site
 from django.core.management.base import BaseCommand
 
 # (provider_id, display_name, env_prefix)
+# The env vars read are ``{env_prefix}_OAUTH_CLIENT_ID`` /
+# ``{env_prefix}_OAUTH_CLIENT_SECRET`` — so the prefix must NOT itself end in
+# ``_OAUTH`` (that produced the double ``_OAUTH_`` bug for Google/GitHub).
 PROVIDERS = [
     ("commcare", "CommCare HQ", "COMMCARE"),
     ("commcare_connect", "CommCare Connect", "CONNECT"),
     ("ocs", "Open Chat Studio", "OCS"),
-    ("google", "Google", "GOOGLE_OAUTH"),
-    ("github", "GitHub", "GITHUB_OAUTH"),
+    ("google", "Google", "GOOGLE"),
+    ("github", "GitHub", "GITHUB"),
 ]
 
 
@@ -47,7 +52,7 @@ class Command(BaseCommand):
             client_secret = os.environ.get(f"{env_prefix}_OAUTH_CLIENT_SECRET", "")
 
             if not client_id or not client_secret:
-                self.stdout.write(f"  skip   {name} ({env_prefix}_CLIENT_ID not set)")
+                self.stdout.write(f"  skip   {name} ({env_prefix}_OAUTH_CLIENT_ID not set)")
                 continue
 
             app, created = SocialApp.objects.update_or_create(

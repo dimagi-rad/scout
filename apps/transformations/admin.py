@@ -22,7 +22,9 @@ class TransformationRunAdmin(admin.ModelAdmin):
     list_display = ("id", "tenant", "workspace", "status", "started_at", "completed_at")
     list_filter = ("status",)
     inlines = [TransformationAssetRunInline]
-    readonly_fields = ("id", "started_at")
+    # ``status`` is a pipeline state-machine field — editing it via admin can
+    # desync the run record from the physical transform state (arch #260, 11#3).
+    readonly_fields = ("id", "tenant", "workspace", "status", "started_at", "completed_at")
 
 
 @admin.register(TransformationAssetRun)
