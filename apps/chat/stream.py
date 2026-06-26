@@ -310,12 +310,16 @@ async def langgraph_to_ui_stream(
                 content = _tool_content_to_str(tool_output)
                 tool_name = event.get("name", "unknown")
 
+                # The agent state carries ``workspace_id`` (the projects->workspaces
+                # rename); the old ``project_id`` read was ALWAYS empty, so the
+                # workspace attribution on every audited tool call was blank
+                # (arch #257, finding 08#8).
                 audit_logger.info(
-                    "tool_call tool=%s user_id=%s thread_id=%s project_id=%s",
+                    "tool_call tool=%s user_id=%s thread_id=%s workspace_id=%s",
                     tool_name,
                     input_state.get("user_id", ""),
                     config.get("configurable", {}).get("thread_id", ""),
-                    input_state.get("project_id", ""),
+                    input_state.get("workspace_id", ""),
                 )
 
                 # The ToolMessage carries the authoritative LLM toolu_ id; use

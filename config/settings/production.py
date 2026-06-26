@@ -69,5 +69,23 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        # The agent tool-call audit trail (arch #257, finding 08#8). This is the
+        # ONLY user/thread-attributed record of agent tool calls, emitted at INFO
+        # from apps.chat.stream. Without an explicit logger it falls through to
+        # root (WARNING) and is suppressed entirely in production — exactly the
+        # blind spot the 2026-06-10 forensic review could not see past.
+        "scout.agent.audit": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        # The MCP-side audit trail. mcp_server.audit propagates to its parent
+        # ``mcp_server`` logger (INFO, console) above, but pin it explicitly so a
+        # future change to the parent's level can't silently mute the audit.
+        "mcp_server.audit": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }

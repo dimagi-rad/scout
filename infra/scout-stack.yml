@@ -47,6 +47,17 @@ Parameters:
     Default: cache.t4g.micro
     AllowedValues: [cache.t4g.micro, cache.t4g.small, cache.t4g.medium]
 
+  AlarmEmail:
+    Type: String
+    Description: >-
+      Email address that receives CloudWatch alarm notifications (subscription
+      must be confirmed via the email AWS sends). Leave blank to skip the
+      subscription (alarms still fire to the SNS topic).
+    Default: ''
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
+
 Resources:
 
   # ── VPC & Networking ──────────────────────────────────────────────
@@ -476,6 +487,225 @@ Resources:
                   - secretsmanager:BatchGetSecretValue
                 Resource: '*'
 
+  # ── Observability / detection layer (arch #257, finding 08#7) ────
+  # The stack previously created log groups but NOTHING converted a dead
+  # worker/MCP/process or a destructive operation into an operator signal.
+  # This block adds: an SNS alert topic, metric filters that turn the
+  # structured application logs (the destruction logs added in apps/
+  # workspaces/tasks.py + the audit trail) into CloudWatch metrics, and a
+  # minimal, grounded alarm set. Thresholds are conservative starting points
+  # — tune them against real traffic.
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: scout-alerts
+      DisplayName: Scout Alerts
+
+  AlertEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  # ── Metric filters: structured app logs -> CloudWatch metrics ──────
+  # ERROR-level lines from each container. Counts let us alarm on an error
+  # spike that Sentry's per-event view does not aggregate into a rate.
+
+  ApiErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref ApiLogGroup
+      FilterPattern: 'ERROR'
+      MetricTransformations:
+        - MetricNamespace: Scout/App
+          MetricName: ApiErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  WorkerErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroup
+      FilterPattern: 'ERROR'
+      MetricTransformations:
+        - MetricNamespace: Scout/App
+          MetricName: WorkerErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  McpErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref McpLogGroup
+      FilterPattern: 'ERROR'
+      MetricTransformations:
+        - MetricNamespace: Scout/App
+          MetricName: McpErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # Liveness signal: every worker task logs at least at INFO, so a healthy
+  # worker emits a steady stream of log events. Count ALL worker log events;
+  # a drop to zero (alarmed below with TreatMissingData: breaching) means the
+  # worker process is dead/stuck — the 2026-06-09 silent-failure mode.
+  WorkerHeartbeatMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroup
+      FilterPattern: ''
+      MetricTransformations:
+        - MetricNamespace: Scout/App
+          MetricName: WorkerLogEvents
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # Destructive-operation counter: the successful DROP SCHEMA CASCADE log line
+  # added in apps/workspaces/tasks.py. Surfacing it as a metric makes a teardown
+  # storm (e.g. the 2026-06-10 mass-drop) visible and alarmable.
+  SchemaDropMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WorkerLogGroup
+      FilterPattern: 'DROP SCHEMA CASCADE succeeded'
+      MetricTransformations:
+        - MetricNamespace: Scout/App
+          MetricName: SchemaDropCount
+          MetricValue: '1'
+          DefaultValue: 0
+
+  # ── Alarms ─────────────────────────────────────────────────────────
+
+  # Worker silence = process death. A healthy worker logs continuously; if no
+  # log events arrive for 15 minutes, the metric reports no data, which we
+  # treat as breaching so a dead worker that emits NOTHING still alarms.
+  WorkerSilenceAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-worker-silent
+      AlarmDescription: >-
+        Worker has emitted no log events for 15 minutes — the process is likely
+        dead or stuck (2026-06-09 silent-failure mode). TreatMissingData is
+        breaching because a dead worker emits nothing at all.
+      Namespace: Scout/App
+      MetricName: WorkerLogEvents
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  WorkerErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-worker-errors
+      AlarmDescription: Worker is logging ERRORs at an elevated rate.
+      Namespace: Scout/App
+      MetricName: WorkerErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  ApiErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-api-errors
+      AlarmDescription: API container is logging ERRORs at an elevated rate.
+      Namespace: Scout/App
+      MetricName: ApiErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # Mass schema-drop: more than 5 DROP SCHEMA CASCADE in 15 min is a teardown
+  # storm worth a human look (the 2026-06-10 incident dropped data-bearing
+  # schemas in a tight loop).
+  SchemaDropStormAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-schema-drop-storm
+      AlarmDescription: >-
+        More than 5 schemas were dropped in 15 minutes — possible runaway TTL
+        teardown of data-bearing schemas (arch #257 / 2026-06-10 incident).
+      Namespace: Scout/App
+      MetricName: SchemaDropCount
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # ── Infrastructure-health alarms (EC2 + RDS) ──────────────────────
+
+  EC2StatusCheckAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-ec2-status-check-failed
+      AlarmDescription: The EC2 instance hosting all Scout containers failed its status check.
+      Namespace: AWS/EC2
+      MetricName: StatusCheckFailed
+      Dimensions:
+        - Name: InstanceId
+          Value: !Ref EC2Instance
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref AlertTopic]
+
+  RDSCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-rds-high-cpu
+      AlarmDescription: RDS CPU sustained above 85%.
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  RDSLowStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-rds-low-storage
+      AlarmDescription: RDS free storage below 2 GiB.
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RDSInstance
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2147483648
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
 Outputs:
   EC2PublicIP:
     Description: EC2 Elastic IP (use in Kamal configs and DNS)
@@ -500,3 +730,7 @@ Outputs:
   GitHubDeployRoleArn:
     Description: IAM role ARN for GitHub Actions OIDC (use in workflow)
     Value: !GetAtt GitHubDeployRole.Arn
+
+  AlertTopicArn:
+    Description: SNS topic that receives CloudWatch alarm notifications
+    Value: !Ref AlertTopic

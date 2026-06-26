@@ -2,10 +2,12 @@
 
 The agent graph's injecting tool node (`_make_injecting_tool_node` in
 `apps.agents.graph.base`) adds ``workspace_id``, ``user_id``, ``thread_id`` and
-``tool_call_id`` to the args of **every** MCP tool call — including the read
-tools (``list_tables``, ``query``, …) whose signatures declare only
-``workspace_id``. Those calls succeed today only because TWO independent library
-behaviours silently tolerate the extra arguments:
+``tool_call_id`` to the args of **every** MCP tool call. The read tools
+(``list_tables``, ``query``, …) declare ``workspace_id``, ``user_id`` and
+``thread_id`` (the last two carry the actor into the MCP audit trail — arch #257,
+finding 08#8); only the per-call ``tool_call_id`` remains undeclared on them.
+That residual extra succeeds today only because TWO independent library
+behaviours silently tolerate it:
 
 1. **LangChain** — the MCP tools are ``StructuredTool``s whose ``args_schema`` is
    the raw MCP ``inputSchema`` *dict* (not a Pydantic model). ``BaseTool.
@@ -39,10 +41,14 @@ INJECTED_ARGS = {
     "tool_call_id": "tc-1",
 }
 
-# Read tools whose signature declares ONLY ``workspace_id`` — i.e. they declare
-# *none* of the other injected args. ``run_materialization`` is excluded because
-# it deliberately declares all four.
-WORKSPACE_ONLY_TOOLS = ["list_tables", "get_metadata", "get_schema_status"]
+# Read tools whose signature declares the actor set (workspace_id/user_id/
+# thread_id) but NOT the per-call ``tool_call_id`` — so ``tool_call_id`` is the
+# one injected arg they still rely on the libraries to silently drop.
+# ``run_materialization`` is excluded because it deliberately declares all four.
+ACTOR_DECLARED_TOOLS = ["list_tables", "get_metadata", "get_schema_status"]
+
+# The args these tools declare (everything injected except ``tool_call_id``).
+DECLARED_ACTOR_ARGS = {"workspace_id", "user_id", "thread_id"}
 
 
 def test_langchain_parse_input_passes_injected_extras_through_unvalidated():
@@ -78,18 +84,19 @@ def test_langchain_parse_input_passes_injected_extras_through_unvalidated():
         assert key in parsed, f"LangChain dropped/rejected injected arg {key!r}"
 
 
-@pytest.mark.parametrize("tool_name", WORKSPACE_ONLY_TOOLS)
+@pytest.mark.parametrize("tool_name", ACTOR_DECLARED_TOOLS)
 def test_fastmcp_arg_model_accepts_and_ignores_injected_extras(tool_name):
-    """FastMCP half: the server-side arg model for a tool that declares only
-    ``workspace_id`` must accept the full injected arg set (no ValidationError)
-    and silently drop the three undeclared extras before the tool fn runs."""
+    """FastMCP half: the server-side arg model for a read tool must declare the
+    actor set (workspace_id/user_id/thread_id), accept the full injected arg set
+    (no ValidationError), and silently drop the still-undeclared ``tool_call_id``
+    before the tool fn runs."""
     assert tool_name in MCP_TOOL_NAMES  # sanity: this is an injected MCP tool
 
     tool = mcp._tool_manager.get_tool(tool_name)
     arg_model = tool.fn_metadata.arg_model
 
     declared = set(arg_model.model_fields)
-    assert declared == {"workspace_id"}, (
+    assert declared == DECLARED_ACTOR_ARGS, (
         f"{tool_name} now declares {declared}; update this guardrail if the "
         "injected-arg surface changed"
     )
@@ -98,9 +105,9 @@ def test_fastmcp_arg_model_accepts_and_ignores_injected_extras(tool_name):
     # which is exactly the prod-wide breakage we are guarding against.
     validated = arg_model.model_validate(dict(INJECTED_ARGS))
 
-    # FastMCP forwards only the top-level declared fields to the tool fn; the
-    # undeclared injected args must have been dropped here.
+    # FastMCP forwards only the declared fields to the tool fn; the still-
+    # undeclared ``tool_call_id`` must have been dropped here.
     forwarded = validated.model_dump_one_level()
-    assert forwarded == {"workspace_id": INJECTED_ARGS["workspace_id"]}, (
-        f"{tool_name} forwarded {forwarded}; injected extras were not ignored"
+    assert forwarded == {k: INJECTED_ARGS[k] for k in DECLARED_ACTOR_ARGS}, (
+        f"{tool_name} forwarded {forwarded}; injected extras were not handled as expected"
     )

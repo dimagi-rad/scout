@@ -646,20 +646,41 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """
     cutoff = timezone.now() - timedelta(hours=settings.SCHEMA_TTL_HOURS)
 
-    # Expire stale tenant schemas
+    # Expire stale tenant schemas. Log the decision WITH last_accessed_at BEFORE
+    # flipping the row — that timestamp is the exact forensic input the
+    # 2026-06-10 incident review could not recover, because teardown/provision
+    # later overwrites it (arch #257, finding 08#9).
     async for schema in TenantSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
     ):
+        logger.info(
+            "expire_inactive_schemas: marking tenant schema %s (%s) for teardown — "
+            "last_accessed_at=%s cutoff=%s ttl_hours=%s",
+            schema.id,
+            schema.schema_name,
+            schema.last_accessed_at.isoformat() if schema.last_accessed_at else None,
+            cutoff.isoformat(),
+            settings.SCHEMA_TTL_HOURS,
+        )
         schema.state = SchemaState.TEARDOWN
         await schema.asave(update_fields=["state"])
         await teardown_schema.defer_async(schema_id=str(schema.id))
 
-    # Expire stale view schemas
+    # Expire stale view schemas (same forensic logging as tenant schemas above).
     async for vs in WorkspaceViewSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
     ):
+        logger.info(
+            "expire_inactive_schemas: marking view schema %s (%s) for teardown — "
+            "last_accessed_at=%s cutoff=%s ttl_hours=%s",
+            vs.id,
+            vs.schema_name,
+            vs.last_accessed_at.isoformat() if vs.last_accessed_at else None,
+            cutoff.isoformat(),
+            settings.SCHEMA_TTL_HOURS,
+        )
         vs.state = SchemaState.TEARDOWN
         await vs.asave(update_fields=["state"])
         await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
@@ -726,6 +747,16 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         await vs.asave(update_fields=["state"])
         raise
 
+    # Log the successful drop — a destructive op must leave a trace (arch #257,
+    # finding 08#9).
+    logger.info(
+        "teardown_view_schema_task: DROP SCHEMA CASCADE succeeded for view schema %s (%s) — "
+        "last_accessed_at=%s",
+        vs.id,
+        vs.schema_name,
+        vs.last_accessed_at.isoformat() if vs.last_accessed_at else None,
+    )
+
     vs.state = SchemaState.EXPIRED
     await vs.asave(update_fields=["state"])
 
@@ -768,6 +799,17 @@ async def teardown_schema(schema_id: str) -> None:
         schema.state = SchemaState.ACTIVE
         await schema.asave(update_fields=["state"])
         raise
+
+    # A successful DROP SCHEMA CASCADE of data-bearing tables previously emitted
+    # zero log lines, so a destructive operation left no forensic trace (arch
+    # #257, finding 08#9). Record it explicitly.
+    logger.info(
+        "teardown_schema: DROP SCHEMA CASCADE succeeded for tenant schema %s (%s) — "
+        "last_accessed_at=%s",
+        schema.id,
+        schema.schema_name,
+        schema.last_accessed_at.isoformat() if schema.last_accessed_at else None,
+    )
 
     # The physical schema (and its tables) is now dropped. Flip the data-bearing
     # runs to STALE so pipeline_list_tables stops returning ghost entries for
@@ -831,7 +873,19 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
     if tenant_has_surviving_active_schema:
         await _rebuild_dependent_view_schemas([schema.tenant_id])
     else:
-        await _fail_dependent_view_schemas(schema.tenant_id)
+        # The count of sibling workspaces whose views were just broken was
+        # previously discarded — log it so a cascade that silently degrades N
+        # multi-tenant workspaces is visible (arch #257, finding 08#9).
+        failed_count = await _fail_dependent_view_schemas(schema.tenant_id)
+        if failed_count:
+            logger.warning(
+                "teardown_schema: %d dependent multi-tenant view schema(s) flipped to "
+                "FAILED after tenant schema %s (%s) was dropped (their namespaced views "
+                "were cascade-dropped and the tenant has no surviving data)",
+                failed_count,
+                schema.id,
+                schema.schema_name,
+            )
 
 
 async def _fail_dependent_view_schemas(tenant_id) -> int:

@@ -97,7 +97,12 @@ async def tool_context(tool_name: str, context_id: str, **extra_fields: Any):
 
     Args:
         tool_name: Name of the tool being called.
-        context_id: tenant_id or project_id for logging.
+        context_id: The workspace_id (or run_id) the call is scoped to.
+        **extra_fields: Per-tool context recorded in the audit line. Pass
+            ``user_id`` and ``thread_id`` (injected server-side by the agent
+            graph) so the audit trail attributes the call to an actor and a
+            conversation, not just a workspace (arch #257, finding 08#8). Empty
+            values are dropped so context-free/operator calls stay quiet.
     """
     timer = Timer()
     tc: dict[str, Any] = {"timer": timer}
@@ -105,13 +110,14 @@ async def tool_context(tool_name: str, context_id: str, **extra_fields: Any):
         yield tc
     finally:
         status = "success" if tc.get("result", {}).get("success") else "error"
+        # Drop empty actor/context fields so they don't add noise (e.g. operator
+        # or context-free tools that carry no user/thread).
+        fields = {k: v for k, v in scrub_extra_fields(extra_fields).items() if v not in ("", None)}
         audit_logger.info(
             "tool_call tool=%s context_id=%s status=%s timing_ms=%d %s",
             tool_name,
             context_id,
             status,
             timer.elapsed_ms,
-            " ".join(f"{k}={v!r}" for k, v in scrub_extra_fields(extra_fields).items())
-            if extra_fields
-            else "",
+            " ".join(f"{k}={v!r}" for k, v in fields.items()) if fields else "",
         )
