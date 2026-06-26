@@ -173,3 +173,85 @@ async def test_tool_output_not_double_indented():
     # Compact: round-trips and has no indentation newlines from indent=2.
     assert json.loads(out) == payload
     assert '\n  "' not in out
+
+
+# --- a non-serializable injected param must not crash the stream (SCOUT-DJANGO-1V)
+
+
+def _make_tool_runtime():
+    """Build a real langgraph ToolRuntime, like ToolNode injects into MCP tools.
+
+    langchain_mcp_adapters gives every MCP tool a ``runtime`` param and
+    langgraph's ToolNode injects a ToolRuntime object into it, which then shows
+    up in the on_tool_start event's input. It is NOT JSON serializable. Fall
+    back to a plain non-serializable object if the internal signature shifts.
+    """
+    try:
+        from langgraph.prebuilt.tool_node import ToolRuntime
+
+        return ToolRuntime(
+            state={},
+            context=None,
+            config={},
+            stream_writer=None,
+            tool_call_id="toolu_RT",
+            store=None,
+        )
+    except Exception:  # pragma: no cover - signature drift fallback
+
+        class _Opaque:
+            pass
+
+        return _Opaque()
+
+
+@pytest.mark.asyncio
+async def test_tool_runtime_in_input_does_not_crash_stream():
+    """Regression for SCOUT-DJANGO-1V: a ToolRuntime injected into the tool
+    input must not crash the SSE stream. The tool-input card must still render
+    with the real input, and the non-serializable ``runtime`` must not leak."""
+    events = [
+        {
+            "event": "on_tool_start",
+            "run_id": "run-1",
+            "name": "query",
+            "data": {
+                "input": {
+                    "sql": "SELECT 1",
+                    "workspace_id": "ws-secret",
+                    "tool_call_id": "toolu_RT",
+                    "runtime": _make_tool_runtime(),
+                }
+            },
+        },
+    ]
+    chunks = await _run(events)
+
+    # The stream must not have degraded into the generic error text.
+    error_deltas = [
+        c
+        for c in chunks
+        if c.get("type") == "text-delta" and "An error occurred" in c.get("delta", "")
+    ]
+    assert not error_deltas, "stream crashed and emitted the generic error text"
+
+    starts = [c for c in chunks if c["type"] == "tool-input-available"]
+    assert starts, "on_tool_start should still emit a tool-input-available chunk"
+    start = starts[0]
+    assert start["toolCallId"] == "toolu_RT"
+    assert start["input"].get("sql") == "SELECT 1"
+    # The injected, non-serializable runtime must not surface in the card.
+    assert "runtime" not in start["input"]
+    assert "workspace_id" not in start["input"]
+
+
+def test_sse_survives_non_serializable_values():
+    """``_sse`` is the last line of defence: no single non-serializable value
+    may ever crash the whole stream, so it falls back to ``default=str``."""
+    chunk = {"type": "tool-input-available", "input": {"runtime": _make_tool_runtime()}}
+    out = stream._sse(chunk)
+    assert out.startswith("data: ")
+    assert out.endswith("\n\n")
+    # Still valid JSON; the opaque value is coerced to a string rather than raising.
+    parsed = json.loads(out.removeprefix("data: ").strip())
+    assert parsed["type"] == "tool-input-available"
