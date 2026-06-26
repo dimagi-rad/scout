@@ -200,3 +200,38 @@ class AgentLearning(models.Model):
         self.confidence_score = max(0.0, self.confidence_score - amount)
         self.save(update_fields=["confidence_score"])
         return self.confidence_score
+
+
+class ModelGapSignal(models.Model):
+    """
+    Records a question the agent could not answer via the governed semantic layer.
+
+    Each row represents a metric-style question that fell back to raw SQL because
+    no matching measure existed in the Cube semantic model. The M5 self-improving
+    loop reads these signals to identify gaps and propose new measures.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="model_gap_signals",
+        null=True,
+        blank=True,
+    )
+
+    question = models.TextField(help_text="The user's original question that triggered the fallback.")
+    sql = models.TextField(
+        blank=True,
+        help_text="The raw SQL the agent used when falling back from the semantic layer.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["workspace", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ModelGapSignal: {self.question[:80]}"

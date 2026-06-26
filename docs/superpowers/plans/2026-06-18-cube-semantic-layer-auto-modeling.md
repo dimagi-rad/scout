@@ -376,47 +376,80 @@ git commit -m "feat(transform): generate Connect staging + column notes during m
 
 # PHASE M3 — Cube Core + generated model + `semantic_query`
 
-> **Detail note:** M3 task *interfaces, files, and tests* are concrete below. The per-step body of the **model generator** (Task 7) is contract-defined (it drives an LLM), so its steps test the output contract, not literal generated YAML. Expand any remaining literal code against the concrete `stg_visits` schema M2 produces.
+> **Architecture mandate (user decision):** M3 is built **fully multi-tenant** — Cube must map to Scout's per-tenant/per-workspace schema routing, not a single-schema shortcut. The design (single source of truth = Scout):
+> 1. **Scout resolves** `workspace_id → schema_name` via the existing `mcp_server/context.py::load_workspace_context()` (single-tenant → `t_<id>`; multi-tenant → `ws_<hash>`). Cube never re-implements this routing.
+> 2. **Scout mints a JWT** signed with `CUBEJS_API_SECRET`, carrying `securityContext = {workspace_id, schema_name}`, and connects to Cube's pg-wire SQL API passing the JWT as the password.
+> 3. **Cube's `cube.js`**: `checkSqlAuth` verifies the JWT and returns its `securityContext`; `contextToAppId`/`contextToOrchestratorId` key compilation + cache per `schema_name`; the generated data model uses `sql_table: "{COMPILE_CONTEXT.security_context.schema_name}.stg_visits"` so the schema resolves per request. One managed DB, dynamic schema via `COMPILE_CONTEXT` (no per-tenant `driverFactory` needed).
+> 4. **Per-workspace model loading (heterogeneous apps):** different opportunities use different deliver apps → different `stg_visits` columns, so the model STRUCTURE varies per workspace (not just the schema). Cube's `repositoryFactory: ({ securityContext }) => new FileRepository(\`model/${securityContext.schema_name}\`)` serves each workspace its own model files from `cube/model/<schema_name>/`. The generator (Task 7) writes per-workspace model files there. `contextToAppId` keyed by `schema_name` ensures one compiled model per workspace.
+>
+> The model generator (Task 7) drives an LLM, so its steps test the output **contract** (incl. the `COMPILE_CONTEXT` schema templating + per-workspace file layout), not literal YAML.
 
-### Task 6: Cube Core service + project skeleton
+### Task 6: Cube Core service + multi-tenant `cube.js` config
 
 **Files:**
-- Create: `cube/model/.gitkeep`, `cube/cube.js` (or `cube/.env` config), `cube/README.md`
+- Create: `cube/model/.gitkeep`, `cube/cube.js` (multi-tenant config), `cube/README.md`
 - Modify: `docker-compose.yml` (add `cube` service), `.env.example` (Cube env vars)
-- Test: `tests/test_cube_service_smoke.py` (skipped unless `CUBE_URL` set — a connectivity smoke test)
+- Test: `tests/test_cube_service_smoke.py` (skipped unless `CUBE_URL`/`CUBEJS_API_SECRET` set — a connectivity smoke test that mints a JWT and runs a trivial query)
 
 **Interfaces:**
-- Produces: a running Cube Core container reading `cube/model/`, connected to `MANAGED_DATABASE_URL`, exposing the SQL API (pg-wire) on a configured port and the REST API on `:4000`. Env: `CUBEJS_DB_TYPE=postgres`, `CUBEJS_DB_*` from managed DB, `CUBEJS_API_SECRET`, `CUBEJS_PG_SQL_PORT` (SQL API).
+- Produces: a running Cube Core container reading `cube/model/` + `cube/cube.js`, connected to the **managed DB** (same DB Scout's tenant schemas live in), exposing the SQL API (pg-wire) and REST API. Multi-tenant: schema is selected per request from the JWT `securityContext.schema_name`. Env: `CUBEJS_DB_TYPE=postgres`, `CUBEJS_DB_*` (managed DB), `CUBEJS_API_SECRET` (JWT signing — MUST match what Scout signs with), `CUBEJS_PG_SQL_PORT`.
 
-- [ ] **Step 1:** Add the `cube` service to `docker-compose.yml`:
+- [ ] **Step 1:** Add the `cube` service to `docker-compose.yml`, pointed at the managed DB (here the same `platform-db`/managed Postgres; use the managed-DB env). Mount `./cube`:
 
 ```yaml
   cube:
     image: cubejs/cube:latest
     ports:
-      - "4000:4000"      # REST/playground
+      - "4000:4000"      # REST/playground/meta
       - "15432:15432"    # SQL API (pg-wire)
     environment:
       CUBEJS_DEV_MODE: "true"
       CUBEJS_DB_TYPE: postgres
-      CUBEJS_DB_HOST: ${MANAGED_DB_HOST}
-      CUBEJS_DB_PORT: ${MANAGED_DB_PORT}
-      CUBEJS_DB_NAME: ${MANAGED_DB_NAME}
-      CUBEJS_DB_USER: ${MANAGED_DB_USER}
-      CUBEJS_DB_PASS: ${MANAGED_DB_PASS}
+      CUBEJS_DB_HOST: platform-db
+      CUBEJS_DB_PORT: "5432"
+      CUBEJS_DB_NAME: agent_platform
+      CUBEJS_DB_USER: platform
+      CUBEJS_DB_PASS: ${PLATFORM_DB_PASSWORD:-devpassword}
       CUBEJS_API_SECRET: ${CUBEJS_API_SECRET}
       CUBEJS_PG_SQL_PORT: "15432"
     volumes:
-      - ./cube/model:/cube/conf/model
+      - ./cube:/cube/conf
+    depends_on:
+      platform-db:
+        condition: service_healthy
+```
+(Note: `MANAGED_DATABASE_URL` may differ from `DATABASE_URL` in real deploys — read `mcp_server/context.py` for how the managed DB is resolved and wire Cube to the SAME managed DB. Confirm at task start.)
+
+- [ ] **Step 2:** Create `cube/cube.js` implementing the multi-tenant security model (verify against current Cube docs at task start):
+
+```javascript
+const jwt = require("jsonwebtoken");
+
+module.exports = {
+  // Verify the JWT Scout passes as the SQL-API password; return its securityContext.
+  checkSqlAuth: (query, username, password) => {
+    const decoded = jwt.verify(password, process.env.CUBEJS_API_SECRET);
+    return {
+      password,
+      securityContext: {
+        workspace_id: decoded.workspace_id,
+        schema_name: decoded.schema_name,
+      },
+    };
+  },
+  // Per-workspace compilation + cache isolation (also drives COMPILE_CONTEXT).
+  contextToAppId: ({ securityContext }) => `ws_${securityContext.schema_name}`,
+  contextToOrchestratorId: ({ securityContext }) => `ws_${securityContext.schema_name}`,
+};
 ```
 
-- [ ] **Step 2:** `docker compose up cube` → confirm playground at `http://localhost:4000` and SQL API reachable: `psql "host=localhost port=15432 user=cube password=$CUBEJS_API_SECRET dbname=cube" -c "SELECT 1"` (expect `1`).
-- [ ] **Step 3:** Document env in `.env.example` and `cube/README.md` (how to run, where models live, schema/search_path note: scope Cube to the tenant/view schema).
-- [ ] **Step 4:** Commit.
+- [ ] **Step 3:** `cube/model/.gitkeep` (generated models land here) + `cube/README.md` documenting: run via `docker compose up cube`, the JWT `securityContext` shape (`{workspace_id, schema_name}`), that models use `{COMPILE_CONTEXT.security_context.schema_name}`, and that `CUBEJS_API_SECRET` MUST equal the secret Scout signs JWTs with (Task 8). Add `CUBEJS_API_SECRET` + cube ports to `.env.example`.
+- [ ] **Step 4:** `tests/test_cube_service_smoke.py` — skipped unless `CUBE_URL` and `CUBEJS_API_SECRET` are set; when set, mint a JWT (`{workspace_id, schema_name}`), connect to the SQL API, and assert a trivial `SELECT 1`. (CI-safe: skips by default.)
+- [ ] **Step 5:** Verify locally if Docker available: `docker compose config` parses; `docker compose up cube` boots and `http://localhost:4000` serves. If Docker isn't available in the environment, validate `cube.js` syntax (`node --check cube/cube.js`) and `docker compose config`, and note the live-boot check as a manual step. Commit.
 
 ```bash
 git add docker-compose.yml .env.example cube/
-git commit -m "feat(cube): add Cube Core service + project skeleton"
+git commit -m "feat(cube): add multi-tenant Cube Core service + cube.js security config"
 ```
 
 ### Task 7: Cube model generator (schema + form_definitions + knowledge → YAML)
@@ -432,6 +465,7 @@ git commit -m "feat(cube): add Cube Core service + project skeleton"
 
 **Generated-YAML contract** (what tests assert):
 - One cube per staged table (`visits` ← `stg_visits`, `flws` ← `raw_users`, etc.).
+- **Multi-tenant `sql_table`:** every cube uses `sql_table: "{COMPILE_CONTEXT.security_context.schema_name}.<table>"` (e.g. `…schema_name}.stg_visits`) so the model resolves to the correct per-workspace schema at compile time. Tests MUST assert this templating is present (not a hard-coded schema).
 - Dimensions: every staged column → dimension with `type` mapped from question type; choice-list questions → `type: string` dimensions; the question `label` carried into a `title`/`description`.
 - Joins: from `RelationshipConfig` (e.g. `visits.username = flws.username`, `many_to_one`).
 - Measures: `count`; plus seeded measures from KPI hints (e.g. `muac_confirmation_rate` as `type: number, sql: AVG(CASE WHEN muac_confirmed='yes' THEN 1.0 ELSE 0 END)`), and any `KnowledgeEntry` tagged `metric` translated to a measure.
@@ -455,15 +489,24 @@ git commit -m "feat(cube): generate validated Cube model from schema + form defs
 - Modify: `mcp_server/server.py` (register two `@mcp.tool()` tools, mirroring the `query` tool at lines 335-378)
 - Test: `tests/test_semantic_query.py`
 
-**Interfaces:**
-- Consumes: Cube SQL-API connection params (host/port `CUBEJS_PG_SQL_PORT`/secret from settings); `_resolve_mcp_context(workspace_id)`; `success_response`/`error_response`/`tool_context` envelope helpers used by existing tools.
-- Produces:
-  - `semantic_query(sql: str, workspace_id: str = "") -> dict` — runs Semantic SQL (`MEASURE(...)`) against Cube's pg-wire endpoint via psycopg, returns the same envelope shape as `query` (`columns`, `rows`, `row_count`, `sql_executed`). Tenant scoping passed to Cube (security context / schema).
-  - `semantic_catalog(workspace_id: str = "") -> dict` — returns available cubes/views with their measures & dimensions (from Cube REST `/v1/meta`), so the agent knows what it can ask for.
+**Multi-tenant auth (the core of this task):** `semantic_query` must scope to the caller's workspace exactly as the raw `query` tool does — by reusing `load_workspace_context(workspace_id)` (single source of truth) to resolve the `schema_name`, then minting a short-lived JWT signed with `CUBEJS_API_SECRET` carrying `securityContext = {workspace_id, schema_name}`, and passing it as the Cube SQL-API password. Cube's `cube.js` (Task 6) verifies it and selects the schema via `COMPILE_CONTEXT`. The agent NEVER sees or sets the schema — it's injected server-side, same as the raw query path.
 
-- [ ] **Step 1:** Write a test that patches the Cube SQL connection to return a fake result and asserts `semantic_query` returns the standard success envelope with `columns`/`rows`; and that `semantic_catalog` (patching `/v1/meta`) returns measures/dimensions.
+**Files:**
+- Create: `mcp_server/services/semantic.py` (resolve schema → mint JWT → Cube pg-wire connect; REST `/v1/meta` with the JWT)
+- Modify: `mcp_server/server.py` (register `semantic_query` + `semantic_catalog` tools, mirroring `query` at lines 335-378); settings for `CUBEJS_API_SECRET`, `CUBE_SQL_HOST/PORT`, `CUBE_REST_URL`
+- Dependency: `PyJWT` (confirm present in `pyproject.toml`; add if missing)
+- Test: `tests/test_semantic_query.py`
+
+**Interfaces:**
+- Consumes: `load_workspace_context(workspace_id)` (→ `schema_name`); `settings.CUBEJS_API_SECRET`; `success_response`/`error_response`/`tool_context` envelope helpers.
+- Produces:
+  - `async def mint_cube_jwt(workspace_id: str, schema_name: str) -> str` — short-TTL JWT signed with `CUBEJS_API_SECRET`, claims `{workspace_id, schema_name, exp}`.
+  - `semantic_query(sql: str, workspace_id: str = "") -> dict` — resolves context, mints JWT, connects to Cube's pg-wire SQL API (`psycopg`, password=JWT), runs the Semantic SQL (`MEASURE(...)`), returns the same envelope shape as `query` (`columns`, `rows`, `row_count`, `sql_executed`).
+  - `semantic_catalog(workspace_id: str = "") -> dict` — `GET {CUBE_REST_URL}/v1/meta` with `Authorization: Bearer <JWT>`; returns available cubes/views + their measures & dimensions so the agent knows what it can ask for.
+
+- [ ] **Step 1:** Test (no live Cube): assert `mint_cube_jwt` produces a token that decodes (with `CUBEJS_API_SECRET`) to `{workspace_id, schema_name}`. Patch `load_workspace_context` and the Cube pg-wire connection to assert `semantic_query` (a) resolves the schema, (b) connects with the JWT as password, (c) returns the standard success envelope. Patch httpx for `semantic_catalog` `/v1/meta`.
 - [ ] **Step 2:** Run → FAIL.
-- [ ] **Step 3:** Implement `semantic.py` (psycopg connect to Cube pg-wire; httpx GET `/v1/meta`); register both tools in `server.py` using the existing `tool_context` + `success_response` pattern verbatim from the `query` tool.
+- [ ] **Step 3:** Implement `semantic.py` (JWT mint via PyJWT; psycopg connect to Cube pg-wire with password=JWT; httpx GET `/v1/meta`); register both tools in `server.py` using the existing `tool_context` + `success_response` pattern verbatim from the `query` tool. Keep the schema injection server-side (agent never passes schema/JWT).
 - [ ] **Step 4:** Run → PASS.
 - [ ] **Step 5:** Commit.
 

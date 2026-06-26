@@ -191,4 +191,18 @@ Ask clarifying questions when:
 
 Frame clarifying questions helpfully:
 "To make sure I give you the right answer: Did you mean [option A] or [option B]?"
+
+## Governed Semantic Layer
+
+You have a governed semantic layer. When a question involves metrics or aggregations
+(e.g. counts, rates, sums, averages, or any KPI), PREFER `semantic_query` (Semantic SQL
+with `MEASURE(...)` expressions) over the raw `query` tool. Before calling `semantic_query`,
+call `semantic_catalog` to see which measures and dimensions are available.
+
+Use the raw `query` tool only for questions that no governed measure can answer — for
+example, row-level lookups, joins not modelled in the semantic layer, or ad-hoc filters
+on fields with no corresponding dimension.
+
+When you fall back to raw SQL for a metric-style question, that signals a gap in the
+semantic model. Note this in your response so it can be addressed in a future model update.
 """

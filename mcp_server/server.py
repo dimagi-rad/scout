@@ -64,6 +64,8 @@ from mcp_server.services.metadata import (
     workspace_list_tables,
 )
 from mcp_server.services.query import execute_query
+from mcp_server.services.semantic import semantic_catalog as _semantic_catalog
+from mcp_server.services.semantic import semantic_query as _semantic_query
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +375,77 @@ async def query(sql: str, workspace_id: str = "") -> dict:
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
             warnings=warnings or None,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def semantic_query(sql: str, workspace_id: str = "") -> dict:
+    """Execute a Semantic SQL query against the Cube semantic layer for the workspace.
+
+    Use this tool when the question involves business metrics, KPIs, or pre-defined
+    measures and dimensions (e.g. ``MEASURE(Orders.count)``). Cube's SQL API translates
+    Semantic SQL into optimised queries against the workspace's schema — the agent never
+    needs to know the schema name or construct raw aggregations.
+
+    The workspace's schema and a short-lived JWT are injected server-side; the agent only
+    provides the Semantic SQL.
+
+    Args:
+        sql: A Semantic SQL SELECT query using Cube measure/dimension references.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+    """
+    async with tool_context("semantic_query", workspace_id, sql=sql) as tc:
+        try:
+            result = await _semantic_query(sql, workspace_id)
+        except ValueError as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            return tc["result"]
+        except Exception as e:
+            tc["result"] = error_response(INTERNAL_ERROR, str(e))
+            return tc["result"]
+
+        tc["result"] = success_response(
+            {
+                "columns": result["columns"],
+                "rows": result["rows"],
+                "row_count": result["row_count"],
+                "sql_executed": result["sql_executed"],
+            },
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def semantic_catalog(workspace_id: str = "") -> dict:
+    """Fetch the Cube semantic catalog — available cubes, measures, and dimensions.
+
+    Returns the list of cubes (logical data models) exposed by the Cube semantic layer
+    for this workspace, along with their named measures and dimensions. Use this tool
+    before writing a ``semantic_query`` to discover what metrics and attributes are
+    available (e.g. ``Orders.count``, ``Orders.createdAt``).
+
+    The workspace's schema and a short-lived JWT are injected server-side.
+
+    Args:
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+    """
+    async with tool_context("semantic_catalog", workspace_id) as tc:
+        try:
+            result = await _semantic_catalog(workspace_id)
+        except ValueError as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            return tc["result"]
+        except Exception as e:
+            tc["result"] = error_response(INTERNAL_ERROR, str(e))
+            return tc["result"]
+
+        tc["result"] = success_response(
+            result,
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
 
