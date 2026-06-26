@@ -16,9 +16,11 @@ Covers findings:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from apps.agents.graph import base as graph_base
+from apps.agents.graph.base import PROMPT_CACHE_CONTROL, _build_cached_system_message
 from apps.agents.graph.state import DEFAULT_MAX_MESSAGES, prune_messages
 
 
@@ -216,13 +218,6 @@ def test_anthropic_request_payload_carries_cache_breakpoints():
     payload ``ChatAnthropic`` would send (its ``_get_request_payload``) — the
     deterministic, offline equivalent of verifying cache hits (arch #254, 02#3).
     """
-    from langchain_anthropic import ChatAnthropic
-
-    from apps.agents.graph.base import (
-        PROMPT_CACHE_CONTROL,
-        _build_cached_system_message,
-    )
-
     llm = ChatAnthropic(model="claude-opus-4-8", max_tokens=64, api_key="test-key")
 
     system_msg = _build_cached_system_message("STABLE PREFIX " * 50, "VOLATILE SUFFIX")
