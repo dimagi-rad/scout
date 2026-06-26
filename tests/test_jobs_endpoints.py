@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
 from procrastinate.manager import JobManager
@@ -798,8 +799,6 @@ async def test_active_jobs_throttles_reconcile_across_rapid_polls():
     loop doesn't run ~5 reconcile DB queries on every tick (arch #254, 05#6).
     The first poll reconciles; a rapid second poll skips the sweep.
     """
-    from django.core.cache import cache
-
     cache.clear()
     _user, ws, _tj = await _make_stale_pending_job("throttle@b.c", 50009)
 

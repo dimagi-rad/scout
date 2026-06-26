@@ -11,6 +11,9 @@ isn't reachable. These tests exercise the selection logic directly (no live
 Redis needed).
 """
 
+import inspect
+
+from apps.chat import rate_limiting
 from config.settings.base import _build_caches
 
 
@@ -29,10 +32,6 @@ def test_rate_limiter_uses_default_cache():
     """The chat rate limiter must read/write the Django *default* cache (so a
     Redis-backed default makes it shared across workers), not a private dict.
     """
-    import inspect
-
-    from apps.chat import rate_limiting
-
     src = inspect.getsource(rate_limiting)
     # It uses the shared django cache API, not a module-level dict counter.
     assert "from django.core.cache import cache" in src
