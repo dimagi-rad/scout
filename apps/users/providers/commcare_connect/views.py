@@ -6,16 +6,25 @@ from allauth.socialaccount.providers.oauth2.views import (
     OAuth2CallbackView,
     OAuth2LoginView,
 )
+from django.conf import settings
 
 
 class CommCareConnectOAuth2Adapter(OAuth2Adapter):
-    """OAuth2 adapter for CommCare Connect (connect.dimagi.com)."""
+    """OAuth2 adapter for CommCare Connect."""
 
     provider_id = "commcare_connect"
 
-    access_token_url = "https://connect.dimagi.com/o/token/"  # noqa: S105 — OAuth endpoint URL, not a credential
-    authorize_url = "https://connect.dimagi.com/o/authorize/"
-    profile_url = "https://connect.dimagi.com/api/users/me/"
+    @property
+    def authorize_url(self) -> str:
+        return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/authorize/"
+
+    @property
+    def access_token_url(self) -> str:
+        return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/token/"
+
+    @property
+    def profile_url(self) -> str:
+        return f"{settings.CONNECT_API_URL.rstrip('/')}/api/users/me/"
 
     def complete_login(self, request, app, token, **kwargs):
         response = requests.get(

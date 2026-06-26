@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 _VISIT_BASE_COLUMNS = [
     "visit_id",
     "opportunity_id",
-    "user_id",
+    "username",
     "entity_id",
     "status",
     "deliver_unit_id",

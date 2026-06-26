@@ -610,6 +610,14 @@ class TestParseDbUrl:
         assert params["dbname"] == "scout"
         assert params["user"] == ""
         assert params["password"] == ""
+        assert params["sslmode"] == "prefer"
+
+    def test_preserves_explicit_sslmode(self):
+        from mcp_server.context import _parse_db_url
+
+        params = _parse_db_url("postgresql://localhost/scout?sslmode=require", "my_schema")
+
+        assert params["sslmode"] == "require"
 
     def test_bare_dbname_fallback(self):
         """In dev, MANAGED_DATABASE_URL may be just a database name."""

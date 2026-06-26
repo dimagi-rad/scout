@@ -57,6 +57,8 @@ def test_generates_visit_staging_with_typed_columns(connect_tenant):
     sql = by_name["stg_visits"].sql_content
     # Non-repeat questions become typed, aliased columns from form_json:
     assert "form_json" in sql
+    assert "username" in sql
+    assert "user_id" not in sql
     assert "muac" in sql  # column derived from /data/muac_group/muac
     assert "muac_confirmed" in sql
     # Repeat question is NOT inlined into stg_visits:

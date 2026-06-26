@@ -346,6 +346,7 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
 # CommCare Connect API
 CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
+CONNECT_OAUTH_URL = env("CONNECT_OAUTH_URL", default=CONNECT_API_URL)
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 

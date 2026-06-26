@@ -23,9 +23,12 @@ def _ocs_token_url() -> str:
     return f"{settings.OCS_URL.rstrip('/')}/o/token/"
 
 
+def _connect_token_url() -> str:
+    return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/token/"
+
+
 PROVIDER_TOKEN_URLS = {
     "commcare": "https://www.commcarehq.org/oauth/token/",
-    "commcare_connect": "https://connect.dimagi.com/o/token/",
 }
 
 
@@ -33,6 +36,8 @@ def get_token_url(provider: str) -> str | None:
     """Return the OAuth token endpoint for a provider, or None if unknown."""
     if provider == "ocs":
         return _ocs_token_url()
+    if provider == "commcare_connect":
+        return _connect_token_url()
     return PROVIDER_TOKEN_URLS.get(provider)
 
 
