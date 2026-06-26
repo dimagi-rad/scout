@@ -293,21 +293,52 @@ def create_artifact_tools(
                     "message": f"Artifact with ID '{artifact_id}' not found in this workspace.",
                 }
 
+            # Resolve the effective new field values (fall back to the original
+            # when the caller omitted a field).
+            new_title = title.strip() if title is not None else original.title
+            new_data = data if data is not None else original.data
+            new_source_queries = (
+                source_queries if source_queries is not None else original.source_queries
+            )
+
+            # No-op guard (arch #254, finding 09#9): versioning writes the entire
+            # React code into a new row per update, so an agent that "updates"
+            # with no actual change accretes full-code copies indefinitely. If
+            # nothing changed, return the existing artifact rather than copying it.
+            if (
+                code == original.code
+                and new_title == original.title
+                and new_data == original.data
+                and new_source_queries == original.source_queries
+            ):
+                logger.info(
+                    "update_artifact no-op for %s (no change) — skipping version copy",
+                    original.id,
+                )
+                render_url = f"/api/workspaces/{workspace.id}/artifacts/{original.id}/sandbox/"
+                return {
+                    "artifact_id": str(original.id),
+                    "previous_version_id": artifact_id,
+                    "status": "updated",
+                    "version": original.version,
+                    "title": original.title,
+                    "render_url": render_url,
+                    "message": f"Artifact '{original.title}' is already up to date.",
+                }
+
             # Create a new version linked to the original
             new_artifact = Artifact(
                 workspace=workspace,
                 created_by=user,
-                title=title.strip() if title is not None else original.title,
+                title=new_title,
                 description=original.description,
                 artifact_type=original.artifact_type,
                 code=code,
-                data=data if data is not None else original.data,
+                data=new_data,
                 version=original.version + 1,
                 parent_artifact=original,
                 conversation_id=original.conversation_id,
-                source_queries=source_queries
-                if source_queries is not None
-                else original.source_queries,
+                source_queries=new_source_queries,
             )
             await new_artifact.asave()
 

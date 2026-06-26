@@ -170,31 +170,10 @@ class Artifact(models.Model):
         """
         return hashlib.sha256(self.code.encode("utf-8")).hexdigest()
 
-    def create_new_version(self, **updates) -> "Artifact":
-        """
-        Create a new version of this artifact with the given updates.
-
-        Args:
-            **updates: Fields to update in the new version.
-
-        Returns:
-            The newly created Artifact instance.
-        """
-        new_artifact = Artifact(
-            workspace=self.workspace,
-            created_by=updates.get("created_by", self.created_by),
-            title=updates.get("title", self.title),
-            description=updates.get("description", self.description),
-            artifact_type=updates.get("artifact_type", self.artifact_type),
-            code=updates.get("code", self.code),
-            data=updates.get("data", self.data),
-            version=self.version + 1,
-            parent_artifact=self,
-            conversation_id=updates.get("conversation_id", self.conversation_id),
-            source_queries=updates.get("source_queries", self.source_queries),
-        )
-        new_artifact.save()
-        return new_artifact
+    # NB: the live version-bump path is the inline copy in
+    # apps/agents/tools/artifact_tool.py::update_artifact (which also carries the
+    # no-op guard from arch #254, 09#9). A former ``create_new_version`` helper
+    # here was a dead duplicate with zero callers and was removed.
 
     def get_version_history(self, max_depth: int = 100) -> list["Artifact"]:
         """
