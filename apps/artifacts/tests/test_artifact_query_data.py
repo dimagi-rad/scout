@@ -2,11 +2,13 @@
 Tests for ArtifactQueryDataView — live query execution via MCP service.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.core.cache import cache
 from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
@@ -280,10 +282,6 @@ async def test_source_queries_run_concurrently(live_artifact, member_client, mem
     second would never start until the first returned, and the barrier (which
     needs both) would deadlock. Completing proves they overlap.
     """
-    import asyncio
-
-    from django.core.cache import cache
-
     cache.clear()
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
@@ -323,8 +321,6 @@ async def test_source_queries_run_concurrently(live_artifact, member_client, mem
 async def test_query_results_cached_across_opens(live_artifact, member_client, membership):
     """A second open within the cache TTL must not re-execute the source
     queries (09#9 — live artifacts re-ran every query on every open)."""
-    from django.core.cache import cache
-
     cache.clear()
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 

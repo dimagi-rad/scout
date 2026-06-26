@@ -12,13 +12,12 @@ from django.core.management import call_command
 from django.utils import timezone
 
 from apps.artifacts.models import Artifact, ArtifactType
+from apps.users.models import Tenant
+from apps.workspaces.models import Workspace, WorkspaceTenant
 
 
 @pytest.fixture
 def workspace(db):
-    from apps.users.models import Tenant
-    from apps.workspaces.models import Workspace, WorkspaceTenant
-
     tenant = Tenant.objects.create(provider="commcare", external_id="t", canonical_name="T")
     ws = Workspace.objects.create(name="T")
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
