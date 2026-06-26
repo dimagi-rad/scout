@@ -4,6 +4,7 @@ import pytest
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_query_tool_uses_workspace_context_when_workspace_id_provided():
     """When workspace_id is provided, query should call load_workspace_context."""
     mock_ctx = MagicMock()
@@ -35,6 +36,7 @@ async def test_query_tool_uses_workspace_context_when_workspace_id_provided():
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_query_tool_requires_workspace_id():
     """When workspace_id is empty, query should return a validation error."""
     from mcp_server.server import query

@@ -37,6 +37,14 @@ def _make_async_conn(mock_cursor):
     return mock_conn
 
 
+def _make_pool_for_conn(mock_conn):
+    """Mock AsyncConnectionPool whose .connection() yields ``mock_conn`` — queries
+    acquire from the shared managed-DB pool now (arch #253, 10#1)."""
+    pool = MagicMock()
+    pool.connection.return_value = mock_conn
+    return AsyncMock(return_value=pool)
+
+
 class TestSetRoleIsolation:
     def _make_ctx(self, schema_name="test_domain"):
         return QueryContext(
@@ -54,8 +62,8 @@ class TestSetRoleIsolation:
         mock_conn = _make_async_conn(mock_cursor)
 
         with patch(
-            "psycopg.AsyncConnection.connect",
-            new=AsyncMock(return_value=mock_conn),
+            "mcp_server.services.query.get_pool",
+            new=_make_pool_for_conn(mock_conn),
         ):
             ctx = self._make_ctx()
             await _execute_async(ctx, "SELECT 1", 30)
@@ -65,9 +73,10 @@ class TestSetRoleIsolation:
         first_call_str = str(execute_calls[0])
         assert "SET ROLE" in first_call_str
         assert "test_domain_ro" in first_call_str
-        # Last call before cursor.close should be RESET ROLE
-        last_call_str = str(execute_calls[-1])
-        assert "RESET ROLE" in last_call_str
+        # Cleanup before the pooled connection returns: RESET ROLE then RESET ALL.
+        call_strs = [str(c) for c in execute_calls]
+        assert any("RESET ROLE" in c for c in call_strs)
+        assert "RESET ALL" in call_strs[-1]
 
     @pytest.mark.asyncio
     async def test_reset_role_on_query_error(self):
@@ -78,21 +87,22 @@ class TestSetRoleIsolation:
             None,  # SET statement_timeout succeeds
             Exception("query failed"),  # actual query fails
             None,  # RESET ROLE succeeds
+            None,  # RESET ALL succeeds
         ]
 
         mock_conn = _make_async_conn(mock_cursor)
 
         with patch(
-            "psycopg.AsyncConnection.connect",
-            new=AsyncMock(return_value=mock_conn),
+            "mcp_server.services.query.get_pool",
+            new=_make_pool_for_conn(mock_conn),
         ):
             ctx = self._make_ctx()
             with contextlib.suppress(Exception):
                 await _execute_async(ctx, "SELECT bad", 30)
 
-        # RESET ROLE should still have been called
-        last_call_str = str(mock_cursor.execute.call_args_list[-1])
-        assert "RESET ROLE" in last_call_str
+        # RESET ROLE must still have run after the query error (before RESET ALL).
+        call_strs = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any("RESET ROLE" in c for c in call_strs)
 
 
 class TestRoleErrorClassification:

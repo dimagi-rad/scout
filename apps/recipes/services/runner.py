@@ -15,7 +15,7 @@ from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.agents.mcp_client import get_mcp_tools
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.workspaces.models import Workspace
 
@@ -76,7 +76,6 @@ class RecipeRunner:
         # materialization tool for MaterializationRun traceability.
         self._job_id: int | None = job_id
         self._thread_id: str = ""
-        self._oauth_tokens: dict = {}
 
     @staticmethod
     def validate_and_default(recipe: Recipe, variable_values: dict[str, Any]) -> dict[str, Any]:
@@ -116,13 +115,11 @@ class RecipeRunner:
             # SynchronousOnlyOperation under async (root of Sentry #276).
             workspace = await Workspace.objects.aget(id=self.recipe.workspace_id)
             mcp_tools = await get_mcp_tools()
-            self._oauth_tokens = await get_user_oauth_tokens(self.user)
             self._graph = await build_agent_graph(
                 workspace=workspace,
                 user=self.user,
                 checkpointer=None,
                 mcp_tools=mcp_tools,
-                oauth_tokens=self._oauth_tokens,
                 conversation_id=self._thread_id or None,
                 # A recipe is a HEADLESS run: no chat Thread, no checkpointer, no
                 # async-resume path. interactive=False gives the agent the
@@ -191,7 +188,6 @@ class RecipeRunner:
         config = {
             "configurable": {"thread_id": self._thread_id},
             "recursion_limit": 50,
-            "oauth_tokens": self._oauth_tokens,
         }
 
         prompt = self.recipe.render_prompt(self.variable_values)

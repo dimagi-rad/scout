@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
@@ -210,7 +210,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         # base schema. Without target_schema, run_pipeline re-resolves the base
         # (old active) schema via provision() and the data lands there; we then
         # activate this empty new schema and tear down the data-bearing old one.
-        await asyncio.to_thread(
+        await _to_thread_fresh_db(
             run_pipeline, membership, credential, pipeline_config, target_schema=new_schema
         )
     except Exception:
@@ -387,7 +387,7 @@ async def materialize_workspace_core(
     workspace_tenant_count = await workspace.workspace_tenants.acount()
     if workspace_tenant_count > 1 and all_succeeded:
         try:
-            await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
+            await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
             view_schema_outcome = {"ok": True, "error": None}
         except Exception as exc:
             # Don't re-raise — the resume task should still fire so the
@@ -599,6 +599,31 @@ async def _rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=No
             )
 
 
+async def _to_thread_fresh_db(func, /, *args, **kwargs):
+    """Run a sync ORM-touching callable on a to_thread pool thread that first
+    closes stale/dead DB connections (arch #253, 08#0).
+
+    ORM run via ``asyncio.to_thread`` executes on a default-executor pool thread
+    whose thread-local Django connection the worker ``task`` decorator's cleanup
+    (which only reaches the async-ORM thread) cannot touch. Pool threads are
+    reused across jobs, so a connection that died since this thread's last run
+    would otherwise poison the call (view-schema rebuilds surfacing as
+    "system-side fix required"; refreshes leaving the row stuck PROVISIONING).
+    Running ``close_old_connections`` on the SAME pool thread, immediately before
+    the body, replaces such a connection so the first ORM use re-opens it.
+
+    The cleanup is wrapped into the threaded callable (not run on the caller's
+    thread) so it never closes the connection a synchronous unit test or request
+    is using — only the pool thread's own connection.
+    """
+
+    def _guarded():
+        close_old_connections()
+        return func(*args, **kwargs)
+
+    return await asyncio.to_thread(_guarded)
+
+
 def _run_pipeline_with_progress(
     tenant_membership,
     credential: dict,
@@ -725,7 +750,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
 
     manager = SchemaManager()
     try:
-        vs = await asyncio.to_thread(manager.build_view_schema, workspace)
+        vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
         # build_view_schema already saves state=FAILED before re-raising;
         # no need to write it again here (doing so risks overwriting a
@@ -1155,22 +1180,16 @@ async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
 
 
 async def _build_agent_for_resume(workspace, user, conversation_id=None):
-    """Build the LangGraph agent + load oauth_tokens for runtime config.
-
-    Returns (agent, oauth_tokens).
-    """
+    """Build the LangGraph agent for the resume task."""
     mcp_tools = await get_mcp_tools()
-    oauth_tokens = await get_user_oauth_tokens(user)
     checkpointer = await ensure_checkpointer()
-    agent = await build_agent_graph(
+    return await build_agent_graph(
         workspace=workspace,
         user=user,
         checkpointer=checkpointer,
         mcp_tools=mcp_tools,
-        oauth_tokens=oauth_tokens,
         conversation_id=conversation_id,
     )
-    return agent, oauth_tokens
 
 
 def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
@@ -1214,7 +1233,7 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
     not a correctness invariant.
     """
     try:
-        agent, _ = await _build_agent_for_resume(
+        agent = await _build_agent_for_resume(
             thread_job.thread.workspace,
             thread_job.thread.user,
             conversation_id=str(thread_job.thread.id),
@@ -1504,9 +1523,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     start = time.monotonic()
     try:
-        agent, oauth_tokens = await _build_agent_for_resume(
-            workspace, user, conversation_id=str(tj.thread.id)
-        )
+        agent = await _build_agent_for_resume(workspace, user, conversation_id=str(tj.thread.id))
         input_state = {
             "messages": [HumanMessage(content=body)],
             "workspace_id": str(workspace.id),
@@ -1517,7 +1534,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         config = {
             "configurable": {"thread_id": str(tj.thread.id)},
             "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
-            "oauth_tokens": oauth_tokens,
         }
         with _resume_langfuse_span(
             thread_job_id=thread_job_id,

@@ -344,6 +344,12 @@ TASKBADGER_ENVIRONMENT = env("TASKBADGER_ENVIRONMENT", default=DEPLOY_ENVIRONMEN
 # MCP server URL (Scout data access layer)
 MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 
+# Shared secret authenticating callers of the internal MCP HTTP server (arch
+# #253, finding 01#6). Sent by the API/worker in the X-Scout-MCP-Secret header
+# and verified by mcp_server.auth.SharedSecretMiddleware. Empty in local dev
+# (loopback only) disables the check; production deploy configs set it.
+MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
+
 # CommCare Connect API
 CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")

@@ -28,6 +28,9 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.development
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
+      # Shared-secret caller auth (must match the API's value below). Unset =
+      # check disabled (dev default).
+      - MCP_SHARED_SECRET=${MCP_SHARED_SECRET:-}
     expose:
       - "8100"
     depends_on:
@@ -51,6 +54,8 @@ services:
       - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-claude-opus-4-8}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
+      # Must match the mcp-server's value above so the API can authenticate.
+      - MCP_SHARED_SECRET=${MCP_SHARED_SECRET:-}
       - MAX_CONNECTIONS_PER_PROJECT=5
     volumes:
       - ./apps:/app/apps

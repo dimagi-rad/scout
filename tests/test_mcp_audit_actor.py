@@ -18,6 +18,7 @@ from mcp_server.server import query
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_tool_context_logs_actor_when_provided(caplog):
     """tool_context records user_id and thread_id when threaded through."""
     with caplog.at_level(logging.INFO, logger="mcp_server.audit"):
@@ -34,6 +35,7 @@ async def test_tool_context_logs_actor_when_provided(caplog):
 
 
 @pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_tool_context_omits_empty_actor(caplog):
     """Empty actor fields are not noise-logged (context-free / operator tools)."""
     with caplog.at_level(logging.INFO, logger="mcp_server.audit"):

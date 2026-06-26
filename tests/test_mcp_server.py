@@ -202,41 +202,24 @@ class TestExecuteQuery:
 # code paths (load_tenant_context + execute_internal_query).
 
 
-# --- Auth token extraction tests ---
-
-
-class TestAuthTokenExtraction:
-    """Test MCP auth token extraction from _meta field."""
-
-    def test_extract_tokens_from_meta(self):
-        from mcp_server.auth import extract_oauth_tokens
-
-        meta = {"oauth_tokens": {"commcare": "tok_abc", "commcare_connect": "tok_xyz"}}
-        assert extract_oauth_tokens(meta) == {"commcare": "tok_abc", "commcare_connect": "tok_xyz"}
-
-    def test_extract_tokens_missing_meta(self):
-        from mcp_server.auth import extract_oauth_tokens
-
-        assert extract_oauth_tokens({}) == {}
-
-    def test_extract_tokens_none_meta(self):
-        from mcp_server.auth import extract_oauth_tokens
-
-        assert extract_oauth_tokens(None) == {}
+# --- Audit log scrubbing ---
 
 
 class TestAuditLogScrubbing:
-    """Test that oauth_tokens are scrubbed from audit log extra_fields."""
+    """scrub_extra_fields removes any keys listed in _SCRUB_KEYS from audit
+    extra_fields. The set is currently empty (the oauth_tokens transport was
+    removed, arch #253 / 01#0); the hook stays for future sensitive fields."""
 
-    def test_scrub_removes_oauth_tokens(self):
+    def test_scrub_removes_listed_keys(self):
+        from mcp_server import envelope
         from mcp_server.envelope import scrub_extra_fields
 
-        extra = {"sql": "SELECT 1", "oauth_tokens": {"commcare": "secret"}}
-        scrubbed = scrub_extra_fields(extra)
-        assert "oauth_tokens" not in scrubbed
+        with patch.object(envelope, "_SCRUB_KEYS", frozenset({"secret"})):
+            scrubbed = scrub_extra_fields({"sql": "SELECT 1", "secret": "x"})
+        assert "secret" not in scrubbed
         assert scrubbed["sql"] == "SELECT 1"
 
-    def test_scrub_noop_when_no_tokens(self):
+    def test_scrub_noop_when_nothing_to_scrub(self):
         from mcp_server.envelope import scrub_extra_fields
 
         extra = {"sql": "SELECT 1"}

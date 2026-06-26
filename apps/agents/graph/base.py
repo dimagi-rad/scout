@@ -73,6 +73,10 @@ MCP_TOOL_NAMES = frozenset(
         "run_materialization",
         "get_schema_status",
         "get_lineage",
+        # workspace_id is injected into these so an LLM-supplied run_id is scoped
+        # to the calling workspace (arch #253, 01#6).
+        "get_materialization_status",
+        "cancel_materialization",
     }
 )
 
@@ -603,7 +607,6 @@ async def build_agent_graph(
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
-    oauth_tokens: dict | None = None,
     conversation_id: str | None = None,
     *,
     interactive: bool = True,
@@ -617,7 +620,6 @@ async def build_agent_graph(
         user: Optional User model instance.
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
-        oauth_tokens: Optional OAuth tokens for tool authentication.
         conversation_id: Optional thread/conversation id. Threaded through to the
             artifact tools so chat-created artifacts record their originating
             conversation (so shared/public thread pages can find them).

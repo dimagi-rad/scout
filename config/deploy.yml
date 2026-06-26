@@ -59,6 +59,9 @@ env:
     - OCS_OAUTH_CLIENT_SECRET
     - SENTRY_DSN
     - TASKBADGER_API_KEY
+    # Sent in X-Scout-MCP-Secret to authenticate to the MCP server (arch #253,
+    # 01#6). MUST match deploy-mcp.yml's MCP_SHARED_SECRET.
+    - MCP_SHARED_SECRET
 
 ssh:
   user: scout

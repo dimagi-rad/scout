@@ -19,7 +19,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_protect
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
     _resolve_workspace_and_membership,
@@ -169,9 +169,6 @@ async def chat_view(request):
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
 
-    # Retrieve user's OAuth tokens for materialization
-    oauth_tokens = await get_user_oauth_tokens(user)
-
     # Build agent (retry once with fresh checkpointer on connection errors)
     try:
         checkpointer = await ensure_checkpointer()
@@ -180,7 +177,6 @@ async def chat_view(request):
             user=user,
             checkpointer=checkpointer,
             mcp_tools=mcp_tools,
-            oauth_tokens=oauth_tokens,
             conversation_id=str(thread_id),
         )
     except Exception:
@@ -193,7 +189,6 @@ async def chat_view(request):
                 user=user,
                 checkpointer=checkpointer,
                 mcp_tools=mcp_tools,
-                oauth_tokens=oauth_tokens,
                 conversation_id=str(thread_id),
             )
         except Exception as e:
@@ -206,7 +201,6 @@ async def chat_view(request):
     config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 50,
-        "oauth_tokens": oauth_tokens,
     }
 
     # Repair any dangling tool_use calls from a previous interrupted turn.

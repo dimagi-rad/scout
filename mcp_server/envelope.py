@@ -16,7 +16,21 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
+from asgiref.sync import sync_to_async
+from django.db import close_old_connections
+
 logger = logging.getLogger(__name__)
+
+# Dead-DB-connection hygiene for the long-lived MCP server process (arch #253,
+# finding 08#0). The MCP server is a Django-ORM process with no HTTP
+# request_started/request_finished cycle, so a connection that dies underneath
+# it (RDS restart/upgrade, idle TCP timeout) is reused — closed — forever, and
+# every ORM-touching tool call fails until the process restarts. Mirroring the
+# procrastinate worker's fix (config/procrastinate.py), we close stale/dead
+# connections around every tool call so the next ORM use re-opens them. The
+# cleanup must run on the asgiref thread-sensitive executor — the same thread
+# the async ORM routes queries through — so it reaches the right connection.
+_aclose_old_connections = sync_to_async(close_old_connections, thread_sensitive=True)
 
 # Audit logger — separate from the module logger so it can be filtered/routed
 audit_logger = logging.getLogger("mcp_server.audit")
@@ -79,8 +93,11 @@ class Timer:
         return int((time.monotonic() - self._start) * 1000)
 
 
-# Fields that must never appear in audit logs
-_SCRUB_KEYS = frozenset({"oauth_tokens"})
+# Fields that must never appear in audit logs. Currently empty: the only entry
+# was ``oauth_tokens``, removed with the dead OAuth-into-MCP transport (arch
+# #253, finding 01#0). Kept as the single hook to scrub any sensitive extra
+# field a future tool might pass into ``tool_context``.
+_SCRUB_KEYS: frozenset[str] = frozenset()
 
 
 def scrub_extra_fields(extra: dict[str, Any]) -> dict[str, Any]:
@@ -106,9 +123,13 @@ async def tool_context(tool_name: str, context_id: str, **extra_fields: Any):
     """
     timer = Timer()
     tc: dict[str, Any] = {"timer": timer}
+    # Replace a connection that died between tool calls before the body runs (so
+    # ORM use re-opens it), and close after so nothing leaks between calls.
+    await _aclose_old_connections()
     try:
         yield tc
     finally:
+        await _aclose_old_connections()
         status = "success" if tc.get("result", {}).get("success") else "error"
         # Drop empty actor/context fields so they don't add noise (e.g. operator
         # or context-free tools that carry no user/thread).

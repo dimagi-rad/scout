@@ -48,6 +48,9 @@ env:
     # Worker executes tasks and updates their Task Badger status; it also chains
     # the resume task, so it defers (creates) Task Badger records too.
     - TASKBADGER_API_KEY
+    # The resume task's get_mcp_tools call authenticates to the MCP server with
+    # this shared secret (arch #253, 01#6). MUST match deploy-mcp.yml.
+    - MCP_SHARED_SECRET
 
 ssh:
   user: scout

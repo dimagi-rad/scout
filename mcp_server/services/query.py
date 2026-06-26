@@ -21,6 +21,7 @@ from mcp_server.envelope import (
     VALIDATION_ERROR,
     error_response,
 )
+from mcp_server.services.pool import get_pool
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 logger = logging.getLogger(__name__)
@@ -36,11 +37,15 @@ def _build_validator(ctx: QueryContext) -> SQLValidator:
 
 
 async def _execute_async(ctx: QueryContext, sql: str, timeout_seconds: int) -> dict[str, Any]:
-    """Run a SQL query asynchronously under the tenant's read-only role."""
-    async with (
-        await psycopg.AsyncConnection.connect(**ctx.connection_params, autocommit=True) as conn,
-        conn.cursor() as cursor,
-    ):
+    """Run a SQL query asynchronously under the tenant's read-only role.
+
+    Acquires a connection from the shared managed-DB pool (arch #253, 10#1)
+    instead of opening a fresh TLS connection per call. The pool's connections
+    carry no schema-specific search_path/role, so each checkout sets them
+    explicitly and RESETs the role before the connection returns to the pool.
+    """
+    pool = await get_pool(ctx.connection_params)
+    async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
         try:
             await cursor.execute(
@@ -62,35 +67,44 @@ async def _execute_async(ctx: QueryContext, sql: str, timeout_seconds: int) -> d
                 "row_count": len(rows),
             }
         finally:
+            # Return the connection to the pool with no lingering role or
+            # per-query timeout. RESET ALL clears search_path + statement_timeout
+            # too, so a reused connection never inherits another schema's state.
             await cursor.execute("RESET ROLE")
+            await cursor.execute("RESET ALL")
 
 
 async def _execute_async_parameterized(
     ctx: QueryContext, sql: str, params: tuple, timeout_seconds: int
 ) -> dict[str, Any]:
-    """Run a parameterized SQL query asynchronously. No validation or LIMIT injection."""
-    async with (
-        await psycopg.AsyncConnection.connect(**ctx.connection_params, autocommit=True) as conn,
-        conn.cursor() as cursor,
-    ):
-        await cursor.execute(
-            psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
-        )
-        await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-        await cursor.execute(sql, params)
+    """Run a parameterized SQL query asynchronously. No validation or LIMIT injection.
 
-        columns: list[str] = []
-        rows: list[list[Any]] = []
+    Uses the shared managed-DB pool (arch #253, 10#1). RESETs the connection's
+    per-query state before returning it to the pool.
+    """
+    pool = await get_pool(ctx.connection_params)
+    async with pool.connection() as conn, conn.cursor() as cursor:
+        try:
+            await cursor.execute(
+                psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
+            )
+            await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
+            await cursor.execute(sql, params)
 
-        if cursor.description:
-            columns = [desc[0] for desc in cursor.description]
-            rows = [list(row) for row in await cursor.fetchall()]
+            columns: list[str] = []
+            rows: list[list[Any]] = []
 
-        return {
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-        }
+            if cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                rows = [list(row) for row in await cursor.fetchall()]
+
+            return {
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+            }
+        finally:
+            await cursor.execute("RESET ALL")
 
 
 async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:

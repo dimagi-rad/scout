@@ -44,7 +44,6 @@ class TenantContext:
     user_id: str
     provider: str
     schema_name: str
-    oauth_tokens: dict[str, str] = None  # type: ignore[assignment]
     max_rows_per_query: int = 500
     max_query_timeout_seconds: int = 30
 
