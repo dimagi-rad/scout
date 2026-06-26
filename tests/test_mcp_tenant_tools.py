@@ -656,7 +656,7 @@ class TestGetSchemaStatusTool:
         assert result["success"] is False
         assert result["error"]["code"] == NOT_FOUND
 
-    @pytest.mark.django_db
+    @pytest.mark.django_db(transaction=True)
     async def test_returns_not_provisioned_when_workspace_exists_without_schema(self):
         # An existing workspace with no tenants/schema is genuinely
         # unprovisioned — that path must still report not_provisioned so the
