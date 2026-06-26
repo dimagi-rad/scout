@@ -5,6 +5,8 @@ Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, and executing live queries.
 """
 
+import asyncio
+import hashlib
 import json
 import logging
 import secrets
@@ -13,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from django.core.cache import cache
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -28,6 +31,21 @@ from .models import Artifact
 from .services.export import ArtifactExporter
 
 logger = logging.getLogger(__name__)
+
+# Short TTL for live-artifact query results (arch #254, finding 09#9). Live
+# artifacts re-executed ALL their source queries serially on every open with no
+# caching, so each viewer opening a 5-query dashboard cost 5 sequential
+# connect+validate+execute cycles. A brief shared cache collapses repeat opens
+# (the common case: a dashboard reloaded / shared with several viewers) onto one
+# execution. The key includes the artifact version + a hash of the source
+# queries, so an update invalidates it immediately.
+ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
+
+
+def _artifact_query_cache_key(artifact: Artifact) -> str:
+    payload = json.dumps(artifact.source_queries, sort_keys=True, default=str)
+    digest = hashlib.md5(payload.encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"artifact_qdata:{artifact.id}:{artifact.version}:{digest}"
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
@@ -851,6 +869,15 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
+        static_data = artifact.data or {}
+
+        # Serve repeat opens of the same artifact version from a short-lived
+        # cache so we don't re-run every source query on every open (09#9).
+        cache_key = _artifact_query_cache_key(artifact)
+        cached = await cache.aget(cache_key)
+        if cached is not None:
+            return JsonResponse({"queries": cached, "static_data": static_data})
+
         # Route through load_workspace_context so single- vs multi-tenant
         # workspaces resolve to the correct schema (t_* vs ws_* view schema) and
         # the inactivity TTL is touched on the right schema.
@@ -862,18 +889,19 @@ class ArtifactQueryDataView(View):
                 {"name": entry.get("name", f"query_{i}"), "error": error_msg}
                 for i, entry in enumerate(artifact.source_queries)
             ]
-            return JsonResponse({"queries": results, "static_data": artifact.data or {}})
+            # Don't cache a context-resolution failure — it's likely transient.
+            return JsonResponse({"queries": results, "static_data": static_data})
 
-        results = []
-        for i, entry in enumerate(artifact.source_queries):
+        async def _run_one(i: int, entry: dict) -> dict:
             name = entry.get("name", f"query_{i}")
             sql = entry.get("sql", "")
             if not sql:
-                results.append({"name": name, "error": "Empty SQL query"})
-                continue
-
-            result = await execute_query(ctx, sql)
-
+                return {"name": name, "error": "Empty SQL query"}
+            try:
+                result = await execute_query(ctx, sql)
+            except Exception:
+                logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
+                return {"name": name, "error": "Query failed"}
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
                 msg = (
@@ -881,19 +909,29 @@ class ArtifactQueryDataView(View):
                     if isinstance(error_info, dict)
                     else str(error_info)
                 )
-                results.append({"name": name, "error": msg})
-            else:
-                results.append(
-                    {
-                        "name": name,
-                        "columns": result.get("columns", []),
-                        "rows": result.get("rows", []),
-                        "row_count": result.get("row_count", 0),
-                        "truncated": result.get("truncated", False),
-                    }
-                )
+                return {"name": name, "error": msg}
+            return {
+                "name": name,
+                "columns": result.get("columns", []),
+                "rows": result.get("rows", []),
+                "row_count": result.get("row_count", 0),
+                "truncated": result.get("truncated", False),
+            }
 
-        return JsonResponse({"queries": results, "static_data": artifact.data or {}})
+        # Execute the source queries concurrently rather than one-at-a-time
+        # (09#9). asyncio.gather preserves input order, so results still line up
+        # with source_queries.
+        results = await asyncio.gather(
+            *(_run_one(i, entry) for i, entry in enumerate(artifact.source_queries))
+        )
+        results = list(results)
+
+        # Cache only when every query succeeded — never persist a transient
+        # failure for the whole TTL.
+        if not any("error" in r for r in results):
+            await cache.aset(cache_key, results, ARTIFACT_QUERY_CACHE_TTL)
+
+        return JsonResponse({"queries": results, "static_data": static_data})
 
 
 class ArtifactListView(LoginRequiredJsonMixin, View):
