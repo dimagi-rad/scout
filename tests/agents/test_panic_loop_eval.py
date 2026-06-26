@@ -69,7 +69,8 @@ class TestAssembledSystemPromptIncludesEscalationRule:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
     async def test_assembled_prompt_contains_escalation_section(self, workspace, user):
-        prompt = await _build_system_prompt(workspace, user)
+        # _build_system_prompt returns a (stable, volatile) split (arch #254).
+        prompt = "\n".join(await _build_system_prompt(workspace, user))
         assert "## When the Schema is Broken" in prompt
         assert "STOP exploring" in prompt
         assert "pg_namespace" in prompt

@@ -179,7 +179,8 @@ class TestAssembledSystemPromptIncludesRule:
         # Schema context will be the "no data" branch (no TenantSchema row in
         # the test DB), which is fine — we're checking the BASE_SYSTEM_PROMPT
         # portion is included end-to-end.
-        prompt = await _build_system_prompt(workspace, user)
+        # _build_system_prompt returns a (stable, volatile) split (arch #254).
+        prompt = "\n".join(await _build_system_prompt(workspace, user))
         assert "## Metadata vs. Verified Counts" in prompt
         assert "materialized_row_count" in prompt
         assert "NEVER report" in prompt

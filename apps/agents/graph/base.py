@@ -32,7 +32,7 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.state import AgentState
+from apps.agents.graph.state import AgentState, prune_messages
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.tools.artifact_tool import create_artifact_tools
@@ -109,6 +109,19 @@ INJECTED_TOOL_PARAMS = frozenset({"workspace_id", "user_id", "thread_id", "tool_
 # Configuration constants
 DEFAULT_MAX_TOKENS = 4096
 SCHEMA_CONTEXT_CHAR_BUDGET = 6000
+
+# Anthropic prompt-caching breakpoint (arch #254, finding 02#3).
+#
+# Default 5-minute ephemeral TTL — breaks even at ~2 reads (write is 1.25x, read
+# ~0.1x), which a single K-tool agent turn (K+1 LLM calls sharing one prefix)
+# clears immediately. A 1-hour TTL ({"type": "ephemeral", "ttl": "1h"}) costs 2x
+# to write and needs ~3 reads to pay off; switch to it only if traffic is bursty
+# with multi-minute idle gaps between turns. langchain-anthropic renders the
+# request as tools -> system -> messages, so a breakpoint on the LAST system
+# block caches the tool schemas AND the frozen system prefix together; a second
+# breakpoint passed as the ``cache_control`` kwarg to ``ainvoke`` lands on the
+# most-recent message block, caching the replayed conversation history.
+PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 
 # Circuit-breaker thresholds for the escalation node. If the last N tool
 # messages all carry one of these error codes, the agent has drifted from
@@ -561,6 +574,27 @@ def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
     return result
 
 
+def _build_cached_system_message(stable: str, volatile: str) -> SystemMessage:
+    """Build a list-content SystemMessage with an Anthropic cache breakpoint.
+
+    The stable prefix gets a ``cache_control`` breakpoint as its last block;
+    because langchain-anthropic renders ``tools -> system -> messages``, that one
+    breakpoint caches the tool schemas AND the frozen system prefix together
+    (arch #254, finding 02#3). The volatile suffix (tenant context + schema
+    availability with row counts/timestamps) follows WITHOUT a breakpoint, so a
+    new materialization changes only post-breakpoint bytes and leaves the cached
+    prefix intact.
+
+    list-content SystemMessages are passed through to the Anthropic ``system``
+    field with their ``cache_control`` preserved (langchain_anthropic
+    ``_format_messages``).
+    """
+    blocks: list[dict] = [{"type": "text", "text": stable, "cache_control": PROMPT_CACHE_CONTROL}]
+    if volatile and volatile.strip():
+        blocks.append({"type": "text", "text": volatile})
+    return SystemMessage(content=blocks)
+
+
 def _make_injecting_tool_node(
     base_tool_node: ToolNode,
     injections: dict[str, str],
@@ -668,11 +702,14 @@ async def build_agent_graph(
     llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
-    # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, user, interactive=interactive)
+    # --- Build system prompt (stable cacheable prefix + volatile suffix) ---
+    stable_prompt, volatile_prompt = await _build_system_prompt(
+        workspace, user, interactive=interactive
+    )
     logger.debug(
-        "System prompt assembled: %d characters for workspace %s",
-        len(system_prompt),
+        "System prompt assembled: %d stable + %d volatile chars for workspace %s",
+        len(stable_prompt),
+        len(volatile_prompt),
         workspace.id,
     )
 
@@ -688,10 +725,22 @@ async def build_agent_graph(
 
         This node prepends the system prompt to the messages and invokes
         the LLM. The LLM may respond with text, tool calls, or both.
+
+        History is bounded with ``prune_messages`` so per-turn input tokens
+        don't grow without limit as a thread ages (arch #254, finding 01#3 —
+        query tool results up to 500 rows of JSON were otherwise replayed
+        verbatim on every later call). Anthropic prompt-caching breakpoints are
+        attached so the static prefix and the (now bounded) history are billed
+        at cache-read rates (finding 02#3).
         """
         state_messages = list(state["messages"])
         # Filter out any prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
+
+        # Bound replayed history. recursion_limit caps tool iterations, not the
+        # conversation length; without this the full message list (including
+        # large query results) is re-sent on every LLM call (01#3).
+        state_messages = prune_messages(state_messages)
 
         # Defensive guard: ensure every AIMessage with tool_calls is followed
         # by matching ToolMessages. If not, inject synthetic error ToolMessages
@@ -724,8 +773,10 @@ async def build_agent_graph(
                         )
                         answered_ids.add(tc_id)
 
-        messages = [SystemMessage(content=system_prompt), *repaired]
-        response = await llm_with_tools.ainvoke(messages)
+        messages = [_build_cached_system_message(stable_prompt, volatile_prompt), *repaired]
+        # The cache_control kwarg lands on the last eligible message block,
+        # caching the (pruned) conversation-history prefix (arch #254, 02#3).
+        response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
@@ -864,23 +915,38 @@ def _build_tools(
     return tools
 
 
-async def _build_system_prompt(workspace: Workspace, user, interactive: bool = True) -> str:
+async def _build_system_prompt(
+    workspace: Workspace, user, interactive: bool = True
+) -> tuple[str, str]:
     """
-    Assemble the complete system prompt for a workspace.
+    Assemble the system prompt for a workspace as a (stable, volatile) split.
 
     The prompt is built from:
     1. BASE_SYSTEM_PROMPT: Core agent behavior and formatting
     2. ARTIFACT_PROMPT_ADDITION: Instructions for creating artifacts
     3. Workspace system prompt: Workspace-specific instructions
-    4. Knowledge retriever output: Metrics, rules, learnings
+    4. Knowledge retriever output: Metrics, rules, learnings (budget-capped)
     5. Tenant context: Tenant name, provider, query config (single-tenant only)
+    6. Data Availability: schema state, table list, row counts, timestamps
+
+    Sections 1–4 are *stable* — they change rarely (a workspace-instruction or
+    knowledge edit invalidates the per-process cache key below). Sections 5–6
+    are *volatile*: the ``## Data Availability`` block embeds row counts and the
+    last-materialized timestamp, which change on every materialization.
+
+    Returning the two halves separately lets the agent node place an Anthropic
+    ``cache_control`` breakpoint on the stable prefix (so the large frozen base
+    prompt + ~15 tool schemas cache together and are billed at cache-read rates)
+    while the volatile block sits AFTER the breakpoint — a new materialization
+    no longer rewrites the cached prefix bytes and defeats every cache hit
+    (arch #254, finding 02#3, prefix-stability half).
 
     Args:
         workspace: The Workspace model instance.
         user: The User model instance (used to scope tenant metadata lookup).
 
     Returns:
-        Complete system prompt string.
+        ``(stable_prefix, volatile_suffix)``. ``volatile_suffix`` may be "".
     """
     cache_key = _system_prompt_cache_key(workspace, user, interactive)
     cached = _system_prompt_cache.get(cache_key)
@@ -889,16 +955,22 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
         if time.monotonic() - timestamp < _SYSTEM_PROMPT_TTL:
             return value
 
-    sections = [BASE_SYSTEM_PROMPT]
-    sections.append(ARTIFACT_PROMPT_ADDITION)
+    # --- Stable sections (cacheable prefix) ---
+    stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
 
     if workspace.system_prompt:
-        sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
+        stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
 
     retriever = KnowledgeRetriever(workspace)
     knowledge_context = await retriever.retrieve()
     if knowledge_context:
-        sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
+        # The retriever already emits a top-level ``## Knowledge Base`` heading;
+        # don't wrap it in a second one (arch #254, finding 01#4 — duplicated
+        # nested heading).
+        stable_sections.append(f"\n{knowledge_context}\n")
+
+    # --- Volatile sections (after the cache breakpoint) ---
+    volatile_sections: list[str] = []
 
     tenant_count = await workspace.tenants.acount()
 
@@ -907,7 +979,7 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
         pipeline_config = get_registry().get_by_provider(tenant.provider)
         pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
 
-        sections.append(f"""
+        volatile_sections.append(f"""
 ## Tenant Context
 
 - Tenant: {tenant.canonical_name} ({tenant.external_id})
@@ -924,9 +996,9 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
         # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
         schema_context = await _fetch_schema_context(tenant, user, interactive)
-        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+        volatile_sections.append(f"\n## Data Availability\n\n{schema_context}\n")
     elif tenant_count > 1:
-        sections.append("""
+        volatile_sections.append("""
 ## Query Configuration
 
 - Maximum rows per query: 500
@@ -935,9 +1007,11 @@ When results are truncated, suggest adding filters or using aggregations to redu
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
         schema_context = await _fetch_multi_tenant_schema_context(workspace, user, interactive)
-        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+        volatile_sections.append(f"\n## Data Availability\n\n{schema_context}\n")
 
-    result = "\n".join(sections)
+    stable = "\n".join(stable_sections)
+    volatile = "\n".join(volatile_sections)
+    result = (stable, volatile)
 
     _system_prompt_cache[cache_key] = (result, time.monotonic())
 
