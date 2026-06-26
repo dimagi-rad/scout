@@ -46,6 +46,11 @@ env:
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
+    # Shared ElastiCache endpoint (infra/scout-stack.yml RedisEndpoint output).
+    # Backs the default Django cache so chat rate limiting + throttles are
+    # consistent across the 4 uvicorn workers instead of per-process LocMemCache
+    # (arch #254, finding 06#2). Unset -> falls back to LocMemCache.
+    - REDIS_URL
     - DJANGO_SECRET_KEY
     - DB_CREDENTIAL_KEY
     - ANTHROPIC_API_KEY

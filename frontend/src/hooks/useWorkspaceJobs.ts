@@ -83,14 +83,42 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
     prevThreadIdsRef.current = new Set()
     setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
     let cancelled = false
-    const interval = setInterval(() => {
-      if (!cancelled) void fetchOnce()
-    }, POLL_INTERVAL_MS)
+    let interval: ReturnType<typeof setInterval> | null = null
+
+    // Gate polling on tab visibility (arch #254, 05#6). A hidden tab doesn't
+    // need live job status, and each poll triggers an API-side janitor
+    // reconciliation; pausing while hidden removes that idle load and resumes
+    // (with an immediate catch-up fetch) when the tab is shown again.
+    const startPolling = () => {
+      if (interval !== null) return
+      interval = setInterval(() => {
+        if (!cancelled) void fetchOnce()
+      }, POLL_INTERVAL_MS)
+    }
+    const stopPolling = () => {
+      if (interval !== null) {
+        clearInterval(interval)
+        interval = null
+      }
+    }
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        if (!cancelled) void fetchOnce() // immediate catch-up
+        startPolling()
+      } else {
+        stopPolling()
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility)
     // Fire immediately on mount so the UI populates without waiting one tick.
     void fetchOnce()
+    if (document.visibilityState === "visible") startPolling()
+
     return () => {
       cancelled = true
-      clearInterval(interval)
+      stopPolling()
+      document.removeEventListener("visibilitychange", handleVisibility)
     }
   }, [workspaceId, fetchOnce])
 

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
 from procrastinate.manager import JobManager
@@ -789,6 +790,31 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     assert len(body["jobs"]) == 1
     assert body["jobs"][0]["thread_job_id"] == str(tj.id)
     assert body["jobs"][0]["state"] == "pending"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_throttles_reconcile_across_rapid_polls():
+    """The stale-job reconcile sweep is throttled per-workspace so a 3s poll
+    loop doesn't run ~5 reconcile DB queries on every tick (arch #254, 05#6).
+    The first poll reconciles; a rapid second poll skips the sweep.
+    """
+    cache.clear()
+    _user, ws, _tj = await _make_stale_pending_job("throttle@b.c", 50009)
+
+    with patch(
+        "apps.workspaces.api.jobs_views.workspace_tasks.reconcile_stale_thread_job",
+        new=AsyncMock(return_value=None),
+    ) as reconcile_mock:
+        client = AsyncClient()
+        await client.alogin(email="throttle@b.c", password="x")
+        await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+        first_calls = reconcile_mock.await_count
+        await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+        second_calls = reconcile_mock.await_count
+
+    assert first_calls >= 1, "first poll should reconcile the stale job"
+    assert second_calls == first_calls, "rapid second poll must skip the reconcile sweep"
 
 
 # ---------------------------------------------------------------------------

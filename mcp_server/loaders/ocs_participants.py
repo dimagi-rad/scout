@@ -5,8 +5,10 @@ dimagi/open-chat-studio#3334) to fetch rich participant records — including
 ``name`` and per-chatbot custom ``data`` — rather than deriving a minimal
 participant list from the session endpoint.
 
-The endpoint is cursor-paginated (``{"next": ..., "previous": ...,
-"results": [...]}``) and returns ``ParticipantDetail`` objects shaped as::
+The endpoint is cursor-paginated (``{"count": ..., "next": ..., "previous":
+..., "results": [...]}``) — the first page now carries a ``count`` total (arch
+#254, finding 13#1), so participant progress is determinate. It returns
+``ParticipantDetail`` objects shaped as::
 
     {
         "id": "<participant public uuid>",
@@ -37,7 +39,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.ocs_base import OCSBaseLoader
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +53,20 @@ class OCSParticipantLoader(OCSBaseLoader):
         # participant's per-chatbot ``data`` array are limited to it. The OCS
         # ParticipantView filters on the ``experiment`` query param; ``chatbot``
         # is silently ignored and leaks the whole team roster (arch #245).
-        params = {"experiment": self.experiment_id}
+        #
+        # Request the max page size to cut list-request volume ~10-15x versus the
+        # OCS default of 100 (arch #254, finding 13#1).
+        params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         total = 0
-        # Cursor pagination — no ``count`` field, so totals are always None.
-        for raw_page, _page_total in self._paginate(url, params=params):
+        # Upstream now provides a first-page ``count`` (arch #254, finding 13#1);
+        # ``_paginate`` surfaces it on the first tuple. Pass it through so
+        # participant progress is determinate instead of always indeterminate.
+        for raw_page, page_total in self._paginate(url, params=params):
             rows = [_map_participant(item) for item in raw_page]
             if not rows:
                 continue
             total += len(rows)
-            yield rows, None
+            yield rows, page_total
         logger.info(
             "Fetched %d participants for experiment %s",
             total,

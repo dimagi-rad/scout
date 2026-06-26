@@ -28,6 +28,10 @@ export function KnowledgePage() {
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const knowledgeFilter = useAppStore((s) => s.knowledgeFilter)
   const knowledgeSearch = useAppStore((s) => s.knowledgeSearch)
+  const knowledgePagination = useAppStore((s) => s.knowledgePagination)
+  // Surface server-side pagination so items beyond page 1 are reachable
+  // (arch #254, 05#7 — the backend now paginates in the DB query).
+  const [page, setPage] = useState(1)
   const {
     fetchKnowledge,
     createKnowledge,
@@ -47,13 +51,19 @@ export function KnowledgePage() {
 
   const isNew = location.pathname.endsWith("/new")
 
+  // Reset to the first page whenever the filter or search changes.
+  useEffect(() => {
+    setPage(1)
+  }, [knowledgeFilter, knowledgeSearch, activeDomainId])
+
   useEffect(() => {
     if (!activeDomainId) return
     fetchKnowledge({
       type: knowledgeFilter ?? undefined,
       search: knowledgeSearch || undefined,
+      page,
     })
-  }, [activeDomainId, knowledgeFilter, knowledgeSearch, fetchKnowledge])
+  }, [activeDomainId, knowledgeFilter, knowledgeSearch, page, fetchKnowledge])
 
   useEffect(() => {
     if (isNew) {
@@ -197,6 +207,43 @@ export function KnowledgePage() {
           onDelete={handleDelete}
         />
       )}
+
+      {/* Pagination controls (arch #254, 05#7): without these, items beyond the
+          first page were unreachable. */}
+      {knowledgeStatus === "loaded" &&
+        knowledgePagination &&
+        knowledgePagination.total_pages > 1 && (
+          <div
+            className="mt-4 flex items-center justify-between text-sm text-muted-foreground"
+            data-testid="knowledge-pagination"
+          >
+            <span data-testid="knowledge-pagination-status">
+              Page {knowledgePagination.page} of {knowledgePagination.total_pages}
+              {" · "}
+              {knowledgePagination.total_count} items
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="knowledge-page-prev"
+                disabled={!knowledgePagination.has_previous}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="knowledge-page-next"
+                disabled={!knowledgePagination.has_next}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
 
       {/* Create/Edit Form Dialog */}
       <KnowledgeForm
