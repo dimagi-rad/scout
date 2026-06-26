@@ -3,7 +3,9 @@
 import logging
 
 from allauth.account.models import EmailAddress
+from allauth.socialaccount.models import SocialAccount
 from asgiref.sync import async_to_sync
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -16,6 +18,57 @@ from apps.users.services.tenant_resolution import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _trusted_email_providers() -> set[str]:
+    """allauth provider ids we trust to have verified the email upstream.
+
+    Derived from ``SOCIALACCOUNT_PROVIDERS[<id>]["VERIFIED_EMAIL"] is True``.
+    These are the Dimagi-operated IdPs (CommCare HQ, CommCare Connect, OCS) whose
+    ``extract_email_addresses`` returns a verified ``EmailAddress`` on login.
+    """
+    providers = getattr(settings, "SOCIALACCOUNT_PROVIDERS", {}) or {}
+    return {pid for pid, cfg in providers.items() if (cfg or {}).get("VERIFIED_EMAIL") is True}
+
+
+def _canonical_provably_owns_email(canonical, email: str) -> bool:
+    """Whether ``canonical`` has *proven* it owns ``email`` (01#8).
+
+    Auto-merge folds the incoming OAuth identity INTO ``canonical``, so we must
+    be sure ``canonical`` is the legitimate owner of the email — otherwise an
+    attacker who ``/signup``'d with a victim's email (signup_view bypasses
+    allauth, creating no ``EmailAddress``) could absorb the victim's OAuth
+    account on the victim's next login (closed by commit 1dc1d58).
+
+    Ownership is proven by EITHER:
+
+    1. a verified allauth ``EmailAddress`` for that email (the OAuth->OAuth case:
+       a prior trusted-provider login persisted one), OR
+    2. a ``SocialAccount`` on ``canonical`` from a trusted provider whose login
+       asserted this email — same upstream-verified signal, robust to the case
+       where the verified ``EmailAddress`` row was never persisted/got out of
+       sync.
+
+    SEAM (01#8 / #258): a canonical that owns the email ONLY via a password
+    ``/signup`` satisfies NEITHER and is (correctly) refused here. Making the
+    password->OAuth path auto-link safely needs allauth-side email verification
+    at signup — that perimeter is owned by issue #258. See the PR body.
+    """
+    if EmailAddress.objects.filter(
+        user=canonical,
+        email__iexact=email,
+        verified=True,
+    ).exists():
+        return True
+
+    trusted = _trusted_email_providers()
+    if not trusted:
+        return False
+    for account in SocialAccount.objects.filter(user=canonical, provider__in=trusted):
+        account_email = (account.extra_data or {}).get("email") or ""
+        if account_email.strip().lower() == email.strip().lower():
+            return True
+    return False
 
 
 @receiver(post_save, sender="users.TenantMembership")
@@ -101,14 +154,10 @@ def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):
         user.save(update_fields=["email"])
         return
 
-    canonical_owns_email = EmailAddress.objects.filter(
-        user=canonical,
-        email__iexact=new_email,
-        verified=True,
-    ).exists()
-    if not canonical_owns_email:
+    if not _canonical_provably_owns_email(canonical, new_email):
         logger.warning(
-            "Refusing auto-merge: canonical user=%s lacks verified EmailAddress for %s",
+            "Refusing auto-merge: canonical user=%s has not proven ownership of %s "
+            "(no verified EmailAddress and no trusted-provider SocialAccount)",
             canonical.pk,
             new_email,
         )

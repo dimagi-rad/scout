@@ -102,3 +102,16 @@ class Command(BaseCommand):
             f"workspace(repoint/conflict)={report.workspace_membership_repointed}/"
             f"{report.workspace_membership_conflict_merged}"
         )
+        # 11#4: make any privilege the discarded duplicate held visible at the
+        # y/N prompt. The merge NEVER applies these to the canonical (no silent
+        # escalation); we surface them so the operator knows a privileged dev
+        # artifact is being deleted and can act on it deliberately if needed.
+        if report.discarded_privileges:
+            flags = ", ".join(sorted(report.discarded_privileges))
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  WARNING: duplicate User#{duplicate.pk} holds privilege flags the "
+                    f"canonical lacks: {flags}. These are NOT propagated to the canonical "
+                    f"(no escalation). The privileged duplicate will be deleted."
+                )
+            )
