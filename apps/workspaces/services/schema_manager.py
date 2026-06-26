@@ -721,8 +721,9 @@ class SchemaManager:
         """Create a read-only PostgreSQL role for a schema.
 
         Idempotent — checks pg_roles before creating. Grants USAGE on the
-        schema and sets ALTER DEFAULT PRIVILEGES so tables created later by
-        the materializer are automatically readable.
+        schema, grants SELECT on existing tables, and sets ALTER DEFAULT
+        PRIVILEGES so tables created later by both the materializer and dbt
+        are automatically readable.
 
         Also creates the low-privilege dbt role (issue #241) alongside the
         read-only role so every provisioned schema has its confinement role
@@ -749,6 +750,12 @@ class SchemaManager:
             )
         )
         cursor.execute(
+            psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
+        cursor.execute(
             psycopg.sql.SQL(
                 "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
                 "GRANT SELECT ON TABLES TO {}"
@@ -759,6 +766,16 @@ class SchemaManager:
         )
         # Confinement role for the dbt transform phase (issue #241).
         self._create_dbt_role(cursor, schema_name)
+        cursor.execute(
+            psycopg.sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
+                "GRANT SELECT ON TABLES TO {}"
+            ).format(
+                psycopg.sql.Identifier(dbt_role_name(schema_name)),
+                psycopg.sql.Identifier(schema_name),
+                psycopg.sql.Identifier(role_name),
+            )
+        )
 
     def _revoke_stale_view_role_grants(
         self, cursor, role_name: str, current_schemas: set[str]

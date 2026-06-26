@@ -33,6 +33,7 @@ from apps.workspaces.services.schema_manager import (
     SchemaManager,
     dbt_role_name,
     get_managed_db_connection,
+    readonly_role_name,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -170,6 +171,27 @@ def test_generated_staging_model_resolves_raw_cases(confinement_schemas, setting
     assert run.status == TransformationRunStatus.COMPLETED, run.error_message
     ar = run.asset_runs.get(asset__name="stg_case_patient")
     assert ar.status == "success", ar.logs
+
+    conn = get_managed_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            psycopg.sql.SQL("SET ROLE {}").format(
+                psycopg.sql.Identifier(readonly_role_name(attacker_schema))
+            )
+        )
+        cur.execute(
+            psycopg.sql.SQL("SET search_path TO {}").format(
+                psycopg.sql.Identifier(attacker_schema)
+            )
+        )
+        cur.execute("SELECT count(*) FROM stg_case_patient")
+        assert cur.fetchone()[0] == 1
+    finally:
+        conn.rollback()
+        cur.execute("RESET ROLE")
+        cur.close()
+        conn.close()
 
 
 @pytest.mark.django_db(transaction=True)
