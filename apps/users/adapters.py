@@ -78,20 +78,25 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         is created or login session established. Configured by the
         SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS setting (provider id -> list of
         allowed email domains). A provider with no entry (or an empty list) is
-        unrestricted; a login that returns no email is allowed regardless.
+        unrestricted.
+
+        For a provider WITH a non-empty allow-list, a login that returns no email
+        is rejected (arch #258, finding 07#2): a missing email must not silently
+        bypass a configured domain restriction. Providers Scout deliberately
+        leaves open (Connect, OCS) carry no allow-list, so their no-email logins
+        are unaffected by this gate.
         """
         provider = sociallogin.account.provider
         allowed = settings.SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS.get(provider) or []
         if not allowed:
             return
 
-        email = (sociallogin.user.email or "").strip().lower()
-        if not email:
-            return
-
-        domain = email.rpartition("@")[2]
         allowed_lower = [d.lower() for d in allowed]
-        if domain in allowed_lower:
+        email = (sociallogin.user.email or "").strip().lower()
+        # A configured allow-list means this provider is restricted; a no-email
+        # login can't be confirmed to satisfy it, so reject rather than bypass.
+        domain = email.rpartition("@")[2] if email else ""
+        if domain and domain in allowed_lower:
             return
 
         provider_class = providers_registry.get_class(provider)

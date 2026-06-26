@@ -135,10 +135,11 @@ class TestDjangoAllauthConfiguration:
         assert settings.SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT is True
         assert settings.SOCIALACCOUNT_EMAIL_VERIFICATION == "none"
 
-    def test_socialaccount_login_on_get_enabled(self, settings):
-        """SOCIALACCOUNT_LOGIN_ON_GET=True skips the unnecessary allauth confirmation
-        page. Login CSRF risk is mitigated by the OAuth provider's own authorize screen."""
-        assert settings.SOCIALACCOUNT_LOGIN_ON_GET is True
+    def test_socialaccount_login_on_get_disabled(self, settings):
+        """SOCIALACCOUNT_LOGIN_ON_GET=False requires a POST (with CSRF token) to
+        initiate OAuth, closing login-CSRF on GET (arch #258, finding 14#2).
+        allauth renders a short "Continue with <provider>" interstitial on GET."""
+        assert settings.SOCIALACCOUNT_LOGIN_ON_GET is False
 
     def test_site_id_configured(self, settings):
         """Test that SITE_ID is set for django.contrib.sites."""
