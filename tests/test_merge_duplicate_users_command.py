@@ -131,6 +131,47 @@ def test_prompt_rejection_aborts_without_changes():
 
 
 @pytest.mark.django_db
+def test_dry_run_surfaces_discarded_privilege_at_prompt():
+    """11#4: when the duplicate carries privilege flags the canonical lacks, the
+    printed plan must WARN that a privileged duplicate is being discarded (and
+    that the flags are not propagated) — making the escalation risk visible
+    before the y/N confirmation."""
+    # Canonical is the older, password-holding row (selected as canonical).
+    older = User.objects.create(email="x@y.com", username="x1")
+    older.set_password("pw")
+    older.save()
+    # Duplicate is a stale createsuperuser-style artifact.
+    User.objects.create(email="X@y.com", username="x2", is_staff=True, is_superuser=True)
+    out = StringIO()
+
+    call_command("merge_duplicate_users", "--dry-run", stdout=out)
+
+    output = out.getvalue()
+    assert "WARNING" in output
+    assert "is_staff" in output
+    assert "is_superuser" in output
+    assert "not propagated" in output.lower()
+
+
+@pytest.mark.django_db
+def test_yes_flag_merge_does_not_escalate_canonical_privileges():
+    """11#4 end-to-end: merging a privileged duplicate via the command must not
+    promote the canonical to staff/superuser."""
+    older = User.objects.create(email="x@y.com", username="x1")
+    older.set_password("pw")
+    older.save()
+    newer = User.objects.create(email="X@y.com", username="x2", is_staff=True, is_superuser=True)
+    out = StringIO()
+
+    call_command("merge_duplicate_users", "--yes", stdout=out)
+
+    older.refresh_from_db()
+    assert older.is_staff is False
+    assert older.is_superuser is False
+    assert not User.objects.filter(pk=newer.pk).exists()
+
+
+@pytest.mark.django_db
 def test_failure_in_one_group_does_not_block_others():
     # Group A — will fail
     User.objects.create(email="a@y.com", username="a1")

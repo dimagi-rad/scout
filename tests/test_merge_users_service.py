@@ -63,8 +63,14 @@ def test_field_level_merge_copies_password_from_duplicate():
 
 
 @pytest.mark.django_db
-def test_field_level_merge_ors_staff_and_superuser_flags():
+def test_field_level_merge_never_escalates_staff_or_superuser_from_duplicate():
+    """SECURITY (11#4): merging a privileged duplicate (e.g. a stale
+    createsuperuser dev artifact) into a normal canonical must NOT silently
+    promote the canonical. The canonical's own flags are kept; the discarded
+    duplicate's flags are never OR-propagated."""
     canonical = User.objects.create(email="canon@y.com", username="canon")
+    assert canonical.is_staff is False
+    assert canonical.is_superuser is False
     duplicate = User.objects.create(
         email="dup@y.com",
         username="dup",
@@ -72,11 +78,34 @@ def test_field_level_merge_ors_staff_and_superuser_flags():
         is_superuser=True,
     )
 
-    merge_users(canonical=canonical, duplicate=duplicate)
+    report = merge_users(canonical=canonical, duplicate=duplicate)
+
+    canonical.refresh_from_db()
+    # No escalation: canonical stays exactly as privileged as it was.
+    assert canonical.is_staff is False
+    assert canonical.is_superuser is False
+    assert "is_staff" not in report.field_changes
+    assert "is_superuser" not in report.field_changes
+    # The discarded privilege is surfaced (so the operator/log can see it) but
+    # NOT applied.
+    assert report.discarded_privileges == {"is_staff", "is_superuser"}
+
+
+@pytest.mark.django_db
+def test_field_level_merge_keeps_canonical_existing_privileges():
+    """A canonical that is already staff/superuser stays so regardless of the
+    duplicate; no privilege is dropped or surfaced as discarded."""
+    canonical = User.objects.create(
+        email="canon@y.com", username="canon", is_staff=True, is_superuser=True
+    )
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+
+    report = merge_users(canonical=canonical, duplicate=duplicate)
 
     canonical.refresh_from_db()
     assert canonical.is_staff is True
     assert canonical.is_superuser is True
+    assert report.discarded_privileges == set()
 
 
 @pytest.mark.django_db
@@ -527,3 +556,115 @@ def test_merge_conflict_delete_keeps_canonical_tenant_metadata():
     # dangling rows pointing at the deleted membership remain.
     assert TenantMetadata.objects.count() == 1
     assert TenantMetadata.objects.filter(tenant_membership=dup_tm.id).count() == 0
+
+
+@pytest.mark.django_db
+def test_merge_conflict_migrates_duplicate_metadata_when_canonical_has_none():
+    """04#1: both users belong to the same tenant, but only the DUPLICATE's
+    membership carries discovered TenantMetadata. The conflict path must migrate
+    that metadata onto the canonical's bare membership BEFORE deleting the
+    duplicate's row — otherwise the only copy of the discovered metadata is
+    cascade-deleted."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="ocs", external_id="shared1", canonical_name="Shared")
+
+    # Canonical membership has NO metadata.
+    canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared)
+    # Duplicate membership carries the only discovered metadata.
+    dup_tm = TenantMembership.objects.create(user=duplicate, tenant=shared)
+    TenantMetadata.objects.create(
+        tenant_membership=dup_tm,
+        metadata={"team_slug": "alpha", "discovered": True},
+        discovered_at=None,
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    # The duplicate's membership is gone (conflict-deleted) but its metadata was
+    # migrated onto the canonical's surviving membership — not cascade-deleted.
+    surviving = TenantMembership.objects.get(user=canonical, tenant=shared)
+    assert surviving.id == canon_tm.id
+    md = TenantMetadata.objects.get(tenant_membership=surviving)
+    assert md.metadata == {"team_slug": "alpha", "discovered": True}
+    assert TenantMetadata.objects.count() == 1
+    assert not TenantMembership.objects.filter(pk=dup_tm.pk).exists()
+
+
+@pytest.mark.django_db
+def test_merge_conflict_migrates_duplicate_connection_when_canonical_unwired():
+    """04#1: on a tenant both users share, only the DUPLICATE's membership is
+    wired to a connection. The conflict path must carry that connection wiring
+    onto the canonical's unwired membership so it is not left connection=None."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="ocs", external_id="shared2", canonical_name="Shared2")
+
+    # Canonical's membership is unwired (connection=None).
+    canon_tm = TenantMembership.objects.create(user=canonical, tenant=shared, connection=None)
+    # Duplicate's membership is wired to its OAuth connection.
+    dup_conn = TenantConnection.objects.create(
+        user=duplicate,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+    )
+    TenantMembership.objects.create(user=duplicate, tenant=shared, connection=dup_conn)
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    surviving = TenantMembership.objects.get(user=canonical, tenant=shared)
+    assert surviving.id == canon_tm.id
+    # The connection moved to canonical (via _merge_tenant_connections) AND the
+    # surviving membership is now wired to it — not left connection=None.
+    surviving.refresh_from_db()
+    assert surviving.connection_id is not None
+    assert surviving.connection.user_id == canonical.pk
+
+
+@pytest.mark.django_db
+def test_merge_conflict_migrates_provider_metadata_when_canonical_empty():
+    """04#1: the JSON provider_metadata (team_slug/team_name) on the duplicate's
+    membership is preserved onto the canonical's membership when the canonical's
+    is empty."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="ocs", external_id="shared3", canonical_name="Shared3")
+
+    TenantMembership.objects.create(user=canonical, tenant=shared, provider_metadata={})
+    TenantMembership.objects.create(
+        user=duplicate,
+        tenant=shared,
+        provider_metadata={"team_slug": "beta", "team_name": "Beta Team"},
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    surviving = TenantMembership.objects.get(user=canonical, tenant=shared)
+    assert surviving.provider_metadata == {"team_slug": "beta", "team_name": "Beta Team"}
+
+
+@pytest.mark.django_db
+def test_merge_conflict_does_not_clobber_canonical_metadata():
+    """04#1 guardrail: when the canonical membership ALREADY has metadata, the
+    duplicate's conflicting metadata is discarded (cascade) — the canonical's is
+    never overwritten."""
+    canonical = User.objects.create(email="canon@y.com", username="canon")
+    duplicate = User.objects.create(email="dup@y.com", username="dup")
+    shared = Tenant.objects.create(provider="ocs", external_id="shared4", canonical_name="Shared4")
+
+    canon_tm = TenantMembership.objects.create(
+        user=canonical, tenant=shared, provider_metadata={"team_slug": "canon"}
+    )
+    TenantMetadata.objects.create(tenant_membership=canon_tm, metadata={"owner": "canonical"})
+    dup_tm = TenantMembership.objects.create(
+        user=duplicate, tenant=shared, provider_metadata={"team_slug": "dup"}
+    )
+    TenantMetadata.objects.create(tenant_membership=dup_tm, metadata={"owner": "duplicate"})
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    surviving = TenantMembership.objects.get(user=canonical, tenant=shared)
+    assert surviving.provider_metadata == {"team_slug": "canon"}
+    md = TenantMetadata.objects.get(tenant_membership=surviving)
+    assert md.metadata == {"owner": "canonical"}
+    assert TenantMetadata.objects.count() == 1
