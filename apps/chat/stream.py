@@ -391,7 +391,10 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
     except TimeoutError as exc:
-        logger.warning("Agent execution timed out after %ds", AGENT_TIMEOUT_SECONDS)
+        ref = _error_ref(exc)
+        logger.warning(
+            "Agent execution timed out after %ds [ref=%s]", AGENT_TIMEOUT_SECONDS, ref
+        )
         if reasoning_started:
             yield _sse({"type": "reasoning-end", "id": reasoning_id})
             reasoning_started = False
@@ -412,8 +415,6 @@ async def langgraph_to_ui_stream(
         # timed-out run MUST be distinguishable from a successful one (06#4).
         # Without this the apology above was just message text followed by a
         # normal finishReason 'stop', indistinguishable from success.
-        ref = _error_ref(exc)
-        logger.warning("Agent stream timed out [ref=%s]", ref)
         yield _sse(
             {
                 "type": "error",
