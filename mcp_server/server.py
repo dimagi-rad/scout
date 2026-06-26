@@ -27,6 +27,8 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+import uvicorn
+from django.conf import settings
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -46,6 +48,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import materialize_workspace
+from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
@@ -1022,11 +1025,6 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
     check then fires ahead of any MCP session/tool dispatch. DNS-rebinding Host
     protection stays on as a second layer.
     """
-    import uvicorn
-    from django.conf import settings
-
-    from mcp_server.auth import SharedSecretMiddleware
-
     mcp.settings.host = args.host
     mcp.settings.port = args.port
     # Allow internal Docker network hostname in addition to loopback defaults.

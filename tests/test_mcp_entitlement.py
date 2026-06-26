@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
@@ -74,8 +75,6 @@ async def test_run_materialization_denies_empty_user_id():
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
     await TenantMembership.objects.acreate(tenant=tenant, user=user)
-    from apps.chat.models import Thread
-
     thread = await Thread.objects.acreate(workspace=ws, user=user)
 
     result = await run_materialization(
