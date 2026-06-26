@@ -80,7 +80,11 @@ urlpatterns = [
     path("widget.js", widget_js_view, name="widget-js"),
     path("health/", health_check, name="health_check"),
     path("admin/", admin.site.urls),
-    path("accounts/", include("allauth.urls")),
+    # Narrowed allauth surface: only the OAuth provider login/callback routes the
+    # SPA needs. The stock allauth HTML auth perimeter (open self-registration,
+    # password reset, email management) is deliberately NOT mounted — see
+    # apps/users/allauth_urls.py (arch #258, finding 13#9).
+    path("accounts/", include("apps.users.allauth_urls")),
     # Workspace-scoped content APIs
     path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(

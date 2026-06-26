@@ -218,8 +218,12 @@ ACCOUNT_EMAIL_VERIFICATION = "optional"
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = env("ACCOUNT_DEFAULT_HTTP_PROTOCOL", default="http")
 
 # Social account settings
+# Require POST (not GET) to initiate OAuth, so /accounts/<provider>/login/ can't
+# be triggered by a forged GET (login CSRF). allauth renders a short CSRF-token
+# "Continue with <provider>" interstitial on GET that POSTs to the same URL.
+# (arch #258, finding 14#2.)
+SOCIALACCOUNT_LOGIN_ON_GET = False
 # Auto-create Django user on first OAuth login
-SOCIALACCOUNT_LOGIN_ON_GET = True
 SOCIALACCOUNT_AUTO_SIGNUP = True
 # Don't require email for OAuth signups (Connect doesn't provide one)
 SOCIALACCOUNT_EMAIL_REQUIRED = False
@@ -237,6 +241,17 @@ SOCIALACCOUNT_ADAPTER = "apps.users.adapters.EncryptingSocialAccountAdapter"
 # Redirect URLs after login/logout
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/"
+
+# Email backend (arch #258, finding 14#0).
+# Django's default is the SMTP backend pointed at localhost:25; a container with
+# no local MTA would silently fail (or 500) on any send. Scout's HTML
+# password-reset / email-verification surface is no longer mounted (13#9), so no
+# email-dependent flow is reachable by default and the safe default is the
+# console backend. Override at deploy time with EMAIL_BACKEND (and the standard
+# EMAIL_HOST/EMAIL_PORT/... vars) to stand up real transactional email — see the
+# DEFAULT_FROM_EMAIL note below.
+EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="webmaster@localhost")
 
 # Provider-specific settings (credentials stored in DB via Django admin SocialApp model)
 # Configure client IDs and secrets via Django admin at /admin/socialaccount/socialapp/

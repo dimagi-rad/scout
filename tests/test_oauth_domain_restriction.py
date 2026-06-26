@@ -71,9 +71,21 @@ class TestPreSocialLoginEnforcement:
         assert "@dimagi.com" in messages[0].message
 
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
-    def test_empty_email_allowed(self, adapter):
+    def test_empty_email_blocked_for_restricted_provider(self, adapter):
+        """07#2: a provider WITH a configured allow-list must not be bypassed by
+        a login that returns no email — a missing email can't satisfy the gate."""
         request = _make_request()
         sociallogin = _make_sociallogin("commcare", "")
+        with pytest.raises(ImmediateHttpResponse):
+            adapter.pre_social_login(request, sociallogin)
+
+    @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={"commcare": ["dimagi.com"]})
+    def test_empty_email_allowed_for_unrestricted_provider(self, adapter):
+        """A provider with no allow-list (Connect/OCS) is deliberately open, so a
+        no-email login there is still allowed — the 07#2 fix must not impose a
+        new restriction on the intentionally-open providers."""
+        request = _make_request()
+        sociallogin = _make_sociallogin("commcare_connect", "")
         assert adapter.pre_social_login(request, sociallogin) is None
 
     @override_settings(SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS={})
