@@ -77,6 +77,46 @@ interface ChatMessageProps {
   onRetryDispatched?: () => void
 }
 
+interface ChatAvatarProps {
+  role: "user" | "assistant"
+}
+
+export function ChatAvatar({ role }: ChatAvatarProps) {
+  if (role === "user") {
+    return (
+      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+        <User className="w-4 h-4 text-primary-foreground" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+      <Bot className="w-4 h-4 text-primary" />
+    </div>
+  )
+}
+
+interface ChatTextPartProps {
+  role: "user" | "assistant"
+  text: string
+}
+
+export function ChatTextPart({ role, text }: ChatTextPartProps) {
+  const isUser = role === "user"
+  return (
+    <div
+      className={`rounded-lg px-4 py-2 text-sm ${
+        isUser
+          ? "bg-primary text-primary-foreground"
+          : "bg-muted prose prose-sm max-w-none"
+      }`}
+    >
+      {isUser ? text : <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>}
+    </div>
+  )
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isArtifactToolPart(part: any): boolean {
   const name = getToolName(part)
@@ -145,7 +185,7 @@ interface ToolCallPartProps {
   onRetryDispatched?: () => void
 }
 
-function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched }: ToolCallPartProps) {
+export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
@@ -319,7 +359,7 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; index: number; isLatest: boolean; isActiveMessage: boolean }) {
+export function ChatReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; index: number; isLatest: boolean; isActiveMessage: boolean }) {
   const text = part.reasoning || part.text || ""
 
   // Only auto-expand while actively streaming. On historical loads or once superseded: collapsed.
@@ -358,6 +398,28 @@ function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; 
   )
 }
 
+interface ChatArtifactButtonProps {
+  artifactId: string
+  isActive?: boolean
+  onOpen?: (artifactId: string) => void
+}
+
+export function ChatArtifactButton({ artifactId, isActive = false, onOpen }: ChatArtifactButtonProps) {
+  return (
+    <button
+      onClick={() => onOpen?.(artifactId)}
+      className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm my-1 transition-colors hover:bg-muted ${
+        isActive
+          ? "border-primary bg-primary/5"
+          : "border-border"
+      }`}
+    >
+      <FileBarChart className="h-4 w-4 text-primary" />
+      <span>View Artifact</span>
+    </button>
+  )
+}
+
 export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTerminationsByToolCallId, onRetryDispatched }: ChatMessageProps) {
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
@@ -365,35 +427,16 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
 
   return (
     <div className={`flex gap-3 ${isUser ? "justify-end" : ""}`}>
-      {!isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-          <Bot className="w-4 h-4 text-primary" />
-        </div>
-      )}
+      {!isUser && <ChatAvatar role="assistant" />}
 
       <div className={`max-w-[80%] ${isUser ? "order-first" : ""}`}>
         {message.parts.map((part, i) => {
           if (part.type === "text") {
-            return (
-              <div
-                key={i}
-                className={`rounded-lg px-4 py-2 text-sm ${
-                  isUser
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-muted prose prose-sm max-w-none"
-                }`}
-              >
-                {isUser ? (
-                  part.text
-                ) : (
-                  <Markdown remarkPlugins={[remarkGfm]}>{part.text}</Markdown>
-                )}
-              </div>
-            )
+            return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} />
           }
 
           if (part.type === "reasoning") {
-            return <ReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
+            return <ChatReasoningPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} />
           }
 
           if (isToolUIPart(part)) {
@@ -402,18 +445,12 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               if (artifactId && part.state === "output-available") {
                 const isActive = activeArtifactId === artifactId
                 return (
-                  <button
+                  <ChatArtifactButton
                     key={i}
-                    onClick={() => openArtifact(artifactId)}
-                    className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm my-1 transition-colors hover:bg-muted ${
-                      isActive
-                        ? "border-primary bg-primary/5"
-                        : "border-border"
-                    }`}
-                  >
-                    <FileBarChart className="h-4 w-4 text-primary" />
-                    <span>View Artifact</span>
-                  </button>
+                    artifactId={artifactId}
+                    isActive={isActive}
+                    onOpen={openArtifact}
+                  />
                 )
               }
             }
@@ -424,18 +461,14 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               toolCallId && recentTerminationsByToolCallId
                 ? recentTerminationsByToolCallId[toolCallId] ?? null
                 : null
-            return <ToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} />
+            return <ChatToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} />
           }
 
           return null
         })}
       </div>
 
-      {isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-          <User className="w-4 h-4 text-primary-foreground" />
-        </div>
-      )}
+      {isUser && <ChatAvatar role="user" />}
     </div>
   )
 }

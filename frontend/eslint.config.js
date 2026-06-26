@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'vite.config.ts', 'vitest.config.ts']),
+  globalIgnores(['dist', 'storybook-static', 'vite.config.ts', 'vitest.config.ts']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -36,6 +36,12 @@ export default defineConfig([
     files: ['src/**/*.test.{ts,tsx}', 'src/test/**/*.{ts,tsx}'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  {
+    files: ['.storybook/**/*.{ts,tsx}', 'src/**/*.stories.{ts,tsx}'],
+    rules: {
       'react-refresh/only-export-components': 'off',
     },
   },
