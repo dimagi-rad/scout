@@ -110,6 +110,9 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         result = run.result if isinstance(run.result, dict) else None
         if not result:
             continue
+        top_level_error = result.get("error")
+        if top_level_error:
+            failed_sources.append(("materialization", str(top_level_error)))
         for name, info in (result.get("sources") or {}).items():
             if not isinstance(info, dict):
                 continue
@@ -1270,7 +1273,10 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
+        run_error: str | None = None
         if isinstance(r.result, dict):
+            if r.result.get("error"):
+                run_error = str(r.result["error"])
             for source, info in (r.result.get("sources") or {}).items():
                 if not isinstance(info, dict):
                     continue
@@ -1307,6 +1313,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         }
         if transform_error:
             tenant_summary["transform_error"] = transform_error
+        if run_error:
+            tenant_summary["error"] = run_error
         summary.append(tenant_summary)
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
@@ -1464,14 +1472,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         )
     elif status == "failed":
         body = (
-            f"{SYSTEM_RESUME_MARKER} Materialization FAILED — every source failed, "
-            f"so there is NO loaded data for this workspace. Do NOT claim the "
-            f"materialization completed and do NOT query the workspace's tables as "
-            f"if data were present; there is nothing there. Tell the user plainly "
-            f"that the data load failed (this is commonly caused by expired or "
-            f"revoked credentials), summarize the per-source errors below, and "
-            f"suggest checking the workspace's connection before retrying. Do NOT "
-            f"silently re-run materialization. Per-tenant: {summary}"
+            f"{SYSTEM_RESUME_MARKER} Materialization FAILED, so this run did not "
+            f"produce fresh loaded data. Do NOT claim the materialization completed. "
+            f"Summarize the per-tenant error details below, including any top-level "
+            f"error field. If older workspace tables are still queryable, do NOT "
+            f"present them as results from this failed run; only use them if you "
+            f"explicitly verify their provenance and last successful materialization "
+            f"time. Suggest checking the workspace connection only when the actual "
+            f"error points to authentication or authorization. Do NOT silently re-run "
+            f"materialization. Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (
