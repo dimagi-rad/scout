@@ -27,6 +27,7 @@ export function Sidebar() {
   const logout = useAppStore((s) => s.authActions.logout)
   const threadId = useAppStore((s) => s.threadId)
   const threads = useAppStore((s) => s.threads)
+  const threadsStatus = useAppStore((s) => s.threadsStatus)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
@@ -115,6 +116,26 @@ export function Sidebar() {
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-2">
+          {threadsStatus === "error" && (
+            // 07#7: a load failure must not look like "no conversations". Show a
+            // distinct error + retry so an outage is recoverable, not silent.
+            <div
+              className="px-3 py-2 text-xs text-muted-foreground"
+              data-testid="sidebar-threads-error"
+            >
+              <p>Couldn&apos;t load conversations.</p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (activeDomainId) void fetchThreads(activeDomainId)
+                }}
+                className="mt-1 text-primary underline-offset-2 hover:underline"
+                data-testid="sidebar-threads-retry"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {threads.map((thread) => {
             const job = jobsByThreadId[thread.id]
             const lastUpdated = new Date(thread.updated_at)

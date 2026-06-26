@@ -1122,6 +1122,45 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_resume_cascade_teardown_view_schema_advises_rerun():
+    """07#9: when the view schema is FAILED because a tenant schema it depends on
+    was torn down (cascade), re-running materialization IS the fix. The resume
+    prompt must invite a re-run, NOT forbid it / claim a system-side fix."""
+    from apps.workspaces.models import VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR
+
+    tj = await _make_multi_tenant_job(
+        email="vsc@b.c",
+        ws_name="W-vsc",
+        pj_id=20003,
+        view_schema_state=SchemaState.FAILED,
+        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    mock_agent.ainvoke.assert_awaited_once()
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    lower = body.lower()
+    # Correct, cause-specific advice: re-running materialization WILL fix it.
+    assert "re-running materialization will fix this" in lower
+    # The WRONG advice from the generic-build-failure branch must NOT appear.
+    assert "do not re-run materialization" not in lower
+    assert "a system-side fix is required" not in lower
+    # Terminal state is FAILED (no queryable surface right now) but the
+    # error_summary tells the truthful, recoverable story.
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert "re-running materialization will rebuild it" in tj.error_summary.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
     """Regression: when the WorkspaceViewSchema is ACTIVE, the multi-tenant
     resume uses the normal 'just completed' copy, not the failure branch."""

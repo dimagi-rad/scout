@@ -472,9 +472,9 @@ async def get_materialization_status(run_id: str) -> dict:
 async def cancel_materialization(run_id: str) -> dict:
     """Cancel a running materialization pipeline.
 
-    Marks the run as failed in the database. This is a best-effort cancellation —
-    in-flight loader operations may not terminate immediately. Full subprocess
-    cancellation is a future feature.
+    Marks the run as CANCELLED in the database. This is a best-effort
+    cancellation — in-flight loader operations may not terminate immediately.
+    Full subprocess cancellation is a future feature.
 
     Args:
         run_id: UUID of the MaterializationRun to cancel.
@@ -502,7 +502,12 @@ async def cancel_materialization(run_id: str) -> dict:
             return tc["result"]
 
         previous_state = run.state
-        run.state = MaterializationRun.RunState.FAILED
+        # Write the dedicated CANCELLED state (not FAILED) so a deliberately
+        # cancelled run is distinguishable from a genuine failure in any
+        # state-based reporting — matching the user-facing cancel path
+        # (apps/workspaces/api/jobs_cancel.py::cancel_thread_job). The
+        # result.cancelled flag is retained for back-compat (#290).
+        run.state = MaterializationRun.RunState.CANCELLED
         run.completed_at = datetime.now(UTC)
         run.result = {**(run.result or {}), "cancelled": True}
         await run.asave(update_fields=["state", "completed_at", "result"])
@@ -723,7 +728,11 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         try:
             workspace = await Workspace.objects.aget(id=workspace_id)
         except Workspace.DoesNotExist:
-            tc["result"] = not_provisioned
+            # A genuinely missing workspace is NOT the same as an existing-but-
+            # unprovisioned one. Returning the empty 'not_provisioned' success
+            # envelope here invited the agent to materialize against a phantom
+            # workspace (07#7); surface a NOT_FOUND error so it stops instead.
+            tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
 
         tenant_count = await workspace.tenants.acount()

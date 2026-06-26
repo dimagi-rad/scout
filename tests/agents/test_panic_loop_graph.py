@@ -136,3 +136,48 @@ class TestShouldEscalate:
 
     def test_empty_message_list_does_not_trigger_escalation(self):
         assert _should_escalate([]) is False
+
+    def test_compact_json_envelope_still_triggers_escalation(self):
+        # 06#1: the detector must not couple to FastMCP's indent=2 spacing.
+        # A compact ``{"code":"NOT_FOUND"}`` (no space after the colon) — what a
+        # serialization change to compact separators would produce — must still
+        # trip the circuit breaker. The old substring match keyed on
+        # ``'"code": "NOT_FOUND"'`` (with a space) and silently failed here.
+        def _compact_err(code: str, tc: str) -> ToolMessage:
+            body = json.dumps(
+                {"success": False, "error": {"code": code, "message": "x"}},
+                separators=(",", ":"),
+            )
+            return ToolMessage(content=body, tool_call_id=tc, name="query")
+
+        messages = [
+            HumanMessage(content="how many users?"),
+            _ai_with_tool_call("a"),
+            _compact_err("NOT_FOUND", "a"),
+            _ai_with_tool_call("b"),
+            _compact_err("VALIDATION_ERROR", "b"),
+            _ai_with_tool_call("c"),
+            _compact_err("NOT_FOUND", "c"),
+        ]
+        assert _should_escalate(messages) is True
+
+    def test_code_substring_in_unrelated_field_does_not_trigger(self):
+        # A robust check matches the ``error.code`` value, not any occurrence of
+        # the string "NOT_FOUND" anywhere in the payload (e.g. a row that happens
+        # to contain the text). A successful envelope must never escalate.
+        def _ok_with_text(tc: str) -> ToolMessage:
+            body = json.dumps(
+                {"success": True, "data": {"rows": [["NOT_FOUND was mentioned here"]]}}
+            )
+            return ToolMessage(content=body, tool_call_id=tc, name="query")
+
+        messages = [
+            HumanMessage(content="show me the log"),
+            _ai_with_tool_call("a"),
+            _ok_with_text("a"),
+            _ai_with_tool_call("b"),
+            _ok_with_text("b"),
+            _ai_with_tool_call("c"),
+            _ok_with_text("c"),
+        ]
+        assert _should_escalate(messages) is False

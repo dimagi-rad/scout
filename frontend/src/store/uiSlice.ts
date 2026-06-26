@@ -20,7 +20,7 @@ export interface ThreadShareState {
   share_token: string | null
 }
 
-export type ThreadsStatus = "idle" | "loading" | "loaded"
+export type ThreadsStatus = "idle" | "loading" | "loaded" | "error"
 
 export interface UiSlice {
   threadId: string
@@ -69,8 +69,14 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
       try {
         const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
         set({ threads, threadsStatus: "loaded" })
-      } catch {
-        set({ threads: [], threadsStatus: "loaded" })
+      } catch (error) {
+        // Distinguish an outage from a genuinely empty history (07#7): a failed
+        // load must NOT report "loaded" with an empty array — that rendered as
+        // "no conversations" during a DB/checkpointer blip, as if every
+        // conversation had been deleted. Keep any threads already shown and flag
+        // the error so the sidebar can surface a retry affordance instead.
+        console.error("[Scout] Failed to load threads:", error)
+        set({ threadsStatus: "error" })
       }
     },
     updateThreadSharing: async (

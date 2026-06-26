@@ -643,10 +643,31 @@ class TestGetSchemaStatusTool:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     @pytest.mark.django_db
-    async def test_returns_not_provisioned_when_workspace_not_found(self):
+    async def test_returns_not_found_when_workspace_missing(self):
+        # 07#7: a non-existent workspace is NOT the same as an existing-but-
+        # unprovisioned one. Returning the empty 'not_provisioned' success
+        # envelope for a phantom workspace invited the agent to materialize
+        # against a workspace that doesn't exist. Surface a NOT_FOUND error so
+        # the agent stops instead of looping on a non-existent target.
         from mcp_server.server import get_schema_status
 
         result = await get_schema_status(workspace_id="00000000-0000-0000-0000-000000000000")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == NOT_FOUND
+
+    @pytest.mark.django_db(transaction=True)
+    async def test_returns_not_provisioned_when_workspace_exists_without_schema(self):
+        # An existing workspace with no tenants/schema is genuinely
+        # unprovisioned — that path must still report not_provisioned so the
+        # agent can offer to materialize.
+        from mcp_server.server import get_schema_status
+
+        User = get_user_model()
+        user = await User.objects.acreate_user(email="noschema@b.c", password="x")
+        ws = await Workspace.objects.acreate(name="empty-ws", created_by=user)
+
+        result = await get_schema_status(workspace_id=str(ws.id))
 
         assert result["success"] is True
         assert result["data"]["exists"] is False
@@ -837,6 +858,7 @@ class TestCancelMaterialization:
             mock_cls.RunState.LOADING = "loading"
             mock_cls.RunState.TRANSFORMING = "transforming"
             mock_cls.RunState.FAILED = "failed"
+            mock_cls.RunState.CANCELLED = "cancelled"
             from mcp_server.server import cancel_materialization
 
             result = asyncio.run(cancel_materialization(run_id=run_id))
@@ -845,12 +867,12 @@ class TestCancelMaterialization:
         assert result["data"]["cancelled"] is True
         assert result["data"]["run_id"] == run_id
         assert result["data"]["previous_state"] == "loading"
-        # 12#0 item 6: assert the PERSISTED state, not just the response flag.
-        # cancel_materialization currently writes RunState.FAILED (NOT CANCELLED)
-        # and stamps result["cancelled"]=True. Pinning the written state makes the
-        # FAILED-vs-CANCELLED inconsistency vs cancel_thread_job visible; the
-        # reconciliation is tracked in #290.
-        assert mock_run.state == "failed"
+        # #290: cancel_materialization now writes the dedicated RunState.CANCELLED
+        # (matching the user-facing cancel_thread_job endpoint) instead of FAILED,
+        # so a deliberately-cancelled run no longer masquerades as a failure in
+        # state-based reporting. The response still carries result.cancelled=True
+        # for back-compat.
+        assert mock_run.state == "cancelled"
         assert mock_run.result == {"cancelled": True}
         mock_run.asave.assert_awaited_once_with(update_fields=["state", "completed_at", "result"])
 

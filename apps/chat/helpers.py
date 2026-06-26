@@ -15,6 +15,16 @@ from apps.workspaces.models import WorkspaceMembership
 logger = logging.getLogger(__name__)
 
 
+class CheckpointerUnavailable(Exception):
+    """Raised when the LangGraph checkpointer can't be reached/read.
+
+    Distinguishes a genuine outage (DB/checkpointer blip) from a thread that is
+    legitimately empty (no checkpoint written yet). Callers that load message
+    history must surface this as an error (non-200) rather than swallowing it
+    into an empty result that reads as "conversation deleted" (arch #256, 07#7).
+    """
+
+
 async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
     """Return synthetic ToolMessages for any tool_use calls that were never answered.
 

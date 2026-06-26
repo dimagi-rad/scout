@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
@@ -109,8 +110,58 @@ SCHEMA_CONTEXT_CHAR_BUDGET = 6000
 # messages all carry one of these error codes, the agent has drifted from
 # self-correction into a panic loop — route to the escalation node so the
 # turn ends with an explicit ask instead of consuming the recursion budget.
-ESCALATION_ERROR_CODES = ('"code": "NOT_FOUND"', '"code": "VALIDATION_ERROR"')
+#
+# These are the bare ``error.code`` values from the MCP envelope
+# (mcp_server.envelope), matched against the parsed JSON ``error.code`` field —
+# NOT a substring search. The previous implementation substring-matched
+# ``'"code": "NOT_FOUND"'`` (with a space after the colon), which only worked
+# because FastMCP serialized with ``indent=2``; a switch to compact separators
+# would have silently disabled the breaker (06#1). They are also the single
+# source of truth shared with the base system prompt's "When the Schema is
+# Broken" rule (see apps/agents/prompts/base_system.py).
+ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
 ESCALATION_TRIGGER_COUNT = 3
+
+
+def _tool_message_error_code(content: Any) -> str | None:
+    """Extract the MCP envelope ``error.code`` from a ToolMessage's content.
+
+    Tool content may be a JSON string, a list of content blocks (the shape
+    langchain_mcp_adapters emits), or already-parsed structures. We parse the
+    JSON and read ``error.code`` so the panic-loop detector keys off the
+    structured field rather than a whitespace-sensitive substring (06#1).
+    Returns None when the content isn't a recognizable error envelope.
+    """
+    if isinstance(content, list):
+        # Content-block list: try each text block until one parses to an error.
+        for block in content:
+            text = None
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+            elif isinstance(block, str):
+                text = block
+            if text:
+                code = _tool_message_error_code(text)
+                if code is not None:
+                    return code
+        return None
+    if isinstance(content, dict):
+        envelope = content
+    elif isinstance(content, str):
+        try:
+            envelope = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+    else:
+        return None
+    if not isinstance(envelope, dict) or envelope.get("success") is not False:
+        return None
+    error = envelope.get("error")
+    if isinstance(error, dict):
+        code = error.get("code")
+        return code if isinstance(code, str) else None
+    return None
+
 
 ESCALATION_MESSAGE = (
     "I've encountered repeated schema errors — the tables I expected to "
@@ -123,9 +174,12 @@ def _should_escalate(messages: list) -> bool:
     """Detect a panic loop: last N tool messages all returned an error code.
 
     Looks only at trailing ``ToolMessage``s — a successful tool call in
-    between resets the streak. Substring matches the error envelope's
-    ``"code": "..."`` field rather than parsing JSON, since tool content
-    may be a string, list of content blocks, or other shapes.
+    between resets the streak. Parses each tool message's JSON envelope and
+    matches the structured ``error.code`` value against
+    ``ESCALATION_ERROR_CODES`` (06#1) rather than substring-searching the raw
+    text, so a serialization/whitespace change can't silently disable the
+    breaker and an unrelated row containing the literal "NOT_FOUND" can't
+    falsely trip it.
     """
     streak: list[ToolMessage] = []
     for msg in reversed(messages):
@@ -142,8 +196,8 @@ def _should_escalate(messages: list) -> bool:
         return False
 
     for tm in streak:
-        content = tm.content if isinstance(tm.content, str) else str(tm.content)
-        if not any(code in content for code in ESCALATION_ERROR_CODES):
+        code = _tool_message_error_code(tm.content)
+        if code not in ESCALATION_ERROR_CODES:
             return False
     return True
 
