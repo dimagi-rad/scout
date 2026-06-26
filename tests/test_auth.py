@@ -13,6 +13,7 @@ from django.contrib.sites.models import Site
 from django.db import IntegrityError
 
 from apps.users.models import TenantConnection, TenantMembership
+from apps.users.providers.ocs.provider import OCSProvider
 
 User = get_user_model()
 
@@ -645,6 +646,36 @@ class TestCustomCommCareProvider:
 
         account = CommCareAccount(mock_account)
         assert account.get_avatar_url() is None
+
+
+# ============================================================================
+# 7b. TestOCSProviderScopes
+# ============================================================================
+
+
+class TestOCSProviderScopes:
+    """The OCS OAuth scopes Scout requests must cover every data source it loads."""
+
+    def _provider(self) -> OCSProvider:
+        # get_default_scope only needs an ``app`` on the provider; an unsaved
+        # SocialApp keeps this a pure unit test (no DB), matching the pattern in
+        # tests/test_provider_email_verification.py.
+        app = SocialApp(provider=OCSProvider.id, name="OCS", client_id="x", secret="x")
+        return OCSProvider(request=None, app=app)
+
+    def test_default_scope_includes_participants_read(self):
+        """Participant sync hits OCS GET /api/participants, which requires
+        the participants:read scope. Its omission 403s the load (SCOUT-DJANGO-1X)."""
+        assert "participants:read" in self._provider().get_default_scope()
+
+    def test_default_scope_covers_all_loaded_sources(self):
+        """Each OCS source Scout materializes maps to a read scope; all must be requested."""
+        scope = self._provider().get_default_scope()
+        # experiments -> chatbots:read, sessions/messages -> sessions:read,
+        # files -> files:read, participants -> participants:read
+        for required in ("chatbots:read", "sessions:read", "files:read", "participants:read"):
+            assert required in scope, f"missing OCS scope: {required}"
+        assert "openid" in scope
 
 
 # ============================================================================
