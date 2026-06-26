@@ -362,6 +362,13 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
     assert active_schema.state == SchemaState.EXPIRED
     # B's namespaced views were cascade-dropped; ACTIVE was a lie → now FAILED.
     assert vs_b.state == SchemaState.FAILED
+    # 07#9: the FAILED row must carry a TRUTHFUL last_error explaining the
+    # teardown cascade (marked) — not the empty fallback that get_schema_status
+    # would render as the generic "View schema build failed." and that the resume
+    # prompt would misread as "a system-side fix is required, do NOT re-run".
+    from apps.workspaces.models import VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER
+
+    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in vs_b.last_error
     # C is single-tenant — its view schema must not be clobbered.
     assert vs_c.state == SchemaState.ACTIVE
 

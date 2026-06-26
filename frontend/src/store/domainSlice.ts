@@ -86,7 +86,16 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
         }
         await get().domainActions.fetchDomains()
       } catch (error) {
+        // A failed ensure-tenant must surface an error state, not silently
+        // console.error and leave the user on an empty data-sources page that
+        // reads as "no opportunities" (07#6). Flag it so the UI can show a
+        // distinct "couldn't load your workspace" message + retry.
         console.error("[Scout] Failed to ensure tenant:", error)
+        set({
+          domainsStatus: "error",
+          domainsError:
+            error instanceof Error ? error.message : "Failed to set up your workspace",
+        })
       }
     },
   },

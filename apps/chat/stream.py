@@ -25,14 +25,16 @@ Chunk types used:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
 from anthropic import APIStatusError, InternalServerError, RateLimitError
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import INJECTED_TOOL_PARAMS
 
@@ -86,6 +88,16 @@ def _sse(chunk: dict) -> str:
     whole stream -- it is coerced to its string form rather than raising.
     """
     return f"data: {json.dumps(chunk, default=str)}\n\n"
+
+
+def _error_ref(exc: BaseException) -> str:
+    """Mint a short correlation ref for a stream failure.
+
+    Matches the hashing used by the non-streaming error paths in
+    ``apps/chat/views.py`` so an operator can cross-reference the user-visible
+    ref against the logged exception.
+    """
+    return hashlib.sha256(f"{time.time()}{exc}".encode()).hexdigest()[:8]
 
 
 def _tool_content_to_str(output: Any) -> str:
@@ -353,10 +365,36 @@ async def langgraph_to_ui_stream(
                     }
                 )
 
-    except TimeoutError:
+            # ── escalation node output ─────────────────────────────────────────
+            elif event_type == "on_chain_end" and event.get("name") == "escalate":
+                # The terminal ``escalate`` node returns a hardcoded AIMessage
+                # rather than calling the LLM, so it emits no on_chat_model_stream
+                # event and its message was never turned into a live text-delta —
+                # the panic-loop recovery affordance only appeared after reload
+                # (06#1). Translate the node's output into a streamed text part so
+                # the user sees it during the turn.
+                output = event.get("data", {}).get("output") or {}
+                esc_messages = output.get("messages", []) if isinstance(output, dict) else []
+                esc_text = "".join(
+                    m.content
+                    for m in esc_messages
+                    if isinstance(m, AIMessage) and isinstance(m.content, str)
+                )
+                if esc_text:
+                    if reasoning_started:
+                        yield _sse({"type": "reasoning-end", "id": reasoning_id})
+                        reasoning_started = False
+                        reasoning_id = f"reasoning-{uuid.uuid4().hex[:8]}"
+                    if not text_started:
+                        yield _sse({"type": "text-start", "id": text_id})
+                        text_started = True
+                    yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
+
+    except TimeoutError as exc:
         logger.warning("Agent execution timed out after %ds", AGENT_TIMEOUT_SECONDS)
         if reasoning_started:
             yield _sse({"type": "reasoning-end", "id": reasoning_id})
+            reasoning_started = False
         if not text_started:
             yield _sse({"type": "text-start", "id": text_id})
             text_started = True
@@ -365,6 +403,21 @@ async def langgraph_to_ui_stream(
                 "type": "text-delta",
                 "id": text_id,
                 "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
+            }
+        )
+        if text_started:
+            yield _sse({"type": "text-end", "id": text_id})
+            text_started = False
+        # Emit a native AI SDK error chunk so useChat's error state fires — a
+        # timed-out run MUST be distinguishable from a successful one (06#4).
+        # Without this the apology above was just message text followed by a
+        # normal finishReason 'stop', indistinguishable from success.
+        ref = _error_ref(exc)
+        logger.warning("Agent stream timed out [ref=%s]", ref)
+        yield _sse(
+            {
+                "type": "error",
+                "errorText": f"The request timed out. Ref: {ref}",
             }
         )
     except Exception as exc:
@@ -386,9 +439,11 @@ async def langgraph_to_ui_stream(
                 }
             )
         else:
-            logger.exception("Error during agent streaming")
+            ref = _error_ref(exc)
+            logger.exception("Error during agent streaming [ref=%s]", ref)
             if reasoning_started:
                 yield _sse({"type": "reasoning-end", "id": reasoning_id})
+                reasoning_started = False
             if not text_started:
                 yield _sse({"type": "text-start", "id": text_id})
                 text_started = True
@@ -397,6 +452,19 @@ async def langgraph_to_ui_stream(
                     "type": "text-delta",
                     "id": text_id,
                     "delta": "\n\nAn error occurred while processing your request.",
+                }
+            )
+            if text_started:
+                yield _sse({"type": "text-end", "id": text_id})
+                text_started = False
+            # Emit a native AI SDK error chunk so useChat's error state fires —
+            # a failed agent run MUST be distinguishable from a successful one
+            # (06#4). The apology text above is informational; this is what makes
+            # the frontend show an error state instead of a clean finish.
+            yield _sse(
+                {
+                    "type": "error",
+                    "errorText": f"An error occurred while processing your request. Ref: {ref}",
                 }
             )
 

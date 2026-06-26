@@ -26,6 +26,8 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -63,6 +65,26 @@ MATERIALIZATION_FAILED_MESSAGE = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _no_pipeline_error(registry, provider: str) -> str:
+    """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
+
+    A genuinely-unconfigured provider and a provider whose pipeline YAML failed
+    to parse both surfaced as the same "No pipeline for provider X" message,
+    which pointed at workspace config when the real cause was a broken deploy.
+    When the registry recorded load errors, say so explicitly so the failure
+    points at the deploy, not the workspace.
+    """
+    load_errors = registry.load_errors
+    if load_errors:
+        return (
+            f"No pipeline available for provider '{provider}': "
+            f"{len(load_errors)} pipeline definition(s) failed to load "
+            f"({', '.join(sorted(load_errors))}). This is a deploy/config error, "
+            "not a workspace setting — check the pipeline YAML files."
+        )
+    return f"No pipeline configured for provider '{provider}'"
 
 
 def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
@@ -180,7 +202,9 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         pipeline_name = provider_pipeline_map.get(membership.tenant.provider)
         if pipeline_name is None:
             await _drop_schema_and_fail(new_schema)
-            return {"error": f"No pipeline configured for provider '{membership.tenant.provider}'"}
+            return {
+                "error": _no_pipeline_error(registry, membership.tenant.provider),
+            }
         pipeline_config = registry.get(pipeline_name)
         # Load into the new "_r" schema this task created — NOT the tenant's
         # base schema. Without target_schema, run_pipeline re-resolves the base
@@ -283,7 +307,7 @@ async def materialize_workspace_core(
                 {
                     "tenant": tenant_id,
                     "success": False,
-                    "error": f"No pipeline for provider '{tm.tenant.provider}'",
+                    "error": _no_pipeline_error(registry, tm.tenant.provider),
                 }
             )
             continue
@@ -906,10 +930,19 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
         .filter(num_tenants__gte=2)
         .values("id")
     )
+    # Write a truthful last_error describing the teardown cascade (07#9). Without
+    # it, get_schema_status returns the generic fallback "View schema build
+    # failed." and the resume prompt tells the agent "do NOT re-run
+    # materialization; a system-side fix is required" — wrong advice, since
+    # re-materializing the torn-down tenant IS the fix. The marker lets the
+    # resume logic give correct, cause-specific recovery advice.
     return await WorkspaceViewSchema.objects.filter(
         workspace_id__in=dependent_workspace_ids,
         state=SchemaState.ACTIVE,
-    ).aupdate(state=SchemaState.FAILED)
+    ).aupdate(
+        state=SchemaState.FAILED,
+        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    )
 
 
 STALE_JOB_THRESHOLD = timedelta(minutes=10)
@@ -1377,16 +1410,34 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 )
 
     if view_schema_failed:
-        body = (
-            f"{SYSTEM_RESUME_MARKER} Per-tenant data loaded successfully, BUT the "
-            f"workspace query layer (the combined view schema that UNION ALLs the "
-            f"tenant tables) FAILED to build, so there is currently NO queryable "
-            f"surface for this workspace. Error: {view_schema_error}. Do NOT re-run "
-            f"materialization — it cannot fix this; the per-tenant data is already "
-            f"loaded and re-running will hit the same build failure. Tell the user "
-            f"plainly that a system-side fix is required and quote the error summary "
-            f"above. Per-tenant: {summary}"
-        )
+        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+            # 07#9: the view schema is FAILED because a tenant schema it depends
+            # on was torn down (TTL/teardown), cascade-dropping the namespaced
+            # views — NOT because build_view_schema itself failed. Re-running
+            # materialization IS the fix here (it rebuilds the tenant data and the
+            # view schema), so the advice must invite a re-run, not forbid it.
+            body = (
+                f"{SYSTEM_RESUME_MARKER} The per-tenant runs reported success, but "
+                f"the workspace query layer (the combined view schema that UNION "
+                f"ALLs the tenant tables) is currently unavailable because a tenant "
+                f"schema it depends on was torn down (inactivity TTL or teardown), "
+                f"so the namespaced views were cascade-dropped. There is currently "
+                f"NO queryable surface for this workspace. Re-running materialization "
+                f"WILL fix this: it rebuilds the tenant data and the view schema. "
+                f"Tell the user the data needs to be reloaded and offer to re-run "
+                f"materialization. Error: {view_schema_error}. Per-tenant: {summary}"
+            )
+        else:
+            body = (
+                f"{SYSTEM_RESUME_MARKER} Per-tenant data loaded successfully, BUT the "
+                f"workspace query layer (the combined view schema that UNION ALLs the "
+                f"tenant tables) FAILED to build, so there is currently NO queryable "
+                f"surface for this workspace. Error: {view_schema_error}. Do NOT re-run "
+                f"materialization — it cannot fix this; the per-tenant data is already "
+                f"loaded and re-running will hit the same build failure. Tell the user "
+                f"plainly that a system-side fix is required and quote the error summary "
+                f"above. Per-tenant: {summary}"
+            )
     elif status == "no_runs":
         logger.warning(
             "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
@@ -1555,7 +1606,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed:
+        if view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+            # 07#9: cascade teardown, not a build defect — re-running
+            # materialization IS the fix, so the summary must say so.
+            error_summary = (
+                "The workspace query layer (view schema) is unavailable because a "
+                f"tenant schema it depends on was torn down: {view_schema_error}. "
+                "Re-running materialization will rebuild it."
+            )
+        elif view_schema_failed:
             error_summary = (
                 "Per-tenant data loaded, but the workspace query layer (view "
                 f"schema) failed to build: {view_schema_error}. A system-side "

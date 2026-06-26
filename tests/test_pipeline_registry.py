@@ -86,11 +86,57 @@ relationships:
         assert r.to_column == "case_id"
         assert r.description == "Forms reference cases"
 
+    def test_load_errors_empty_when_all_pipelines_parse(self, tmp_path):
+        (tmp_path / "a.yml").write_text(
+            "pipeline: a\ndescription: A\nversion: '1.0'\nprovider: commcare\nsources: []\n"
+        )
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+        assert registry.load_errors == []
+
+    def test_load_errors_records_unparseable_pipeline(self, tmp_path):
+        # 07#7: a malformed pipeline YAML must be tracked (a broken deploy), not
+        # silently dropped — otherwise the provider just vanishes from the
+        # registry and surfaces later as a misleading "No pipeline for provider".
+        (tmp_path / "good.yml").write_text(
+            "pipeline: good\ndescription: G\nversion: '1.0'\nprovider: ocs\nsources: []\n"
+        )
+        (tmp_path / "broken.yml").write_text("pipeline: broken\nsources: [: : :\n")  # bad YAML
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+
+        # The good pipeline still loads; the broken one is recorded as an error.
+        assert registry.get("good") is not None
+        assert "broken.yml" in registry.load_errors
+
     def test_source_config_physical_table_name_defaults_to_raw_prefix(self):
         from mcp_server.pipeline_registry import SourceConfig
 
         s = SourceConfig(name="cases")
         assert s.physical_table_name == "raw_cases"
+
+
+class TestNoPipelineErrorMessage:
+    """07#7: the 'no pipeline' error must distinguish a misconfigured workspace
+    from a broken deploy (pipeline YAML failed to load)."""
+
+    def test_plain_message_when_no_load_errors(self):
+        from types import SimpleNamespace
+
+        from apps.workspaces.tasks import _no_pipeline_error
+
+        registry = SimpleNamespace(load_errors=[])
+        msg = _no_pipeline_error(registry, "weird_provider")
+        assert "weird_provider" in msg
+        assert "deploy" not in msg.lower()
+
+    def test_deploy_hint_when_pipeline_yaml_failed_to_load(self):
+        from types import SimpleNamespace
+
+        from apps.workspaces.tasks import _no_pipeline_error
+
+        registry = SimpleNamespace(load_errors=["ocs_sync.yml"])
+        msg = _no_pipeline_error(registry, "ocs")
+        assert "ocs_sync.yml" in msg
+        assert "deploy" in msg.lower()
 
     def test_source_config_physical_table_name_explicit_override(self):
         from mcp_server.pipeline_registry import SourceConfig

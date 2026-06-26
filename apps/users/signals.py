@@ -61,21 +61,26 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
         logger.warning("No access token available after OAuth for %s", sociallogin.user)
         return
 
+    # A resolution failure must NOT break login (we can't 500 the OAuth
+    # callback), but it must be surfaced loudly: log at ERROR via
+    # logger.exception so Sentry pages. Logging at WARNING left the user with
+    # zero TenantMembership rows and an empty data-sources page that looked
+    # identical to "account has no opportunities", with nobody told (07#6).
     if provider == "commcare_connect":
         try:
             async_to_sync(resolve_connect_opportunities)(sociallogin.user, token.token)
         except Exception:
-            logger.warning("Failed to resolve Connect opportunities after OAuth", exc_info=True)
+            logger.exception("Failed to resolve Connect opportunities after OAuth")
     elif provider == "ocs":
         try:
             async_to_sync(resolve_ocs_chatbots)(sociallogin.user, token.token)
         except Exception:
-            logger.warning("Failed to resolve OCS chatbots after OAuth", exc_info=True)
+            logger.exception("Failed to resolve OCS chatbots after OAuth")
     elif provider.startswith("commcare"):
         try:
             async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
         except Exception:
-            logger.warning("Failed to resolve CommCare domains after OAuth", exc_info=True)
+            logger.exception("Failed to resolve CommCare domains after OAuth")
 
 
 def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):

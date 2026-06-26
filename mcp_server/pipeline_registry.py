@@ -80,11 +80,18 @@ class PipelineRegistry:
     def __init__(self, pipelines_dir: str | None = None) -> None:
         self._dir = pathlib.Path(pipelines_dir) if pipelines_dir else _DEFAULT_PIPELINES_DIR
         self._cache: dict[str, PipelineConfig] | None = None
+        # Filenames that failed to parse on the last load. A YAML parse failure
+        # silently dropped the provider from the registry, later surfacing as a
+        # misleading "No pipeline for provider X" that pointed at workspace
+        # config rather than the real cause (a broken deploy). Tracking the
+        # failures lets callers tell the two apart (arch #256, 07#7).
+        self._load_errors: list[str] = []
 
     def _load_all(self) -> dict[str, PipelineConfig]:
         if self._cache is not None:
             return self._cache
         configs: dict[str, PipelineConfig] = {}
+        load_errors: list[str] = []
         for path in self._dir.glob("*.yml"):
             try:
                 with path.open() as f:
@@ -93,8 +100,21 @@ class PipelineRegistry:
                 configs[config.name] = config
             except Exception:
                 logger.exception("Failed to load pipeline from %s", path)
+                load_errors.append(path.name)
         self._cache = configs
+        self._load_errors = load_errors
         return configs
+
+    @property
+    def load_errors(self) -> list[str]:
+        """Pipeline files that failed to parse on the most recent load.
+
+        Non-empty means a broken deploy (malformed pipeline YAML), NOT a
+        workspace misconfiguration — callers reporting "No pipeline for provider"
+        should consult this to give a truthful cause (07#7).
+        """
+        self._load_all()
+        return list(self._load_errors)
 
     def get(self, name: str) -> PipelineConfig | None:
         return self._load_all().get(name)

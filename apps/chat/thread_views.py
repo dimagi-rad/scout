@@ -8,6 +8,7 @@ from django.http import JsonResponse
 
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
+    CheckpointerUnavailable,
     _resolve_workspace_and_membership,
     async_login_required,
 )
@@ -103,14 +104,20 @@ async def _list_threads(user, *, workspace_id):
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
-    """Load messages from checkpointer and convert to UI format."""
+    """Load messages from checkpointer and convert to UI format.
+
+    Raises ``CheckpointerUnavailable`` on a checkpointer/DB error so the caller
+    can return a non-200 error: an empty list is reserved for a thread that is
+    genuinely empty (no checkpoint written yet). Swallowing the error into []
+    made a transient outage look like "the conversation was deleted" (07#7).
+    """
     try:
         checkpointer = await ensure_checkpointer()
         config = {"configurable": {"thread_id": str(thread_id)}}
         checkpoint_tuple = await checkpointer.aget_tuple(config)
-    except Exception:
+    except Exception as exc:
         logger.warning("Failed to load checkpoint for thread %s", thread_id, exc_info=True)
-        return []
+        raise CheckpointerUnavailable(str(exc)) from exc
 
     if checkpoint_tuple is None:
         return []
@@ -166,7 +173,15 @@ async def thread_messages_view(request, workspace_id, thread_id):
             return JsonResponse({"error": "Thread not found"}, status=404)
         return JsonResponse([], safe=False)
 
-    ui_messages = await _load_thread_messages(thread_id)
+    try:
+        ui_messages = await _load_thread_messages(thread_id)
+    except CheckpointerUnavailable:
+        # A checkpointer/DB blip — surface it as a retryable error instead of an
+        # empty list that reads as "conversation deleted" (07#7).
+        return JsonResponse(
+            {"error": "Conversation history is temporarily unavailable. Please try again."},
+            status=503,
+        )
     return JsonResponse(ui_messages, safe=False)
 
 
@@ -250,7 +265,13 @@ async def public_thread_view(request, share_token):
         return JsonResponse({"error": "Thread not found"}, status=404)
 
     # Load messages from checkpointer
-    messages = await _load_thread_messages(thread.id)
+    try:
+        messages = await _load_thread_messages(thread.id)
+    except CheckpointerUnavailable:
+        return JsonResponse(
+            {"error": "Conversation history is temporarily unavailable. Please try again."},
+            status=503,
+        )
 
     # Load associated artifacts
     artifacts = await _get_thread_artifacts(thread.id)
