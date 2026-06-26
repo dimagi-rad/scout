@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.ocs_base import OCSBaseLoader
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,10 @@ class OCSMessageLoader(OCSBaseLoader):
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         list_url = f"{self.base_url}/api/sessions/"
-        params = {"experiment": self.experiment_id}
+        # Max page size for the session-list walk to cut its request volume
+        # ~10-15x (arch #254, finding 13#1); the per-session detail fetches
+        # (the N+1) are unavoidable and dominate regardless.
+        params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         session_ids: list[str] = []
         for session_page, _session_total in self._paginate(list_url, params=params):
             for session in session_page:

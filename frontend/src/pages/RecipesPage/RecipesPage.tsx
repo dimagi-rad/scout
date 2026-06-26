@@ -68,10 +68,32 @@ export function RecipesPage() {
   useEffect(() => {
     if (!id || !runId) return
     if (viewedRunStatus !== "pending" && viewedRunStatus !== "running") return
-    const interval = setInterval(() => {
-      void fetchRuns(id)
-    }, 2000)
-    return () => clearInterval(interval)
+    let interval: ReturnType<typeof setInterval> | null = null
+    // Pause the run-status poll while the tab is hidden (arch #254, 05#6).
+    const start = () => {
+      if (interval !== null) return
+      interval = setInterval(() => void fetchRuns(id), 2000)
+    }
+    const stop = () => {
+      if (interval !== null) {
+        clearInterval(interval)
+        interval = null
+      }
+    }
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void fetchRuns(id)
+        start()
+      } else {
+        stop()
+      }
+    }
+    if (document.visibilityState === "visible") start()
+    document.addEventListener("visibilitychange", handleVisibility)
+    return () => {
+      stop()
+      document.removeEventListener("visibilitychange", handleVisibility)
+    }
   }, [id, runId, viewedRunStatus, fetchRuns])
 
   const handleView = useCallback(

@@ -3,6 +3,7 @@
 import logging
 from datetime import timedelta
 
+from django.core.cache import cache
 from django.http import JsonResponse
 from django.utils import timezone
 
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 # failure card render for users who were away from the tab when the
 # materialization failed but have come back within the window.
 RECENT_TERMINATION_WINDOW = timedelta(minutes=30)
+
+# Minimum interval between API-side stale-job reconcile sweeps per workspace
+# (arch #254, 05#6). The sweep is a backstop for a sick worker, not a per-poll
+# duty: running its ~5 DB queries on every 3s poll multiplies platform-DB load
+# with open tabs. Gating it to once per workspace per this interval keeps the
+# backstop while removing it from the hot poll path. The frontend also pauses
+# polling when the tab is hidden, so the two changes compound.
+RECONCILE_THROTTLE_SECONDS = 30
 
 
 def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
@@ -120,23 +129,31 @@ async def active_jobs_view(request, workspace_id):
     # and the frontend spins forever. This poll runs in the API process and
     # can reconcile stale jobs itself: flip ones whose procrastinate job
     # failed, re-defer the resume for ones that quietly succeeded.
-    stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
-    reconciled = False
-    for tj in jobs:
-        # Measure staleness from the resume phase for RUNNING jobs so a healthy
-        # long-running resume (after a >10 min materialization) is not falsely
-        # reconciled (finding 02#9); _staleness_anchor falls back to created_at
-        # for PENDING / legacy rows.
-        if workspace_tasks._staleness_anchor(tj) >= stale_cutoff:
-            continue
-        try:
-            action = await workspace_tasks.reconcile_stale_thread_job(tj)
-        except Exception:
-            logger.exception("active_jobs: reconcile failed for ThreadJob %s", tj.id)
-            continue
-        reconciled = reconciled or action is not None
-    if reconciled:
-        jobs = [j async for j in _fetch_active_jobs()]
+    #
+    # Throttle the sweep per workspace (arch #254, 05#6): it's a backstop, not a
+    # per-poll duty. Without this, every 3s poll runs the reconcile DB queries
+    # for each stale job; gating to once per RECONCILE_THROTTLE_SECONDS removes
+    # it from the hot path while still rescuing jobs a sick worker stranded.
+    reconcile_gate_key = f"jobs_reconcile_gate:{workspace.id}"
+    may_reconcile = await cache.aadd(reconcile_gate_key, 1, RECONCILE_THROTTLE_SECONDS)
+    if may_reconcile:
+        stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
+        reconciled = False
+        for tj in jobs:
+            # Measure staleness from the resume phase for RUNNING jobs so a
+            # healthy long-running resume (after a >10 min materialization) is
+            # not falsely reconciled (finding 02#9); _staleness_anchor falls back
+            # to created_at for PENDING / legacy rows.
+            if workspace_tasks._staleness_anchor(tj) >= stale_cutoff:
+                continue
+            try:
+                action = await workspace_tasks.reconcile_stale_thread_job(tj)
+            except Exception:
+                logger.exception("active_jobs: reconcile failed for ThreadJob %s", tj.id)
+                continue
+            reconciled = reconciled or action is not None
+        if reconciled:
+            jobs = [j async for j in _fetch_active_jobs()]
 
     # Bulk-fetch the latest progress per procrastinate_job_id.
     job_ids = [j.procrastinate_job_id for j in jobs]

@@ -356,14 +356,38 @@ OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
 # Cache configuration
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-    }
-}
+#
+# The default cache backs chat rate limiting (apps.chat.rate_limiting), the DRF
+# throttles, and the per-user onboarding/tenant-resolution caches. Under
+# ``uvicorn --workers 4`` a per-process ``LocMemCache`` gives each worker its
+# own counters, so the 20-req/60s chat budget is effectively multiplied by the
+# worker count and reset on every deploy (arch #254, finding 06#2). ElastiCache
+# Redis is provisioned in infra but had no code consumer.
+#
+# When ``REDIS_URL`` is set we use the shared Redis cache (state is consistent
+# across workers); otherwise we fall back to ``LocMemCache`` so dev/test/CI —
+# where Redis isn't reachable — keep working with no extra services.
 
-# NOTE: LocMemCache is per-process — rate limiting won't work across
-# multiple workers. Set up a shared cache for production deployments.
+
+def _build_caches(redis_url: str) -> dict:
+    if redis_url:
+        return {
+            "default": {
+                "BACKEND": "django.core.cache.backends.redis.RedisCache",
+                "LOCATION": redis_url,
+            }
+        }
+    return {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+
+# REDIS_URL points at the shared ElastiCache cluster (infra/scout-stack.yml).
+# Threaded into the production deploy as a secret env (config/deploy.yml).
+REDIS_URL = env("REDIS_URL", default="")
+CACHES = _build_caches(REDIS_URL)
 
 
 # Rate limiting

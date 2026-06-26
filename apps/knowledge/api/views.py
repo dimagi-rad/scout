@@ -30,11 +30,15 @@ KNOWLEDGE_TYPES = {
         "model": KnowledgeEntry,
         "serializer": KnowledgeEntrySerializer,
         "search_fields": ["title", "content"],
+        # created_by is read by the serializer's created_by_name field; join it
+        # so the page slice doesn't N+1 (arch #254, 05#7).
+        "select_related": ["created_by"],
     },
     "learning": {
         "model": AgentLearning,
         "serializer": AgentLearningSerializer,
         "search_fields": ["description", "original_error", "original_sql", "corrected_sql"],
+        "select_related": [],
     },
 }
 
@@ -73,8 +77,17 @@ class KnowledgeListCreateView(APIView):
         else:
             types_to_query = list(KNOWLEDGE_TYPES.keys())
 
-        all_items = []
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
 
+        # Paginate in the DB, not in Python (arch #254, finding 05#7). The list
+        # merges two models ordered by ``created_at`` desc; to assemble one page
+        # without serializing every row, fetch from each model only the rows up
+        # to ``end_index`` (DB-side ``ORDER BY created_at DESC LIMIT end_index``),
+        # merge those, then slice the page. Per-page serialization is bounded by
+        # ``page * page_size`` rows per type rather than the full table.
+        total_count = 0
+        candidates = []
         for type_name in types_to_query:
             type_config = KNOWLEDGE_TYPES[type_name]
             model = type_config["model"]
@@ -88,15 +101,19 @@ class KnowledgeListCreateView(APIView):
                     search_q |= Q(**{f"{field}__icontains": search_query})
                 queryset = queryset.filter(search_q)
 
-            serializer = serializer_class(queryset, many=True)
-            all_items.extend(serializer.data)
+            total_count += queryset.count()
 
-        all_items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            page_window = queryset.order_by("-created_at")
+            select_related = type_config.get("select_related")
+            if select_related:
+                page_window = page_window.select_related(*select_related)
+            page_window = page_window[:end_index]
+            serializer = serializer_class(page_window, many=True)
+            candidates.extend(serializer.data)
 
-        total_count = len(all_items)
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        paginated_items = all_items[start_index:end_index]
+        # Merge the (at most ``end_index`` per type) candidates and slice the page.
+        candidates.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        paginated_items = candidates[start_index:end_index]
 
         total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
 

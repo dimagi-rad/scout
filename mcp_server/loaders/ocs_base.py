@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 
+# OCS list endpoints default to ``page_size=100`` (DRF ``CursorPagination``) but
+# support up to ``max_page_size=1500`` via a ``page_size`` query param. Sending
+# the max cuts list-request volume ~10-15x versus the upstream default — the
+# loaders' Connect/CommCare mental model is 1000/page (arch #254, finding 13#1).
+OCS_MAX_PAGE_SIZE = 1500
+
 
 class OCSAuthError(Exception):
     """Raised when OCS returns a 401 or 403 response."""

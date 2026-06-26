@@ -58,8 +58,31 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
       setStatus("offline")
     }
 
+    let interval: ReturnType<typeof setInterval> | null = null
+    const startPolling = () => {
+      if (interval !== null) return
+      interval = setInterval(checkHealth, POLL_INTERVAL)
+    }
+    const stopPolling = () => {
+      if (interval !== null) {
+        clearInterval(interval)
+        interval = null
+      }
+    }
+
+    // Gate the /health/ poll on tab visibility (arch #254, 05#6): a hidden tab
+    // doesn't need a live network indicator. Re-check immediately on show.
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        checkHealth()
+        startPolling()
+      } else {
+        stopPolling()
+      }
+    }
+
     checkHealth()
-    const interval = setInterval(checkHealth, POLL_INTERVAL)
+    if (document.visibilityState === "visible") startPolling()
 
     const handleOnline = () => checkHealth()
     const handleOffline = () => {
@@ -73,13 +96,15 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
 
     window.addEventListener("online", handleOnline)
     window.addEventListener("offline", handleOffline)
+    document.addEventListener("visibilitychange", handleVisibility)
 
     return () => {
       polling = false
-      clearInterval(interval)
+      stopPolling()
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
       window.removeEventListener("online", handleOnline)
       window.removeEventListener("offline", handleOffline)
+      document.removeEventListener("visibilitychange", handleVisibility)
     }
   }, [])
 

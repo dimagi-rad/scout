@@ -8,6 +8,7 @@ from asgiref.sync import async_to_sync
 from django.contrib.auth import authenticate, get_user_model, login, logout
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.sites.models import Site
+from django.core.cache import cache
 from django.core.exceptions import ValidationError as _ValidationError
 from django.db import IntegrityError
 from django.http import JsonResponse
@@ -31,6 +32,20 @@ logger = logging.getLogger(__name__)
 
 UserModel = get_user_model()
 
+# Short-lived cache for the /me onboarding computation (arch #254, finding 07#4).
+# The SPA polls /me; without a guard each poll re-hit all three provider APIs
+# (CommCare / Connect / OCS) for a token-bearing user with no persisted
+# memberships. We cache the computed flag briefly so a poll loop doesn't
+# re-resolve. We deliberately cache only the *complete* (True) result long, and
+# the *incomplete* (False) result for a short window — long enough to throttle
+# the poll storm, short enough that onboarding still completes promptly once the
+# user connects a tenant.
+_ME_ONBOARDING_TTL = 30  # seconds
+
+
+def _me_onboarding_cache_key(user) -> str:
+    return f"me_onboarding:{user.pk}"
+
 
 def _user_response(user, *, onboarding_complete=False):
     """Build standard user JSON response dict."""
@@ -44,16 +59,35 @@ def _user_response(user, *, onboarding_complete=False):
 
 
 async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
-    """Attempt lazy OAuth onboarding resolution for a provider."""
+    """Best-effort lazy OAuth onboarding resolution for a provider.
+
+    Returns ``True`` only when the resolver actually persisted at least one
+    membership. A bare "token exists and the resolver didn't raise" is NOT
+    onboarding completion: ``resolve_commcare_domains`` (and friends) can return
+    ``[]`` without raising, which previously flapped ``onboarding_complete`` to
+    ``True`` while the persisted state stayed incomplete (arch #254, 07#4). The
+    caller derives the authoritative flag from the persisted membership state,
+    not from this return value.
+    """
     token_obj = await aget_social_token(user, provider)
     if not token_obj:
         return False
     try:
-        await resolve_fn(user, token_obj.token)
-        return True
+        resolved = await resolve_fn(user, token_obj.token)
     except Exception:
         logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
         return False
+    # Treat a falsy / empty result as "resolved nothing" so the flag can't flap.
+    return bool(resolved)
+
+
+async def _aonboarding_complete(user) -> bool:
+    """True when the user has at least one active, connection-backed membership."""
+    return await TenantMembership.objects.filter(
+        user=user,
+        connection__isnull=False,
+        archived_at__isnull=True,
+    ).aexists()
 
 
 @ensure_csrf_cookie
@@ -66,29 +100,38 @@ def csrf_view(request):
 @require_GET
 @async_login_required
 async def me_view(request):
-    """Return current user info or 401."""
+    """Return current user info or 401.
+
+    ``onboarding_complete`` is always the *persisted* membership state, never a
+    transient "the resolver ran" signal (arch #254, 07#4). The whole
+    computation — including the expensive provider re-resolution — is cached for
+    a short TTL so the SPA's /me poll doesn't re-hit all three provider APIs on
+    every tick.
+    """
     user = request._authenticated_user
 
-    onboarding_complete = await TenantMembership.objects.filter(
-        user=user,
-        connection__isnull=False,
-        archived_at__isnull=True,
-    ).aexists()
+    cache_key = _me_onboarding_cache_key(user)
+    cached = await cache.aget(cache_key)
+    if cached is not None:
+        return JsonResponse(_user_response(user, onboarding_complete=cached))
 
-    # If the user just completed CommCare OAuth but tenant resolution hasn't
-    # run yet, resolve now so onboarding can complete.
-    # Both providers are tried independently — a successful CommCare
-    # resolution must not skip Connect.
+    onboarding_complete = await _aonboarding_complete(user)
+
+    # If the user just completed OAuth but tenant resolution hasn't run yet,
+    # resolve now so onboarding can complete. Providers are tried independently —
+    # a successful CommCare resolution must not skip Connect.
     if not onboarding_complete:
-        commcare_ok = await _atry_resolve_provider(
-            user, "commcare", resolve_commcare_domains, "CommCare"
-        )
-        connect_ok = await _atry_resolve_provider(
+        await _atry_resolve_provider(user, "commcare", resolve_commcare_domains, "CommCare")
+        await _atry_resolve_provider(
             user, "commcare_connect", resolve_connect_opportunities, "Connect"
         )
-        ocs_ok = await _atry_resolve_provider(user, "ocs", resolve_ocs_chatbots, "OCS")
-        onboarding_complete = commcare_ok or connect_ok or ocs_ok
+        await _atry_resolve_provider(user, "ocs", resolve_ocs_chatbots, "OCS")
+        # Authoritative flag = persisted state after the resolution attempt. This
+        # is True only if a provider actually created a connection-backed
+        # membership, so the flag can't flap True for a token-but-no-tenant user.
+        onboarding_complete = await _aonboarding_complete(user)
 
+    await cache.aset(cache_key, onboarding_complete, _ME_ONBOARDING_TTL)
     return JsonResponse(_user_response(user, onboarding_complete=onboarding_complete))
 
 
@@ -204,6 +247,10 @@ def disconnect_provider_view(request, provider_id):
         archived_at=timezone.now(), connection=None
     )
     oauth_conns.delete()
+
+    # Bust the cached /me onboarding flag so the change is reflected immediately
+    # rather than after the TTL (arch #254, 07#4).
+    cache.delete(_me_onboarding_cache_key(request.user))
 
     return JsonResponse({"status": "disconnected"})
 

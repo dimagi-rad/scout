@@ -4,7 +4,6 @@ API views for data dictionary and workspace schema management.
 
 import logging
 
-from asgiref.sync import async_to_sync
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -24,7 +23,6 @@ from apps.workspaces.services.schema_manager import SchemaManager, get_managed_d
 from apps.workspaces.tasks import refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.metadata import pipeline_list_tables
 
 logger = logging.getLogger(__name__)
 
@@ -70,30 +68,23 @@ def _schema_unavailable_response(tenant) -> Response | None:
     )
 
 
-def _get_all_columns(schema_name: str) -> dict[str, list[dict]]:
-    """Query managed DB for columns of every table in *schema_name*.
+def _columns_from_conn(conn, schema_name: str) -> dict[str, list[dict]]:
+    """Read all columns for *schema_name* using an already-open connection.
 
-    Returns a mapping of table_name → list of column dicts.
-    Returns an empty dict on any connection error.
+    Returns ``table_name -> list of column dicts``. Reuses the caller's
+    connection so the data-dictionary request opens the managed DB once rather
+    than per helper (arch #254, finding 10#2).
     """
-    try:
-        conn = get_managed_db_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT table_name, column_name, data_type, is_nullable, column_default "
-                "FROM information_schema.columns "
-                "WHERE table_schema = %s "
-                "ORDER BY table_name, ordinal_position",
-                (schema_name,),
-            )
-            rows = cursor.fetchall()
-            cursor.close()
-        finally:
-            conn.close()
-    except Exception:
-        logger.exception("Failed to query managed DB for schema '%s'", schema_name)
-        return {}
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT table_name, column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns "
+        "WHERE table_schema = %s "
+        "ORDER BY table_name, ordinal_position",
+        (schema_name,),
+    )
+    rows = cursor.fetchall()
+    cursor.close()
 
     columns_by_table: dict[str, list[dict]] = {}
     for table_name, col_name, data_type, is_nullable, default in rows:
@@ -106,6 +97,117 @@ def _get_all_columns(schema_name: str) -> dict[str, list[dict]]:
             }
         )
     return columns_by_table
+
+
+def _live_tables_from_conn(conn, schema_name: str) -> set[str]:
+    """Read the set of physical table names in *schema_name* from an open conn."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+        (schema_name,),
+    )
+    names = {row[0] for row in cursor.fetchall()}
+    cursor.close()
+    return names
+
+
+def _get_all_columns(schema_name: str) -> dict[str, list[dict]]:
+    """Query managed DB for columns of every table in *schema_name*.
+
+    Returns a mapping of table_name → list of column dicts.
+    Returns an empty dict on any connection error.
+    """
+    try:
+        conn = get_managed_db_connection()
+        try:
+            return _columns_from_conn(conn, schema_name)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Failed to query managed DB for schema '%s'", schema_name)
+        return {}
+
+
+def _live_tables_in_schema_sync(schema_name: str) -> set[str]:
+    """Read the live physical table names for a schema (single connection).
+
+    Returns an empty set on any connection error (treated as "nothing live",
+    matching the async ``_live_tables_in_schema``).
+    """
+    try:
+        conn = get_managed_db_connection()
+        try:
+            return _live_tables_from_conn(conn, schema_name)
+        finally:
+            conn.close()
+    except Exception:
+        logger.exception("Failed to enumerate live tables in schema '%s'", schema_name)
+        return set()
+
+
+def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names: set[str]) -> list:
+    """Synchronous equivalent of ``pipeline_list_tables`` for the sync DRF view.
+
+    Replaces the previous ``async_to_sync(pipeline_list_tables)`` call (which
+    span up a new event loop per request and opened its own managed-DB
+    connection). Uses sync ORM for the latest run and the *already-fetched*
+    ``live_table_names`` set so the request reads the managed DB once
+    (arch #254, finding 10#2). Mirrors the async implementation's reconciliation:
+    only sources marked ``completed`` whose physical table is present are
+    surfaced, plus dbt models that physically exist.
+    """
+    run = (
+        MaterializationRun.objects.filter(
+            tenant_schema=tenant_schema,
+            state__in=[
+                MaterializationRun.RunState.COMPLETED,
+                MaterializationRun.RunState.PARTIAL,
+            ],
+        )
+        .order_by("-completed_at")
+        .first()
+    )
+    if run is None:
+        return []
+
+    materialized_at = run.completed_at.isoformat() if run.completed_at else None
+    sources_result = (run.result or {}).get("sources", {})
+    source_descriptions = {s.name: s.description for s in pipeline_config.sources}
+    source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
+
+    tables = []
+    for source_name, source_data in sources_result.items():
+        if (source_data or {}).get("state") != "completed":
+            continue
+        physical_name = source_physical_names.get(source_name, f"raw_{source_name}")
+        if physical_name not in live_table_names:
+            continue
+        tables.append(
+            {
+                "name": physical_name,
+                "type": "table",
+                "description": source_descriptions.get(source_name, ""),
+                "materialized_row_count": source_data.get("rows"),
+                "row_count_verified": False,
+                "materialized_at": materialized_at,
+            }
+        )
+
+    for model_name in pipeline_config.dbt_models:
+        if live_table_names and model_name not in live_table_names:
+            continue
+        tables.append(
+            {
+                "name": model_name,
+                "type": "table",
+                "description": "",
+                "materialized_row_count": None,
+                "row_count_verified": False,
+                "materialized_at": materialized_at,
+            }
+        )
+
+    return tables
 
 
 def _get_table_columns(schema_name: str, table_name: str) -> list[dict]:
@@ -239,6 +341,19 @@ def _get_annotation(workspace, qualified_name):
         return None
 
 
+def _get_annotations_by_logical_name(workspace) -> dict[str, dict]:
+    """Return ``{logical_table_name: serialized annotation}`` for a workspace.
+
+    One query for all TableKnowledge rows instead of a per-table ``.get`` N+1
+    (arch #254, finding 10#2). The caller keys lookups by the stable logical
+    table name (see _logical_table_name).
+    """
+    return {
+        tk.table_name: _serialize_annotation(tk)
+        for tk in TableKnowledge.objects.filter(workspace=workspace)
+    }
+
+
 class DataDictionaryView(APIView):
     """
     GET /api/data-dictionary/
@@ -287,24 +402,44 @@ class DataDictionaryView(APIView):
         if pipeline_config is None:
             pipeline_config = registry.get("commcare_sync")
 
+        schema_name = tenant_schema.schema_name
+
+        # Open the managed DB ONCE and read both the live-table set (for the
+        # phantom-row reconciliation) and all columns from the same connection,
+        # rather than two fresh connections + an async_to_sync event loop
+        # (arch #254, finding 10#2). On any connection error, degrade to an empty
+        # catalog (same behavior as the async path).
+        try:
+            conn = get_managed_db_connection()
+            try:
+                live_table_names = _live_tables_from_conn(conn, schema_name)
+                all_columns = _columns_from_conn(conn, schema_name)
+            finally:
+                conn.close()
+        except Exception:
+            logger.exception("Failed to query managed DB for schema '%s'", schema_name)
+            live_table_names = set()
+            all_columns = {}
+
         tables_list = [
             t
-            for t in async_to_sync(pipeline_list_tables)(tenant_schema, pipeline_config)
+            for t in _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names)
             if not t["name"].startswith("stg_")
         ]
         if not tables_list:
             return Response({"tables": {}, "generated_at": None})
 
-        schema_name = tenant_schema.schema_name
-        all_columns = _get_all_columns(schema_name)
         tenant = tenant_schema.tenant
         tenant_metadata = _get_tenant_metadata(tenant)
+        # One query for every annotation, keyed by logical table name — replaces
+        # the per-table TableKnowledge.get N+1 (arch #254, finding 10#2).
+        annotations = _get_annotations_by_logical_name(workspace)
 
         enriched_tables = {}
         for table_info in tables_list:
             table_name = table_info["name"]
             qualified_name = f"{schema_name}.{table_name}"
-            annotation = _get_annotation(workspace, qualified_name)
+            annotation = annotations.get(_logical_table_name(qualified_name))
             source_metadata = _build_source_metadata(table_name, tenant_metadata)
             entry = {
                 "schema": schema_name,
@@ -467,8 +602,11 @@ class TableDetailView(APIView):
         if pipeline_config is None:
             pipeline_config = registry.get("commcare_sync")
 
+        # Sync table list (no async_to_sync event loop — arch #254, 10#2 sibling).
+        live_table_names = _live_tables_in_schema_sync(schema_name)
         known = {
-            t["name"] for t in async_to_sync(pipeline_list_tables)(tenant_schema, pipeline_config)
+            t["name"]
+            for t in _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names)
         }
         if table_name not in known:
             return None
