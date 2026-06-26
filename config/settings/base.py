@@ -274,8 +274,10 @@ SOCIALACCOUNT_PROVIDERS = {
 # Map of allauth provider id -> list of allowed email domains (lowercase, exact match).
 # A provider absent from the dict (or mapped to an empty list) is unrestricted.
 # A provider with a non-empty list rejects OAuth logins whose email domain isn't in the list.
-# A login that returns no email is allowed regardless (best-effort: covers providers like
-# Connect that don't return an email).
+# For a provider WITH a non-empty list, a login that returns no email is REJECTED
+# (a missing email can't satisfy a configured restriction — arch #258, finding 07#2).
+# Unrestricted providers (no/empty list — e.g. the deliberately-open Connect/OCS)
+# still allow no-email logins.
 # Override at deploy time with the SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS env var (JSON).
 SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
