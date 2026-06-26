@@ -15,6 +15,21 @@ if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
 
 
+# Total character budget for the knowledge context injected into the system
+# prompt (arch #254, finding 01#4). Without a cap the retriever concatenated
+# ALL KnowledgeEntry + ALL TableKnowledge rows verbatim (only learnings were
+# capped), so a bulk import could grow the prompt arbitrarily — and the whole
+# block is re-billed on every LLM call. Mirrors the 6000-char schema budget in
+# the graph. Knowledge is the first-billed, cacheable section, so keeping it
+# bounded keeps the cached prefix small and stable.
+KNOWLEDGE_CONTEXT_CHAR_BUDGET = 6000
+
+_TRUNCATION_NOTICE = (
+    "\n\n*(Knowledge context truncated to fit the prompt budget — "
+    "open the Knowledge page to see the full set.)*"
+)
+
+
 class KnowledgeRetriever:
     """
     Retrieves and formats knowledge context for an agent's system prompt.
@@ -31,7 +46,15 @@ class KnowledgeRetriever:
         self.workspace = workspace
 
     async def retrieve(self, user_question: str = "") -> str:
-        """Retrieve and format all relevant knowledge as markdown."""
+        """Retrieve and format all relevant knowledge as markdown.
+
+        The combined output is bounded by ``KNOWLEDGE_CONTEXT_CHAR_BUDGET`` so a
+        large knowledge base (or a bulk import) can't inflate — and re-bill on
+        every LLM call — the system prompt without limit (arch #254, 01#4).
+        ``user_question`` is accepted for API compatibility; there is no
+        relevance-ranking index today, so entries are included in a stable
+        (title / table-name) order until the budget is exhausted.
+        """
         sections: list[str] = []
 
         entries_section = await self._format_knowledge_entries()
@@ -46,7 +69,11 @@ class KnowledgeRetriever:
         if learnings_section:
             sections.append(learnings_section)
 
-        return "\n\n".join(sections)
+        combined = "\n\n".join(sections)
+        if len(combined) > KNOWLEDGE_CONTEXT_CHAR_BUDGET:
+            keep = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+            combined = combined[: max(0, keep)].rstrip() + _TRUNCATION_NOTICE
+        return combined
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""

@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 
+# Cap the total *decompressed* size of an import archive (arch #254, 01#4). A
+# small zip can decompress to gigabytes; without a guard a READ member could
+# inflate the knowledge base, which is concatenated into the system prompt and
+# re-billed on every LLM call. 25 MB is far above any legitimate markdown export.
+MAX_IMPORT_DECOMPRESSED_BYTES = 25 * 1024 * 1024
+
 KNOWLEDGE_TYPES = {
     "entry": {
         "model": KnowledgeEntry,
@@ -298,6 +304,21 @@ class KnowledgeImportView(APIView):
         except zipfile.BadZipFile:
             return Response(
                 {"error": "Invalid zip file."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Reject decompression bombs before reading any member: the zip's own
+        # directory advertises each member's uncompressed size (arch #254, 01#4).
+        total_uncompressed = sum(info.file_size for info in zf.infolist())
+        if total_uncompressed > MAX_IMPORT_DECOMPRESSED_BYTES:
+            return Response(
+                {
+                    "error": (
+                        "Import archive is too large when decompressed "
+                        f"({total_uncompressed} bytes; limit "
+                        f"{MAX_IMPORT_DECOMPRESSED_BYTES})."
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

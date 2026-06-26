@@ -239,7 +239,8 @@ async def test_build_system_prompt_no_schema_status_call():
         mock_reg.return_value.get.return_value = MagicMock()
         mock_full.return_value = ""
 
-        prompt = await _build_system_prompt(mock_workspace, MagicMock())
+        # _build_system_prompt returns a (stable, volatile) split (arch #254).
+        prompt = "\n".join(await _build_system_prompt(mock_workspace, MagicMock()))
 
     assert "call `get_schema_status`" not in prompt
     assert "start of every conversation" not in prompt
@@ -433,7 +434,8 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
         MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=None)
         MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
 
-        prompt = await _build_system_prompt(ws, MagicMock())
+        # _build_system_prompt returns a (stable, volatile) split (arch #254).
+        prompt = "\n".join(await _build_system_prompt(ws, MagicMock()))
 
     assert "## Data Availability" in prompt
     assert "No data has been loaded yet" in prompt
