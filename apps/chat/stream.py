@@ -79,8 +79,13 @@ def _is_transient_overload(exc: BaseException) -> bool:
 
 
 def _sse(chunk: dict) -> str:
-    """Format a chunk as an SSE data event."""
-    return f"data: {json.dumps(chunk)}\n\n"
+    """Format a chunk as an SSE data event.
+
+    ``default=str`` is a backstop: no single non-serializable value (e.g. a
+    langgraph ToolRuntime that slipped into a tool input) may ever crash the
+    whole stream -- it is coerced to its string form rather than raising.
+    """
+    return f"data: {json.dumps(chunk, default=str)}\n\n"
 
 
 def _tool_content_to_str(output: Any) -> str:
@@ -108,17 +113,41 @@ def _tool_content_to_str(output: Any) -> str:
     return json.dumps(content, default=str)
 
 
+# Params we never surface in the tool-call card. INJECTED_TOOL_PARAMS are the
+# context ids the graph injects; ``runtime`` is the ToolRuntime object that
+# langchain_mcp_adapters/langgraph's ToolNode inject into every MCP tool call
+# (internal plumbing, and not JSON serializable -- it crashed the whole stream,
+# Sentry SCOUT-DJANGO-1V).
+_HIDDEN_TOOL_PARAMS = INJECTED_TOOL_PARAMS | {"runtime"}
+
+
+def _is_json_serializable(value: Any) -> bool:
+    """True if ``value`` can be put on the JSON-encoded SSE wire as-is."""
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _redact_tool_input(raw_input: Any) -> dict:
     """Strip server-injected context params from a tool's input for display.
 
     The graph injects workspace_id / user_id / thread_id / tool_call_id into
-    every MCP tool call; those are internal ids, not arguments the user typed,
-    so they must not surface in the tool-call card. Returns {} for non-dict
-    input (e.g. positional-only), which the card renders as "no input".
+    every MCP tool call, and langgraph's ToolNode injects a ``runtime`` object;
+    those are internal plumbing, not arguments the user typed, so they must not
+    surface in the tool-call card. Any remaining non-JSON-serializable value is
+    dropped too, so one stray object can neither leak nor break the card.
+    Returns {} for non-dict input (e.g. positional-only), which the card
+    renders as "no input".
     """
     if not isinstance(raw_input, dict):
         return {}
-    return {k: v for k, v in raw_input.items() if k not in INJECTED_TOOL_PARAMS}
+    return {
+        k: v
+        for k, v in raw_input.items()
+        if k not in _HIDDEN_TOOL_PARAMS and _is_json_serializable(v)
+    }
 
 
 def _truncate_tool_output(content: str) -> str:
