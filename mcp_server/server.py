@@ -431,7 +431,7 @@ async def list_pipelines() -> dict:
 
 
 @mcp.tool()
-async def get_materialization_status(run_id: str) -> dict:
+async def get_materialization_status(run_id: str, workspace_id: str = "") -> dict:
     """Retrieve the status of a materialization run by ID.
 
     Primarily a fallback for reconnection scenarios — live progress is delivered
@@ -439,13 +439,22 @@ async def get_materialization_status(run_id: str) -> dict:
 
     Args:
         run_id: UUID of the MaterializationRun to look up.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+            The run is scoped to this workspace (arch #253, 01#6) so a run in
+            another workspace cannot be inspected from here.
     """
-    async with tool_context("get_materialization_status", run_id) as tc:
+    async with tool_context("get_materialization_status", run_id, workspace_id=workspace_id) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        if not await _run_belongs_to_workspace(run, workspace_id):
+            # Same NOT_FOUND as a genuinely missing run so a caller can't probe
+            # the existence of runs in other workspaces.
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
@@ -469,7 +478,7 @@ async def get_materialization_status(run_id: str) -> dict:
 
 
 @mcp.tool()
-async def cancel_materialization(run_id: str) -> dict:
+async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
     """Cancel a running materialization pipeline.
 
     Marks the run as CANCELLED in the database. This is a best-effort
@@ -478,13 +487,20 @@ async def cancel_materialization(run_id: str) -> dict:
 
     Args:
         run_id: UUID of the MaterializationRun to cancel.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+            The run is scoped to this workspace (arch #253, 01#6) so a run in
+            another workspace cannot be cancelled from here.
     """
-    async with tool_context("cancel_materialization", run_id) as tc:
+    async with tool_context("cancel_materialization", run_id, workspace_id=workspace_id) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        if not await _run_belongs_to_workspace(run, workspace_id):
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
@@ -525,7 +541,17 @@ async def cancel_materialization(run_id: str) -> dict:
 
 
 async def _resolve_workspace_memberships(workspace_id, user_id):
-    """Resolve TenantMemberships for all tenants in a workspace."""
+    """Resolve a user's TenantMemberships within a workspace.
+
+    Entitlement guard (arch #253, 01#6): ``user_id`` is REQUIRED. An empty
+    ``user_id`` previously skipped the user filter and returned every membership
+    in the workspace, so the membership guard passed for any/no user. We now
+    reject an empty ``user_id`` outright — a server-injected acting user is the
+    whole point of the check.
+    """
+    if not user_id:
+        return None, "user_id is required"
+
     workspace = await Workspace.objects.filter(id=workspace_id).afirst()
     if workspace is None:
         return None, f"Workspace '{workspace_id}' not found"
@@ -537,15 +563,31 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     if not tenant_ids:
         return None, "Workspace has no tenants configured"
 
-    qs = TenantMembership.objects.select_related("user", "tenant").filter(tenant_id__in=tenant_ids)
-    if user_id:
-        qs = qs.filter(user_id=user_id)
-
-    memberships = [tm async for tm in qs]
+    memberships = [
+        tm
+        async for tm in TenantMembership.objects.select_related("user", "tenant").filter(
+            tenant_id__in=tenant_ids, user_id=user_id
+        )
+    ]
     if not memberships:
         return None, "No tenant memberships found for this user in this workspace"
 
     return memberships, None
+
+
+async def _run_belongs_to_workspace(run, workspace_id) -> bool:
+    """Return True if a MaterializationRun's tenant is part of ``workspace_id``.
+
+    Scopes LLM-supplied ``run_id``s to the calling workspace (arch #253, 01#6)
+    so a run in another workspace cannot be inspected or cancelled from a chat
+    scoped elsewhere.
+    """
+    if not workspace_id:
+        return False
+    return await WorkspaceTenant.objects.filter(
+        workspace_id=workspace_id,
+        tenant_id=run.tenant_schema.tenant_id,
+    ).aexists()
 
 
 @mcp.tool()
@@ -966,16 +1008,44 @@ def _run_server(args: argparse.Namespace) -> None:
     logger.info("Starting Scout MCP server (transport=%s)", args.transport)
 
     if args.transport == "streamable-http":
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        # Allow internal Docker network hostname in addition to loopback defaults.
-        # The MCP server is internal-only; DNS rebinding protection is still on.
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
-        )
+        _run_streamable_http(args)
+        return
 
     mcp.run(transport=args.transport)
+
+
+def _run_streamable_http(args: argparse.Namespace) -> None:
+    """Serve the streamable-HTTP transport with shared-secret caller auth.
+
+    We build the Starlette app ourselves (rather than calling ``mcp.run``) so we
+    can wrap it in ``SharedSecretMiddleware`` (arch #253, 01#6) — the secret
+    check then fires ahead of any MCP session/tool dispatch. DNS-rebinding Host
+    protection stays on as a second layer.
+    """
+    import uvicorn
+    from django.conf import settings
+
+    from mcp_server.auth import SharedSecretMiddleware
+
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    # Allow internal Docker network hostname in addition to loopback defaults.
+    # The MCP server is internal-only; DNS rebinding protection is still on.
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
+    )
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(SharedSecretMiddleware, secret=settings.MCP_SHARED_SECRET)
+
+    config = uvicorn.Config(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=("debug" if args.verbose else "info"),
+    )
+    uvicorn.Server(config).run()
 
 
 def _run_with_reload(args: argparse.Namespace) -> None:

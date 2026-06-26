@@ -143,6 +143,18 @@ def _make_async_conn(mock_cursor):
     return mock_conn
 
 
+def _make_pool_for_conn(mock_conn):
+    """Build a mock AsyncConnectionPool whose .connection() yields ``mock_conn``.
+
+    Queries now acquire connections from the shared managed-DB pool (arch #253,
+    10#1) rather than opening a fresh ``psycopg.AsyncConnection`` per call, so
+    tests patch ``get_pool`` to return this fake pool.
+    """
+    pool = MagicMock()
+    pool.connection.return_value = mock_conn  # mock_conn is its own async ctx mgr
+    return AsyncMock(return_value=pool)
+
+
 class TestExecuteAsyncParameterized:
     """Test the low-level async execution function."""
 
@@ -157,8 +169,8 @@ class TestExecuteAsyncParameterized:
         mock_conn = _make_async_conn(mock_cursor)
 
         with patch(
-            "psycopg.AsyncConnection.connect",
-            new=AsyncMock(return_value=mock_conn),
+            "mcp_server.services.query.get_pool",
+            new=_make_pool_for_conn(mock_conn),
         ):
             result = await _execute_async_parameterized(
                 tenant_context,
@@ -168,9 +180,10 @@ class TestExecuteAsyncParameterized:
                 30,
             )
 
-        # Verify all three execute calls: SET search_path, SET timeout, actual query
+        # SET search_path, SET timeout, actual query, then RESET ALL on return.
         execute_calls = mock_cursor.execute.call_args_list
-        assert len(execute_calls) == 3
+        assert len(execute_calls) == 4
+        assert "RESET ALL" in str(execute_calls[-1])
 
         # Verify the actual query was called with params
         final_call = execute_calls[2]
@@ -194,8 +207,8 @@ class TestExecuteAsyncParameterized:
         mock_conn = _make_async_conn(mock_cursor)
 
         with patch(
-            "psycopg.AsyncConnection.connect",
-            new=AsyncMock(return_value=mock_conn),
+            "mcp_server.services.query.get_pool",
+            new=_make_pool_for_conn(mock_conn),
         ):
             result = await _execute_async_parameterized(
                 tenant_context,
@@ -224,6 +237,10 @@ def _fake_sync_to_async(fn):
     return wrapper
 
 
+# Tool handlers run inside tool_context, which now manages DB connections
+# (close_old_connections) on every call (arch #253, 08#0), so every tool-invoking
+# test touches the connection layer and needs the DB enabled.
+@pytest.mark.django_db(transaction=True)
 class TestListTablesTool:
     async def test_success_returns_enriched_tables(self, tenant_id, tenant_context):
         from mcp_server.server import list_tables
@@ -331,6 +348,7 @@ class TestListTablesTool:
 PATCH_PIPELINE_DESCRIBE_TABLE = "mcp_server.server.pipeline_describe_table"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestDescribeTableTool:
     async def test_success_returns_enriched_columns(self, tenant_id, tenant_context):
         from mcp_server.server import describe_table
@@ -430,6 +448,7 @@ class TestDescribeTableTool:
 PATCH_PIPELINE_GET_METADATA = "mcp_server.server.pipeline_get_metadata"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestGetMetadataTool:
     async def test_returns_tables_and_relationships(self, tenant_id, tenant_context):
         from mcp_server.server import get_metadata
@@ -631,6 +650,7 @@ PATCH_TENANT_SCHEMA = "apps.workspaces.models.TenantSchema"
 PATCH_MATERIALIZATION_RUN = "apps.workspaces.models.MaterializationRun"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestGetSchemaStatusTool:
     """Test the get_schema_status MCP tool."""
 
@@ -712,6 +732,7 @@ class TestGetSchemaStatusTool:
 PATCH_SCHEMA_MANAGER = "apps.workspaces.services.schema_manager.SchemaManager"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestTeardownSchemaTool:
     """Test the teardown_schema MCP tool."""
 
@@ -752,6 +773,7 @@ class TestTeardownSchemaTool:
         assert result["error"]["code"] == NOT_FOUND
 
 
+@pytest.mark.django_db(transaction=True)
 class TestListPipelines:
     def test_returns_available_pipelines(self):
         import asyncio
@@ -779,6 +801,7 @@ class TestListPipelines:
         assert result["data"]["pipelines"][0]["provider"] == "commcare"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestGetMaterializationStatus:
     def test_returns_run_status(self):
         import asyncio
@@ -802,11 +825,19 @@ class TestGetMaterializationStatus:
         mock_run.tenant_schema.schema_name = "dimagi"
         del mock_run.tenant_schema.tenant_membership
 
-        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+        with (
+            patch("mcp_server.server.MaterializationRun") as mock_cls,
+            # The run-belongs-to-workspace scoping (arch #253, 01#6) is exercised
+            # by tests/test_mcp_entitlement.py; here we isolate the status logic.
+            patch(
+                "mcp_server.server._run_belongs_to_workspace",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
             from mcp_server.server import get_materialization_status
 
-            result = asyncio.run(get_materialization_status(run_id=run_id))
+            result = asyncio.run(get_materialization_status(run_id=run_id, workspace_id="ws-1"))
 
         assert result["success"] is True
         assert result["data"]["run_id"] == run_id
@@ -834,6 +865,7 @@ class TestGetMaterializationStatus:
         assert result["error"]["code"] == "NOT_FOUND"
 
 
+@pytest.mark.django_db(transaction=True)
 class TestCancelMaterialization:
     def test_cancel_in_progress_run(self):
         import asyncio
@@ -851,7 +883,13 @@ class TestCancelMaterialization:
         del mock_run.tenant_schema.tenant_membership
         mock_run.asave = AsyncMock()
 
-        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+        with (
+            patch("mcp_server.server.MaterializationRun") as mock_cls,
+            patch(
+                "mcp_server.server._run_belongs_to_workspace",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
             mock_cls.RunState.STARTED = "started"
             mock_cls.RunState.DISCOVERING = "discovering"
@@ -861,7 +899,7 @@ class TestCancelMaterialization:
             mock_cls.RunState.CANCELLED = "cancelled"
             from mcp_server.server import cancel_materialization
 
-            result = asyncio.run(cancel_materialization(run_id=run_id))
+            result = asyncio.run(cancel_materialization(run_id=run_id, workspace_id="ws-1"))
 
         assert result["success"] is True
         assert result["data"]["cancelled"] is True
@@ -889,7 +927,13 @@ class TestCancelMaterialization:
         mock_run.tenant_schema.schema_name = "dimagi"
         del mock_run.tenant_schema.tenant_membership
 
-        with patch("mcp_server.server.MaterializationRun") as mock_cls:
+        with (
+            patch("mcp_server.server.MaterializationRun") as mock_cls,
+            patch(
+                "mcp_server.server._run_belongs_to_workspace",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
             mock_cls.objects.select_related.return_value.aget = AsyncMock(return_value=mock_run)
             mock_cls.RunState.STARTED = "started"
             mock_cls.RunState.DISCOVERING = "discovering"
@@ -898,7 +942,7 @@ class TestCancelMaterialization:
             mock_cls.RunState.FAILED = "failed"
             from mcp_server.server import cancel_materialization
 
-            result = asyncio.run(cancel_materialization(run_id=run_id))
+            result = asyncio.run(cancel_materialization(run_id=run_id, workspace_id="ws-1"))
 
         assert result["success"] is False
         assert "not in progress" in result["error"]["message"].lower()

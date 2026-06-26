@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
-from asgiref.sync import async_to_sync
 from cryptography.fernet import Fernet
 from django.conf import settings
 from django.contrib.sites.models import Site
@@ -78,94 +77,6 @@ class TestCommCareConnectProvider:
 
     def test_provider_in_installed_apps(self):
         assert "apps.users.providers.commcare_connect" in settings.INSTALLED_APPS
-
-
-class AsyncList:
-    """Wraps a list to support async iteration for mocking Django async querysets."""
-
-    def __init__(self, items):
-        self._items = items
-
-    def __aiter__(self):
-        return self._aiter()
-
-    async def _aiter(self):
-        for item in self._items:
-            yield item
-
-
-class TestGetUserOAuthTokens:
-    """Test the get_user_oauth_tokens helper in mcp_client."""
-
-    def _make_social_token(self, provider, token, token_secret="refresh_tok", expires_at=None):
-        """Build a mock SocialToken."""
-        st = MagicMock()
-        st.account.provider = provider
-        st.token = token
-        st.token_secret = token_secret
-        st.expires_at = expires_at
-        return st
-
-    @patch("apps.agents.mcp_client.SocialToken")
-    def test_returns_tokens_for_connected_providers(self, mock_social_token_cls):
-        from apps.agents.mcp_client import get_user_oauth_tokens
-
-        user = MagicMock()
-        user.pk = 1
-
-        mock_qs = MagicMock()
-        mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = AsyncList(
-            [
-                self._make_social_token("commcare", "hq_token_123"),
-                self._make_social_token("commcare_connect", "connect_token_456"),
-            ]
-        )
-
-        result = async_to_sync(get_user_oauth_tokens)(user)
-        assert result == {
-            "commcare": "hq_token_123",
-            "commcare_connect": "connect_token_456",
-        }
-
-    @patch("apps.agents.mcp_client.SocialToken")
-    def test_returns_empty_dict_for_no_tokens(self, mock_social_token_cls):
-        from apps.agents.mcp_client import get_user_oauth_tokens
-
-        user = MagicMock()
-        user.pk = 1
-
-        mock_qs = MagicMock()
-        mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = AsyncList([])
-
-        result = async_to_sync(get_user_oauth_tokens)(user)
-        assert result == {}
-
-    @patch("apps.agents.mcp_client.SocialToken")
-    def test_skips_non_commcare_providers(self, mock_social_token_cls):
-        from apps.agents.mcp_client import get_user_oauth_tokens
-
-        user = MagicMock()
-        user.pk = 1
-
-        mock_qs = MagicMock()
-        mock_social_token_cls.objects.filter.return_value = mock_qs
-        mock_qs.select_related.return_value = AsyncList(
-            [
-                self._make_social_token("google", "google_token"),
-                self._make_social_token("commcare", "hq_token"),
-            ]
-        )
-
-        result = async_to_sync(get_user_oauth_tokens)(user)
-        assert result == {"commcare": "hq_token"}
-
-    def test_returns_empty_dict_for_none_user(self):
-        from apps.agents.mcp_client import get_user_oauth_tokens
-
-        result = async_to_sync(get_user_oauth_tokens)(None)
-        assert result == {}
 
 
 class TestTokenRefresh:
@@ -240,32 +151,6 @@ class TestTokenRefresh:
         from apps.users.services.token_refresh import token_needs_refresh
 
         assert token_needs_refresh(None) is False
-
-
-@pytest.mark.django_db
-class TestGraphOAuthConfig:
-    """Test that build_agent_graph accepts oauth_tokens gracefully."""
-
-    @patch("apps.agents.graph.base.ChatAnthropic")
-    @patch("apps.agents.graph.base.KnowledgeRetriever")
-    def test_build_graph_accepts_oauth_tokens(self, mock_kr, mock_llm, workspace):
-        """build_agent_graph should accept oauth_tokens without error."""
-        from apps.agents.graph.base import build_agent_graph
-
-        mock_kr_instance = MagicMock()
-        mock_kr_instance.retrieve.return_value = ""
-        mock_kr.return_value = mock_kr_instance
-
-        mock_llm_instance = MagicMock()
-        mock_llm_instance.bind_tools.return_value = mock_llm_instance
-        mock_llm.return_value = mock_llm_instance
-
-        # Should not raise (returns a coroutine — check it's not None)
-        graph = build_agent_graph(
-            workspace=workspace,
-            oauth_tokens={"commcare": "test_token"},
-        )
-        assert graph is not None
 
 
 @pytest.mark.django_db

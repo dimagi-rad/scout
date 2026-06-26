@@ -63,11 +63,13 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 
 # Tools the server exposes that do NOT take a server-injected context id. Kept
 # explicit so adding a context-free tool is a deliberate edit, not silent drift.
+# ``get_materialization_status``/``cancel_materialization`` were moved OUT of this
+# set (arch #253, 01#6): they now take an injected ``workspace_id`` that scopes
+# the LLM-supplied ``run_id`` to the calling workspace, so they belong in
+# ``MCP_TOOL_NAMES`` instead.
 CONTEXT_FREE_TOOLS = frozenset(
     {
         "list_pipelines",
-        "get_materialization_status",
-        "cancel_materialization",
     }
 )
 
@@ -243,6 +245,7 @@ async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_list_pipelines_round_trip_shape():
     """list_pipelines round-trips and returns the documented success envelope.
 
@@ -294,6 +297,7 @@ async def test_get_schema_status_round_trip_not_provisioned(db):
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.django_db(transaction=True)
 async def test_get_schema_status_rejects_empty_workspace_id():
     """A missing workspace_id is rejected server-side, not silently accepted.
 

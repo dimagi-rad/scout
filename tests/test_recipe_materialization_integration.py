@@ -64,7 +64,6 @@ async def test_recipe_agent_materializes_headlessly_without_crash(workspace, use
 
     with (
         patch("apps.recipes.services.runner.get_mcp_tools", new=AsyncMock(return_value=[])),
-        patch("apps.recipes.services.runner.get_user_oauth_tokens", new=AsyncMock(return_value={})),
         patch("apps.agents.graph.base.ChatAnthropic", return_value=mock_llm),
     ):
         run_row = await RecipeRun.objects.acreate(
