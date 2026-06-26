@@ -24,7 +24,7 @@ class OCSProvider(OAuth2Provider):
     oauth2_adapter_class = OCSOAuth2Adapter
 
     def get_default_scope(self) -> list[str]:
-        return ["chatbots:read", "sessions:read", "files:read", "openid"]
+        return ["chatbots:read", "sessions:read", "participants:read", "files:read", "openid"]
 
     def extract_uid(self, data: dict) -> str:
         sub = data.get("sub")

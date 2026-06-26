@@ -49,9 +49,8 @@ class OCSParticipantLoader(OCSBaseLoader):
         url = f"{self.base_url}/api/participants"
         # Scope to this tenant's chatbot so the participant list and each
         # participant's per-chatbot ``data`` array are limited to it. The OCS
-        # ParticipantView filters on the ``experiment`` query param; ``chatbot``
-        # is silently ignored and leaks the whole team roster (arch #245).
-        params = {"experiment": self.experiment_id}
+        # ParticipantView filters on the ``chatbot`` query param.
+        params = {"chatbot": self.experiment_id}
         total = 0
         # Cursor pagination — no ``count`` field, so totals are always None.
         for raw_page, _page_total in self._paginate(url, params=params):
