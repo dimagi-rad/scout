@@ -152,6 +152,18 @@ def build_blended_cube(
     ]
     sql = "\nUNION ALL\n".join(branches)
 
+    if with_visit_fields:
+        # Pre-compute the age bins in an outer wrapper so the age_days/age_week DIMENSIONS are
+        # plain passthroughs of distinct columns. A dimension whose sql transforms a column of
+        # the SAME name (e.g. floor(age_days) on a dimension named age_days) resolves the bare
+        # identifier to the dimension itself, not the raw column — Cube then emits NULL for it
+        # and for anything referencing it (age_week). Distinct wrapper columns break the shadow.
+        sql = (
+            "SELECT u.*, floor(u.age_days) AS age_days_bin, "
+            "floor(u.age_days / 7.0) AS age_week_bin\n"
+            f"FROM (\n{sql}\n) AS u"
+        )
+
     dimensions = [{"name": "opportunity_id", "sql": "opportunity_id", "type": "string"}]
     dimensions += [{"name": n, "sql": n, "type": t} for n, t in _BASE_DIMENSIONS]
 
@@ -161,10 +173,10 @@ def build_blended_cube(
         measure_defs.append({"name": m.name, "sql": m.name, "type": "avg"})
 
     if with_visit_fields:
-        dimensions.append({"name": "age_days", "sql": "floor(age_days)", "type": "number"})
+        dimensions.append({"name": "age_days", "sql": "age_days_bin", "type": "number"})
         # Weekly bin: per-day points are sparse/noisy for a growth curve; grouping by
         # age_week gives a smooth, well-powered line (more children per point).
-        dimensions.append({"name": "age_week", "sql": "floor(age_days / 7)", "type": "number"})
+        dimensions.append({"name": "age_week", "sql": "age_week_bin", "type": "number"})
         # The band needs the birth_weight measure column; only emit it when resolved.
         if any(m.name == "birth_weight" for m in measures):
             dimensions.append(

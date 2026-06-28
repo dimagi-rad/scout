@@ -27,7 +27,11 @@ export interface UiSlice {
   activeArtifactId: string | null
   threads: Thread[]
   threadsStatus: ThreadsStatus
+  // Text another surface (e.g. an "Edit definition" lineage button) wants to push into the
+  // chat composer. ChatPanel consumes it on change, fills the input, focuses, and clears it.
+  pendingChatInput: string | null
   uiActions: {
+    setPendingChatInput: (text: string | null) => void
     newThread: () => void
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
@@ -46,7 +50,11 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
   activeArtifactId: null,
   threads: [],
   threadsStatus: "idle",
+  pendingChatInput: null,
   uiActions: {
+    setPendingChatInput: (text: string | null) => {
+      set({ pendingChatInput: text })
+    },
     newThread: () => {
       set({ threadId: crypto.randomUUID(), activeArtifactId: null })
     },

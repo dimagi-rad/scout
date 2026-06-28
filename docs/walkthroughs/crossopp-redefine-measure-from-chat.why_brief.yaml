@@ -1,0 +1,121 @@
+schema_version: 1
+narrative_slug: crossopp-redefine-measure-from-chat
+problem: >-
+  A clinical operations expert can be handed a cross-opp chart that is silently wrong because a
+  single metric was defined against the wrong field — the infant growth curve is flat because
+  age_days resolved to a decoupled child_age field — and today the only way to correct that
+  metric is a backend code change by an engineer, even though the underlying data is correct.
+spine:
+  - id: S1
+    claim: >-
+      A metric can be defined against the wrong field, producing a chart that is confidently wrong
+      even when the data is good, and fixing it currently requires an engineer to change backend code.
+    rationale: >-
+      The resolver mapped age_days to the literal child_age field, which is decoupled from real age
+      (corr ~= 0.0), so the growth curve is flat — yet the data climbs strongly against true age
+      (visit_date - child_dob, corr ~= 0.41). The wrongness lives in the metric definition, not the data.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-006
+      - kind: implemented
+        ref: EV-002
+      - kind: documented
+        ref: EV-001
+  - id: S2
+    claim: >-
+      Scout's inspectability already shows exactly how each number was computed — the per-opportunity
+      resolved column, the SQL, and the confidence — so a user can see that the metric is wrong.
+    rationale: >-
+      The lineage card and inspector render age_days = child_age and its CAST SQL per opp, so the
+      wrong derivation is legible to the person reading the chart, not hidden in code.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-004
+  - id: S3
+    claim: >-
+      In the Cube semantic layer a metric is a definition over the per-opp views, so correcting it is a
+      model reload rather than a data rebuild — cheap, reversible, and localized to one expression.
+    rationale: >-
+      The cube builder threads each canonical field's SQL expression into the Tier-1 per-opp cubes;
+      changing one field's expression and reloading leaves every other measure and the Tier-2 blend
+      untouched, with no re-ETL.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-003
+      - kind: implemented
+        ref: EV-005
+  - id: S4
+    claim: >-
+      Therefore the correction can be a product action: the user redefines the metric in chat as a
+      derived formula — age_days as the days between the visit date and the child's date of birth —
+      resolved per opportunity.
+    rationale: >-
+      MeasureResolution already carries a sql_expression the cube accepts, so a redefinition can emit
+      a derived per-opp expression (visit_date - child_dob) instead of a single-column match.
+    status: gap
+    evidence:
+      - kind: implemented
+        ref: EV-002
+      - kind: implemented
+        ref: EV-003
+  - id: S5
+    claim: >-
+      The doubt-gate confirms the new per-opportunity SQL — including an opportunity whose date-of-birth
+      column is named differently — before committing, so the user trusts the corrected metric.
+    rationale: >-
+      The existing inline approval shows the proposed per-opp expression for confirm or reject, so the
+      user verifies the derivation resolved correctly everywhere without hand-writing SQL.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-007
+  - id: S6
+    claim: >-
+      Making inspectability writable — an edit-definition affordance on the lineage card — turns the
+      audit surface into the correction surface, so the user fixes the metric where they found the bug.
+    rationale: >-
+      The same card that exposes age_days = child_age should let the user launch the redefinition
+      pre-filled with the current expression, closing see-it and fix-it in one place.
+    status: gap
+    evidence:
+      - kind: implemented
+        ref: EV-004
+      - kind: assumed
+        ref: EV-008
+  - id: S7
+    claim: >-
+      End to end, redefining the metric flips the curve from flat to climbing — catch-up growth with the
+      lightest band above the WHO target — with no deploy and no data rebuild.
+    rationale: >-
+      The data already encodes catch-up growth against true age, so once age_days reads
+      visit_date - child_dob and the cube reloads, the rendered curve climbs; the DDD run's convergence
+      against the live product is the end-to-end proof.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-006
+      - kind: implemented
+        ref: EV-005
+gaps:
+  - id: G1
+    type: CAPABILITY
+    claim_ref: S4
+    detail: >-
+      The resolve/define path cannot yet express a canonical field as a derived formula over per-opp
+      resolved operands (it emits single-column matches only).
+    proposed_action: >-
+      Extend define_crossopp_visit_field + the resolver to accept a derivation (operands + formula),
+      resolve each operand per opp, and emit sql_expression = (visit_date - child_dob). Built via the
+      DDD loop's PRODUCT findings.
+  - id: G2
+    type: CAPABILITY
+    claim_ref: S6
+    detail: >-
+      The inspector/lineage card is read-only — there is no edit-definition affordance to launch a
+      redefinition from where the bug is seen.
+    proposed_action: >-
+      Add an Edit-definition control on the lineage card / Data Dictionary that opens the chat redefine
+      flow pre-filled with the current expression. Built via the DDD loop's PRODUCT findings.

@@ -1,0 +1,276 @@
+auth:
+  type: session
+base_url: http://localhost:5173
+name: crossopp-redefine-measure-from-chat
+narrative: 'Maya runs several KMC delivery opportunities and opens the infant growth curve she relies
+  on — but the lightest babies'' line is flat, not climbing the way catch-up growth should, and she does
+  not trust it. Instead of filing a ticket, she opens the curve''s lineage and reads, opportunity by opportunity,
+  how each number was built: the age axis is reading a raw "child age" field that does not track real
+  age. She tells Scout, in plain language, that age should be the days between the visit date and the
+  child''s date of birth — and from the same inspector she edits the definition. Scout re-derives the
+  measure as a formula across every opportunity, shows her the new SQL for each one — including the opportunity
+  whose date-of-birth column is named differently — and asks her to confirm. She approves; the cube reloads
+  on the spot — a definition change, not a data rebuild — and the curve she was staring at redraws itself
+  into proper catch-up growth. She re-opens the lineage, sees the corrected definition, and walks away
+  having fixed a metric herself, in the product.'
+narrative_locked: true
+narrative_locked_at: '2026-06-25T00:33:50.677479+00:00'
+narrative_synced_at: '2026-06-24T18:35:00.616866+00:00'
+narrative_synced_hash: e64e628646525860d0ce294570535972fdfcfcc95b6c005a1555d4a689bc7bbe
+narrative_synced_version: 1
+personas:
+  maya:
+    color: '#0EA5E9'
+    intro: Maya oversees several KMC delivery opportunities and reads the growth curve to make clinical
+      calls; she knows when a curve looks wrong but not how each opportunity's app stores its fields.
+    name: Maya
+    role: KMC Clinical Operations Lead
+review_mode: autonomous
+scenes:
+- actions:
+  - kind: wait_for
+    target: View Artifact
+  - kind: click
+    target: View Artifact
+    must_succeed: true
+  - kind: wait_for
+    target: testid:artifact-tab-view
+  - kind: hold
+    seconds: 4
+  - kind: scroll_to
+    target: semantic_query
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: View Artifact
+  - kind: hold
+    seconds: 3
+  concept_claim: The seeded growth curve renders flat for the lightest band because the age_days measure
+    resolves to a field decoupled from real age.
+  design_intent: Open on the real, seeded-broken state — a confidently-wrong chart produced by the resolver's
+    natural default (age_days = child_age) — so the fix has genuine stakes.
+  features:
+  - description: A per-render seed builds the PIPN workspace (opps 10019+10021) with the default resolution
+      (age_days -> child_age) and a rendered growth-curve artifact that is flat.
+    id: seed-broken-curve
+    verify: 'pytest/SQL: the seeded workspace''s cube model has age_days resolved to child_age, and corr(child_weight_visit,
+      age_days) over the materialized data is < 0.1'
+  narrative: Maya opens the infant growth curve for her KMC workspace and sees the lightest babies' line
+    sit flat across the weeks — not the catch-up climb she expects — and she doesn't trust the chart.
+  persona: maya
+  provenance: S1
+  show: Open the growth-curve artifact in the chat; the lightest birth-weight band's line is flat, not
+    climbing.
+  title: The growth curve looks wrong
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+- actions:
+  - kind: wait_for
+    target: per-opportunity mapping
+  - kind: scroll_to
+    target: per-opportunity mapping
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: child_age
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: Edit definition
+  - kind: hold
+    seconds: 2
+  concept_claim: The lineage shows age_days resolved per opportunity to the child_age column with its
+    exact SQL, exposing the wrong derivation.
+  design_intent: Inspectability is the diagnostic entry point — the user sees exactly why the number is
+    wrong, in the product, not in code.
+  features:
+  - description: The lineage / Data Dictionary renders, per opportunity, the resolved column + SQL + confidence
+      for the age_days per-visit field.
+    id: measure-lineage-inspect
+    verify: 'Playwright: open the age_days lineage and assert it shows the resolved column ''child_age''
+      and a CAST(... AS NUMERIC) SQL expression per opportunity'
+  narrative: Maya opens the lineage for the age_days measure and reads, opportunity by opportunity, that
+    it is resolved to a raw child-age field with a plain CAST — a field she recognizes does not track
+    real age.
+  persona: maya
+  provenance: S2
+  show: Expand the age_days lineage; per opportunity it shows the resolved column child_age and its CAST
+    SQL.
+  title: Maya reads how the age axis was built
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+- actions:
+  - kind: wait_for
+    target: Edit definition
+  - kind: click
+    target: Edit definition
+    must_succeed: true
+    note: launch redefine (F4)
+  - kind: fill
+    target: testid:chat-input
+    value: Redefine age_days as the number of days between the child's date of birth (child_dob) and the
+      visit date (visit_date), not the child_age field.
+  - kind: press
+    value: Enter
+  - kind: wait_for
+    seconds: 150
+    target: testid:tool-call-redefine_crossopp_visit_field
+  - kind: hold
+    seconds: 4
+  - kind: scroll_to
+    target: Redefine
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: child_dob
+  - kind: hold
+    seconds: 3
+  concept_claim: Editing a measure from the inspector lets the user redefine age_days as a derived formula
+    (visit_date minus child_dob) in chat, not just pick a different column.
+  design_intent: 'The core build: inspectability becomes writable, and the resolve/define path supports
+    a derived formula over per-opp-resolved operands, not only single-column matches.'
+  features:
+  - description: An 'Edit definition' control on the age_days lineage card / Data Dictionary opens the
+      chat redefine flow pre-filled with the current expression (inspectability becomes writable).
+    id: edit-definition-affordance
+    verify: 'Playwright: assert an ''Edit definition'' control on the age_days lineage card, clicking
+      it focuses the chat input pre-filled with the current age_days definition'
+  - description: define_crossopp_visit_field + the resolver accept a derivation (operands + formula),
+      resolve each operand per opp, and emit sql_expression = (visit_date::date - child_dob::date) instead
+      of a single-column match.
+    id: derived-measure-define
+    verify: 'pytest: redefining age_days as the visit_date-minus-child_dob derivation produces a MeasureResolution
+      per opp whose sql_expression is the date-difference, not a single column'
+  narrative: From the lineage card Maya clicks Edit definition and tells Scout, in plain language, that
+    age_days should be the number of days between the visit date and the child's date of birth — not the
+    child_age field — and Scout starts re-deriving the measure as a formula.
+  persona: maya
+  provenance: S4
+  show: Click Edit definition on the age_days card, enter 'days between visit_date and child_dob', and
+    submit; Scout re-resolves age_days as a derived formula.
+  title: Maya redefines the metric from the inspector
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+- actions:
+  - kind: wait_for
+    seconds: 60
+    target: child_dob
+  - kind: scroll_to
+    target: Redefine age_days
+  - kind: hold
+    seconds: 2
+  - kind: scroll_to
+    target: opp 10019
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: opp 10021
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: Commit redefinition
+  - kind: hold
+    seconds: 3
+  concept_claim: The doubt-gate shows the redefined age_days SQL per opportunity before commit, so the
+    user confirms the derivation resolved correctly everywhere.
+  design_intent: 'Trust: the user confirms the derived per-opp expression Scout proposes rather than hand-writing
+    SQL (free-form editing stays a non-goal).'
+  features:
+  - description: The crossopp approval card renders the redefined per-opp sql_expression (the visit_date
+      - child_dob date-diff) for confirm/reject, including the opp with a differently-named DOB column.
+    id: approval-shows-derived-sql
+    verify: 'Playwright: after redefining, the approval card shows a ''visit_date - child_dob'' style
+      expression for each opportunity; clicking Commit applies it'
+  narrative: Scout shows Maya the redefined age_days for each opportunity — the days between visit date
+    and date of birth — including the opportunity whose date-of-birth column is named differently, and
+    asks her to confirm before committing.
+  persona: maya
+  provenance: S5
+  show: The approval card shows the new per-opportunity SQL (visit_date - child_dob), including the differently-named
+    DOB column; Maya confirms.
+  title: Scout shows the new SQL for every opportunity
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+- actions:
+  - kind: click
+    target: Commit redefinition
+    must_succeed: true
+  - kind: hold
+    seconds: 10
+    note: commit + cube hot-reload
+  - kind: wait_for
+    seconds: 60
+    target: View Artifact
+  - kind: click
+    target: View Artifact
+    must_succeed: true
+  - kind: wait_for
+    target: testid:artifact-tab-view
+  - kind: hold
+    seconds: 5
+    note: the curve redraws climbing
+  - kind: scroll_to
+    target: Redefined
+  - kind: hold
+    seconds: 2
+  concept_claim: Approving the redefinition reloads the cube model and the rendered curve changes from
+    flat to climbing with no data rebuild.
+  design_intent: 'Pin the Cube leverage (S3): a metric is a definition, so the correction is an instant
+    model reload, not a re-ETL; the curve re-queries and climbs.'
+  features:
+  - description: On commit, add_measure regenerates the cube model with age_days = the derived date-diff
+      and reloads Cube additively (#303); the growth surface re-queries and the curve climbs.
+    id: cube-reload-derived-age
+    verify: 'SQL/pytest: after commit, the cube model''s age_days resolves to visit_date - child_dob and
+      corr(child_weight_visit, age_days) over the materialized data is > 0.3; the lightest band''s weekly
+      avg increases with age'
+  narrative: The moment Maya approves, the cube reloads — a definition change, not a data rebuild — and
+    the same growth curve redraws itself, the lightest band now climbing in proper catch-up growth toward
+    the 2,500g milestone.
+  persona: maya
+  provenance: S7
+  show: After commit the cube model reloads; re-open the growth curve and the lightest band now climbs
+    (catch-up growth).
+  title: The cube reloads and the curve corrects itself
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+- actions:
+  - kind: wait_for
+    target: age_days
+  - kind: scroll_to
+    target: Redefine
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: child_dob
+  - kind: hold
+    seconds: 3
+  - kind: scroll_to
+    target: visit_date
+  - kind: hold
+    seconds: 2
+  concept_claim: After the fix, the lineage shows age_days defined as visit_date minus child_dob per opportunity,
+    closing the see-it/fix-it loop in one surface.
+  design_intent: The inspector that exposed the bug now shows the correction — auditing and fixing live
+    in the same place.
+  features:
+  - description: The lineage / inspector reflects the redefined age_days (visit_date - child_dob) per
+      opportunity after commit, so the correction is auditable where the bug was found.
+    id: lineage-reflects-redefinition
+    verify: 'Playwright: re-open the age_days lineage and assert it shows a ''visit_date - child_dob''
+      expression per opportunity, not child_age'
+  narrative: Maya re-opens the age_days lineage and reads the corrected definition — days between visit
+    date and date of birth — confirming, in the same surface where she found the bug, that she fixed the
+    metric herself.
+  persona: maya
+  provenance: S6
+  show: Re-open the age_days lineage; it now shows visit_date - child_dob per opportunity instead of child_age.
+  title: Maya verifies the fix where she found it
+  url: /workspaces/${ws_id}/chat/${build_thread_id}
+  pace: teach
+setup:
+  command: uv run python scripts/walkthroughs/redefine-measure/seed.py
+  outputs: scripts/walkthroughs/redefine-measure/outputs.json
+  rerun: per_render
+  timeout_seconds: 1200
+why_brief: crossopp-redefine-measure-from-chat.why_brief.yaml

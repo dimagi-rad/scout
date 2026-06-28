@@ -276,6 +276,9 @@ class CrossOppMeasureDraft(models.Model):
     name = models.CharField(max_length=128)
     description = models.TextField(blank=True, default="")
     kind = models.CharField(max_length=16, default="numeric")
+    # "measure" (averaged) | "visit_field" (per-visit dimension/measure). Decides whether
+    # approval commits via add_measure or add_visit_field. Redefinitions use "visit_field".
+    target = models.CharField(max_length=16, default="measure")
     resolutions = models.JSONField(default=dict)  # opp_id -> serialized MeasureResolution
     flagged = models.JSONField(default=list)      # [opp_id, ...] low_confidence/absent
     shortlists = models.JSONField(default=dict)   # opp_id -> [ {column,label,type}, ... ]

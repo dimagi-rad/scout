@@ -213,6 +213,74 @@ def _stg_visits_columns(schema_name: str) -> list[str]:
         return [r[0] for r in cur.fetchall()]
 
 
+# NB: no {n} brace quantifiers — this regex is embedded in a Cube model SQL string, and Cube's
+# templating treats `{...}` as a member reference and strips it (turning `[0-9]{4}` into `[0-9]4`,
+# which then matches no real date and nulls the whole derived column). Spell the digits out.
+_ISO_DATE_RE = r"^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+_DOB_HINTS = ("child_dob", "dob", "date_of_birth", "birth_date", "childs_dob")
+
+
+def _resolve_date_operand(schema_name: str, operand: str, columns: set[str]) -> str | None:
+    """Resolve a canonical date operand (e.g. 'visit_date', 'child_dob') to this opp's real
+    column. Exact match first (base/derived columns like visit_date are always present);
+    otherwise fuzzy-match a date-of-birth column so differently-named DOB columns still align."""
+    if operand in columns:
+        return operand
+    low = operand.lower()
+    if "dob" in low or "birth" in low or "date_of_birth" in low:
+        for hint in _DOB_HINTS:
+            if hint in columns:
+                return hint
+        for col in sorted(columns):
+            cl = col.lower()
+            if "dob" in cl or ("birth" in cl and "weight" not in cl):
+                return col
+    return None
+
+
+def _guarded_date(col: str) -> str:
+    return f"CASE WHEN NULLIF({col}::text,'') ~ '{_ISO_DATE_RE}' THEN {col}::date END"
+
+
+def build_derived_days_between(workspace, field_name, start_operand, end_operand):
+    """Build per-opp resolutions for a DERIVED per-visit field = days between two dates
+    (``end - start``), resolving each date column per opp and emitting a guarded
+    date-difference SQL expression (column=None, sql_expression set). Returns (opps,
+    {opp_id: MeasureResolution}); an opp whose operand can't be resolved is status=absent."""
+    opps, _cands = workspace_opps(workspace)
+    resolutions: dict[str, MeasureResolution] = {}
+    for opp in opps:
+        cols = set(_stg_visits_columns(opp.schema_name))
+        s = _resolve_date_operand(opp.schema_name, start_operand, cols)
+        e = _resolve_date_operand(opp.schema_name, end_operand, cols)
+        if not s or not e:
+            resolutions[opp.external_id] = MeasureResolution(
+                measure=field_name, column=None, source_path=None, sql_expression=None,
+                confidence=0.0, status="absent", matched_label="",
+                reason=f"could not resolve {'start' if not s else 'end'} date column for this opp",
+            )
+            continue
+        expr = f"({_guarded_date(e)} - {_guarded_date(s)})"
+        resolutions[opp.external_id] = MeasureResolution(
+            measure=field_name, column=None, source_path=None, sql_expression=expr,
+            confidence=1.0, status="resolved",
+            matched_label=f"{e} - {s} (days, derived)",
+            reason=f"derived days between {start_operand} and {end_operand}",
+        )
+    return opps, resolutions
+
+
+def derived_lineage(field_name, resolutions) -> list[dict]:
+    """Inspector-shaped lineage list for a derived field's per-opp resolutions."""
+    return [
+        {
+            "opportunity_id": opp_id, "status": r.status, "confidence": r.confidence,
+            "column": r.column, "matched_label": r.matched_label, "sql_expression": r.sql_expression,
+        }
+        for opp_id, r in resolutions.items()
+    ]
+
+
 def _derived_column_candidates(schema_name: str, form_columns: set[str]) -> list[FieldCandidate]:
     """Offer staging-DERIVED stg_visits columns (not backed by a form question) to the
     resolver. Form fields cover entered values (e.g. visit weight); derived columns like

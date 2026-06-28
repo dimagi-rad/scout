@@ -29,11 +29,21 @@ export function ChatPanel() {
   const threadId = useAppStore((s) => s.threadId)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const pendingChatInput = useAppStore((s) => s.pendingChatInput)
+  const setPendingChatInput = useAppStore((s) => s.uiActions.setPendingChatInput)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState("")
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
+  // Pull text pushed from another surface (e.g. an "Edit definition" lineage button) into
+  // the composer, then clear it so it isn't re-applied on the next render.
+  useEffect(() => {
+    if (pendingChatInput != null) {
+      setInput(pendingChatInput)
+      setPendingChatInput(null)
+    }
+  }, [pendingChatInput, setPendingChatInput])
   // Transient-overload auto-retry (see ./overloadRetry):
   //   hitRetryableRef — a retryable-error data part arrived during this turn
   //   retriedRef      — we've already auto-retried this turn once

@@ -70,6 +70,8 @@ function renderToolOutput(
       return <GetMetadataOutputComponent output={output as GetMetadataOutput} />
     case "define_crossopp_measure":
     case "propose_crossopp_measures":
+    case "define_crossopp_visit_field":
+    case "redefine_crossopp_visit_field":
       return (
         <CrossOppMeasureOutput
           workspaceId={workspaceId ?? ""}
@@ -146,6 +148,18 @@ const AUTO_EXPAND_TOOLS = new Set([
   "get_metadata",
   "define_crossopp_measure",
   "propose_crossopp_measures",
+  "define_crossopp_visit_field",
+  "redefine_crossopp_visit_field",
+])
+
+// Interactive cross-opp cards (lineage with "Edit definition", the redefine approval card)
+// carry buttons the user acts on — they must stay visible even on a historical thread load,
+// never hidden inside a collapsed tool-call card.
+const ALWAYS_EXPAND_TOOLS = new Set([
+  "define_crossopp_measure",
+  "propose_crossopp_measures",
+  "define_crossopp_visit_field",
+  "redefine_crossopp_visit_field",
 ])
 
 interface ToolCallPartProps {
@@ -196,13 +210,16 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
   // Also stay expanded when we have a failure card to show so the user can
   // see the error inline rather than having to expand a collapsed card.
   const autoExpanded =
-    AUTO_EXPAND_TOOLS.has(toolName)
-    && (
-      isLatest
-      || isLoading
-      || (toolName === "run_materialization" && (!!matchingJob || !!matchingFailure))
+    ALWAYS_EXPAND_TOOLS.has(toolName)
+    || (
+      AUTO_EXPAND_TOOLS.has(toolName)
+      && (
+        isLatest
+        || isLoading
+        || (toolName === "run_materialization" && (!!matchingJob || !!matchingFailure))
+      )
+      && (isActiveMessage || toolName === "run_materialization")
     )
-    && (isActiveMessage || toolName === "run_materialization")
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null
   const expanded = effectiveOverride ?? autoExpanded

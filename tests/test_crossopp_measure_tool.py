@@ -29,7 +29,7 @@ async def test_define_measure_commits_when_no_doubt(workspace, user, monkeypatch
 
     monkeypatch.setattr(svc, "ensure_measure_queryable_meta", ok)
 
-    define, _propose, _vf = t.create_crossopp_measure_tools(workspace, user, "thread-1")
+    define, _propose, _vf, _redef = t.create_crossopp_measure_tools(workspace, user, "thread-1")
     out = await define.ainvoke({"name": "birth_weight", "description": "g", "kind": "numeric"})
     assert out["status"] == "committed" and out["measure"] == "birth_weight"
 
@@ -60,7 +60,7 @@ async def test_define_measure_drafts_when_doubt(workspace, user, monkeypatch):
     monkeypatch.setattr(svc, "resolve_across_opps_from_candidates", fake_resolve)
     monkeypatch.setattr(svc, "shortlist_for_opp", lambda c: [{"column": "x", "label": "X", "type": "Int"}])
 
-    define, _propose, _vf = t.create_crossopp_measure_tools(workspace, user, "thread-1")
+    define, _propose, _vf, _redef = t.create_crossopp_measure_tools(workspace, user, "thread-1")
     out = await define.ainvoke({"name": "los", "description": "days", "kind": "numeric"})
     assert out["status"] == "needs_approval"
     assert out["flagged"][0]["opp_id"] == "10013"

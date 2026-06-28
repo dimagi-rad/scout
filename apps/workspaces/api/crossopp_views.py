@@ -208,7 +208,14 @@ class CrossOppMeasureApproveView(APIView):
             resolutions = _apply_overrides(draft, request.data.get("overrides", {}))
         except ValueError as exc:
             return Response({"error": str(exc)}, status=400)
-        lineage = svc.add_measure(workspace, draft.to_spec_like(), resolutions, opps)
+        if getattr(draft, "target", "measure") == "visit_field":
+            # A redefinition of a per-visit field (e.g. age_days = visit_date - child_dob):
+            # commit via add_visit_field (no CrossOppMeasure catalog entry, surfaces as a
+            # cube dimension/visit-measure) and regenerate the model.
+            svc.add_visit_field(workspace, draft.name, resolutions, opps)
+            lineage = svc.derived_lineage(draft.name, resolutions)
+        else:
+            lineage = svc.add_measure(workspace, draft.to_spec_like(), resolutions, opps)
         draft.status = "committed"
         draft.save(update_fields=["status"])
         _defer_measure_resume(workspace, draft.thread_id, draft.name)

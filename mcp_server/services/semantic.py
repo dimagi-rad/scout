@@ -16,6 +16,7 @@ Multi-tenant auth flow:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,17 @@ import psycopg
 from django.conf import settings
 
 from mcp_server.context import load_workspace_context
+
+# Cube reads a measure as the function call MEASURE(cube.col). Agents (and the artifact
+# source queries they write) sometimes emit it as a quoted identifier — "measure(cube.col)"
+# or "MEASURE(cube.col)" — which Cube rejects ("Invalid identifier"), returning no rows and a
+# blank chart. Strip the wrapping quotes so the function call survives; same for DIMENSION().
+_QUOTED_FN_RE = re.compile(r'"\s*(measure|dimension)\s*\(([^"()]*)\)\s*"', re.IGNORECASE)
+
+
+def _normalize_semantic_sql(sql: str) -> str:
+    """Unwrap quoted MEASURE()/DIMENSION() so a stray-quote query still runs against Cube."""
+    return _QUOTED_FN_RE.sub(lambda m: f"{m.group(1).upper()}({m.group(2)})", sql)
 
 
 def mint_cube_jwt(workspace_id: str, schema_name: str, *, ttl_seconds: int = 300) -> str:
@@ -76,6 +88,7 @@ async def semantic_query(sql: str, workspace_id: str = "") -> dict[str, Any]:
     if not workspace_id:
         raise ValueError("workspace_id is required")
 
+    sql = _normalize_semantic_sql(sql)
     ctx = await load_workspace_context(workspace_id)
     token = mint_cube_jwt(workspace_id, ctx.schema_name)
 

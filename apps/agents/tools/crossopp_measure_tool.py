@@ -191,4 +191,61 @@ def create_crossopp_measure_tools(workspace, user, conversation_id=None) -> list
 
     define_crossopp_visit_field.name = "define_crossopp_visit_field"
 
-    return [define_crossopp_measure, propose_crossopp_measures, define_crossopp_visit_field]
+    @tool
+    async def redefine_crossopp_visit_field(
+        name: str, days_between_start: str, days_between_end: str
+    ) -> dict:
+        """Redefine an EXISTING cross-opp per-visit field as a DERIVED formula: the number of
+        days between two date fields (``end - start``). Use to CORRECT a field that resolved
+        to the wrong column. Example: a growth curve is flat because 'age_days' was mapped to
+        a raw 'child_age' field that doesn't track real age — redefine it as the days between
+        the child's date of birth and the visit date:
+        redefine_crossopp_visit_field(name='age_days', days_between_start='child_dob',
+        days_between_end='visit_date'). The result is days-since-birth at each visit. Each date
+        column is resolved per opportunity (apps differ), and the new per-opp SQL is returned
+        for the user to confirm before it is committed and the cube reloads."""
+        from asgiref.sync import sync_to_async
+
+        from apps.transformations.models import CrossOppMeasureDraft
+        from apps.transformations.services import crossopp_measure_service as svc
+
+        fname = name.strip()
+        start, end = days_between_start.strip(), days_between_end.strip()
+        _opps, resolutions = await sync_to_async(svc.build_derived_days_between)(
+            workspace, fname, start, end
+        )
+        draft = await CrossOppMeasureDraft.objects.acreate(
+            workspace=workspace,
+            name=fname,
+            description=f"days between {start} and {end} (derived)",
+            kind="numeric",
+            target="visit_field",
+            thread_id=conversation_id or "",
+            created_by=user,
+            status="pending",
+            resolutions={o: svc.serialize_resolution(r) for o, r in resolutions.items()},
+            flagged=[o for o, r in resolutions.items() if r.status != "resolved"],
+            shortlists={},
+        )
+        return {
+            "status": "needs_approval_redefine",
+            "draft_id": str(draft.id),
+            "field": fname,
+            "per_opp": [
+                {"opp_id": o, "sql_expression": r.sql_expression, "status": r.status}
+                for o, r in resolutions.items()
+            ],
+            "message": (
+                f"Redefined '{fname}' as days({end} - {start}). Review the per-opportunity SQL "
+                f"and confirm to commit; the cube reloads and the curve re-queries."
+            ),
+        }
+
+    redefine_crossopp_visit_field.name = "redefine_crossopp_visit_field"
+
+    return [
+        define_crossopp_measure,
+        propose_crossopp_measures,
+        define_crossopp_visit_field,
+        redefine_crossopp_visit_field,
+    ]

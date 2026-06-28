@@ -1,0 +1,143 @@
+schema_version: 1
+narrative_slug: kmc-cross-opp-growth-curve
+problem: >-
+  A clinical operations expert who wants to compare infant growth across several KMC
+  opportunities cannot, because each opportunity's CommCare app stores weight, age, and
+  birth weight under different field names and structures, and aligning them into one
+  trustworthy semantic model traditionally requires a data engineer to hand-build it
+  before any chart can be drawn.
+spine:
+  - id: S1
+    claim: >-
+      Comparing infant growth across multiple KMC opportunities requires a shared semantic
+      model, but the underlying CommCare apps are built differently, so the fields that hold
+      weight, age, and birth weight do not line up across opportunities.
+    rationale: >-
+      Cross-opp comparison is only meaningful if every opportunity's number means the same
+      thing. KMC apps range from 271 to 672 questions and name the same clinical concept
+      differently (e.g. opp 10020 uses child_weight where others use child_weight_visit),
+      so lexical matching silently drops or misaligns what matters.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-003
+      - kind: documented
+        ref: EV-001
+  - id: S2
+    claim: >-
+      In Scout an expert stands up the multi-opp workspace entirely through the product —
+      creating the workspace, adding the opportunities, and materializing them — starting
+      from zero pre-existing semantic knowledge.
+    rationale: >-
+      The cold-start path proves there is no hidden engineer-built model: the workspace is
+      created cold via the UI and materialized via chat, which builds the per-opp view
+      schema and read-only role with nothing pre-seeded.
+    status: grounded
+    evidence:
+      - kind: documented
+        ref: EV-001
+      - kind: implemented
+        ref: EV-012
+      - kind: implemented
+        ref: EV-006
+  - id: S3
+    claim: >-
+      From that cold workspace the chat agent itself builds the semantic layer — defining
+      birth weight as a canonical measure and visit weight and age as per-visit fields —
+      which bootstraps the Cube model and the per-visit growth surface from nothing.
+    rationale: >-
+      The agent's define_crossopp_measure and define_crossopp_visit_field tools feed a shared
+      resolve-then-commit engine that emits the Cube model and the weekly-binned weight-by-age
+      growth surface, so the modeling work happens in the conversation, not in a script.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-006
+      - kind: implemented
+        ref: EV-007
+      - kind: implemented
+        ref: EV-005
+  - id: S4
+    claim: >-
+      Because resolution is per-tenant and semantic, heterogeneous opportunities align on
+      shared canonical names without lexical matching, and each new definition is additive
+      so it never changes the meaning of measures already defined.
+    rationale: >-
+      A per-tenant LLM resolver maps each canonical concept to the SQL that opportunity's
+      app actually uses, and the commit step regenerates the model additively — so opp
+      10020's differently-named columns line up and existing measures stay byte-stable.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-007
+      - kind: documented
+        ref: EV-003
+  - id: S5
+    claim: >-
+      The infant growth curve renders from the Cube semantic query — weekly-binned average
+      weight by age with a 95% confidence interval and distinct-child counts — never from a
+      raw-SQL fallback.
+    rationale: >-
+      The growth surface's measures (avg_visit_weight, ci95_visit_weight, children) come from
+      the blended cube, and the artifact embeds those semantic-query results server-side
+      because the sandboxed chart iframe cannot fetch them itself.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-005
+      - kind: implemented
+        ref: EV-008
+  - id: S6
+    claim: >-
+      Every number on the curve can be traced from the chat to its canonical definition, its
+      per-opportunity resolved column, and the exact SQL.
+    rationale: >-
+      Trust in a cross-opp comparison depends on being able to see how each number was
+      produced; the lineage cards render the resolved column, confidence, and SQL per
+      opportunity inline, expandable, and point to the Data Dictionary.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-009
+      - kind: documented
+        ref: EV-002
+  - id: S7
+    claim: >-
+      The cross-opp comparison runs under DB-enforced per-workspace tenant isolation, so the
+      trust the transparency invites is backed by least-privilege access at the database layer.
+    rationale: >-
+      Cube connects to each workspace under a least-privilege read-only role rather than
+      relying on app-layer scoping, and a negative isolation test guards it, so a workspace
+      can only read its own tenants' data.
+    status: grounded
+    evidence:
+      - kind: implemented
+        ref: EV-010
+      - kind: implemented
+        ref: EV-011
+  - id: S8
+    claim: >-
+      The curve is currently fairly flat for lighter birthweight bands because the synthetic
+      data is not age-anchored, which is a data-generation limitation rather than a modeling
+      or product defect.
+    rationale: >-
+      Per-opp resolution is verified correct (age_days, visit_weight incl. opp 10020, and
+      birth_weight all align), so the flatness traces to the synthetic generator producing
+      weights that do not climb with age — an attribution grounded in the verified resolution
+      but not yet independently proven on the data itself.
+    status: gap
+    evidence:
+      - kind: assumed
+        ref: EV-013
+gaps:
+  - id: G1
+    type: RESEARCH
+    claim_ref: S8
+    detail: >-
+      Whether the flat curve for lighter bands is fully explained by non-age-anchored
+      synthetic data has not been independently proven on the data; the modeling is verified
+      correct but the generator's longitudinal realism has not been measured.
+    proposed_action: >-
+      Track via connect-labs #713 (longitudinal / close-mirror synthetic generation); when
+      age-anchored synthetic data lands, re-render the curve and confirm the slope without
+      changing any product code.

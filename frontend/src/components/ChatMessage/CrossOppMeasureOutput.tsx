@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { SqlHighlighter } from "./SqlHighlighter"
 import { approveMeasure } from "@/api/crossopp"
+import { useAppStore } from "@/store/store"
 
 type Lineage = {
   opportunity_id: string
@@ -19,7 +20,7 @@ type Flagged = {
 }
 
 export type MeasureOutput =
-  | { status: "committed"; measure: string; lineage: Lineage[] }
+  | { status: "committed"; measure?: string; field?: string; lineage: Lineage[] }
   | {
       status: "needs_approval"
       draft_id: string
@@ -27,7 +28,14 @@ export type MeasureOutput =
       flagged: Flagged[]
       resolved: { opp_id: string; column: string | null; confidence: number }[]
     }
-  | { status: "exists"; measure: string; message?: string }
+  | { status: "exists"; measure?: string; field?: string; message?: string }
+  | {
+      status: "needs_approval_redefine"
+      draft_id: string
+      field: string
+      per_opp: { opp_id: string; sql_expression: string | null; status: string }[]
+      message?: string
+    }
   | {
       status: "proposed"
       committed: string[]
@@ -62,45 +70,143 @@ export function CrossOppMeasureOutput({
     )
   }
   if (output.status === "exists") {
+    const name = output.measure ?? output.field
     return (
       <div className="text-xs text-muted-foreground">
-        Measure &ldquo;{output.measure}&rdquo; already defined.
+        {output.field ? "Field" : "Measure"} &ldquo;{name}&rdquo; already defined.
       </div>
     )
   }
   if (output.status === "committed") {
+    const name = output.measure ?? output.field ?? "measure"
     return (
       <LineageTable
-        measure={output.measure}
+        workspaceId={workspaceId}
+        measure={name}
         rows={output.lineage}
-        testid={`crossopp-measure-output-${output.measure}`}
+        testid={`crossopp-measure-output-${name}`}
       />
     )
+  }
+  if (output.status === "needs_approval_redefine") {
+    return <RedefineApprovalCard workspaceId={workspaceId} output={output} />
   }
   return <ApprovalCard workspaceId={workspaceId} output={output} />
 }
 
+function RedefineApprovalCard({
+  workspaceId,
+  output,
+}: {
+  workspaceId: string
+  output: Extract<MeasureOutput, { status: "needs_approval_redefine" }>
+}) {
+  const [done, setDone] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  const commit = async () => {
+    try {
+      await approveMeasure(workspaceId, output.draft_id, {})
+      setDone(true)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  if (done) {
+    return (
+      <div
+        data-testid={`crossopp-approved-${output.draft_id}`}
+        className="text-xs text-emerald-600"
+      >
+        Redefined &ldquo;{output.field}&rdquo;. The cube reloaded — re-open the chart to see the
+        corrected curve.
+      </div>
+    )
+  }
+
+  return (
+    <div
+      data-testid={`crossopp-redefine-${output.draft_id}`}
+      className="space-y-2 rounded border border-sky-300 bg-sky-50/50 p-2"
+    >
+      <div className="text-xs font-medium">
+        Redefine &ldquo;{output.field}&rdquo; — confirm the new SQL for each opportunity
+      </div>
+      {/* Per-opp derived SQL: stacked full-width blocks so the long date-diff expression
+          has room to wrap legibly instead of clipping in a narrow table cell. */}
+      <div className="space-y-1.5">
+        {output.per_opp.map((o) => (
+          <div key={o.opp_id} className="overflow-hidden rounded border border-border/50">
+            <div className="border-b border-border/50 bg-muted/40 px-2 py-1 font-mono text-[11px] font-medium">
+              opp {o.opp_id}
+            </div>
+            <div className="whitespace-pre-wrap break-words bg-zinc-900 px-2 py-1.5">
+              {o.sql_expression ? (
+                <SqlHighlighter sql={o.sql_expression} />
+              ) : (
+                <span className="text-xs text-amber-500">could not resolve for this opp</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {err && <div className="text-red-600">{err}</div>}
+      <button
+        type="button"
+        data-testid={`crossopp-redefine-commit-${output.draft_id}`}
+        onClick={commit}
+        className="rounded bg-foreground px-2 py-1 text-xs text-background"
+      >
+        Commit redefinition
+      </button>
+    </div>
+  )
+}
+
 function LineageTable({
+  workspaceId,
   measure,
   rows,
   testid,
 }: {
+  workspaceId?: string
   measure: string
   rows: Lineage[]
   testid: string
 }) {
+  const setPendingChatInput = useAppStore((s) => s.uiActions.setPendingChatInput)
+  const editDefinition = () => {
+    setPendingChatInput(
+      `Redefine the "${measure}" measure as a derived formula — the number of days between ` +
+        `two date fields. For an infant age, that is the days between the child's date of birth ` +
+        `(child_dob) and the visit date (visit_date), instead of the current single column.`,
+    )
+  }
   return (
     <div data-testid={testid} className="space-y-2">
-      <div className="text-xs font-medium">{measure} — per-opportunity mapping</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs font-medium">{measure} — per-opportunity mapping</div>
+        {workspaceId && (
+          <button
+            type="button"
+            data-testid={`crossopp-edit-definition-${measure}`}
+            onClick={editDefinition}
+            className="rounded border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/40"
+          >
+            Edit definition
+          </button>
+        )}
+      </div>
       <div className="overflow-x-auto rounded border border-border/50">
         <table className="w-full text-xs">
           <thead>
             <tr className="bg-muted/40">
-              <th className="px-2 py-1 text-left">opp</th>
-              <th className="px-2 py-1 text-left">field</th>
-              <th className="px-2 py-1 text-left">label</th>
-              <th className="px-2 py-1 text-right">conf</th>
-              <th className="px-2 py-1 text-left">SQL</th>
+              <th className="px-2 py-1 text-left">Opportunity</th>
+              <th className="px-2 py-1 text-left">Source field</th>
+              <th className="px-2 py-1 text-left">Label</th>
+              <th className="px-2 py-1 text-right">Confidence</th>
+              <th className="px-2 py-1 text-left">Derivation SQL</th>
             </tr>
           </thead>
           <tbody>

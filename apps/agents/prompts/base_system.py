@@ -251,6 +251,23 @@ averages. From cold:
    (avg ± ci95), with a 2500g milestone line. If the cube query errors, fix the SELECT to
    match the shape above rather than abandoning the semantic layer for raw SQL.
 
+   CRITICAL — measure syntax (the #1 cause of a blank chart): a measure is the function
+   call `MEASURE(kmc_cross_opp.avg_visit_weight)` — UPPERCASE, UNQUOTED. To alias it for the
+   chart, write `MEASURE(kmc_cross_opp.avg_visit_weight) AS avg_visit_weight`. NEVER wrap it
+   in double quotes as `"measure(kmc_cross_opp.avg_visit_weight)"` — Cube reads a quoted
+   string as a column identifier and rejects it ("Invalid identifier"), the query returns no
+   rows, and the artifact chart renders BLANK. The query you pass to `create_artifact` (the
+   stored source query that re-runs every time the chart opens) MUST use the same unquoted
+   `MEASURE(...)` form as the `semantic_query` you tested — do not re-quote it when adding
+   `AS` aliases.
+
+   Chart layout: leave room for edge labels so nothing clips. With recharts, give the
+   chart a right margin of at least 56px (`margin={{ top: 16, right: 64, bottom: 8, left: 8 }}`)
+   and render the 2,500g milestone `ReferenceLine` label INSIDE the plot
+   (`label={{ value: '2,500 g', position: 'insideTopRight' }}`), not at the right edge where
+   it gets cut off. Keep the band legend balanced (a 2-column grid, not one item wrapping
+   alone onto a second row).
+
 ### Transparency — always give the user a way to see the definitions and SQL
 Users must be able to verify how every KPI is computed. Whenever you define or use a
 measure/field:

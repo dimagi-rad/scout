@@ -1,0 +1,292 @@
+auth:
+  type: session
+base_url: http://localhost:5173
+name: kmc-cross-opp-growth-curve
+narrative: 'Maya runs several KMC delivery opportunities and wants one thing she has
+  never been able to get: an infant growth curve she can trust across all of them
+  at once. The problem is that each opportunity runs a different CommCare app, so
+  "birth weight" and "the baby''s weight at this visit" live under different field
+  names in every one. Maya creates a brand-new Scout workspace, pools four KMC opportunities
+  into it, and — with no measures and no model defined anywhere — simply asks Scout
+  in chat to prepare the data and then to build the growth curve. Scout finds an empty
+  semantic catalog, works out opportunity by opportunity which field means birth weight
+  and which means the visit weight, and defines those as shared measures on the spot.
+  It charts the curve straight from the cube semantic layer rather than hand-written
+  SQL, and when Maya wants to know whether to believe a number she opens it and reads,
+  opportunity by opportunity, the exact column and SQL it came from. Seeing the lightest
+  babies'' line sit flatter than she expects, she traces it through that same lineage
+  and decides for herself that it is the source data, not the model — and walks away
+  with a curve she can defend.'
+narrative_locked: true
+narrative_locked_at: '2026-06-22T15:37:09.041458+00:00'
+narrative_synced_at: '2026-06-22T14:13:46.478479+00:00'
+narrative_synced_hash: 161e59ff7db81f3d39c7ea964644dc0f8bd5eed667a547266262475c8d52534b
+narrative_synced_version: 1
+personas:
+  maya:
+    color: '#0EA5E9'
+    intro: Maya oversees several KMC delivery opportunities and wants to compare infant
+      growth across them; she knows the clinical program cold but not how each CommCare
+      app stores its fields.
+    name: Maya
+    role: KMC Clinical Operations Lead
+review_mode: autonomous
+scenes:
+- actions:
+  - kind: wait_for
+    target: testid:workspace-name
+  - kind: click
+    note: open the Data sources tab
+    target: testid:tab-tenants
+  - kind: wait_for
+    target: '10012'
+  - kind: hold
+    note: frame the four pooled opportunities
+    seconds: 2
+  concept_claim: A newly created workspace pools four structurally-different KMC opportunities
+    together as its data sources before any alignment exists.
+  design_intent: Open on the real starting point — four separate opportunities pooled,
+    nothing yet comparable — so the cold start is visceral before any modeling appears.
+  features:
+  - description: Workspace detail Data sources tab (tab-tenants) lists every pooled
+      opportunity tenant for the workspace.
+    id: workspace-data-sources
+    verify: 'Playwright: load /workspaces/<id>, click testid:tab-tenants, assert the
+      four opp ids 10012/10014/10015/10020 render as data-source rows'
+  narrative: Maya opens the workspace she just created and sees the four KMC opportunities
+    she pooled into it sitting side by side as its data sources — four apps built
+    differently, none of them yet lined up to the others.
+  persona: maya
+  provenance: S1
+  show: Open the new workspace, switch to its Data sources, and see the four pooled
+    KMC opportunities.
+  title: Maya's new workspace pools four opportunities that don't line up
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2
+- actions:
+  - kind: wait_for
+    target: testid:tool-call-run_materialization
+  - kind: scroll_to
+    target: testid:tool-call-run_materialization
+  - kind: hold
+    note: the materialization tool ran and reported ready
+    seconds: 3
+  concept_claim: A chat request to prepare a new workspace runs materialization across
+    its opportunities and reports when cross-opp querying is ready.
+  design_intent: Prove the workspace is set up entirely through the product — a chat
+    request, not an engineer-run pipeline.
+  features:
+  - description: The chat agent exposes a run_materialization tool that builds the
+      per-opp view schema + read-only role for a new workspace.
+    id: chat-materialization
+    verify: 'pytest: GET /api/workspaces/<id>/threads/<materialize_thread>/messages/
+      returns an assistant turn containing a run_materialization tool call'
+  narrative: Maya watches Scout work through her opening request — prepare the new
+    workspace's opportunities for cross-opp querying — running the materialization
+    and reporting back when the data is ready.
+  persona: maya
+  provenance: S2
+  show: Open the materialization thread and watch Scout run run_materialization and
+    confirm the workspace is ready to query.
+  title: Maya asks Scout to prepare the brand-new workspace
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/78b4a40c-6e4d-41ce-b269-3d328e2d1f7a
+- actions:
+  - kind: wait_for
+    target: testid:tool-call-define_crossopp_measure
+  - kind: scroll_to
+    note: the catalog Scout checked first
+    target: testid:tool-call-semantic_catalog
+  - kind: hold
+    seconds: 2
+  - kind: scroll_to
+    note: visit weight + age defined as per-visit fields
+    target: testid:tool-call-define_crossopp_visit_field
+  - kind: hold
+    seconds: 2
+  concept_claim: When a growth-curve question hits an empty catalog, Scout defines
+    birth weight, visit weight and age as shared measures from chat before querying.
+  design_intent: Show the modeling happening in the conversation from nothing — the
+    heart of cold start.
+  features:
+  - description: define_crossopp_measure and define_crossopp_visit_field agent tools
+      resolve and commit canonical measures (birth_weight) and per-visit fields (visit_weight,
+      age_days) into the cube model from chat.
+    id: define-measures-from-chat
+    verify: 'pytest: GET /api/workspaces/<id>/crossopp/inspector/ returns measures
+      including birth_weight, visit_weight and age_days after the build thread'
+  narrative: Maya asks for the growth curve in plain language, and Scout — finding
+    nothing in the semantic catalog to answer it — defines birth weight as a shared
+    measure and the visit weight and age as per-visit fields, right there in the conversation.
+  persona: maya
+  provenance: S3
+  show: Open the build thread; Scout checks semantic_catalog, finds it empty, and
+    calls define_crossopp_measure and define_crossopp_visit_field to model birth weight,
+    visit weight and age.
+  title: Scout finds an empty catalog and defines the measures it needs
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/2bc82497-8fa3-4fef-9f9b-de6930adb21c
+- actions:
+  - kind: wait_for
+    target: How to see exactly how each measure is defined
+  - kind: scroll_to
+    target: The per-opp column mapping the resolver chose
+  - kind: hold
+    note: per-opp resolved columns — 10012-15 use child_weight_visit, 10020 uses child_weight
+    seconds: 5
+  concept_claim: Each defined measure shows a per-opportunity lineage card naming
+    the resolved column for every opportunity, aligning apps that share no field name.
+  design_intent: Make the semantic (not lexical) alignment legible — differently-named
+    columns map to one canonical name, per opportunity.
+  features:
+  - description: CrossOppMeasureOutput renders a per-opp lineage table (opp, resolved
+      field, label, confidence, SQL) for each committed measure, inline in chat.
+    id: per-opp-lineage-card
+    verify: 'Playwright: open the build thread, assert testid:crossopp-measure-output-visit_weight
+      renders a row per opportunity with a resolved field column'
+  narrative: Maya reads the lineage Scout shows inline — opportunity by opportunity,
+    the actual column each app used for that measure — and sees apps that share no
+    field name lined up onto one shared concept.
+  persona: maya
+  provenance: S4
+  show: Expand the per-opp lineage card for a measure and read the resolved column
+    for each of the four opportunities.
+  title: Maya sees how each opportunity was lined up
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/2bc82497-8fa3-4fef-9f9b-de6930adb21c
+- actions:
+  - kind: wait_for
+    target: testid:tool-call-semantic_query
+  - kind: scroll_to
+    note: the cube semantic query that backs the chart
+    target: testid:tool-call-semantic_query
+  - kind: hold
+    seconds: 2
+  - kind: scroll_to
+    target: View Artifact
+  - kind: hold
+    seconds: 1
+  concept_claim: The growth curve is built from a semantic_query against the cube
+    model rather than a raw-SQL fallback.
+  design_intent: 'Pin requirement #2: the chart is cube-sourced via semantic_query,
+    never a raw-SQL fallback.'
+  features:
+  - description: The growth-curve artifact's source query is a Cube semantic query
+      (uses MEASURE(...)) routed through semantic_query, not a raw-SQL fallback.
+    id: cube-sourced-query
+    verify: 'pytest: the artifact''s stored source query for thread a9ac5d68 is a
+      semantic/Cube query (contains MEASURE(), routed via semantic_query), not raw
+      SQL'
+  narrative: Maya reads how Scout built the curve from the semantic layer — a single
+    semantic query against the cube's blended weekly weight-by-age surface rather
+    than raw SQL stitched by hand — with the finished chart waiting for her.
+  persona: maya
+  provenance: S5
+  show: Open the cube-query thread and read the semantic_query Scout ran against the
+    kmc_cross_opp cube to back the chart.
+  title: Scout charts the curve from the cube, not hand-written SQL
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/a9ac5d68-9d37-4875-b0a5-23b1d35056d6
+- actions:
+  - kind: wait_for
+    target: View Artifact
+  - kind: click
+    must_succeed: true
+    note: open the cube-built growth curve from the chat thread
+    target: View Artifact
+  - kind: wait_for
+    target: testid:artifact-tab-view
+  - kind: click
+    note: peek the embedded cube results behind the chart
+    target: testid:artifact-tab-data
+  - kind: hold
+    seconds: 2
+  - kind: click
+    note: back to the rendered growth curve — end the hero beat on the chart
+    target: testid:artifact-tab-view
+  - kind: hold
+    note: let the chart paint; the snapshot lands on the curve
+    seconds: 8
+  concept_claim: The growth-curve artifact renders weekly average visit weight by
+    age per birth-weight band with confidence intervals, from cube results embedded
+    server-side.
+  design_intent: Show the payoff chart and that its data is the embedded cube semantic-query
+    result, confirming the render path.
+  features:
+  - description: The growth-curve artifact renders in the sandbox with cube semantic-query
+      results embedded server-side (ArtifactSandboxView), and a Data tab exposes those
+      rows.
+    id: growth-curve-render
+    verify: 'Playwright: open artifact 793df27a, assert testid:artifact-tab-view shows
+      a chart and testid:artifact-tab-data lists the embedded result rows'
+  narrative: Maya opens the finished chart and reads the weekly average weight climbing
+    by age, one line per birth-weight band with its confidence interval shaded around
+    it.
+  persona: maya
+  provenance: S5
+  show: From the cube-query thread, open the Infant Growth Curve via View Artifact and
+    view the rendered weekly weight-by-age chart; switch to the Data tab to see the cube
+    results it embedded.
+  title: Maya opens the growth curve
+- actions:
+  - kind: wait_for
+    target: The semantic-layer definitions
+  - kind: scroll_to
+    target: The semantic-layer definitions
+  - kind: hold
+    note: canonical definitions + which cube each measure lives in
+    seconds: 3
+  - kind: scroll_to
+    target: The raw SQL behind the chart
+  - kind: hold
+    note: the exact per-opportunity CAST(...) SQL, inline in chat
+    seconds: 5
+  concept_claim: Every measure on the curve can be opened to its canonical definition,
+    per-opportunity resolved SQL, and the generated cube model without leaving the
+    product.
+  design_intent: 'Pin requirement #3 and fold in DB-layer isolation (S7): full lineage
+    to SQL, served under the per-workspace read-only role.'
+  features:
+  - description: The cross-opp inspector (/crossopp) exposes per-measure per-opp resolved
+      SQL and the generated cube model YAML for the active workspace.
+    id: measure-sql-inspector
+    verify: 'Playwright: load /crossopp for the workspace, expand testid:crossopp-measure-visit_weight,
+      assert per-opp SQL rows render; click testid:crossopp-show-model and assert
+      testid:crossopp-model-yaml is visible'
+  narrative: Before she trusts the curve, Maya opens a measure and reads its canonical
+    definition, each opportunity's resolved column and exact SQL, and the generated
+    cube model — all served read-only under the workspace's own least-privilege role.
+  persona: maya
+  provenance: S6
+  show: In the chat, read the canonical measure definitions and the exact per-opportunity
+    CAST(...) SQL Scout shows for the curve, with the Data Dictionary one click away.
+  title: Maya audits a number down to its SQL
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/2bc82497-8fa3-4fef-9f9b-de6930adb21c
+- actions:
+  - kind: wait_for
+    target: A note on the data
+  - kind: scroll_to
+    target: Week 5–6 data is sparse for lighter bands
+  - kind: hold
+    note: the resolution is verified correct; the flat light-band line is sparse source data, tracked separately
+    seconds: 5
+  concept_claim: Because each measure's per-opportunity SQL is inspectable, an unexpected
+    curve shape can be traced to the source data rather than to the modeling.
+  design_intent: 'Honest closer: transparency is what lets a user triage a surprising
+    result to its true cause — here a tracked synthetic-data realism limitation, not
+    a product defect.'
+  features:
+  - description: The per-opp SQL lineage exposed in the inspector lets a user verify
+      the resolution is correct, so a surprising curve shape can be attributed to
+      source data rather than the model.
+    id: lineage-enables-triage
+    verify: 'Playwright: in /crossopp, assert testid:crossopp-measure-visit_weight
+      exposes a non-empty SQL expression for each opportunity, demonstrating the resolution
+      is auditable'
+  narrative: Noticing the lightest babies' line sits flatter than she expects, Maya
+    follows that same per-opp SQL and confirms the measure resolved correctly everywhere
+    — so she attributes the shape to the source data realism, tracked separately,
+    rather than to Scout's modeling, and trusts what she is about to share.
+  persona: maya
+  provenance: S8
+  show: Back in the cube thread, read Scout's note on the data — the lightest band's
+    line is flat because week 5-6 visits are sparse there, a source-data limitation, not
+    the modeling she just audited.
+  title: Maya traces the flat light-band line to the data, not the model
+  url: /workspaces/f2021229-c49c-46dd-a438-a693836e47a2/chat/a9ac5d68-9d37-4875-b0a5-23b1d35056d6
+why_brief: kmc-cross-opp-growth-curve.why_brief.yaml
