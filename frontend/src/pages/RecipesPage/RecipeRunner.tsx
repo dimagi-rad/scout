@@ -50,7 +50,6 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun, onRunComplete 
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Initialize variables when recipe changes
   useEffect(() => {
     if (recipe) {
       const initialValues: Record<string, string> = {}

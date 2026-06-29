@@ -41,17 +41,12 @@ export function ArtifactPanel() {
   const iframeRef = useRef<HTMLIFrameElement>(null)
 
   const handleExportPdf = useCallback(() => {
-    // Trigger print inside the sandboxed iframe so the print job is scoped to
-    // the artifact content, not the surrounding app. The sandbox HTML listens
-    // for this message and calls window.print() (browser "Save as PDF").
-    //
-    // targetOrigin is "*" because the iframe is sandboxed WITHOUT
-    // allow-same-origin and therefore has an opaque ("null") security origin.
-    // The browser drops a postMessage whose targetOrigin is a concrete origin
-    // string (e.g. window.location.origin) when the target frame's security
-    // origin is opaque, which would silently break Export PDF. "*" is safe
-    // here: the message is a trivial non-secret "scout-print" signal sent only
-    // to our own artifact iframe via iframeRef, so there is nothing to leak.
+    // Print inside the sandboxed iframe so the job is scoped to the artifact;
+    // the sandbox HTML listens for this and calls window.print().
+    // targetOrigin must be "*": the iframe is sandboxed without allow-same-origin
+    // so it has an opaque ("null") origin, and the browser drops a postMessage
+    // with a concrete targetOrigin to an opaque frame. Safe here — the signal is
+    // a non-secret "scout-print" sent only to our own iframe via iframeRef.
     iframeRef.current?.contentWindow?.postMessage({ type: "scout-print" }, "*")
   }, [])
 
@@ -77,15 +72,10 @@ export function ArtifactPanel() {
 
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
-      // Only trust messages that came from our own artifact iframe. The iframe
-      // runs agent-generated (prompt-injectable) code, and it is sandboxed
-      // WITHOUT allow-same-origin, so it is a unique opaque origin whose
-      // event.origin is the literal string "null" — an origin allowlist would
-      // either reject legitimate messages or have to trust "null" (which any
-      // sandboxed frame on the page could also claim). The robust check is on
-      // the message source: reject anything not posted by this iframe's window
-      // (e.g. other frames, popups, or window.opener attempting to forge
-      // artifact-query-data).
+      // Trust only messages from our own artifact iframe. It runs agent-generated
+      // (prompt-injectable) code sandboxed without allow-same-origin, so its
+      // event.origin is the literal "null" that any sandboxed frame could claim;
+      // checking event.source is the robust guard against forged artifact-query-data.
       if (event.source !== iframeRef.current?.contentWindow) return
       if (event.data?.type === "artifact-query-data" && event.data.artifactId === artifactId) {
         setQueryData(event.data.queryData)
@@ -129,7 +119,7 @@ export function ArtifactPanel() {
 
   return (
     <>
-      {/* Full-screen overlay during resize to capture mouse events over iframes */}
+      {/* Overlay captures mouse events that the iframe would otherwise swallow during resize. */}
       {isResizing && (
         <div className="fixed inset-0 z-50 cursor-col-resize" />
       )}
@@ -140,7 +130,6 @@ export function ArtifactPanel() {
         }`}
         style={isOpen ? { width: panelWidth } : { width: 0 }}
       >
-        {/* Resize handle */}
         {isOpen && (
           <div
             onMouseDown={handleMouseDown}
@@ -150,7 +139,6 @@ export function ArtifactPanel() {
         )}
       {artifactId && (
         <div className="flex h-full flex-col">
-          {/* Header with tabs */}
           <div className="flex h-14 items-center justify-between border-b border-border px-4">
             <div className="flex items-center gap-1">
               <button
@@ -200,32 +188,25 @@ export function ArtifactPanel() {
             </div>
           </div>
 
-          {/* View tab: iframe */}
           {activeTab === "view" && (
             <iframe
               ref={iframeRef}
               key={artifactId}
               src={activeDomainId ? withBasePath(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/`) : ""}
               className="flex-1 w-full"
-              // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
-              // served same-origin and session-authenticated, and it executes
-              // agent-generated (prompt-injectable) code. With allow-same-origin
-              // that code could read the viewer's cookies/CSRF token, issue
-              // credentialed /api/ requests, and reach window.parent — a full
-              // session takeover. Omitting it gives the frame a unique opaque
-              // origin: scripts still run and render UI, but the frame cannot
-              // touch the parent origin or send credentialed same-origin
-              // requests. Do NOT re-add allow-same-origin.
+              // SECURITY: deliberately NO allow-same-origin. The doc is served
+              // same-origin and session-authenticated but runs agent-generated
+              // (prompt-injectable) code; allow-same-origin would let it read the
+              // viewer's cookies/CSRF, make credentialed /api/ calls, and reach
+              // window.parent — full session takeover. Do NOT re-add it.
               sandbox="allow-scripts allow-modals"
               title="Artifact"
             />
           )}
 
-          {/* Data tab: SQL queries and results */}
           {activeTab === "data" && (
             <div className="flex-1 overflow-y-auto">
               <div className="p-4 space-y-4">
-                {/* Refresh button */}
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-muted-foreground">
                     {queryData?.queries?.length
@@ -284,7 +265,6 @@ function QueryResultCard({ query }: { query: QueryResult }) {
 
   return (
     <div className="rounded-lg border border-border overflow-hidden">
-      {/* Query header */}
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex w-full items-center justify-between px-4 py-2.5 bg-muted/50 hover:bg-muted transition-colors text-left"
@@ -299,21 +279,18 @@ function QueryResultCard({ query }: { query: QueryResult }) {
 
       {expanded && (
         <div className="divide-y divide-border">
-          {/* SQL */}
           <div className="p-3 bg-muted/20">
             <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap overflow-x-auto">
               {query.sql}
             </pre>
           </div>
 
-          {/* Error */}
           {query.error && (
             <div className="p-3 text-sm text-destructive bg-destructive/5">
               {query.error}
             </div>
           )}
 
-          {/* Results table */}
           {!query.error && query.columns && query.columns.length > 0 && (
             <div className="overflow-x-auto max-h-80">
               <table className="w-full text-xs">

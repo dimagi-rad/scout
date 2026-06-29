@@ -11,26 +11,21 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# Initialize environment variables
 env = environ.Env(
     DEBUG=(bool, False),
     DJANGO_ALLOWED_HOSTS=(list, ["localhost", "127.0.0.1"]),
 )
 
-# Read .env file if it exists
 env_file = BASE_DIR / ".env"
 if env_file.exists():
     env.read_env(str(env_file))
 
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# No default - will raise ImproperlyConfigured if not set (overridden in development.py)
+# No default — raises ImproperlyConfigured if unset (overridden in development.py)
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env("DJANGO_DEBUG", default=True)
 
 # Settings modules that carry the production security posture. connectlabs
@@ -65,8 +60,6 @@ DEPLOY_ENVIRONMENT = resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 
 
-# Application definition
-
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -75,7 +68,6 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "django.contrib.sites",
-    # Third-party apps
     "rest_framework",
     "procrastinate.contrib.django",
     "allauth",
@@ -83,11 +75,9 @@ INSTALLED_APPS = [
     "allauth.socialaccount",
     "allauth.socialaccount.providers.google",
     "allauth.socialaccount.providers.github",
-    # Custom OAuth providers (example implementation)
     "apps.users.providers.commcare",
     "apps.users.providers.commcare_connect",
     "apps.users.providers.ocs",
-    # Local apps
     "apps.users",
     "apps.workspaces",
     "apps.knowledge",
@@ -132,20 +122,13 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 
 
-# Database
-# https://docs.djangoproject.com/en/5.0/ref/settings/#databases
-
 DATABASES = {
     "default": env.db("DATABASE_URL", default="postgresql://localhost/scout"),
 }
 
-# Scout-managed database for materialized tenant data.
-# Separate from the application database to allow future migration to Snowflake etc.
+# Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 
-
-# Password validation
-# https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -163,9 +146,6 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-# Internationalization
-# https://docs.djangoproject.com/en/5.0/topics/i18n/
-
 LANGUAGE_CODE = "en-us"
 
 TIME_ZONE = "UTC"
@@ -174,9 +154,6 @@ USE_I18N = True
 
 USE_TZ = True
 
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.0/howto/static-files/
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
@@ -187,58 +164,40 @@ STORAGES = {
 }
 
 
-# Default primary key field type
-# https://docs.djangoproject.com/en/5.0/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-
-# Custom User model
 AUTH_USER_MODEL = "users.User"
 
-
-# Authentication backends
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
     "allauth.account.auth_backends.AuthenticationBackend",
 ]
 
 
-# django-allauth settings
-# Required for django.contrib.sites
-SITE_ID = 1
+SITE_ID = 1  # required for django.contrib.sites
 
-# Account settings - use email as primary identifier
-# django-allauth 65+ uses new syntax for these settings
 ACCOUNT_LOGIN_METHODS = {"email"}
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
-# Keep these for compatibility with older allauth versions and documentation
 ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_EMAIL_VERIFICATION = "optional"
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = env("ACCOUNT_DEFAULT_HTTP_PROTOCOL", default="http")
 
-# Social account settings
 # Require POST (not GET) to initiate OAuth, so /accounts/<provider>/login/ can't
 # be triggered by a forged GET (login CSRF). allauth renders a short CSRF-token
 # "Continue with <provider>" interstitial on GET that POSTs to the same URL.
 # (arch #258, finding 14#2.)
 SOCIALACCOUNT_LOGIN_ON_GET = False
-# Auto-create Django user on first OAuth login
 SOCIALACCOUNT_AUTO_SIGNUP = True
 # Don't require email for OAuth signups (Connect doesn't provide one)
 SOCIALACCOUNT_EMAIL_REQUIRED = False
-# Auto-connect social account to existing user with matching email
 SOCIALACCOUNT_EMAIL_AUTHENTICATION_AUTO_CONNECT = True
-# Trust Dimagi-operated providers to have verified the email address on their
-# end. Required so allauth's _lookup_by_email gate fires for these providers.
+# Trust Dimagi-operated providers to have verified the email. Required so
+# allauth's _lookup_by_email gate fires for these providers.
 SOCIALACCOUNT_EMAIL_AUTHENTICATION = True
-# Allow OAuth users to skip email verification since provider already verified
-SOCIALACCOUNT_EMAIL_VERIFICATION = "none"
-# Store OAuth tokens so we can use them for data materialization
-SOCIALACCOUNT_STORE_TOKENS = True
+SOCIALACCOUNT_EMAIL_VERIFICATION = "none"  # provider already verified
+SOCIALACCOUNT_STORE_TOKENS = True  # tokens reused for data materialization
 SOCIALACCOUNT_ADAPTER = "apps.users.adapters.EncryptingSocialAccountAdapter"
 
-# Redirect URLs after login/logout
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/"
 
@@ -253,8 +212,7 @@ LOGOUT_REDIRECT_URL = "/"
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="webmaster@localhost")
 
-# Provider-specific settings (credentials stored in DB via Django admin SocialApp model)
-# Configure client IDs and secrets via Django admin at /admin/socialaccount/socialapp/
+# Client IDs/secrets configured via Django admin at /admin/socialaccount/socialapp/
 SOCIALACCOUNT_PROVIDERS = {
     "commcare_connect": {
         "OAUTH_PKCE_ENABLED": True,
@@ -270,15 +228,11 @@ SOCIALACCOUNT_PROVIDERS = {
     },
 }
 
-# OAuth email-domain restriction.
-# Map of allauth provider id -> list of allowed email domains (lowercase, exact match).
-# A provider absent from the dict (or mapped to an empty list) is unrestricted.
-# A provider with a non-empty list rejects OAuth logins whose email domain isn't in the list.
-# For a provider WITH a non-empty list, a login that returns no email is REJECTED
-# (a missing email can't satisfy a configured restriction — arch #258, finding 07#2).
-# Unrestricted providers (no/empty list — e.g. the deliberately-open Connect/OCS)
-# still allow no-email logins.
-# Override at deploy time with the SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS env var (JSON).
+# OAuth email-domain restriction: provider id -> allowed domains (lowercase, exact).
+# Absent/empty list = unrestricted; a non-empty list rejects out-of-list domains
+# AND rejects no-email logins (a missing email can't satisfy a configured
+# restriction — arch #258, finding 07#2). Unrestricted providers (e.g. the
+# deliberately-open Connect/OCS) still allow no-email logins.
 SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
     "SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS",
     default={
@@ -287,7 +241,6 @@ SOCIALACCOUNT_ALLOWED_EMAIL_DOMAINS: dict[str, list[str]] = env.json(
 )
 
 
-# Django REST Framework settings
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
@@ -311,7 +264,6 @@ REST_FRAMEWORK = {
 DB_CREDENTIAL_KEY = env("DB_CREDENTIAL_KEY", default="")
 
 
-# LLM settings
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
 
@@ -355,18 +307,11 @@ CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
-# Cache configuration
-#
-# The default cache backs chat rate limiting (apps.chat.rate_limiting), the DRF
-# throttles, and the per-user onboarding/tenant-resolution caches. Under
-# ``uvicorn --workers 4`` a per-process ``LocMemCache`` gives each worker its
-# own counters, so the 20-req/60s chat budget is effectively multiplied by the
-# worker count and reset on every deploy (arch #254, finding 06#2). ElastiCache
-# Redis is provisioned in infra but had no code consumer.
-#
-# When ``REDIS_URL`` is set we use the shared Redis cache (state is consistent
-# across workers); otherwise we fall back to ``LocMemCache`` so dev/test/CI —
-# where Redis isn't reachable — keep working with no extra services.
+# The default cache backs chat rate limiting, DRF throttles, and per-user
+# onboarding/tenant-resolution caches. Per-process LocMemCache under
+# ``uvicorn --workers N`` multiplies the rate-limit budget by N and resets it on
+# every deploy (arch #254, finding 06#2), so use shared Redis when REDIS_URL is
+# set; otherwise fall back to LocMemCache so dev/test/CI need no extra services.
 
 
 def _build_caches(redis_url: str) -> dict:
@@ -390,20 +335,15 @@ REDIS_URL = env("REDIS_URL", default="")
 CACHES = _build_caches(REDIS_URL)
 
 
-# Rate limiting
 MAX_CONNECTIONS_PER_PROJECT = env.int("MAX_CONNECTIONS_PER_PROJECT", default=5)
 MAX_QUERIES_PER_MINUTE = env.int("MAX_QUERIES_PER_MINUTE", default=60)
 
 
-# SPA / CSRF settings
-# Allow the SPA to read the CSRF cookie via JavaScript
 CSRF_COOKIE_NAME = "csrftoken_scout"
-CSRF_COOKIE_HTTPONLY = False
-# Trust the Vite dev server origin for CSRF
+CSRF_COOKIE_HTTPONLY = False  # SPA must read the CSRF cookie via JavaScript
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=["http://localhost:5173"])
 SESSION_COOKIE_NAME = "sessionid_scout"
 
-# Embed widget settings
 EMBED_ALLOWED_ORIGINS = env.list("EMBED_ALLOWED_ORIGINS", default=[])
 
 

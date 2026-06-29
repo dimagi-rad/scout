@@ -61,11 +61,9 @@ class User(AbstractUser):
     # Override username to make it optional
     username = models.CharField(max_length=150, blank=True)
 
-    # Additional profile fields
     avatar_url = models.URLField(blank=True)
     timezone = models.CharField(max_length=50, default="UTC")
 
-    # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

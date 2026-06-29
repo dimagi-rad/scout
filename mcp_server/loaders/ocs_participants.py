@@ -49,18 +49,11 @@ class OCSParticipantLoader(OCSBaseLoader):
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/participants"
-        # Scope to this tenant's chatbot so the participant list and each
-        # participant's per-chatbot ``data`` array are limited to it. The OCS
-        # ParticipantView filters on the ``experiment`` query param; ``chatbot``
-        # is silently ignored and leaks the whole team roster (arch #245).
-        #
-        # Request the max page size to cut list-request volume ~10-15x versus the
-        # OCS default of 100 (arch #254, finding 13#1).
+        # Must scope by ``experiment`` (not ``chatbot``, silently ignored) or the
+        # whole team roster leaks (arch #245). Max page_size cuts request volume
+        # ~10-15x vs the OCS default of 100 (arch #254, finding 13#1).
         params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         total = 0
-        # Upstream now provides a first-page ``count`` (arch #254, finding 13#1);
-        # ``_paginate`` surfaces it on the first tuple. Pass it through so
-        # participant progress is determinate instead of always indeterminate.
         for raw_page, page_total in self._paginate(url, params=params):
             rows = [_map_participant(item) for item in raw_page]
             if not rows:

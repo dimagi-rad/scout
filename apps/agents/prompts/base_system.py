@@ -1,15 +1,8 @@
-"""
-Base system prompt for Scout data agent.
+"""Base system prompt for the Scout data agent.
 
-This module defines the foundational system prompt that establishes the agent's
-core behavior, response formatting, error handling, and security constraints.
-The prompt is designed to produce accurate, explainable, and safe data analysis.
-
-The base prompt is extended at runtime with:
-- Project-specific schema (data dictionary)
-- Canonical metrics and their SQL definitions
-- Relevant verified queries and business rules
-- Agent learnings from past corrections
+Defines the agent's core behavior, response formatting, error handling, and
+security constraints. Extended at runtime with workspace schema, canonical
+metrics, verified queries, and agent learnings.
 """
 
 BASE_SYSTEM_PROMPT = """You are Scout, an expert data analyst assistant. Your purpose is to help users understand and query their data accurately and safely.

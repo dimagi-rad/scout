@@ -64,7 +64,6 @@ workspace_urlpatterns = [
     path("knowledge/", include("apps.knowledge.urls")),
     path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
     path("", include("apps.workspaces.api.urls")),
-    # Workspace management
     path("members/", WorkspaceMemberListView.as_view(), name="workspace_members"),
     path(
         "members/<int:membership_id>/",
@@ -85,7 +84,6 @@ urlpatterns = [
     # password reset, email management) is deliberately NOT mounted — see
     # apps/users/allauth_urls.py (arch #258, finding 13#9).
     path("accounts/", include("apps.users.allauth_urls")),
-    # Workspace-scoped content APIs
     path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(
         "api/workspaces/<uuid:workspace_id>/",
@@ -96,12 +94,11 @@ urlpatterns = [
         "api/workspaces/<uuid:workspace_id>/",
         include(workspace_urlpatterns),
     ),
-    # Transformation assets and runs
     path("api/transformations/", include("apps.transformations.urls")),
-    # Chat streaming (workspace_id in body)
+    # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),
-    # Public share links (no auth required)
+    # Public share links, no auth required
     path(
         "api/recipes/runs/shared/<str:share_token>/",
         PublicRecipeRunView.as_view(),

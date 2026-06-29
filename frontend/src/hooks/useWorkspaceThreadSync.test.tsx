@@ -59,7 +59,6 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
       ),
     )
 
-    // Switch workspace the same way the WorkspaceSwitcher does.
     act(() => {
       useAppStore.getState().domainActions.setActiveDomain(WS_B)
     })

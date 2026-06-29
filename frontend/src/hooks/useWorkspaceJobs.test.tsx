@@ -33,8 +33,7 @@ describe("useWorkspaceJobs — visibility-gated polling (arch #254, 05#6)", () =
 
   it("polls on an interval while the tab is visible", async () => {
     renderHook(() => useWorkspaceJobsImpl("ws-1"))
-    // Immediate fetch on mount.
-    expect(activeMock).toHaveBeenCalledTimes(1)
+    expect(activeMock).toHaveBeenCalledTimes(1) // immediate fetch on mount
     await act(async () => {
       vi.advanceTimersByTime(3000)
     })
@@ -53,7 +52,6 @@ describe("useWorkspaceJobs — visibility-gated polling (arch #254, 05#6)", () =
     await act(async () => {
       vi.advanceTimersByTime(9000) // three poll intervals
     })
-    // No further polls fired while hidden.
     expect(activeMock).toHaveBeenCalledTimes(callsWhenHidden)
   })
 

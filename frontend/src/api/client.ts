@@ -39,7 +39,6 @@ async function request<T>(
     throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText)
   }
 
-  // Handle 204 No Content (common for DELETE responses)
   if (res.status === 204) {
     return undefined as T
   }

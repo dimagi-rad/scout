@@ -43,7 +43,6 @@ export function ArtifactsPage() {
 
   return (
     <div className="container mx-auto px-8 py-8">
-      {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Artifacts</h1>
         <p className="text-muted-foreground">
@@ -51,7 +50,6 @@ export function ArtifactsPage() {
         </p>
       </div>
 
-      {/* Loading state */}
       {artifactsStatus === "loading" && (
         <div className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -59,14 +57,12 @@ export function ArtifactsPage() {
         </div>
       )}
 
-      {/* Error state */}
       {artifactsStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load artifacts. Please try again.
         </div>
       )}
 
-      {/* List */}
       {artifactsStatus === "loaded" && (
         <ArtifactList
           items={artifacts}

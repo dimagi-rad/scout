@@ -15,8 +15,6 @@ from .models import Recipe, RecipeRun
 
 @admin.register(Recipe)
 class RecipeAdmin(admin.ModelAdmin):
-    """Admin interface for Recipe model."""
-
     list_display = [
         "name",
         "workspace",
@@ -79,8 +77,6 @@ class RecipeAdmin(admin.ModelAdmin):
 
 @admin.register(RecipeRun)
 class RecipeRunAdmin(admin.ModelAdmin):
-    """Admin interface for RecipeRun model."""
-
     list_display = [
         "id",
         "recipe",
@@ -136,7 +132,6 @@ class RecipeRunAdmin(admin.ModelAdmin):
 
     @admin.display(description="Status")
     def status_badge(self, obj):
-        """Display status with color coding."""
         colors = {
             "pending": "gray",
             "running": "blue",
@@ -152,12 +147,10 @@ class RecipeRunAdmin(admin.ModelAdmin):
 
     @admin.display(description="Progress")
     def step_progress(self, obj):
-        """Show how many step results were recorded for this run."""
         return f"{len(obj.step_results)} step(s)"
 
     @admin.display(description="Duration")
     def duration_display(self, obj):
-        """Display duration in a readable format."""
         duration = obj.duration_seconds
         if duration is None:
             return "-"

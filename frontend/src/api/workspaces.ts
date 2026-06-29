@@ -2,8 +2,6 @@ import { api } from "./client"
 
 export type { UserTenant } from "./auth"
 
-// ── Types ──────────────────────────────────────────────────────────────────
-
 export interface WorkspaceListTenant {
   id: string
   tenant_name: string
@@ -83,11 +81,7 @@ export function workspaceDataState(ws: {
   if (ws.schema_status === "available") return "ready"
   if (ws.schema_status === "provisioning") return "loading"
   if (ws.schema_status === "unavailable") return "empty"
-  // A failed view-schema build leaves no queryable surface even when the
-  // per-tenant data (and thus last_synced_at) is present — treat as empty so
-  // the indicator does not falsely claim the workspace has usable data.
   if (ws.schema_status === "failed") return "empty"
-  // No live signal available — fall back to the historical sync marker.
   return ws.last_synced_at != null ? "ready" : "empty"
 }
 
@@ -126,8 +120,6 @@ export const workspaceApi = {
   delete: (workspaceId: string) =>
     api.delete<void>(`/api/workspaces/${workspaceId}/`),
 
-  // ── Members ──────────────────────────────────────────────────────────────
-
   getMembers: (workspaceId: string) =>
     api.get<WorkspaceMember[]>(`/api/workspaces/${workspaceId}/members/`),
 
@@ -148,8 +140,6 @@ export const workspaceApi = {
 
   removeMember: (workspaceId: string, membershipId: string) =>
     api.delete<void>(`/api/workspaces/${workspaceId}/members/${membershipId}/`),
-
-  // ── Tenants ───────────────────────────────────────────────────────────────
 
   getTenants: (workspaceId: string) =>
     api.get<WorkspaceTenant[]>(`/api/workspaces/${workspaceId}/tenants/`),

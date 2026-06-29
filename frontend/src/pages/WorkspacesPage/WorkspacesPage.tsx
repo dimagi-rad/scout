@@ -86,7 +86,6 @@ export function WorkspacesPage() {
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const [showCreate, setShowCreate] = useState(false)
 
-  // Search and filter state
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
     role: null,
@@ -95,11 +94,9 @@ export function WorkspacesPage() {
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
 
-  // Derive filter groups from workspace data
   const filterGroups = useMemo((): FilterGroup[] => {
     const groups: FilterGroup[] = []
 
-    // Role filter
     const roleCounts = new Map<string, number>()
     for (const ws of domains) {
       roleCounts.set(ws.role, (roleCounts.get(ws.role) ?? 0) + 1)
@@ -122,7 +119,6 @@ export function WorkspacesPage() {
       })
     }
 
-    // Provider filter
     const providerCounts = new Map<string, number>()
     for (const ws of domains) {
       const tenants = ws.tenants ?? []
@@ -150,7 +146,6 @@ export function WorkspacesPage() {
     return groups
   }, [domains])
 
-  // Filtered workspaces
   const filtered = useMemo(() => {
     const lowerSearch = search.toLowerCase()
     return domains.filter((ws) => {

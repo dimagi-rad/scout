@@ -1,4 +1,3 @@
-// frontend/src/components/TopBar/TopBarSlot.tsx
 import { useContext } from "react"
 import type { ReactNode } from "react"
 import { createPortal } from "react-dom"

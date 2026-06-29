@@ -35,8 +35,6 @@ _aclose_old_connections = sync_to_async(close_old_connections, thread_sensitive=
 # Audit logger — separate from the module logger so it can be filtered/routed
 audit_logger = logging.getLogger("mcp_server.audit")
 
-# --- Error codes ---
-
 VALIDATION_ERROR = "VALIDATION_ERROR"
 CONNECTION_ERROR = "CONNECTION_ERROR"
 QUERY_TIMEOUT = "QUERY_TIMEOUT"
@@ -123,16 +121,13 @@ async def tool_context(tool_name: str, context_id: str, **extra_fields: Any):
     """
     timer = Timer()
     tc: dict[str, Any] = {"timer": timer}
-    # Replace a connection that died between tool calls before the body runs (so
-    # ORM use re-opens it), and close after so nothing leaks between calls.
+    # Bracket the body with connection cleanup; see module-level note on dead-DB hygiene.
     await _aclose_old_connections()
     try:
         yield tc
     finally:
         await _aclose_old_connections()
         status = "success" if tc.get("result", {}).get("success") else "error"
-        # Drop empty actor/context fields so they don't add noise (e.g. operator
-        # or context-free tools that carry no user/thread).
         fields = {k: v for k, v in scrub_extra_fields(extra_fields).items() if v not in ("", None)}
         audit_logger.info(
             "tool_call tool=%s context_id=%s status=%s timing_ms=%d %s",

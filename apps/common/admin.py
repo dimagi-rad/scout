@@ -20,7 +20,6 @@ class ReadOnlyModelAdmin(admin.ModelAdmin):
     """
 
     def get_readonly_fields(self, request, obj=None):
-        # Every concrete (non-m2m, editable-or-not) field is readonly.
         return [f.name for f in self.model._meta.fields]
 
     def has_add_permission(self, request):

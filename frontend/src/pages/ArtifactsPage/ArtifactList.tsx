@@ -42,7 +42,6 @@ export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete
 
   return (
     <div className="space-y-4">
-      {/* Search */}
       <div className="relative max-w-sm">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -62,7 +61,6 @@ export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete
         </div>
       )}
 
-      {/* Card grid */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         {items.map((item) => (
           <ArtifactCard
@@ -146,7 +144,6 @@ function ArtifactCard({
           Created {formattedDate}
         </div>
 
-        {/* Actions */}
         <div className="mt-auto flex items-center gap-2 pt-2 border-t">
           <Button variant="ghost" size="sm" onClick={onOpen} data-testid={`artifact-open-${artifact.id}`}>
             <Eye className="mr-1 h-4 w-4" />

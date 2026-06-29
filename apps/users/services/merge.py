@@ -366,7 +366,6 @@ def merge_users(
         dry_run=dry_run,
     )
     if dry_run:
-        # Count-only plan (no writes).
         report.discarded_privileges = _discarded_privileges(canonical, duplicate)
         report.socialaccount_repointed = SocialAccount.objects.filter(user=duplicate).count()
         canonical_emails = set(

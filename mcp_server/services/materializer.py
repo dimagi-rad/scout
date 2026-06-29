@@ -129,12 +129,10 @@ def run_pipeline(
 
     Returns a summary dict with run_id, status, and per-source row counts.
     """
-    # total steps: provision + discover + N sources + transform/skip
+    # provision + discover + N sources + transform/skip
     total_steps = 2 + len(pipeline.sources) + 1
     step = 0
     current_source: str | None = None
-    # Holds the run id once the MaterializationRun is created so the
-    # progress dict carries it. Captured by closures below.
     run_id_holder: dict[str, Any] = {"id": None}
 
     def report(message: str) -> None:
@@ -162,9 +160,8 @@ def run_pipeline(
         def _on_page(rows_loaded: int, rows_total: int | None) -> None:
             if progress_updater is None:
                 return
-            # Prefer a total the loader itself reports (page envelope ``count``);
-            # otherwise fall back to a count discovered up front (e.g. the
-            # opportunity's ``visit_count``) so the bar can show a real percent.
+            # Prefer the loader-reported total; fall back to a count discovered
+            # up front (e.g. the opportunity's ``visit_count``) for a real percent.
             effective_total = rows_total if rows_total is not None else known_total
             progress_updater(
                 {
@@ -175,27 +172,20 @@ def run_pipeline(
                     "message": message,
                     "rows_loaded": rows_loaded,
                     "rows_total": effective_total,
-                    # Unit of rows_loaded/rows_total for display. OCS messages
-                    # report progress in "sessions" — the API exposes no
-                    # message count, but the per-session detail fetches are
-                    # the work, so sessions are an honest denominator.
+                    # OCS messages report progress in "sessions": the API exposes
+                    # no message count, but per-session detail fetches are the work.
                     "unit": unit,
                 }
             )
 
         return _on_page
 
-    # ── 1. PROVISION ──────────────────────────────────────────────────────────
-    # Resolve the target schema and create the run row up-front so
-    # progress_updater always has a valid run_id to target.
-    #
     # A blue-green refresh passes an explicit ``target_schema``: the freshly
-    # minted, not-yet-active "_r" schema it wants this run to load into. We must
-    # honor it. Falling back to ``provision()`` here would re-resolve the
-    # tenant's OLD active *base* schema and load there; the refresh task would
-    # then activate the empty new schema and tear down the data-bearing old one,
-    # destroying the data the refresh just loaded. When no target is given
-    # (initial materialization), ``provision()`` get-or-creates the base schema.
+    # minted, not-yet-active "_r" schema. Falling back to ``provision()`` would
+    # re-resolve the tenant's OLD active base schema and load there; the refresh
+    # would then activate the empty new schema and tear down the data-bearing
+    # old one, destroying the data just loaded. When no target is given (initial
+    # materialization), ``provision()`` get-or-creates the base schema.
     if target_schema is not None:
         tenant_schema = target_schema
     else:
@@ -208,8 +198,7 @@ def run_pipeline(
         state=MaterializationRun.RunState.DISCOVERING,
         procrastinate_job_id=procrastinate_job_id,
     )
-    # Stringify the UUID so the dict is JSON-serializable (it is written to
-    # ``MaterializationRun.progress``, a JSONField).
+    # Stringify the UUID so the progress dict stays JSON-serializable.
     run_id_holder["id"] = str(run.id)
 
     report(f"Provisioning schema for {tenant_membership.tenant.external_id}...")
@@ -217,22 +206,18 @@ def run_pipeline(
     source_results: dict[str, dict] = {}
 
     try:
-        # ── 2. DISCOVER ───────────────────────────────────────────────────────
         report(f"Discovering tenant metadata from {pipeline.provider}...")
         discovered_metadata = _run_discover_phase(tenant_membership, credential, pipeline)
 
-        # The visits export is keyset-paginated and returns no total, but the
-        # discovery payload already carries the opportunity's visit_count — use
-        # it as the visits progress denominator.
+        # The keyset-paginated visits export returns no total; reuse the
+        # opportunity's visit_count from discovery as the progress denominator.
         visit_total: int | None = None
         if pipeline.provider == "commcare_connect":
             visit_total = _connect_visit_total(
                 discovered_metadata, int(tenant_membership.tenant.external_id)
             )
 
-        # Generate system staging assets from discovered metadata.
-        # Failures are logged but do not fail the pipeline — the discover phase
-        # has already stored metadata, and load can proceed without assets.
+        # Asset generation failures are isolated — load can proceed without assets.
         if pipeline.provider == "commcare":
             try:
                 tenant_meta = TenantMetadata.objects.filter(
@@ -252,8 +237,7 @@ def run_pipeline(
                     tenant_membership.tenant.external_id,
                 )
 
-        # Generate Connect staging assets + column notes from discovered metadata.
-        # Failures are isolated — the pipeline continues regardless.
+        # Asset generation failures are isolated — the pipeline continues regardless.
         if pipeline.provider == "commcare_connect":
             try:
                 tenant_meta = TenantMetadata.objects.filter(
@@ -276,7 +260,6 @@ def run_pipeline(
                     tenant_membership.tenant.external_id,
                 )
 
-        # ── 3. LOAD ───────────────────────────────────────────────────────────
         # Compare-and-swap: an unconditional save() would silently overwrite a
         # CANCELLED state set by the cancel endpoint while DISCOVER (which has
         # no progress checkpoint) was running, and the run would continue.
@@ -307,9 +290,8 @@ def run_pipeline(
             source_is_resumable = is_resumable_provider and source.resumable
             start_cursor = prior_cursors.get(source.name) if source_is_resumable else None
             if source_is_resumable:
-                # Surface ``in_progress`` immediately so a fresh crash mid-resume
-                # leaves an observable state. The catalog (pipeline_list_tables)
-                # treats this as "do not surface this table yet".
+                # Surface ``in_progress`` immediately so a crash mid-resume leaves
+                # an observable state; the catalog hides this table until completed.
                 source_results[source.name] = {
                     "state": "in_progress",
                     "rows": 0,
@@ -328,9 +310,8 @@ def run_pipeline(
                 if source_is_resumable
                 else None
             )
-            # The discovered visit_count counts *all* visits, so it's only a
-            # valid denominator on a fresh load. On resume, rows_loaded counts
-            # just this run's new rows, so leave the bar indeterminate.
+            # visit_count counts *all* visits, valid only on a fresh load; on
+            # resume rows_loaded is just this run's new rows, so leave it indeterminate.
             source_total = visit_total if source.name == "visits" and start_cursor is None else None
             try:
                 rows = _load_and_commit_source(
@@ -351,8 +332,7 @@ def run_pipeline(
                 )
             except MaterializationCancelled:
                 # Earlier sources stay committed; this in-flight source rolled
-                # back inside _load_and_commit_source. Record per-source state
-                # before bubbling the cancellation up.
+                # back inside _load_and_commit_source.
                 prior_cursor = (source_results.get(source.name) or {}).get("cursor_state")
                 source_results[source.name] = {
                     "state": "cancelled",
@@ -373,7 +353,7 @@ def run_pipeline(
                     schema_name,
                 )
                 # Preserve any cursor_state advanced by per-page commits so the
-                # next run can resume from the last durable watermark (#187).
+                # next run resumes from the last durable watermark (#187).
                 prior_cursor = (source_results.get(source.name) or {}).get("cursor_state")
                 source_results[source.name] = {
                     "state": "failed",
@@ -389,10 +369,9 @@ def run_pipeline(
                         "rows": 0,
                         "cursor_state": None,
                     }
-                # A resumable source whose per-page commits advanced the cursor
-                # has committed rows even though the source as a whole failed;
-                # treat that as PARTIAL too so the next run resumes from the
-                # watermark.
+                # A resumable source that advanced its cursor has committed rows
+                # even if the source failed overall — treat as PARTIAL so the next
+                # run resumes from the watermark.
                 any_committed = any(
                     s.get("state") == "completed" or _has_committed_cursor(s)
                     for s in source_results.values()
@@ -410,9 +389,7 @@ def run_pipeline(
                 }
                 run.save(update_fields=["state", "completed_at", "result"])
                 raise
-            # Preserve the final cursor watermark (resumable sources only) so a
-            # future incremental-update feature can read it; non-resumable keep
-            # ``None``.
+            # Preserve the final cursor watermark for resumable sources; non-resumable keep None.
             final_cursor = (source_results.get(source.name) or {}).get("cursor_state")
             source_results[source.name] = {
                 "state": "completed",
@@ -426,10 +403,9 @@ def run_pipeline(
         current_source = None
 
     except MaterializationCancelled:
-        # Run state is already CANCELLED (set by the canceller before raising
-        # via progress_updater). Stamp completed_at and exit cleanly so the
-        # caller can distinguish cancellation from failure. Sources that
-        # committed before the cancel survive in source_results as "completed".
+        # State is already CANCELLED (set by the canceller before raising via
+        # progress_updater). Stamp completed_at so the caller distinguishes
+        # cancellation from failure. Sources committed before the cancel survive.
         now = datetime.now(UTC)
         MaterializationRun.objects.filter(id=run.id).update(
             completed_at=now,
@@ -443,17 +419,12 @@ def run_pipeline(
         raise
 
     except Exception as e:
-        # Pre-loop failures (DISCOVER phase, system-asset generation re-raise,
-        # or the DISCOVERING→LOADING CAS) would otherwise escape with the run
-        # row stuck in DISCOVERING — no terminal state, no completed_at — which
-        # downstream aggregation treats as "partial" and expire_inactive_schemas
-        # never cleans up. Stamp a FAILED terminal state here so every
-        # non-cancellation failure path produces a terminal run.
-        #
-        # Per-source load failures are handled inside the loop above (which
-        # records FAILED/PARTIAL and re-raises). This handler is idempotent
-        # w.r.t. that path: if completed_at was already stamped there, we leave
-        # the recorded state untouched and just re-raise.
+        # Pre-loop failures (DISCOVER, asset generation re-raise, or the
+        # DISCOVERING→LOADING CAS) would otherwise escape with the run stuck in
+        # DISCOVERING (no terminal state), which expire_inactive_schemas never
+        # cleans up. Stamp FAILED so every non-cancellation path ends terminal.
+        # Idempotent w.r.t. the per-source loop handler: if completed_at was
+        # already stamped there, leave the recorded state untouched.
         if run.completed_at is None:
             logger.exception("Materialization run %s failed before any source committed", run.id)
             now = datetime.now(UTC)
@@ -468,7 +439,6 @@ def run_pipeline(
             )
         raise
 
-    # ── 4. TRANSFORM ──────────────────────────────────────────────────────────
     # Transform errors are isolated — failure here does NOT mark the run FAILED.
     # Compare-and-swap, same reasoning as the LOADING transition: a cancel that
     # lands between LOAD commit and here must not be overwritten. On miss,
@@ -485,7 +455,6 @@ def run_pipeline(
     run.state = MaterializationRun.RunState.TRANSFORMING
     transform_result: dict = {}
 
-    # Check if there are any TransformationAssets to execute
     has_assets = TransformationAsset.objects.filter(tenant=tenant_membership.tenant).exists()
     if has_assets:
         report("Running transforms...")
@@ -499,10 +468,8 @@ def run_pipeline(
     else:
         report("No transforms configured — skipping")
 
-    # ── 5. COMPLETE ───────────────────────────────────────────────────────────
-    # Conditional UPDATE: only transition to COMPLETED if still in TRANSFORMING
-    # state. Preserves a CANCELLED (or FAILED) state written externally during
-    # the transform phase.
+    # Conditional UPDATE: only transition to COMPLETED if still TRANSFORMING.
+    # Preserves a CANCELLED (or FAILED) state written externally during transform.
     final_result = {
         "sources": source_results,
         "pipeline": pipeline.name,
@@ -517,7 +484,7 @@ def run_pipeline(
         result=final_result,
     )
     if rows_updated:
-        run.state = MaterializationRun.RunState.COMPLETED  # reflect DB update locally
+        run.state = MaterializationRun.RunState.COMPLETED
     else:
         logger.info(
             "Run %s state changed externally (cancelled?); preserving current DB state", run.id
@@ -796,7 +763,6 @@ def _load_source(
         return _load_ocs_source(
             source_name, tenant_membership, credential, schema_name, conn, on_page
         )
-    # Existing CommCare dispatch
     domain = tenant_membership.tenant.external_id
     if source_name == "cases":
         loader = CommCareCaseLoader(domain=domain, credential=credential)
@@ -851,7 +817,7 @@ def _load_connect_source(
             start_cursor=start_cursor,
             cursor_callback=cursor_callback,
         )
-    # users: full DROP/CREATE/INSERT, single commit at end (caller-driven).
+    # Non-resumable (e.g. users): full DROP/CREATE/INSERT, caller commits once.
     return writer_fn(loader.load_pages(), schema_name, conn, on_page=on_page)
 
 
@@ -1126,9 +1092,7 @@ def _run_transform_phase(pipeline: PipelineConfig, schema_name: str, tenant=None
     return result
 
 
-# ── Table writers ──────────────────────────────────────────────────────────────
-# Writers accept a shared psycopg connection managed by the caller.
-# The caller owns commit/rollback; writers only cursor.execute.
+# Writers accept a shared psycopg connection; the caller owns commit/rollback.
 
 _CASES_INSERT = psql.SQL(
     """
@@ -1281,9 +1245,6 @@ def _write_forms(
             on_page(total, rows_total)
 
     return total
-
-
-# ── Connect table writers ──────────────────────────────────────────────────────
 
 
 def _max_id(page: list[dict], field: str) -> int | None:
@@ -2011,9 +1972,6 @@ def _write_connect_completed_modules(
             on_page(total, rows_total)
 
     return total
-
-
-# ── Backwards-compatible shim ──────────────────────────────────────────────────
 
 
 def run_commcare_sync(tenant_membership: Any, credential: dict[str, str]) -> dict:

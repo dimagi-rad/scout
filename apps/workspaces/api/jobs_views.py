@@ -16,18 +16,13 @@ from apps.workspaces.workspace_resolver import aresolve_workspace
 
 logger = logging.getLogger(__name__)
 
-# How far back to surface terminated ThreadJobs in the active-jobs response.
-# The frontend polls active jobs every few seconds; this window lets the
-# failure card render for users who were away from the tab when the
-# materialization failed but have come back within the window.
+# How far back to surface terminated ThreadJobs, so a failure card still renders
+# for a user who returns to the tab shortly after a materialization failed.
 RECENT_TERMINATION_WINDOW = timedelta(minutes=30)
 
-# Minimum interval between API-side stale-job reconcile sweeps per workspace
-# (arch #254, 05#6). The sweep is a backstop for a sick worker, not a per-poll
-# duty: running its ~5 DB queries on every 3s poll multiplies platform-DB load
-# with open tabs. Gating it to once per workspace per this interval keeps the
-# backstop while removing it from the hot poll path. The frontend also pauses
-# polling when the tab is hidden, so the two changes compound.
+# Min interval between API-side reconcile sweeps per workspace (arch #254, 05#6).
+# The sweep is a sick-worker backstop, not a per-poll duty — gating it keeps its
+# ~5 DB queries off the hot 3s poll path.
 RECONCILE_THROTTLE_SECONDS = 30
 
 
@@ -43,8 +38,7 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
             "percent": percent,
             "rows_loaded": rows_loaded,
             "rows_total": rows_total,
-            # Display unit for the counts ("rows" for most sources; OCS
-            # messages report per-session progress as "sessions").
+            # "rows" for most sources; OCS reports per-session as "sessions".
             "unit": run_progress.get("unit") or "rows",
             "message": run_progress.get("message"),
             "source": run_progress.get("source"),
@@ -54,10 +48,8 @@ def _job_to_dict(job: ThreadJob, run_progress: dict | None) -> dict:
     return {
         "thread_job_id": str(job.id),
         "thread_id": str(job.thread_id),
-        # tool_call_id ties this job to the specific run_materialization
-        # tool-call card in the chat transcript so the frontend can scope
-        # progress and Stop affordances per-card rather than to every
-        # historical run_materialization message.
+        # Ties this job to its run_materialization card so the frontend can scope
+        # progress/Stop per-card, not to every historical run.
         "tool_call_id": job.tool_call_id,
         "job_type": job.job_type,
         "state": job.state,
@@ -106,7 +98,6 @@ async def active_jobs_view(request, workspace_id):
     if err is not None:
         return err
 
-    # ThreadJobs for this user's threads in this workspace, in active states.
     def _fetch_active_jobs():
         return (
             ThreadJob.objects.select_related(
@@ -123,27 +114,17 @@ async def active_jobs_view(request, workspace_id):
 
     jobs = [j async for j in _fetch_active_jobs()]
 
-    # Backstop for jobs the worker-side janitor should have reconciled but
-    # couldn't — the janitor runs in the worker process, so a sick worker
-    # (e.g. a permanently dead DB connection) strands jobs in active states
-    # and the frontend spins forever. This poll runs in the API process and
-    # can reconcile stale jobs itself: flip ones whose procrastinate job
-    # failed, re-defer the resume for ones that quietly succeeded.
-    #
-    # Throttle the sweep per workspace (arch #254, 05#6): it's a backstop, not a
-    # per-poll duty. Without this, every 3s poll runs the reconcile DB queries
-    # for each stale job; gating to once per RECONCILE_THROTTLE_SECONDS removes
-    # it from the hot path while still rescuing jobs a sick worker stranded.
+    # Backstop for a sick worker whose janitor can't run: this API-process poll
+    # reconciles stale jobs itself so the frontend doesn't spin forever. Throttled
+    # per workspace (arch #254, 05#6) to keep the reconcile queries off the hot path.
     reconcile_gate_key = f"jobs_reconcile_gate:{workspace.id}"
     may_reconcile = await cache.aadd(reconcile_gate_key, 1, RECONCILE_THROTTLE_SECONDS)
     if may_reconcile:
         stale_cutoff = timezone.now() - workspace_tasks.STALE_JOB_THRESHOLD
         reconciled = False
         for tj in jobs:
-            # Measure staleness from the resume phase for RUNNING jobs so a
-            # healthy long-running resume (after a >10 min materialization) is
-            # not falsely reconciled (finding 02#9); _staleness_anchor falls back
-            # to created_at for PENDING / legacy rows.
+            # Anchor on the resume phase for RUNNING jobs so a healthy long resume
+            # isn't falsely reconciled (finding 02#9).
             if workspace_tasks._staleness_anchor(tj) >= stale_cutoff:
                 continue
             try:
@@ -155,13 +136,12 @@ async def active_jobs_view(request, workspace_id):
         if reconciled:
             jobs = [j async for j in _fetch_active_jobs()]
 
-    # Bulk-fetch the latest progress per procrastinate_job_id.
     job_ids = [j.procrastinate_job_id for j in jobs]
     runs_by_job: dict[int, dict] = {}
     async for r in MaterializationRun.objects.filter(
         procrastinate_job_id__in=job_ids,
     ).order_by("started_at"):
-        # Last wins; per workspace this is "the currently active tenant_schema run".
+        # Last wins — the currently active tenant_schema run.
         runs_by_job[r.procrastinate_job_id] = r.progress or {}
 
     cutoff = timezone.now() - RECENT_TERMINATION_WINDOW

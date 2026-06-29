@@ -148,13 +148,10 @@ def _live_tables_in_schema_sync(schema_name: str) -> set[str]:
 def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names: set[str]) -> list:
     """Synchronous equivalent of ``pipeline_list_tables`` for the sync DRF view.
 
-    Replaces the previous ``async_to_sync(pipeline_list_tables)`` call (which
-    span up a new event loop per request and opened its own managed-DB
-    connection). Uses sync ORM for the latest run and the *already-fetched*
-    ``live_table_names`` set so the request reads the managed DB once
-    (arch #254, finding 10#2). Mirrors the async implementation's reconciliation:
-    only sources marked ``completed`` whose physical table is present are
-    surfaced, plus dbt models that physically exist.
+    Uses sync ORM and the already-fetched ``live_table_names`` so the request
+    reads the managed DB once, avoiding the old async_to_sync event loop per
+    request (arch #254, finding 10#2). Surfaces only ``completed`` sources whose
+    physical table is present, plus dbt models that physically exist.
     """
     run = (
         MaterializationRun.objects.filter(
@@ -316,14 +313,11 @@ def _serialize_annotation(tk):
 
 
 def _logical_table_name(qualified_name: str) -> str:
-    """Return the stable logical table name from a (possibly) schema-qualified name.
+    """Return the stable logical table name (portion after the final ``.``).
 
-    TableKnowledge annotations are keyed by the *logical* table name (e.g.
-    ``cases``) rather than the physical, schema-qualified name (e.g.
-    ``commcare_xyz_r1a2b3c4.cases``). The physical schema is regenerated on every
-    refresh, so keying on it orphans annotations (arch #262, finding 01#5). The
-    logical name is the table portion after the final ``.`` and is stable across
-    refreshes.
+    TableKnowledge is keyed on the logical name, not the physical schema-qualified
+    one — the physical schema is regenerated each refresh, so keying on it would
+    orphan annotations (arch #262, finding 01#5).
     """
     return qualified_name.rsplit(".", 1)[-1]
 
@@ -344,9 +338,7 @@ def _get_annotation(workspace, qualified_name):
 def _get_annotations_by_logical_name(workspace) -> dict[str, dict]:
     """Return ``{logical_table_name: serialized annotation}`` for a workspace.
 
-    One query for all TableKnowledge rows instead of a per-table ``.get`` N+1
-    (arch #254, finding 10#2). The caller keys lookups by the stable logical
-    table name (see _logical_table_name).
+    One query instead of a per-table ``.get`` N+1 (arch #254, finding 10#2).
     """
     return {
         tk.table_name: _serialize_annotation(tk)
@@ -404,11 +396,8 @@ class DataDictionaryView(APIView):
 
         schema_name = tenant_schema.schema_name
 
-        # Open the managed DB ONCE and read both the live-table set (for the
-        # phantom-row reconciliation) and all columns from the same connection,
-        # rather than two fresh connections + an async_to_sync event loop
-        # (arch #254, finding 10#2). On any connection error, degrade to an empty
-        # catalog (same behavior as the async path).
+        # Read live-table set and all columns from ONE connection (arch #254,
+        # finding 10#2). Degrade to an empty catalog on connection error.
         try:
             conn = get_managed_db_connection()
             try:
@@ -431,8 +420,6 @@ class DataDictionaryView(APIView):
 
         tenant = tenant_schema.tenant
         tenant_metadata = _get_tenant_metadata(tenant)
-        # One query for every annotation, keyed by logical table name — replaces
-        # the per-table TableKnowledge.get N+1 (arch #254, finding 10#2).
         annotations = _get_annotations_by_logical_name(workspace)
 
         enriched_tables = {}
@@ -467,8 +454,7 @@ class RefreshSchemaView(APIView):
     """
     POST /api/workspaces/<workspace_id>/refresh/
 
-    Triggers a background schema refresh for the workspace. Requires read-write or manage role.
-    Creates a new TenantSchema in PROVISIONING state and dispatches a Celery task.
+    Triggers a background schema refresh. Requires read-write or manage role.
     Returns 202 Accepted immediately.
     """
 
@@ -602,7 +588,6 @@ class TableDetailView(APIView):
         if pipeline_config is None:
             pipeline_config = registry.get("commcare_sync")
 
-        # Sync table list (no async_to_sync event loop — arch #254, 10#2 sibling).
         live_table_names = _live_tables_in_schema_sync(schema_name)
         known = {
             t["name"]
@@ -664,7 +649,6 @@ class TableDetailView(APIView):
 
         data = request.data
 
-        # Convert string fields to list for storage in JSONField
         def _to_list(value):
             if isinstance(value, list):
                 return value
@@ -680,11 +664,9 @@ class TableDetailView(APIView):
             defaults={"description": "", "updated_by": request.user},
         )
 
-        # True partial-update semantics: only mutate a field when its key is
-        # actually present in the payload. The 1s-debounced frontend autosave
-        # omits curated fields (e.g. related_tables); clobbering them with a
-        # default would silently destroy admin-curated annotations the agent
-        # context retriever consumes (arch #262, finding 05#0).
+        # Partial-update: only mutate a field whose key is in the payload. The
+        # debounced autosave omits curated fields, so clobbering them with a
+        # default would destroy admin-curated annotations (arch #262, finding 05#0).
         if "description" in data:
             tk.description = data.get("description") or ""
         if "use_cases" in data:

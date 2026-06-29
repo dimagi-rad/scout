@@ -73,7 +73,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" onClick={onBack} data-testid="run-detail-back">
           <ArrowLeft className="mr-1 h-4 w-4" />
@@ -90,7 +89,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
         </div>
       </div>
 
-      {/* Status & Timestamps */}
       <Card>
         <CardContent className="pt-6">
           <div className="flex items-center gap-3 mb-4">
@@ -110,7 +108,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
         </CardContent>
       </Card>
 
-      {/* Variables */}
       {variableEntries.length > 0 && (
         <Card>
           <CardHeader>
@@ -134,7 +131,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
         </Card>
       )}
 
-      {/* Step Results */}
       {run.step_results && run.step_results.length > 0 && (
         <Card>
           <CardHeader>
@@ -192,7 +188,6 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
         </Card>
       )}
 
-      {/* Sharing */}
       <Card>
         <CardHeader>
           <CardTitle>Sharing</CardTitle>

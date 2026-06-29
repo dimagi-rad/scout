@@ -6,10 +6,9 @@ from .base import *
 
 DEBUG = True
 
-# Use console email backend for development
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
-# For dev, default to the same database as the app (separate schema isolation still applies)
+# Default the managed DB to the app DB in dev (schema isolation still applies)
 if not MANAGED_DATABASE_URL:
     _db = DATABASES["default"]
     _user = _db.get("USER", "postgres")
@@ -20,11 +19,6 @@ if not MANAGED_DATABASE_URL:
     _cred = f"{_user}:{_password}@" if _password else f"{_user}@"
     MANAGED_DATABASE_URL = f"postgresql://{_cred}{_host}:{_port}/{_name}"
 
-# Debug toolbar (optional, add to INSTALLED_APPS if needed)
-# INSTALLED_APPS += ["debug_toolbar"]
-# MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")
-# INTERNAL_IPS = ["127.0.0.1"]
-
 # Allow local Connect Labs to embed Scout
 EMBED_ALLOWED_ORIGINS = ["http://localhost:8001", "http://localhost:8010", "http://localhost:3000"]
 CSRF_TRUSTED_ORIGINS = [
@@ -34,7 +28,6 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",  # Connect Labs frontend dev
 ]
 
-# Logging
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

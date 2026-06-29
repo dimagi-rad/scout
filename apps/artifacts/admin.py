@@ -1,9 +1,4 @@
-"""
-Django admin configuration for Artifact models.
-
-Provides admin interfaces for managing Artifacts
-with filtering, search, and inline editing capabilities.
-"""
+"""Django admin configuration for Artifact models."""
 
 from django.contrib import admin
 from django.utils.html import format_html
@@ -13,8 +8,6 @@ from .models import Artifact
 
 @admin.register(Artifact)
 class ArtifactAdmin(admin.ModelAdmin):
-    """Admin interface for Artifact model."""
-
     list_display = (
         "title",
         "artifact_type",
@@ -108,7 +101,6 @@ class ArtifactAdmin(admin.ModelAdmin):
     )
 
     def code_preview(self, obj):
-        """Display truncated code preview."""
         if obj.code:
             preview = obj.code[:100]
             if len(obj.code) > 100:
@@ -119,13 +111,11 @@ class ArtifactAdmin(admin.ModelAdmin):
     code_preview.short_description = "Code Preview"
 
     def content_hash_display(self, obj):
-        """Display the content hash."""
         return obj.content_hash
 
     content_hash_display.short_description = "Content Hash (SHA-256)"
 
     def version_history_display(self, obj):
-        """Display version history as a list of links."""
         history = obj.get_version_history()
         if len(history) <= 1:
             return "No previous versions"

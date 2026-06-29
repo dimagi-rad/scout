@@ -281,11 +281,9 @@ async def transformation_aware_list_tables(
     terminal_assets = await aget_terminal_assets(tenant_ids, workspace_id)
 
     if not terminal_assets:
-        # No transformation assets — use existing pipeline-based listing
         return await pipeline_list_tables(tenant_schema, pipeline_config)
 
-    # Build set of replaced table names (walk replaces chains, scoped to
-    # visible assets to prevent cross-tenant information disclosure).
+    # Walk replaces-chains scoped to visible assets — prevents cross-tenant disclosure.
     visible_q = models.Q(tenant_id__in=tenant_ids)
     if workspace_id:
         visible_q = visible_q | models.Q(workspace_id=workspace_id)
@@ -302,14 +300,12 @@ async def transformation_aware_list_tables(
             replaced_names.add(upstream.name)
             next_id = upstream.replaces_id
 
-    # Start with raw tables, excluding replaced ones and terminal asset names
     raw_tables = await pipeline_list_tables(tenant_schema, pipeline_config)
     terminal_names = {asset.name for asset in terminal_assets}
     result = [
         t for t in raw_tables if t["name"] not in replaced_names and t["name"] not in terminal_names
     ]
 
-    # Add terminal transformation assets
     for asset in terminal_assets:
         result.append(
             {

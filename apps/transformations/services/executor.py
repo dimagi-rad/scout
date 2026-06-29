@@ -45,12 +45,7 @@ def run_transformation_pipeline(
     workspace=None,
     progress_callback=None,
 ) -> TransformationRun:
-    """Execute the three-stage transformation pipeline.
-
-    Stages run in order: system → tenant → workspace.
-    Each stage writes an ephemeral dbt project to a temp dir and runs dbt.
-    Per-model results are recorded in TransformationAssetRun.
-    """
+    """Execute the three-stage transformation pipeline (system → tenant → workspace)."""
     run = TransformationRun.objects.create(
         tenant=tenant,
         workspace=workspace,
@@ -104,7 +99,6 @@ def run_transformation_pipeline(
 
 
 def _run_stage(run, assets, schema_name, stage_name):
-    """Run a single stage: write dbt project, execute, record results."""
     asset_runs = {}
     for asset in assets:
         ar = TransformationAssetRun.objects.create(
@@ -129,7 +123,6 @@ def _run_stage(run, assets, schema_name, stage_name):
 
 
 def _execute_stage(asset_runs, assets, schema_name, stage_name):
-    """Execute dbt for a single stage and record per-asset results."""
     with tempfile.TemporaryDirectory() as tmpdir:
         project_dir = Path(tmpdir) / "project"
         profiles_dir = Path(tmpdir) / "profiles"
@@ -155,7 +148,6 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
             confinement_role=dbt_role_name(schema_name),
         )
 
-        # Run models
         model_names = [a.name for a in assets]
         result = run_dbt(
             dbt_project_dir=str(project_dir),
@@ -163,7 +155,6 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
             models=model_names,
         )
 
-        # Run tests only if models succeeded and any assets define tests
         test_results = {}
         if result.get("success") and any(a.test_yaml for a in assets):
             test_results = run_dbt_test(
@@ -172,7 +163,6 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
                 models=model_names,
             )
 
-        # Record per-asset results
         now = datetime.now(UTC)
         for asset in assets:
             ar = asset_runs[asset.name]

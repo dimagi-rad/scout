@@ -13,9 +13,8 @@ import type { Recipe } from "@/store/recipeSlice"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 import type { WorkspaceDetail } from "@/api/workspaces"
 
-// Two workspaces the user belongs to. The active workspace id is baked into the
-// `/api/workspaces/{id}/...` request path, so we can read the requested id back
-// out of the mocked api call to prove a refetch fired for the NEW workspace.
+// The active workspace id is baked into the `/api/workspaces/{id}/...` request
+// path, so the mocked api call's url proves a refetch fired for the NEW workspace.
 const WS_A = "11111111-1111-1111-1111-111111111111"
 const WS_B = "22222222-2222-2222-2222-222222222222"
 
@@ -70,17 +69,12 @@ function workspaceDetail(id: string, name: string): WorkspaceDetail {
 }
 
 /**
- * Workspace-switch state-reset contract. Coordinates with issue #247.
+ * Workspace-switch state-reset contract (issue #247).
  *
- * PASSING NOW: switching workspaces starts a fresh per-workspace thread — the
- * only per-workspace state reset that exists today (from the 00c423d
- * threadId-leak fix).
- *
- * The remaining three (#247): on a workspace switch the pages must also refetch
- * / clear their per-workspace state. #247 supplied the runtime fix (page
- * effects keyed on `activeDomainId`; WorkspaceDetailPage clears `error` at the
- * start of each load), so these assert the refetch/clear behaviour by rendering
- * the page against a mocked api layer and a real store.
+ * Switching workspaces starts a fresh per-workspace thread (00c423d threadId-leak
+ * fix). #247 additionally keys page effects on `activeDomainId` and clears
+ * WorkspaceDetailPage's `error` per load; the refetch/clear tests assert that by
+ * rendering the page against a mocked api layer and a real store.
  */
 describe("workspace switch resets per-workspace state", () => {
   beforeEach(() => {
@@ -96,8 +90,6 @@ describe("workspace switch resets per-workspace state", () => {
     useAppStore.getState().domainActions.setActiveDomain("ws-b")
     expect(useAppStore.getState().threadId).not.toBe(before)
   })
-
-  // --- #247: pages refetch / clear state on workspace switch ---
 
   it("refetches the recipes list on workspace switch (#247, 04#9)", async () => {
     const recipesByWs: Record<string, Recipe[]> = {
@@ -129,18 +121,15 @@ describe("workspace switch resets per-workspace state", () => {
       ),
     )
 
-    // Mount fetch resolves with workspace A's recipes.
     await waitFor(() => expect(screen.getByTestId("recipe-card-recipe-a1")).toBeInTheDocument())
     expect(screen.queryByTestId("recipe-card-recipe-b1")).not.toBeInTheDocument()
     expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_A}/recipes/`)
 
-    // Switch workspace the same way the WorkspaceSwitcher does.
     act(() => {
       useAppStore.getState().domainActions.setActiveDomain(WS_B)
     })
 
-    // The effect refetches for the NEW workspace id, the new list renders, and
-    // the stale list is gone. (Old code only fetched on mount → this fails.)
+    // Refetches for the NEW workspace id. (Old code only fetched on mount → fails.)
     await waitFor(() => expect(screen.getByTestId("recipe-card-recipe-b1")).toBeInTheDocument())
     expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WS_B}/recipes/`)
     expect(screen.queryByTestId("recipe-card-recipe-a1")).not.toBeInTheDocument()
@@ -191,8 +180,8 @@ describe("workspace switch resets per-workspace state", () => {
   })
 
   it("clears a prior workspace-detail load error on later success (#247, 05#5)", async () => {
-    // WS_A fails to load (e.g. dead link / 404); WS_B loads fine. Switching from
-    // the failed workspace to the good one must drop the stale error screen.
+    // WS_A fails to load (404); WS_B loads fine. Switching to the good one must
+    // drop the stale error screen.
     const getDetailSpy = vi
       .spyOn(workspaceApi, "getDetail")
       .mockImplementation(async (id: string) => {
@@ -200,9 +189,8 @@ describe("workspace switch resets per-workspace state", () => {
         return workspaceDetail(WS_B, "Workspace Beta")
       })
 
-    // Drive the page's `workspaceId` route param via a controllable navigate.
-    // Captured in an effect (runs outside render, so it's a lint-clean side
-    // effect) rather than during render.
+    // Capture navigate in an effect (outside render) so the route param can be
+    // driven imperatively without a lint-flagged side effect during render.
     let navigateTo: ((path: string) => void) | null = null
     function NavProbe() {
       const navigate = useNavigate()
@@ -230,17 +218,15 @@ describe("workspace switch resets per-workspace state", () => {
       ),
     )
 
-    // WS_A's load fails → the error screen renders.
     await waitFor(() => expect(screen.getByText("Workspace not found")).toBeInTheDocument())
     expect(getDetailSpy).toHaveBeenCalledWith(WS_A)
 
-    // Navigate to WS_B, which loads successfully.
     act(() => {
       navigateTo?.(`/workspaces/${WS_B}`)
     })
 
-    // The successful load clears the prior error and shows the workspace. (Old
-    // code never reset `error`, so the stale error screen would persist → fail.)
+    // Successful load clears the prior error. (Old code never reset `error`, so
+    // the stale error screen would persist → fail.)
     await waitFor(() => expect(screen.getByTestId("workspace-name")).toHaveTextContent("Workspace Beta"))
     expect(screen.queryByText("Workspace not found")).not.toBeInTheDocument()
     expect(getDetailSpy).toHaveBeenCalledWith(WS_B)

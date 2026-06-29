@@ -49,15 +49,7 @@ def _artifact_query_cache_key(artifact: Artifact) -> str:
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
-    """
-    Generate Content Security Policy with nonce for inline scripts.
-
-    Args:
-        nonce: A cryptographically secure random nonce.
-
-    Returns:
-        CSP header string with nonce for script-src.
-    """
+    """Build the sandbox CSP header allowing only nonce'd inline scripts."""
     return (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; "
@@ -753,12 +745,10 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
             return HttpResponse("Access denied", status=403)
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
-        # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
         has_live_queries = bool(artifact.source_queries)
 
-        # Serialize artifact data for embedding in the template
         artifact_json = json.dumps(
             {
                 "id": str(artifact.id),
@@ -779,7 +769,6 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # the in-iframe fetch builds "<prefix>/api/..." without a double slash.
         api_base = request.META.get("SCRIPT_NAME", "").rstrip("/")
 
-        # Inject the nonce, base prefix, and artifact data into the template.
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
         html_content = html_content.replace("{{API_BASE}}", api_base)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
@@ -800,7 +789,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
     """
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        """Fetch artifact data for rendering."""
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
@@ -808,7 +796,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:
-        """Serialize artifact for JSON response."""
         return {
             "id": str(artifact.id),
             "title": artifact.title,
@@ -1033,24 +1020,12 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
     def get(
         self, request: HttpRequest, workspace_id, artifact_id: str, format: str
     ) -> HttpResponse:
-        """
-        Export artifact to the specified format.
-
-        Args:
-            request: HTTP request
-            workspace_id: UUID of the TenantMembership
-            artifact_id: UUID of the artifact
-            format: Export format (html, png, pdf)
-
-        Returns:
-            HttpResponse with the exported content
-        """
+        """Export artifact to the given format (html, png, pdf)."""
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
-        # Validate format
         if format not in ("html", "png", "pdf"):
             return JsonResponse(
                 {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
@@ -1066,8 +1041,7 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
 
-        # PNG and PDF require async - return error for now
-        # In production, this would use async views or background tasks
+        # PNG/PDF need an async endpoint or background task; not served here.
         if format in ("png", "pdf"):
             return JsonResponse(
                 {

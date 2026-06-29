@@ -42,15 +42,13 @@ export function RecipesPage() {
   const [runnerRecipe, setRunnerRecipe] = useState<Recipe | null>(null)
   const [deleteDialogRecipe, setDeleteDialogRecipe] = useState<Recipe | null>(null)
 
-  // Fetch recipes list on mount and whenever the active workspace changes, so
-  // switching workspaces refetches instead of leaving the previous workspace's
-  // recipes on screen (which then 404 when combined with the new workspace id).
+  // Refetch on workspace change so the previous workspace's recipes don't
+  // linger (they then 404 against the new workspace id).
   useEffect(() => {
     if (!activeDomainId) return
     fetchRecipes()
   }, [activeDomainId, fetchRecipes])
 
-  // Fetch specific recipe when viewing detail
   useEffect(() => {
     if (id) {
       fetchRecipe(id)
@@ -58,11 +56,9 @@ export function RecipesPage() {
     }
   }, [id, fetchRecipe, fetchRuns])
 
-  // Recipe execution is a background task: POST /run/ returns 202 with a PENDING
-  // run, so while viewing a run that is still pending/running we poll the runs
-  // list until it reaches a terminal status (completed/failed). Depending on the
-  // status string (not the array identity) keeps this to one interval that tears
-  // down as soon as the run finishes or we navigate away.
+  // Recipe execution is a background task (POST /run/ returns 202 with a PENDING
+  // run), so poll the runs list until a terminal status. Depending on the status
+  // string (not the array identity) keeps this to one interval.
   const viewedRunStatus =
     id && runId ? recipeRuns.find((r) => r.id === runId)?.status : undefined
   useEffect(() => {
@@ -149,7 +145,6 @@ export function RecipesPage() {
     await deleteRecipe(deleteDialogRecipe.id)
     setDeleteDialogRecipe(null)
 
-    // If we're on the detail page of the deleted recipe, go back to list
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
@@ -188,7 +183,6 @@ export function RecipesPage() {
     [navigate],
   )
 
-  // Show run detail view if we have both recipe ID and run ID
   if (id && runId && currentRecipe) {
     const run = recipeRuns.find((r) => r.id === runId)
     if (run) {
@@ -205,7 +199,6 @@ export function RecipesPage() {
     }
   }
 
-  // Show detail view if we have an ID
   if (id && currentRecipe) {
     return (
       <div className="container mx-auto px-8 py-8">
@@ -251,10 +244,8 @@ export function RecipesPage() {
     )
   }
 
-  // Show list view
   return (
     <div className="container mx-auto px-8 py-8">
-      {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold">Recipes</h1>
         <p className="text-muted-foreground">
@@ -262,19 +253,16 @@ export function RecipesPage() {
         </p>
       </div>
 
-      {/* Loading state */}
       {recipeStatus === "loading" && (
         <div className="text-muted-foreground">Loading recipes...</div>
       )}
 
-      {/* Error state */}
       {recipeStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load recipes. Please try again.
         </div>
       )}
 
-      {/* List */}
       {recipeStatus === "loaded" && (
         <RecipesList
           recipes={recipes}
@@ -284,7 +272,6 @@ export function RecipesPage() {
         />
       )}
 
-      {/* Runner Dialog */}
       <RecipeRunner
         open={runnerOpen}
         onOpenChange={setRunnerOpen}
@@ -293,7 +280,6 @@ export function RecipesPage() {
         onRunComplete={handleRunComplete}
       />
 
-      {/* Delete Confirmation Dialog */}
       <AlertDialog
         open={!!deleteDialogRecipe}
         onOpenChange={() => setDeleteDialogRecipe(null)}

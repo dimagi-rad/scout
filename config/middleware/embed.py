@@ -17,18 +17,16 @@ class EmbedFrameOptionsMiddleware:
         if not allowed_origins:
             return response
 
-        # Remove X-Frame-Options (conflicts with CSP frame-ancestors)
+        # X-Frame-Options conflicts with CSP frame-ancestors; drop it in favor of CSP.
         if "X-Frame-Options" in response:
             del response["X-Frame-Options"]
 
-        # Set CSP frame-ancestors
         origins = " ".join(allowed_origins)
         response["Content-Security-Policy"] = f"frame-ancestors 'self' {origins}"
 
-        # Cross-origin cookie handling lives in the settings module
-        # (production.py flips SESSION_COOKIE_SAMESITE + CSRF_COOKIE_SAMESITE
-        # to "None" when EMBED_ALLOWED_ORIGINS is set). That's necessary
-        # because cookies set during the OAuth callback — outside /embed/ —
-        # would otherwise default to SameSite=Lax and never reach the iframe.
+        # Cross-origin cookie handling lives in production.py: it flips
+        # SESSION/CSRF_COOKIE_SAMESITE to "None" when EMBED_ALLOWED_ORIGINS is set,
+        # else cookies from the OAuth callback (outside /embed/) default to
+        # SameSite=Lax and never reach the iframe.
 
         return response

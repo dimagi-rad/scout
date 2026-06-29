@@ -41,17 +41,10 @@ export function LoginForm() {
     }
   }
 
-  // In embed mode, OAuth navigates the top-level page (target="_top") so
-  // the OAuth provider's consent page isn't constrained to the iframe.
-  // After login, LOGIN_REDIRECT_URL sends the user back to the embed page
-  // and the iframe picks up the session cookie (same-origin, no popup needed).
-  //
-  // Prefer the embedding host page (document.referrer) so OAuth returns to
-  // wherever Scout is actually embedded. When the referrer is unavailable
-  // (e.g. a strict referrer policy), fall back to the app's own base path
-  // rather than a hardcoded "/labs/scout/" — that hardcode only existed for
-  // the connect-labs host and 404s on any other embedding site (issue #248,
-  // 06#6).
+  // In embed mode prefer the embedding host page (document.referrer) so OAuth
+  // returns to wherever Scout is embedded; fall back to the app's own base path
+  // when the referrer is unavailable (strict referrer policy). The old hardcoded
+  // "/labs/scout/" only worked for the connect-labs host (issue #248, 06#6).
   const oauthReturnUrl = isEmbed
     ? (document.referrer ? new URL(document.referrer).pathname : `${BASE_PATH}/embed/`)
     : `${BASE_PATH}/`

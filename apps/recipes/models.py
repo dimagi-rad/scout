@@ -1,9 +1,4 @@
-"""
-Recipe models for the Scout data agent platform.
-
-Defines Recipe, RecipeStep, and RecipeRun models for creating and executing
-reusable conversation workflows with variable substitution.
-"""
+"""Recipe, RecipeStep, and RecipeRun models for reusable conversation workflows."""
 
 import secrets
 import uuid
@@ -19,13 +14,9 @@ class RecipeSoftDeleteManager(models.Manager):
 
 class Recipe(models.Model):
     """
-    A reusable workflow template that defines a sequence of prompts with variables.
+    A reusable workflow template: a prompt with variables, re-run with different values.
 
-    Recipes allow users to save common analysis patterns that can be re-run with
-    different variable values. Each recipe belongs to a project and can optionally
-    be shared with all project members.
-
-    Variables are defined as a list of dictionaries with the following structure:
+    Variables are a list of dicts:
     [
         {
             "name": "variable_name",
@@ -49,21 +40,18 @@ class Recipe(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True)
 
-    # Single prompt template (markdown) with {{variable}} placeholders
     prompt = models.TextField(
         blank=True,
         default="",
         help_text="Prompt template with {{variable}} placeholders. Supports markdown.",
     )
 
-    # Variable definitions - list of variable specs
     variables = models.JSONField(
         default=list,
         blank=True,
         help_text="List of variable definitions for the recipe.",
     )
 
-    # Sharing settings
     is_shared = models.BooleanField(
         default=False,
         help_text="If true, all project members can view and run this recipe.",
@@ -81,7 +69,6 @@ class Recipe(models.Model):
         help_text="Token for public share URL. Auto-generated when is_public is set.",
     )
 
-    # Metadata
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -147,33 +134,23 @@ class Recipe(models.Model):
         return rendered
 
     def validate_variable_values(self, values: dict) -> list[str]:
-        """
-        Validate that provided variable values match the recipe's variable definitions.
-
-        Args:
-            values: Dictionary mapping variable names to their values.
-
-        Returns:
-            List of validation error messages (empty if valid).
-        """
+        """Validate ``values`` against variable definitions; return error messages (empty if valid)."""
         from datetime import datetime
 
         errors = []
         required_vars = set(self.get_variable_names())
         provided_vars = set(values.keys())
 
-        # Check for missing required variables (those without defaults)
+        # Missing required variables are those without defaults.
         for var_def in self.variables:
             var_name = var_def.get("name")
             if var_name and var_name not in provided_vars and "default" not in var_def:
                 errors.append(f"Missing required variable: {var_name}")
 
-        # Check for unknown variables
         unknown = provided_vars - required_vars
         if unknown:
             errors.append(f"Unknown variables: {', '.join(unknown)}")
 
-        # Type validation for all variable types
         for var_def in self.variables:
             var_name = var_def.get("name")
             var_type = var_def.get("type", "string")
@@ -183,7 +160,6 @@ class Recipe(models.Model):
 
             value = values[var_name]
 
-            # Skip validation for empty/None values if variable has a default
             if value is None or value == "":
                 continue
 
@@ -204,7 +180,6 @@ class Recipe(models.Model):
                     errors.append(f"Invalid boolean for {var_name}: {value}")
             elif var_type == "date":
                 if isinstance(value, str):
-                    # Try ISO format (YYYY-MM-DD)
                     try:
                         datetime.strptime(value, "%Y-%m-%d")
                     except ValueError:
@@ -216,16 +191,7 @@ class Recipe(models.Model):
 
 
 class RecipeStep(models.Model):
-    """
-    A single step in a recipe workflow.
-
-    Each step contains a prompt template that can include {{variable}} placeholders.
-    Steps are executed in order and can optionally specify an expected tool that
-    should be used by the agent.
-
-    The prompt_template supports variable substitution using double curly braces:
-    "Show me the top {{limit}} customers from {{region}} for {{date_range}}"
-    """
+    """A single ordered step in a recipe workflow with a {{variable}} prompt template."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipe = models.ForeignKey(
@@ -257,20 +223,7 @@ class RecipeStep(models.Model):
         return f"Step {self.order}: {self.recipe.name}"
 
     def render_prompt(self, variable_values: dict) -> str:
-        """
-        Render the prompt template by substituting variable values.
-
-        Args:
-            variable_values: Dictionary mapping variable names to their values.
-
-        Returns:
-            The rendered prompt with all variables substituted.
-
-        Example:
-            >>> step.prompt_template = "Show top {{limit}} from {{region}}"
-            >>> step.render_prompt({"limit": 10, "region": "North"})
-            "Show top 10 from North"
-        """
+        """Render the prompt template by substituting variable values."""
         prompt = self.prompt_template
         for name, value in variable_values.items():
             placeholder = "{{" + name + "}}"
@@ -291,10 +244,7 @@ class RecipeRun(models.Model):
     """
     Tracks the execution of a recipe with specific variable values.
 
-    Each run records the variable values used, the results from each step,
-    and timing information for the entire execution.
-
-    Step results are stored as a list of dictionaries:
+    Step results are stored as a list of dicts:
     [
         {
             "step_order": 1,
@@ -321,20 +271,17 @@ class RecipeRun(models.Model):
         default=RecipeRunStatus.PENDING,
     )
 
-    # Variable values used for this run
     variable_values = models.JSONField(
         default=dict,
         help_text="Actual variable values used for this run.",
     )
 
-    # Results from each step
     step_results = models.JSONField(
         default=list,
         blank=True,
         help_text="Results from each step execution.",
     )
 
-    # Timing
     started_at = models.DateTimeField(
         null=True,
         blank=True,
@@ -344,7 +291,6 @@ class RecipeRun(models.Model):
         blank=True,
     )
 
-    # Sharing settings
     is_shared = models.BooleanField(
         default=False,
         help_text="Visible to all project members.",
@@ -362,7 +308,6 @@ class RecipeRun(models.Model):
         help_text="Token for public share URL. Auto-generated when is_public is set.",
     )
 
-    # Who ran this
     run_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -370,7 +315,6 @@ class RecipeRun(models.Model):
         related_name="recipe_runs",
     )
 
-    # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -413,18 +357,7 @@ class RecipeRun(models.Model):
         started_at: str | None = None,
         completed_at: str | None = None,
     ) -> None:
-        """
-        Add a step result to the run.
-
-        Args:
-            step_order: The order of the step that was executed.
-            prompt: The rendered prompt that was sent.
-            response: The agent's response.
-            tool_used: Optional name of the tool used by the agent.
-            error: Optional error message if the step failed.
-            started_at: ISO format timestamp when step started.
-            completed_at: ISO format timestamp when step completed.
-        """
+        """Append a step result to the run and persist it."""
         result = {
             "step_order": step_order,
             "prompt": prompt,

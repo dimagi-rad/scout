@@ -52,7 +52,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             return ""
 
     def serialize_instance(self, instance):
-        """Encrypt token fields before serialization (storage)."""
         data = super().serialize_instance(instance)
         if isinstance(instance, SocialToken):
             if data.get("token"):
@@ -62,7 +61,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         return data
 
     def deserialize_instance(self, model, data):
-        """Decrypt token fields after deserialization (retrieval)."""
         if model is SocialToken:
             data = dict(data)  # don't mutate the original
             if data.get("token"):
@@ -93,8 +91,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
 
         allowed_lower = [d.lower() for d in allowed]
         email = (sociallogin.user.email or "").strip().lower()
-        # A configured allow-list means this provider is restricted; a no-email
-        # login can't be confirmed to satisfy it, so reject rather than bypass.
         domain = email.rpartition("@")[2] if email else ""
         if domain and domain in allowed_lower:
             return

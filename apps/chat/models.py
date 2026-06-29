@@ -39,8 +39,7 @@ class Thread(models.Model):
         return f"{self.title} ({self.id})"
 
     def save(self, *args, **kwargs):
-        # Maintain the is_shared ↔ share_token invariant.
-        # Always call save() (not update()) to toggle is_shared so this runs.
+        # Maintain the is_shared ↔ share_token invariant — toggle via save(), not update().
         if self.is_shared and not self.share_token:
             self.share_token = secrets.token_urlsafe(32)
         elif not self.is_shared:
@@ -77,19 +76,14 @@ class ThreadJob(models.Model):
     state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
     # Set when the resume task claims the job (PENDING/CANCELLED -> RUNNING).
-    # Staleness for an in-flight resume is measured from this RESUME-phase
-    # timestamp, NOT created_at: created_at includes the full materialization +
-    # queue time, so a healthy long-running materialization (>10 min) followed
-    # by a freshly-started resume would otherwise be falsely flipped to FAILED
-    # by the reconciler while the resume is still live. Null until a resume
-    # starts (so a never-claimed PENDING job still ages out from created_at).
+    # In-flight resume staleness is measured from here, NOT created_at: created_at
+    # includes materialization + queue time, so a healthy long materialization
+    # followed by a fresh resume would otherwise be falsely flipped to FAILED.
+    # Null until a resume starts (never-claimed PENDING jobs age out from created_at).
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
-    # Human-readable failure summary populated on FAILED/CANCELLED transitions
-    # so the frontend can render an inline error card after the spinner clears.
-    # Composed from MaterializationRun.result["sources"] when available, or a
-    # generic string when the failure has no per-source detail (e.g. agent
-    # ainvoke crash, janitor stuck-job flip).
+    # Failure summary for the frontend error card, populated on FAILED/CANCELLED
+    # from MaterializationRun.result["sources"] when available, else a generic string.
     error_summary = models.TextField(blank=True, default="")
 
     class Meta:

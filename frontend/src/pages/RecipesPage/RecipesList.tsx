@@ -64,7 +64,6 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
             </div>
           </CardHeader>
           <CardContent className="flex-1 flex flex-col">
-            {/* Stats */}
             <div className="flex flex-wrap gap-3 mb-4">
               <div className="flex items-center gap-1 text-sm text-muted-foreground">
                 <Variable className="h-4 w-4" />
@@ -72,7 +71,6 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
               </div>
             </div>
 
-            {/* Variables preview */}
             {recipe.variables && recipe.variables.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-3">
                 {recipe.variables.slice(0, 3).map((v) => (
@@ -89,13 +87,11 @@ export function RecipesList({ recipes, onView, onRun, onDelete }: RecipesListPro
               </div>
             )}
 
-            {/* Last run */}
             <div className="flex items-center gap-1 text-xs text-muted-foreground mb-3">
               <Clock className="h-3 w-3" />
               <span>Last run: {formatDate(recipe.last_run_at)}</span>
             </div>
 
-            {/* Actions */}
             <div className="mt-auto flex items-center gap-2 pt-2 border-t">
               <Button
                 variant="default"

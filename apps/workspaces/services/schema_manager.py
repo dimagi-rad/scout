@@ -30,12 +30,9 @@ from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchem
 
 logger = logging.getLogger(__name__)
 
-# Postgres truncates identifiers to 63 bytes (NAMEDATALEN - 1). Tenant view
-# names are composed as ``{prefix}__{table}``; we cap the prefix well below this
-# so a generous table-name budget remains, and hard-fail if a final name still
-# exceeds the limit. The 63-byte limit and all name minting now live in
-# ``apps.common.identifiers`` (arch #235); ``readonly_role_name`` / ``dbt_role_name``
-# are imported above and re-exported here for existing call sites.
+# Cap the view-name prefix well below Postgres's 63-byte identifier limit, leaving
+# budget for the ``__{table}`` suffix (the full name is hard-failed if it still
+# exceeds the limit). Identifier minting lives in apps.common.identifiers (arch #235).
 _MAX_VIEW_PREFIX_LEN = 32
 
 
@@ -61,27 +58,17 @@ class SchemaManager:
     def provision(self, tenant) -> TenantSchema:
         """Get or create a schema for the tenant.
 
-        Matches an existing schema by the ``tenant`` foreign key — never by
-        schema_name (arch #235). Matching by name let a sanitized-name collision
-        (Connect ``123`` / OCS ``123``; ``a-b`` / ``a_b``) hand one tenant another
-        tenant's live ACTIVE schema. Multiple users in the same tenant still share
-        one schema because they share the tenant FK.
+        Matches by the ``tenant`` FK, never by schema_name (arch #235): a
+        sanitized-name collision (Connect ``123`` / OCS ``123``) would otherwise
+        hand one tenant another's live ACTIVE schema.
 
         Resolution order, all scoped to this tenant:
 
-        1. The current live schema (ACTIVE/MATERIALIZING), most-recently-accessed.
-           A blue-green refresh's not-yet-promoted ``_r`` schema is PROVISIONING
-           during its load, so it is correctly skipped here and the old base is
-           returned; once promoted (ACTIVE, freshly touched) it sorts first and
-           becomes the resolved schema.
-        2. Otherwise resurrect the most-recently-active EXPIRED record in place,
-           reusing its stored name (preserves the physical schema; this is the
-           tenant's own row, so no cross-tenant risk).
-        3. Otherwise mint a brand-new collision-safe name via
-           ``tenant_schema_name`` (keyed on ``(provider, external_id)``).
-
-        Existing records keep their stored name, so live physical schemas need no
-        rename/migration.
+        1. Current live schema (ACTIVE/MATERIALIZING), most-recently-accessed. A
+           blue-green refresh's not-yet-promoted ``_r`` schema is PROVISIONING, so
+           it is skipped until promoted (then sorts first).
+        2. Else resurrect the most-recent EXPIRED record in place, reusing its name.
+        3. Else mint a new collision-safe name via ``tenant_schema_name``.
         """
         from django.db import IntegrityError
 
@@ -94,8 +81,8 @@ class SchemaManager:
             .first()
         )
         if live:
-            # Ensure the physical schema still exists — it may have been
-            # dropped externally while the Django record remained ACTIVE.
+            # The physical schema may have been dropped externally while the
+            # Django record stayed ACTIVE.
             self._ensure_physical_schema(live.schema_name)
             live.touch()
             return live
@@ -119,15 +106,13 @@ class SchemaManager:
                     state=SchemaState.PROVISIONING,
                 )
             except IntegrityError:
-                # Race: another process created this tenant's record between our
-                # lookup and create. The name is deterministic per tenant, so
-                # this row belongs to the same tenant — re-fetch and return it.
+                # Race: another process created this tenant's (deterministically
+                # named) record between lookup and create — re-fetch and return it.
                 created = False
                 ts = TenantSchema.objects.get(schema_name=schema_name)
                 if ts.state in (SchemaState.ACTIVE, SchemaState.MATERIALIZING):
                     return ts
-                # Fall through: record exists but isn't active yet; let this
-                # caller attempt the CREATE SCHEMA (IF NOT EXISTS is safe).
+                # Not active yet: fall through to CREATE SCHEMA (IF NOT EXISTS is safe).
 
         try:
             conn = get_managed_db_connection()
@@ -143,19 +128,15 @@ class SchemaManager:
             finally:
                 conn.close()
         except Exception:
-            # Clean up only a record WE created this call, so the next attempt
-            # can retry rather than hitting the unique constraint. A resurrected
-            # pre-existing record is left in place.
+            # Only delete a record WE created, so the next attempt can retry; a
+            # resurrected pre-existing record is left in place.
             if created:
                 ts.delete()
             raise
 
-        # Activating here covers both the fresh-create path and the
-        # resurrect/fall-through path (an existing record that was EXPIRED or
-        # otherwise inactive). Either way the schema is now ACTIVE, so its
-        # inactivity TTL must be reset — otherwise a resurrected schema keeps a
-        # stale last_accessed_at and expire_inactive_schemas drops it on its
-        # next tick, right after data was materialized into it.
+        # Reset the inactivity TTL on activation (covers fresh-create and
+        # resurrect): otherwise a resurrected schema's stale last_accessed_at lets
+        # expire_inactive_schemas drop it right after data is materialized.
         ts.state = SchemaState.ACTIVE
         ts.last_accessed_at = timezone.now()
         ts.save(update_fields=["state", "last_accessed_at"])
@@ -272,21 +253,13 @@ class SchemaManager:
         return f"ws_{hex_id}"
 
     def _view_prefix(self, tenant) -> str:
-        """Derive the per-tenant view-name prefix, bounded to a safe length.
+        """Derive the per-tenant ``{prefix}__{table}`` view-name prefix, capped to
+        <= 32 chars so distinct long-named tenants don't truncate to the same
+        identifier.
 
-        Single source of truth for the ``{prefix}__{table}`` namespacing used by
-        ``build_view_schema``. PostgreSQL silently truncates identifiers to 63
-        bytes, so an unbounded prefix can make two distinct tenants' views
-        collapse to the same physical name. We therefore cap the prefix:
-
-        - If the sanitized canonical name is short (<= 32 chars), use it as-is so
-          human-readable names stay intact.
-        - Otherwise, use the first 23 sanitized chars plus ``_`` plus an 8-char
-          hex digest of ``tenant.external_id``. The digest is deterministic and
-          stable across builds and distinct for distinct tenants, so the prefix
-          is reproducible (same on rebuild) and collision-resistant.
-
-        The result is always a valid PG identifier and at most 32 chars long.
+        Short sanitized names (<= 32) are used as-is; longer ones become 23
+        sanitized chars + ``_`` + an 8-char digest of external_id (deterministic,
+        so stable across rebuilds and distinct per tenant).
         """
         sanitized = self._sanitize_schema_name(tenant.canonical_name)
         if len(sanitized) <= _MAX_VIEW_PREFIX_LEN:
@@ -314,7 +287,6 @@ class SchemaManager:
         if not tenants:
             raise ValueError(f"Workspace {workspace.id} has no tenants")
 
-        # Bulk-fetch active TenantSchema records for all tenants in one query
         active_schemas = {
             ts.tenant_id: ts
             for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
@@ -331,7 +303,6 @@ class SchemaManager:
 
         view_schema_name = self._view_schema_name(workspace.id)
 
-        # Get or create the WorkspaceViewSchema record
         vs, _ = WorkspaceViewSchema.objects.get_or_create(
             workspace=workspace,
             defaults={"schema_name": view_schema_name, "state": SchemaState.PROVISIONING},
@@ -345,23 +316,18 @@ class SchemaManager:
         try:
             cursor = conn.cursor()
 
-            # Validate schema name before embedding
             if not re.match(r"^ws_[a-f0-9]{16}$", view_schema_name):
                 raise ValueError(f"Invalid view schema name: {view_schema_name!r}")
 
-            # Step 1: Compute per-tenant prefixes and detect collisions on the
-            # FINAL (bounded) prefixes — _view_prefix caps each prefix to <= 32
-            # chars so distinct long-named tenants don't collapse to the same
-            # truncated identifier.
+            # Detect collisions on the FINAL (bounded) prefixes.
             prefix_to_tenant: dict[str, str] = {}
             tenant_prefixes: list[
                 tuple[str, str, str]
             ] = []  # (schema_name, tenant_external_id, prefix)
             for schema_name, tenant_obj in tenant_schemas:
                 tenant_external_id = tenant_obj.external_id
-                # Use the tenant object threaded from above — NOT a lookup by
-                # external_id, which raises MultipleObjectsReturned when the id is
-                # shared across providers (arch #235).
+                # Use the threaded tenant object, NOT a lookup by external_id —
+                # that raises MultipleObjectsReturned across providers (arch #235).
                 prefix = self._view_prefix(tenant_obj)
                 if prefix in prefix_to_tenant:
                     raise ValueError(
@@ -371,14 +337,10 @@ class SchemaManager:
                 prefix_to_tenant[prefix] = tenant_external_id
                 tenant_prefixes.append((schema_name, tenant_external_id, prefix))
 
-            # Step 2: Collect all (view_name, schema_name, table_name), then run
-            # the defensive length check and the full view-name collision check
-            # on the FINAL names before executing any DDL. The collision check
-            # catches ambiguous __ delimiters (e.g. prefix "foo__bar" + table
-            # "baz" vs prefix "foo" + table "bar__baz"). The length check guards
-            # against table names growing the composed name past PostgreSQL's
-            # 63-byte identifier limit (where it would silently truncate and two
-            # distinct views could collapse into one).
+            # Check length + full-name collisions on FINAL names before any DDL.
+            # The collision check catches ambiguous __ delimiters ("foo__bar"+"baz"
+            # vs "foo"+"bar__baz"); the length check catches composed names that
+            # would silently truncate past the 63-byte limit and collapse together.
             planned_views: list[tuple[str, str, str]] = []
             seen_view_names: dict[str, str] = {}  # view_name → tenant_external_id
             oversized_views: list[str] = []
@@ -407,12 +369,9 @@ class SchemaManager:
                     f"would be truncated: {', '.join(sorted(oversized_views))}"
                 )
 
-            # Step 3: Rebuild the view schema from scratch for idempotency. We
-            # DROP and recreate the schema (rather than CREATE OR REPLACE VIEW
-            # in place) so that a rebuild after an underlying table's columns
-            # changed never hits "cannot change name of view column" — and so
-            # any unexpected duplicate name becomes a hard error (plain CREATE
-            # VIEW) instead of a silent redefinition.
+            # DROP + recreate (not CREATE OR REPLACE VIEW) so a rebuild after an
+            # underlying column change never hits "cannot change name of view
+            # column", and a duplicate name hard-errors instead of redefining.
             cursor.execute(
                 psycopg.sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
                     psycopg.sql.Identifier(view_schema_name)
@@ -433,21 +392,18 @@ class SchemaManager:
                 )
             views_created = len(planned_views)
 
-            # Create read-only role for the view schema
             self._create_readonly_role(cursor, view_schema_name)
 
             view_role = readonly_role_name(view_schema_name)
 
-            # Revoke grants the role still holds on tenant schemas that are no
-            # longer part of this workspace. The role is reused across rebuilds,
-            # so without this a removed tenant's schema keeps SELECT/USAGE for
-            # the _ro role — leaving the prior tenant's data reachable through a
-            # role that should only see the current members (issue #244).
+            # The _ro role is reused across rebuilds; revoke grants on tenants no
+            # longer in the workspace, else a removed tenant's data stays reachable
+            # (issue #244).
             current_schemas = {view_schema_name} | {s for s, _ in tenant_schemas}
             self._revoke_stale_view_role_grants(cursor, view_role, current_schemas)
 
-            # Grant SELECT on the views themselves (ALTER DEFAULT PRIVILEGES
-            # only covers future tables, not the views just created above)
+            # ALTER DEFAULT PRIVILEGES only covers future tables, not the views
+            # just created — grant SELECT on them explicitly.
             cursor.execute(
                 psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
                     psycopg.sql.Identifier(view_schema_name),
@@ -455,8 +411,7 @@ class SchemaManager:
                 )
             )
 
-            # Grant read access to each constituent tenant schema
-            # (views reference tables in these schemas directly)
+            # Views reference the constituent tenant schemas directly.
             for tenant_schema_name, _ in tenant_schemas:
                 cursor.execute(
                     psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
@@ -473,7 +428,7 @@ class SchemaManager:
 
             cursor.close()
         except Exception as exc:
-            # Drop any partially-created schema before marking FAILED to avoid leaving debris
+            # Drop any partial schema before marking FAILED to avoid debris.
             try:
                 if not conn.closed:
                     c = conn.cursor()
@@ -489,9 +444,8 @@ class SchemaManager:
                 )
             if not conn.closed:
                 conn.close()
-            # Persist the error text so the resume task, the MCP get_schema_status
-            # tool, and the status API can surface *why* the query layer is
-            # unavailable instead of reporting a generic "not_provisioned".
+            # Persist the error text so the resume task, MCP get_schema_status, and
+            # the status API can surface *why* the query layer is unavailable.
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
             vs.save(update_fields=["state", "last_error"])
@@ -589,10 +543,8 @@ class SchemaManager:
                     view_schema.schema_name,
                 )
 
-    # SQL used by both sync and async role-teardown paths. Finds schemas on
-    # which the role holds direct ACL entries — schema-level grants (e.g.
-    # USAGE on constituent tenant schemas for view-schema _ro roles) are the
-    # only ones that survive DROP SCHEMA CASCADE and block DROP ROLE.
+    # Finds schemas where the role holds direct ACL entries — schema-level grants
+    # are the only ones that survive DROP SCHEMA CASCADE and would block DROP ROLE.
     _SCHEMAS_WITH_ROLE_GRANTS_SQL = """
         SELECT DISTINCT n.nspname
         FROM pg_namespace n, aclexplode(n.nspacl) AS acl
@@ -626,19 +578,13 @@ class SchemaManager:
         )
 
     def _drop_readonly_role(self, cursor, schema_name: str) -> None:
-        """Drop the read-only PostgreSQL role for a schema.
+        """Drop the read-only role, first revoking schema-scoped ACLs it still
+        holds on other schemas (e.g. a view-schema role's grants on constituent
+        tenant schemas).
 
-        Explicitly revokes grants the role still holds (schema-scoped ACLs on
-        other schemas — e.g. view-schema roles' USAGE/SELECT on constituent
-        tenant schemas) and then drops the role.
-
-        We avoid ``DROP OWNED BY`` because it requires the executing role to
-        have privileges of the target role (inheritable grant or SET ROLE
-        capability) — a prerequisite Scout's managed-DB user does not reliably
-        hold for roles created earlier or by a different operator. Explicit
-        REVOKE works as long as the current user is the grantor (which it is,
-        since it issued the original GRANTs in ``_create_readonly_role`` and
-        ``build_view_schema``).
+        Avoids ``DROP OWNED BY`` — that needs privileges of the target role, which
+        the managed-DB user does not reliably hold. Explicit REVOKE works because
+        the current user issued the original GRANTs.
         """
         role_name = readonly_role_name(schema_name)
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
@@ -666,21 +612,11 @@ class SchemaManager:
     def _create_dbt_role(self, cursor, schema_name: str) -> None:
         """Create a low-privilege dbt role confined to one schema (issue #241).
 
-        dbt assumes this role via its profile's ``role`` key (``SET ROLE``) when
-        materializing transformation assets, so the free-text SQL in a
-        ``TransformationAsset`` runs with rights on THIS schema only — not as the
-        ``MANAGED_DATABASE_URL`` superuser that runs CREATE SCHEMA / CREATE ROLE.
-
-        Privileges granted (this schema only):
-        - ``USAGE`` + ``CREATE`` on the schema so dbt can build its models.
-        - ``SELECT`` on existing tables (the materializer's ``raw_*`` tables) plus
-          default privileges for tables created later, so staging models can read.
-
-        Critically, NO privileges are granted on any other schema, so a
-        fully-qualified cross-tenant read fails on missing USAGE. The role is
-        granted TO the current user so the managed-DB user can ``SET ROLE`` to it.
-
-        Idempotent — checks pg_roles before creating.
+        dbt SET ROLEs to this so a TransformationAsset's free-text SQL runs with
+        rights on THIS schema only, not as the managed-DB superuser. Grants USAGE +
+        CREATE and SELECT (existing + default) on this schema and NOTHING on any
+        other, so a cross-tenant read fails on missing USAGE. Granted TO the
+        current user so it can SET ROLE. Idempotent.
         """
         role_name = dbt_role_name(schema_name)
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
@@ -691,7 +627,6 @@ class SchemaManager:
                         psycopg.sql.Identifier(role_name)
                     )
                 )
-        # Grant the role to the current (managed-DB) user so it can SET ROLE to it.
         cursor.execute(
             psycopg.sql.SQL("GRANT {} TO CURRENT_USER").format(psycopg.sql.Identifier(role_name))
         )
@@ -729,13 +664,13 @@ class SchemaManager:
         available before the transform phase runs.
         """
         role_name = readonly_role_name(schema_name)
-        # Idempotent role creation — pg doesn't have CREATE ROLE IF NOT EXISTS
+        # pg has no CREATE ROLE IF NOT EXISTS.
         cursor.execute(
             "SELECT 1 FROM pg_roles WHERE rolname = %s",
             (role_name,),
         )
         if not cursor.fetchone():
-            # Race condition: another process may create the role between check and create
+            # Another process may create the role between check and create.
             with contextlib.suppress(psycopg.errors.DuplicateObject):
                 cursor.execute(
                     psycopg.sql.SQL("CREATE ROLE {} NOLOGIN").format(
@@ -757,7 +692,6 @@ class SchemaManager:
                 psycopg.sql.Identifier(role_name),
             )
         )
-        # Confinement role for the dbt transform phase (issue #241).
         self._create_dbt_role(cursor, schema_name)
 
     def _revoke_stale_view_role_grants(

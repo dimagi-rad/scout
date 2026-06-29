@@ -75,8 +75,7 @@ function EmbedApp() {
       }
     }
     if (type === "scout:set-mode") {
-      // Apply the requested mode (and optional theme) live, instead of merely
-      // logging it (issue #248, 06#6).
+      // issue #248, 06#6: apply requested mode/theme live, don't just log it.
       if (typeof payload.mode === "string") {
         setMode(payload.mode as EmbedMode)
       }
@@ -117,7 +116,6 @@ function EmbedApp() {
     }
   }, [authStatus, sendEvent])
 
-  // Auto-select tenant from URL param after authentication
   useEffect(() => {
     if (authStatus === "authenticated" && tenant) {
       ensureTenant(provider, tenant)

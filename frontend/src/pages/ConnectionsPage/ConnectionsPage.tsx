@@ -65,7 +65,6 @@ export function ConnectionsPage() {
   const [removing, setRemoving] = useState<string | null>(null)
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
 
-  // Search and filter state
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
     provider: null,
@@ -193,7 +192,6 @@ export function ConnectionsPage() {
         </p>
       )}
 
-      {/* OAuth Providers section */}
       <section className="space-y-4">
         <h2 className="text-lg font-medium">OAuth Providers</h2>
         {loadingProviders ? (
@@ -250,7 +248,6 @@ export function ConnectionsPage() {
         )}
       </section>
 
-      {/* Connections section */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-medium">Connections</h2>
