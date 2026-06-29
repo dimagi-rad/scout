@@ -107,6 +107,12 @@ Do not write:
 
 Keep the ones you write tight — a single line beats a paragraph. Reserve multi-line blocks for genuinely load-bearing context.
 
+## Commits
+
+Make each commit one logical change — a single feature-level unit that is internally consistent and can be reviewed on its own. Reviewers read large PRs commit by commit, so every commit should leave the tree in a working state and stand alone.
+
+A "change" is one logical thing, not one edit. Split separable work — a bug fix, an unrelated refactor, a new helper — into a commit each, ordered so prerequisites land first. If the commit message needs an "and," it's probably two commits.
+
 ## Testing conventions
 
 ### data-testid attributes
