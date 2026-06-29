@@ -44,12 +44,10 @@ export function Sidebar() {
     ? `${pathPrefix}${workspacePath(activeWorkspace ?? { id: activeDomainId })}/chat`
     : null
 
-  // Fetch domains on mount
   useEffect(() => {
     fetchDomains()
   }, [fetchDomains])
 
-  // Fetch threads when domain changes
   useEffect(() => {
     if (activeDomainId) {
       fetchThreads(activeDomainId)
@@ -82,7 +80,6 @@ export function Sidebar() {
         </div>
       )}
 
-      {/* Navigation */}
       <nav className="space-y-1 p-4">
         <NavItem
           to={chatBase ?? `${pathPrefix}/`}
@@ -96,7 +93,6 @@ export function Sidebar() {
         <NavItem to={`${pathPrefix}/data-dictionary`} icon={Database} label="Data Dictionary" />
       </nav>
 
-      {/* Thread History */}
       <div className="flex flex-1 flex-col border-t overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2">
           <span className="text-xs font-medium text-muted-foreground">
@@ -197,7 +193,6 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* User Section */}
       <div className="border-t p-4">
         <div className="mb-2 truncate text-sm text-muted-foreground">
           {user?.email}

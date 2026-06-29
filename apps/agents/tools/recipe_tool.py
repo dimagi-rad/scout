@@ -1,10 +1,8 @@
 """
 Recipe creation tool for the Scout data agent platform.
 
-This module provides a tool that allows the agent to save conversation patterns
-as reusable recipes. The agent can extract the workflow as a prompt template,
-identify variables for parameterization, and save them as a recipe that can be
-re-run.
+Factory for a tool that saves a conversation workflow as a reusable, templated
+recipe with parameterized variables.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Valid variable types for recipe variables
 VALID_VARIABLE_TYPES = frozenset(
     {
         "string",
@@ -35,20 +32,7 @@ VALID_VARIABLE_TYPES = frozenset(
 
 
 def create_recipe_tool(workspace: Workspace, user: User | None):
-    """
-    Factory function to create a recipe saving tool for a specific workspace.
-
-    The returned tool allows the agent to save a prompt template as a reusable
-    recipe with variable substitution support.
-
-    Args:
-        workspace: The Workspace model instance for scoping recipes.
-        user: The User model instance who triggered the conversation.
-              Used to track recipe ownership.
-
-    Returns:
-        A LangChain tool function that saves recipes.
-    """
+    """Create the save_as_recipe tool scoped to a workspace and owning user."""
 
     @tool
     async def save_as_recipe(
@@ -94,10 +78,8 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
             - variable_names: List of variable names defined
             - message: Success or error message
         """
-        # Import here to avoid circular imports
-        from apps.recipes.models import Recipe
+        from apps.recipes.models import Recipe  # avoid circular import
 
-        # Validate name
         if not name or not name.strip():
             return {
                 "recipe_id": None,
@@ -107,7 +89,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                 "message": "Recipe name is required.",
             }
 
-        # Validate prompt
         if not prompt or not prompt.strip():
             return {
                 "recipe_id": None,
@@ -117,7 +98,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                 "message": "Prompt is required.",
             }
 
-        # Validate variables structure
         validated_variables = []
         for i, var in enumerate(variables):
             if not isinstance(var, dict):
@@ -170,7 +150,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                     "message": f"Variable '{var_name}' is missing 'label' field.",
                 }
 
-            # Validate select type has options
             if var_type == "select" and not var.get("options"):
                 return {
                     "recipe_id": None,
@@ -180,7 +159,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                     "message": f"Variable '{var_name}' of type 'select' requires 'options' list.",
                 }
 
-            # Build validated variable
             validated_var = {
                 "name": var_name,
                 "type": var_type,
@@ -193,7 +171,7 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
 
             validated_variables.append(validated_var)
 
-        # Validate that referenced variables in prompt are defined
+        # Reject {{placeholders}} that aren't defined as variables.
         variable_names = [v["name"] for v in validated_variables]
         referenced_vars = re.findall(r"\{\{(\w+)\}\}", prompt)
         undefined_vars = set(referenced_vars) - set(variable_names)
@@ -207,7 +185,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                 f"Please define them in the variables list.",
             }
 
-        # Create the recipe
         try:
             recipe = await Recipe.objects.acreate(
                 workspace=workspace,
@@ -243,7 +220,6 @@ def create_recipe_tool(workspace: Workspace, user: User | None):
                 "message": f"Failed to create recipe: {e!s}",
             }
 
-    # Set tool name explicitly
     save_as_recipe.name = "save_as_recipe"
 
     return save_as_recipe

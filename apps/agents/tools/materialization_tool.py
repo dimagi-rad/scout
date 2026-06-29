@@ -51,18 +51,13 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         ``status: completed``, continue with the requested analysis in the same
         run — the data is ready.
         """
-        # Imported inside the function to break a real import cycle (verified:
-        # module-level fails with ImportError "partially initialized module
-        # apps.workspaces.tasks" in every import order). The chain is
-        # graph.base -> this module -> workspaces.tasks -> graph.base
-        # (tasks imports build_agent_graph for the resume path). This mirrors the
-        # established pattern in apps/agents/tools/recipe_tool.py, which imports
-        # apps.recipes.models inside the tool body for the same reason.
+        # Inline import breaks a verified cycle: graph.base -> this module ->
+        # workspaces.tasks -> graph.base (tasks imports build_agent_graph for the
+        # resume path). Module-level fails with a partially-initialized import.
         from apps.workspaces.tasks import materialize_workspace_blocking
 
-        # Blocking + dedupe-aware: waits for any in-progress materialization on
-        # this workspace's tenants before starting its own, so a recipe never
-        # triggers a parallel run against the same tenant schema.
+        # Dedupe-aware: waits for any in-progress materialization on this
+        # workspace's tenants rather than starting a parallel run.
         summary = await materialize_workspace_blocking(workspace_id, user_id, job_id)
         tenants = summary.get("tenants", [])
         loaded = sum(1 for t in tenants if t.get("success"))

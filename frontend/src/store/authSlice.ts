@@ -31,7 +31,7 @@ export const createAuthSlice: StateCreator<AuthSlice, [], [], AuthSlice> = (set)
     fetchMe: async () => {
       set({ authStatus: "loading", authError: null })
       try {
-        // Ensure CSRF cookie is set
+        // GET sets the CSRF cookie as a side effect
         await api.get("/api/auth/csrf/")
         const user = await api.get<User>("/api/auth/me/")
         set({ user, authStatus: "authenticated" })

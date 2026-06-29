@@ -31,20 +31,14 @@ def _is_last_manager(workspace, membership):
 
 
 def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
-    """Derive a workspace's live schema status from precomputed schema state.
+    """Derive a workspace's schema status, shared by the list and detail endpoints
+    so they never drift. Returns "available" | "provisioning" | "unavailable" | "failed".
 
-    Returns one of "available" | "provisioning" | "unavailable" | "failed".
-    This is the single source of truth shared by the list and detail endpoints
-    so they never drift apart.
-
-    - Single-tenant (or no view schema): available iff every tenant has an
-      ACTIVE schema; provisioning if any schema is mid-provisioning; otherwise
-      unavailable (never synced, expired, torn down, or failed).
-    - Multi-tenant: readiness is tracked by the workspace's view schema, which
-      unions the per-tenant schemas. ACTIVE view schema ⇒ available; a FAILED
-      view schema ⇒ failed (per-tenant data may have loaded but the workspace
-      has no queryable surface — a distinct, surfaceable state); anything else
-      ⇒ provisioning.
+    - Single-tenant: available iff every tenant is ACTIVE; provisioning if any is
+      mid-provisioning; else unavailable.
+    - Multi-tenant: tracked by the view schema — ACTIVE ⇒ available, FAILED ⇒
+      failed (per-tenant data may have loaded but there's no queryable surface),
+      else provisioning.
     """
     if tenant_count > 1:
         if view_schema_state == SchemaState.ACTIVE:
@@ -169,7 +163,6 @@ class WorkspaceListView(APIView):
 
         tenant_ids = request.data.get("tenant_ids", [])
 
-        # Validate user has access to all requested tenants
         accessible_tenant_ids = set(
             str(tid)
             for tid in TenantMembership.objects.filter(user=request.user).values_list(

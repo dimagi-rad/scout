@@ -30,8 +30,7 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
-    // The failure must be distinguishable from a genuinely-empty history: a
-    // silent {threads:[], status:'loaded'} read as "all conversations deleted".
+    // A silent {threads:[], status:'loaded'} reads as "all conversations deleted".
     expect(useAppStore.getState().threadsStatus).toBe("error")
   })
 
@@ -43,7 +42,6 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
     await useAppStore.getState().uiActions.fetchThreads("ws-1")
 
     expect(useAppStore.getState().threadsStatus).toBe("error")
-    // The list is not wiped to empty during a transient blip.
     expect(useAppStore.getState().threads).toEqual(existing)
   })
 

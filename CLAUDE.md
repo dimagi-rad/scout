@@ -90,6 +90,23 @@ Optional:
 - **Frontend**: ESLint with typescript-eslint + react-hooks plugin
 - **No Prettier** configured for frontend
 
+### Comments
+
+Comment to explain *why*, not *what*. Default to no comment — write code that reads on its own.
+
+Write a comment only when it carries information the code cannot:
+- A non-obvious constraint, gotcha, or invariant ("must run before X or Y races")
+- The reason behind a surprising choice, with a reference where one exists (PR #, arch finding, ticket)
+- A warning about consequences that aren't visible locally
+
+Do not write:
+- Narration that restates the next line (`# Step 1: create the schema`, `# loop over rows`, `# return result`)
+- Section banners and step numbers that just chunk a function (`# --- validation ---`)
+- Comments restating a self-descriptive name or docstring
+- Commented-out code (delete it; git remembers)
+
+Keep the ones you write tight — a single line beats a paragraph. Reserve multi-line blocks for genuinely load-bearing context.
+
 ## Testing conventions
 
 ### data-testid attributes

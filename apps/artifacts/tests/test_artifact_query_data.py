@@ -1,6 +1,4 @@
-"""
-Tests for ArtifactQueryDataView — live query execution via MCP service.
-"""
+"""Tests for ArtifactQueryDataView — live query execution via MCP service."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -237,7 +235,6 @@ async def test_tenant_context_error_returns_error_query(live_artifact, member_cl
 
     assert response.status_code == 200
     data = response.json()
-    # All queries should have errors
     assert all("error" in q for q in data["queries"])
 
 
@@ -270,7 +267,7 @@ async def test_individual_query_failure_continues(live_artifact, member_client, 
     assert "error" not in data["queries"][1]
 
 
-# ── parallel execution + result caching (arch #254, finding 09#9) ────────────
+# parallel execution + result caching (arch #254, finding 09#9)
 
 
 @pytest.mark.django_db(transaction=True)

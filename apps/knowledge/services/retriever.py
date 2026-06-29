@@ -15,13 +15,9 @@ if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
 
 
-# Total character budget for the knowledge context injected into the system
-# prompt (arch #254, finding 01#4). Without a cap the retriever concatenated
-# ALL KnowledgeEntry + ALL TableKnowledge rows verbatim (only learnings were
-# capped), so a bulk import could grow the prompt arbitrarily — and the whole
-# block is re-billed on every LLM call. Mirrors the 6000-char schema budget in
-# the graph. Knowledge is the first-billed, cacheable section, so keeping it
-# bounded keeps the cached prefix small and stable.
+# Char budget for the knowledge context injected into the system prompt, which
+# is re-billed on every LLM call (arch #254, finding 01#4). Mirrors the graph's
+# schema budget; bounding it keeps the cacheable prompt prefix small and stable.
 KNOWLEDGE_CONTEXT_CHAR_BUDGET = 6000
 
 _TRUNCATION_NOTICE = (
@@ -48,12 +44,10 @@ class KnowledgeRetriever:
     async def retrieve(self, user_question: str = "") -> str:
         """Retrieve and format all relevant knowledge as markdown.
 
-        The combined output is bounded by ``KNOWLEDGE_CONTEXT_CHAR_BUDGET`` so a
-        large knowledge base (or a bulk import) can't inflate — and re-bill on
-        every LLM call — the system prompt without limit (arch #254, 01#4).
-        ``user_question`` is accepted for API compatibility; there is no
-        relevance-ranking index today, so entries are included in a stable
-        (title / table-name) order until the budget is exhausted.
+        Output is bounded by ``KNOWLEDGE_CONTEXT_CHAR_BUDGET`` (arch #254, 01#4).
+        ``user_question`` is accepted for API compatibility only; with no
+        relevance index, entries are included in stable order until the budget
+        is exhausted.
         """
         sections: list[str] = []
 
@@ -159,10 +153,8 @@ class KnowledgeRetriever:
                 lines.append(f"  - *Tables: {tables_str}*")
 
             if learning.confidence_score >= 0.8:
-                # Only claim a usage count when the learning has actually been
-                # applied. times_applied effectively never increments today
-                # (arch #262, finding 05#9), so rendering "(applied 0 times)"
-                # implies usage that never happened.
+                # times_applied effectively never increments today (arch #262,
+                # finding 05#9), so only show a count when it's actually nonzero.
                 if learning.times_applied > 0:
                     lines.append(
                         f"  - *Confidence: {learning.confidence_score:.0%} "

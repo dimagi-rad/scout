@@ -57,12 +57,10 @@ class TableKnowledge(models.Model):
         blank=True,
         help_text='How often this data updates. E.g. "hourly", "daily at 3am UTC", "real-time"',
     )
-    # Semantic relationships not captured by FKs
     related_tables = models.JSONField(
         default=list,
         help_text='Tables commonly joined with this one. E.g. [{"table": "users", "join_hint": "orders.user_id = users.id"}]',
     )
-    # Important column-level annotations
     column_notes = models.JSONField(
         default=dict,
         help_text='Per-column notes. E.g. {"status": "Values: active, churned, trial"}',
@@ -144,7 +142,6 @@ class AgentLearning(models.Model):
         blank=True,
     )
 
-    # What the agent learned
     description = models.TextField(
         help_text="Plain English description of the learning. This is what gets injected into the prompt."
     )
@@ -155,14 +152,12 @@ class AgentLearning(models.Model):
     )
     applies_to_tables = models.JSONField(default=list, help_text="Tables this learning applies to.")
 
-    # Evidence: what triggered this learning
     original_error = models.TextField(
         blank=True, help_text="The error message or suspicious result."
     )
     original_sql = models.TextField(blank=True, help_text="The SQL that failed.")
     corrected_sql = models.TextField(blank=True, help_text="The SQL that worked.")
 
-    # Confidence and lifecycle
     confidence_score = models.FloatField(
         default=0.5,
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
@@ -173,7 +168,6 @@ class AgentLearning(models.Model):
     )
     is_active = models.BooleanField(default=True)
 
-    # Source
     discovered_in_conversation = models.CharField(max_length=255, blank=True)
     discovered_by_user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL

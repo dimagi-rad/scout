@@ -23,18 +23,16 @@ import type {
 
 function parseOutput(output: unknown): unknown {
   if (typeof output === "string") {
-    // The backend emits the MCP envelope as JSON (apps/chat/stream.py
-    // _tool_content_to_str), so a plain JSON.parse is sufficient. The old
-    // `output.replace(/'/g, '"')` Python-repr→JSON hack is vestigial under the
-    // current adapter and actively corrupted any apostrophe in the data (05#2 /
-    // 13#8), so it was removed.
+    // Backend emits the MCP envelope as JSON (apps/chat/stream.py), so a plain
+    // JSON.parse suffices. The old Python-repr→JSON `replace(/'/g, '"')` hack
+    // corrupted apostrophes in the data (05#2 / 13#8) and was removed.
     try {
       return JSON.parse(output)
     } catch {
       return output
     }
   }
-  // Handle the MCP envelope array directly (already parsed objects)
+  // MCP envelope array (already-parsed objects).
   if (
     Array.isArray(output) &&
     output[0]?.type === "text" &&
@@ -107,23 +105,21 @@ function extractArtifactId(part: any): string | null {
 
 function formatToolOutput(output: unknown): string {
   if (typeof output === "string") {
-    // Try to parse JSON strings so we can pretty-print them
     try {
       const parsed = JSON.parse(output)
       if (typeof parsed === "object" && parsed !== null) {
         return JSON.stringify(parsed, null, 2)
       }
     } catch {
-      // Not JSON — return as-is
+      // Not JSON — return as-is.
     }
     return output
   }
   return JSON.stringify(output, null, 2)
 }
 
-// Tools that auto-expand to show their output.
-// run_materialization is here because it emits MCP progress notifications.
-// The data tools auto-expand because their rich output is the main value.
+// Tools that auto-expand: data tools because their rich output is the main
+// value, run_materialization because it emits MCP progress notifications.
 const AUTO_EXPAND_TOOLS = new Set([
   "run_materialization",
   "query",
@@ -150,21 +146,17 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
 
-  // Scope activeMaterializationJob to THIS specific tool-call card via
-  // toolCallId — without this, the progress block and Stop button would
-  // render on every historical run_materialization card in the thread.
-  // part.toolCallId is the AI-SDK v6 field name surfaced on tool-input /
-  // tool-output parts.
+  // Scope the job to THIS tool-call card via toolCallId, else the progress block
+  // and Stop button would render on every historical run_materialization card.
+  // part.toolCallId is the AI-SDK v6 field name on tool-input/tool-output parts.
   const matchingJob =
     activeMaterializationJob
     && (activeMaterializationJob.tool_call_id === part.toolCallId)
       ? activeMaterializationJob
       : null
 
-  // For run_materialization, prefer the live job. Only treat the termination
-  // as a "show failure card" signal when there's no active job AND the
-  // termination is FAILED/CANCELLED (we don't render a completed-state card —
-  // the tool output handles success display).
+  // Prefer the live job; only show a failure card when there's no active job AND
+  // the termination is failed/cancelled (success display is left to tool output).
   const matchingFailure =
     toolName === "run_materialization"
     && !matchingJob
@@ -173,12 +165,10 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
       ? recentTermination
       : null
 
-  // Auto-expand while actively streaming; collapsed by default for historical messages.
-  // User overrides tied to isLatest reset automatically when a part is superseded.
-  // run_materialization stays expanded as long as there is an active job
-  // FOR THIS CARD, regardless of whether the SSE stream is still active.
-  // Also stay expanded when we have a failure card to show so the user can
-  // see the error inline rather than having to expand a collapsed card.
+  // Auto-expand while streaming; collapsed for historical messages. User
+  // overrides tied to isLatest reset when a part is superseded. run_materialization
+  // stays expanded while it has an active job or failure card for THIS card,
+  // independent of the SSE stream.
   const autoExpanded =
     AUTO_EXPAND_TOOLS.has(toolName)
     && (
@@ -195,9 +185,8 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
   const isErrored = part.state === "output-error"
   const richOutput =
     hasOutput && part.output != null && !isErrored ? renderToolOutput(toolName, part.output) : null
-  // Fallback text for the <pre> view: an output-error part carries its message
-  // in errorText (no `output`); otherwise show the raw output when no rich card
-  // matched. Either way, the <pre> renders the FULL text — the historical
+  // output-error parts carry their message in errorText (no `output`); otherwise
+  // show raw output when no rich card matched. Renders FULL text — the old
   // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
   const fallbackText = isErrored
     ? (part.errorText ?? "The tool reported an error.")
@@ -303,10 +292,9 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
             )}
           {richOutput ?? (
             fallbackText && (
-              // No client-side slice: the scroll container caps the height and
-              // the backend already truncates with an explicit marker
-              // (apps/chat/stream.py), so the old `.slice(0, 2000)` only dropped
-              // the tail silently (13#4).
+              // No client-side slice: scroll container caps height and the backend
+              // already truncates with a marker (apps/chat/stream.py); the old
+              // `.slice(0, 2000)` dropped the tail silently (13#4).
               <pre className="whitespace-pre-wrap text-xs text-muted-foreground font-mono max-h-60 overflow-auto">
                 {fallbackText}
               </pre>
@@ -322,7 +310,6 @@ function ToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, thr
 function ReasoningPart({ part, index, isLatest, isActiveMessage }: { part: any; index: number; isLatest: boolean; isActiveMessage: boolean }) {
   const text = part.reasoning || part.text || ""
 
-  // Only auto-expand while actively streaming. On historical loads or once superseded: collapsed.
   const autoExpanded = isActiveMessage && isLatest
   const [override, setOverride] = useState<{ whenLatest: boolean; value: boolean } | null>(null)
   const effectiveOverride = override?.whenLatest === isLatest ? override.value : null

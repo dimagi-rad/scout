@@ -50,9 +50,8 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
         logger.warning("repair_dangling_tool_calls: could not load checkpoint state", exc_info=True)
         return []
 
-    # Real LangGraph returns a StateSnapshot with ``.values`` as a dict. If the
-    # shape is unexpected (e.g. a fully-mocked agent in tests, or a checkpointer
-    # that can't load the thread), fall back quietly.
+    # Unexpected shape (e.g. fully-mocked agent in tests, or a checkpointer that
+    # can't load the thread): fall back quietly.
     values = getattr(state, "values", None)
     if not isinstance(values, dict):
         return []
@@ -60,12 +59,10 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
     if not isinstance(messages, list):
         return []
 
-    # Collect all tool_call_ids that already have a ToolMessage response.
     answered_ids: set[str] = {
         msg.tool_call_id for msg in messages if isinstance(msg, ToolMessage) and msg.tool_call_id
     }
 
-    # Find the last AIMessage and check for unanswered tool calls.
     dangling: list[ToolMessage] = []
     for msg in reversed(messages):
         if isinstance(msg, AIMessage):
@@ -89,8 +86,7 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
                             name=tc.get("name", "unknown"),
                         )
                     )
-            # Only inspect the most recent AIMessage.
-            break
+            break  # only inspect the most recent AIMessage
 
     return dangling
 

@@ -59,8 +59,7 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
         } catch {
           // Best-effort; failure does not block thread selection.
         }
-        // Refresh the threads list so last_viewed_at flows through and the
-        // green-dot indicator clears.
+        // Refresh so last_viewed_at flows through and the green-dot clears.
         await get().uiActions.fetchThreads(workspaceId)
       }
     },
@@ -70,11 +69,9 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
         const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
         set({ threads, threadsStatus: "loaded" })
       } catch (error) {
-        // Distinguish an outage from a genuinely empty history (07#7): a failed
-        // load must NOT report "loaded" with an empty array — that rendered as
-        // "no conversations" during a DB/checkpointer blip, as if every
-        // conversation had been deleted. Keep any threads already shown and flag
-        // the error so the sidebar can surface a retry affordance instead.
+        // Distinguish an outage from genuinely-empty history (07#7): reporting
+        // "loaded" with [] reads as "all conversations deleted" during a
+        // DB/checkpointer blip. Keep shown threads and flag the error for retry.
         console.error("[Scout] Failed to load threads:", error)
         set({ threadsStatus: "error" })
       }

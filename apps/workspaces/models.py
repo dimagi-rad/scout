@@ -211,14 +211,10 @@ class WorkspaceMembership(models.Model):
         return f"{self.user.email} in {self.workspace.name} ({self.role})"
 
 
-# Sentinel prefix written to WorkspaceViewSchema.last_error when a view schema
-# is flipped to FAILED because a tenant schema it depends on was torn down (TTL
-# expiry / teardown cascade) — NOT because build_view_schema itself failed. The
-# distinction drives recovery advice: a genuine build failure can't be fixed by
-# re-running materialization, but a teardown cascade IS fixed by re-materializing
-# the torn-down tenant. Resume-prompt logic keys off this marker (arch #256,
-# 07#9). It is part of the human-readable message so get_schema_status surfaces a
-# truthful cause to the agent.
+# Sentinel prefix in WorkspaceViewSchema.last_error marking a FAILED-by-cascade-
+# teardown (vs a genuine build failure). Resume-prompt logic keys off it (arch
+# #256, 07#9) to advise re-materializing — which fixes a cascade but not a build
+# failure. Embedded in the human-readable message so get_schema_status surfaces it.
 VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER = "[cascade-teardown]"
 VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR = (
     f"{VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER} A tenant schema this workspace's "

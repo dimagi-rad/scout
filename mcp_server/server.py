@@ -83,15 +83,12 @@ async def _resolve_mcp_context(workspace_id: str):
 async def _resolve_pipeline_config(ts, last_run):
     """Pick the right PipelineConfig for a TenantSchema.
 
-    Prefers the pipeline of the last completed materialization run; falls back
-    to the pipeline registered for the tenant's provider; falls back to
-    ``commcare_sync`` as a last resort to preserve historical behavior.
+    Prefers the last run's pipeline, then the tenant provider's, then
+    ``commcare_sync`` (preserves historical behavior).
 
-    ``ts`` may be ``None`` when the workspace is multi-tenant and the caller is
-    looking at a workspace view schema (``ws_*``) rather than a tenant schema.
-    In that case we can't infer a tenant-specific pipeline, so just fall back
-    to commcare_sync for pipeline-derived metadata (per-tenant routing happens
-    at load time, not at metadata-describe time).
+    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``); we
+    can't infer a tenant-specific pipeline there, so fall back to commcare_sync
+    (per-tenant routing happens at load time, not metadata-describe time).
     """
     registry = get_registry()
     if last_run:
@@ -104,9 +101,6 @@ async def _resolve_pipeline_config(ts, last_run):
         if cfg:
             return cfg
     return registry.get("commcare_sync")
-
-
-# --- Tools ---
 
 
 @mcp.tool()
@@ -130,8 +124,8 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        # For multi-tenant workspaces, the context points at a WorkspaceViewSchema
-        # (namespaced views). Use information_schema directly instead of MaterializationRun.
+        # Multi-tenant workspaces point at a WorkspaceViewSchema (namespaced
+        # views): use information_schema directly instead of MaterializationRun.
         if workspace_id:
             is_view_schema = await WorkspaceViewSchema.objects.filter(
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
@@ -379,7 +373,6 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
 
         result = await execute_query(ctx, sql)
 
-        # execute_query returns an error envelope on failure
         if not result.get("success", True):
             tc["result"] = result
             return tc["result"]
@@ -521,9 +514,8 @@ async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
             return tc["result"]
 
         previous_state = run.state
-        # Write the dedicated CANCELLED state (not FAILED) so a deliberately
-        # cancelled run is distinguishable from a genuine failure in any
-        # state-based reporting — matching the user-facing cancel path
+        # Dedicated CANCELLED state (not FAILED) keeps a deliberate cancel
+        # distinguishable from a real failure, matching the user-facing path
         # (apps/workspaces/api/jobs_cancel.py::cancel_thread_job). The
         # result.cancelled flag is retained for back-compat (#290).
         run.state = MaterializationRun.RunState.CANCELLED
@@ -642,8 +634,7 @@ async def run_materialization(
             )
             return tc["result"]
 
-        # Authorization guard: confirms the user has at least one tenant
-        # membership in this workspace before we dispatch a job.
+        # Confirm the user has a tenant membership here before dispatching.
         _, err = await _resolve_workspace_memberships(workspace_id, user_id)
         if err:
             tc["result"] = error_response(NOT_FOUND, err)
@@ -661,20 +652,14 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        # Guard against concurrent dispatch in the SAME thread: if this chat
-        # already has a materialization in flight, return its identity so the
-        # agent can tell the user to wait. We scope the guard by thread_id
-        # (not workspace) because the chained resume task only fires once
-        # against the original ThreadJob — a second caller in a different
-        # thread would otherwise get no follow-up message when the worker
-        # finishes (resume defers to a single thread_job_id). Note: this lets
-        # two threads in the same workspace dispatch parallel materializations
-        # that share tenant_schemas. This is not new: the prior workspace-
-        # scoped guard already permitted parallel runs across *different*
-        # workspaces sharing a tenant (multi-workspace tenants), and the
-        # materializer has no advisory lock per tenant_schema. If we ever add
-        # tenant-level dedupe we should add it here with a tenant_id filter
-        # rather than the workspace_id we removed.
+        # Dedupe concurrent dispatch by thread_id (not workspace): the chained
+        # resume task fires once against a single thread_job_id, so a second
+        # caller in another thread would get no follow-up when the worker
+        # finishes. Consequence: two threads in one workspace can run parallel
+        # materializations sharing tenant_schemas — unchanged from the prior
+        # workspace-scoped guard, and the materializer has no per-tenant_schema
+        # lock. Tenant-level dedupe, if ever added, belongs here with a
+        # tenant_id filter.
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
@@ -787,7 +772,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             return tc["result"]
 
         if tenant_count == 1:
-            # Single-tenant: check TenantSchema directly
             tenant = await workspace.tenants.afirst()
             ts = await TenantSchema.objects.filter(
                 tenant=tenant,
@@ -834,7 +818,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             )
             return tc["result"]
 
-        # Multi-tenant: check WorkspaceViewSchema + per-tenant materialization
+        # Multi-tenant: WorkspaceViewSchema + per-tenant materialization.
         vs = await WorkspaceViewSchema.objects.filter(
             workspace_id=workspace_id,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
@@ -866,7 +850,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = not_provisioned
             return tc["result"]
 
-        # Collect last materialization time across all tenant schemas
         tenant_ids = [t.id async for t in workspace.tenants.all()]
         last_run = (
             await MaterializationRun.objects.filter(
@@ -883,7 +866,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         if last_run and last_run.completed_at:
             last_materialized_at = last_run.completed_at.isoformat()
 
-        # List tables from the view schema via information_schema
         ctx = await _resolve_mcp_context(workspace_id)
         tables = await workspace_list_tables(ctx)
 
@@ -945,7 +927,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
         mgr = SchemaManager()
         dropped = []
 
-        # Tear down the workspace view schema if it exists
         vs = (
             await WorkspaceViewSchema.objects.filter(
                 workspace=workspace,
@@ -957,7 +938,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             await mgr.ateardown_view_schema(vs)
             dropped.append(vs.schema_name)
 
-        # Tear down all tenant schemas for this workspace
         tenant_ids = [t.id async for t in workspace.tenants.all()]
         async for ts in TenantSchema.objects.filter(
             tenant_id__in=tenant_ids,
@@ -972,9 +952,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
-
-
-# --- Server setup ---
 
 
 def _configure_logging(verbose: bool = False) -> None:

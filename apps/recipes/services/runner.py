@@ -1,9 +1,4 @@
-"""
-Recipe Runner service for the Scout data agent platform.
-
-Executes a recipe by rendering its prompt template with variable values,
-sending it to the agent, and collecting results.
-"""
+"""Executes a recipe: renders its prompt with variable values, runs the agent, collects results."""
 
 from __future__ import annotations
 
@@ -42,16 +37,7 @@ class VariableValidationError(RecipeRunnerError):
 
 
 class RecipeRunner:
-    """
-    Executes a recipe by sending its rendered prompt to the agent.
-
-    The runner:
-    1. Validates that all required variables are provided
-    2. Creates a RecipeRun record to track execution
-    3. Renders the prompt template with variable values
-    4. Sends the prompt to the agent and captures results
-    5. Updates the RecipeRun with results and final status
-    """
+    """Executes a recipe by sending its rendered prompt to the agent."""
 
     def __init__(
         self,
@@ -176,8 +162,7 @@ class RecipeRunner:
         """Execute the recipe asynchronously."""
         self.validate_variables()
 
-        # The run is always created by the caller (the run_recipe task); mark it
-        # RUNNING as execution begins.
+        # The run is always created by the caller (the run_recipe task).
         self._run.status = RecipeRunStatus.RUNNING
         self._run.started_at = timezone.now()
         await self._run.asave(update_fields=["status", "started_at"])

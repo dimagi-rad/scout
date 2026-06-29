@@ -53,10 +53,6 @@ async def _upsert_thread(thread_id, user, title, *, workspace):
     )
 
 
-# ---------------------------------------------------------------------------
-# Streaming chat endpoint
-# ---------------------------------------------------------------------------
-
 MAX_MESSAGE_LENGTH = 10_000
 
 
@@ -75,7 +71,6 @@ async def chat_view(request):
 
     user = request._authenticated_user
 
-    # Parse body
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -91,7 +86,6 @@ async def chat_view(request):
     if not workspace_id:
         return JsonResponse({"error": "workspaceId is required"}, status=400)
 
-    # Get the last user message.
     # AI SDK v6 sends {parts: [{type:"text", text:"..."}]} instead of {content: "..."}.
     last_msg = messages[-1]
     user_content = last_msg.get("content", "")
@@ -114,21 +108,14 @@ async def chat_view(request):
     if tm is None and not is_multi_tenant:
         return JsonResponse({"error": "No tenant membership for this workspace"}, status=403)
 
-    # Validate thread ownership: a user must not be able to attach this turn
-    # to another user's thread (or another workspace's thread).
-    # Return 404 rather than 403 to avoid leaking thread-existence information.
-    # A non-UUID thread_id cannot match any row, so skip the check (the upsert
-    # below will fail gracefully if the value is truly invalid).
-    #
-    # SECURITY: catch ONLY the "bad / unmatchable id" cases here. A malformed
-    # UUID surfaces as ValueError or django.core.exceptions.ValidationError when
-    # coercing the lookup value, and those genuinely mean "no such thread".
-    # A broad ``except Exception`` would also swallow TRANSIENT ORM errors
-    # (e.g. OperationalError during a DB blip), silently setting
-    # ``existing_thread = None`` and SKIPPING the ownership rejection — fail-open,
-    # letting a request carrying another user's thread UUID append a turn to
-    # their conversation. Let real errors propagate (→ 500) so we never authorize
-    # access we could not verify.
+    # Validate thread ownership so a user can't attach this turn to another
+    # user's (or workspace's) thread. Return 404 not 403 to avoid leaking
+    # thread existence.
+    # SECURITY: catch ONLY the unmatchable-id cases (ValueError/ValidationError
+    # from coercing a malformed UUID = "no such thread"). A broad except would
+    # also swallow transient ORM errors, setting existing_thread=None and
+    # SKIPPING the ownership check — fail-open. Let real errors propagate (→500)
+    # so we never authorize access we couldn't verify.
     try:
         existing_thread = await Thread.objects.filter(id=thread_id).afirst()
     except (ValueError, ValidationError):
@@ -147,7 +134,6 @@ async def chat_view(request):
         )
         return JsonResponse({"error": "Thread not found"}, status=404)
 
-    # Record thread metadata (fire-and-forget on error)
     try:
         await _upsert_thread(
             thread_id,
@@ -158,10 +144,9 @@ async def chat_view(request):
     except Exception:
         logger.warning("Failed to upsert thread %s", thread_id, exc_info=True)
 
-    # Touch the schema to reset inactivity TTL on user-initiated chat.
+    # Reset inactivity TTL on user-initiated chat.
     await touch_workspace_schemas(workspace)
 
-    # Load MCP tools.
     try:
         mcp_tools = await get_mcp_tools()
     except Exception as e:
@@ -169,7 +154,7 @@ async def chat_view(request):
         logger.exception("Failed to load MCP tools [ref=%s]", error_ref)
         return JsonResponse({"error": f"Agent initialization failed. Ref: {error_ref}"}, status=500)
 
-    # Build agent (retry once with fresh checkpointer on connection errors)
+    # Retry once with a fresh checkpointer on connection errors.
     try:
         checkpointer = await ensure_checkpointer()
         agent = await build_agent_graph(
@@ -180,7 +165,6 @@ async def chat_view(request):
             conversation_id=str(thread_id),
         )
     except Exception:
-        # Connection may have gone stale -- force a new checkpointer and retry
         try:
             logger.info("Retrying agent build with fresh checkpointer")
             checkpointer = await ensure_checkpointer(force_new=True)
@@ -210,7 +194,6 @@ async def chat_view(request):
     # inject synthetic ToolMessages before appending the new HumanMessage.
     dangling_tool_results = await repair_dangling_tool_calls(agent, config)
 
-    # Build LangGraph input state
     from langchain_core.messages import HumanMessage
 
     input_state = {
@@ -221,7 +204,6 @@ async def chat_view(request):
         "thread_id": str(thread_id),
     }
 
-    # Attach Langfuse tracing callback if configured
     from apps.agents.tracing import get_langfuse_callback, langfuse_trace_context
 
     trace_metadata = {
@@ -246,7 +228,6 @@ async def chat_view(request):
             async for chunk in langgraph_to_ui_stream(agent, input_state, config):
                 yield chunk
 
-    # Return streaming response (SSE for AI SDK v6 DefaultChatTransport)
     response = StreamingHttpResponse(
         _traced_stream(),
         content_type="text/event-stream; charset=utf-8",

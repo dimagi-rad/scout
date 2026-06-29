@@ -15,19 +15,14 @@ __all__ = ["app", "task"]
 
 
 def _cleanup_after() -> None:
-    # Don't leak the connection past the unit of work...
     close_old_connections()
-    # ...and clear Django's per-connection query log, which is only populated
-    # when settings.DEBUG is True and otherwise accumulates for the lifetime
-    # of the worker. Mirrors what Django does at request_started; a no-op
-    # when DEBUG is False.
+    # reset_queries() clears the per-connection query log, which accumulates for
+    # the worker's lifetime when DEBUG is True (no request cycle to clear it).
     reset_queries()
 
 
-# Cleanup must run on the thread that owns the connections: asgiref's
-# thread-sensitive executor, the same thread the async ORM routes queries
-# through. thread_sensitive=True is the asgiref default — spelled out because
-# it is load-bearing here.
+# thread_sensitive=True (asgiref default, load-bearing here) runs cleanup on the
+# same thread that owns the connections — where the async ORM routes queries.
 _acleanup_before = sync_to_async(close_old_connections, thread_sensitive=True)
 _acleanup_after = sync_to_async(_cleanup_after, thread_sensitive=True)
 
@@ -35,29 +30,21 @@ _acleanup_after = sync_to_async(_cleanup_after, thread_sensitive=True)
 def task(original_func=None, **task_kwargs):
     """Drop-in replacement for ``@app.task`` that survives dead DB connections.
 
-    The worker is a long-lived process with no HTTP request cycle, so Django's
-    request_started/request_finished hooks never run and a connection that dies
-    underneath it (RDS restart or upgrade, idle TCP timeout) is reused — closed
-    — forever: every subsequent ORM call fails instantly with
-    ``psycopg.OperationalError: the connection is closed``, including the
-    janitor task that is supposed to rescue jobs stranded by exactly this
-    (June 2026 incident: ~22h of failed background jobs after an RDS upgrade).
+    The worker is long-lived with no HTTP request cycle, so Django's
+    request_started/finished hooks never run and a connection that dies under it
+    (RDS restart/upgrade, idle TCP timeout) is reused — closed — forever, failing
+    every later ORM call with ``the connection is closed``, including the janitor
+    task meant to rescue jobs stranded by exactly this (June 2026 incident: ~22h
+    of failed background jobs after an RDS upgrade). So we mirror Django's
+    per-request connection management around each task body.
 
-    Mirrors Django's per-request connection management around each task —
-    ``close_old_connections()`` before the body (so a connection that died
-    between jobs is replaced instead of reused) and after it (so nothing leaks
-    past the unit of work), plus ``reset_queries()`` after.
+    Task-middleware pattern from the procrastinate docs (howto/advanced/middleware)
+    so individual tasks can't forget the hygiene; ``tests/test_worker_db_resilience.py``
+    enforces every task in ``apps.workspaces.tasks`` is registered through it.
 
-    This is the task-middleware pattern from the procrastinate docs
-    (howto/advanced/middleware): one decorator wraps the body and delegates
-    registration to ``@app.task``, so individual tasks can't forget the
-    connection hygiene. ``tests/test_worker_db_resilience.py`` enforces that
-    every task in ``apps.workspaces.tasks`` is registered through it.
-
-    TEMPORARY: this is a workaround for procrastinate-org/procrastinate#1134;
-    upstream PR #1555 adds the same cleanup natively in the Django contrib.
-    Once that merges and we upgrade past the release containing it, strip this
-    wrapper — see https://github.com/dimagi-rad/scout/issues/225.
+    TEMPORARY workaround for procrastinate-org/procrastinate#1134; upstream PR #1555
+    adds this natively in the Django contrib. Strip once we upgrade past its release
+    — see https://github.com/dimagi-rad/scout/issues/225.
     """
 
     def wrap(func):

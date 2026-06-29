@@ -170,10 +170,9 @@ def run_dbt_test(
         dbt = dbtRunner()
         res = dbt.invoke(cli_args)
 
-    # Always parse results — dbt sets success=False on test failures but still
-    # populates res.result with per-test RunResult objects.
-    # Group test results by the model they test.
-    # Schema test nodes expose ``attached_node`` = "model.<project>.<model_name>".
+    # Parse even on failure: dbt sets success=False on test failures but still
+    # populates res.result. Schema test nodes carry attached_node =
+    # "model.<project>.<model_name>", which we group results by.
     test_results: dict[str, list[dict]] = {}
     for r in res.result or []:
         if not (hasattr(r, "node") and hasattr(r, "status")):

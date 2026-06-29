@@ -167,14 +167,11 @@ function PublicChatMessage({
   )
 }
 
-// Artifact types that are self-contained markup and can be rendered directly in
-// a sandboxed iframe on the public page. React/Plotly artifacts need the full
-// CDN-backed sandbox renderer plus live query data (which requires auth), so
-// they are not rendered live for anonymous viewers — their source is shown.
+// Self-contained markup renderable directly in a sandboxed iframe. React/Plotly
+// artifacts need the CDN-backed renderer plus auth'd query data, so anonymous
+// viewers see their source instead.
 const SANDBOXABLE_TYPES = new Set(["html", "svg"])
 
-// Wrap self-contained artifact markup in a minimal HTML document so the
-// sandboxed iframe renders it. SVG is centered; HTML is rendered as-is.
 function buildSandboxSrcDoc(artifact: Artifact): string {
   const body =
     artifact.artifact_type === "svg"
@@ -282,7 +279,6 @@ export function PublicThreadPage() {
       </div>
 
       <div className="flex gap-6">
-        {/* Messages */}
         <div className="flex-1 space-y-4">
           {data.messages.length === 0 ? (
             <p className="text-sm text-muted-foreground">No messages in this conversation.</p>
@@ -299,7 +295,6 @@ export function PublicThreadPage() {
           )}
         </div>
 
-        {/* Artifact sidebar */}
         {activeArtifact && (
           <div className="w-96 shrink-0">
             <div className="sticky top-6">

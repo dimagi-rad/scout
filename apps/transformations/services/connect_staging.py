@@ -36,9 +36,6 @@ _VISIT_BASE_COLUMNS = [
 ]
 
 
-# ── Single source of truth for stg_visits column naming ──────────────────────
-
-
 def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     """Return an ordered list of (question, final_column_name) for stg_visits.
 
@@ -61,9 +58,6 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
             col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
             result.append((q, col_name))
     return result
-
-
-# ── Visit staging asset ──────────────────────────────────────────────────────
 
 
 def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
@@ -94,9 +88,6 @@ def _generate_stg_visits(tenant, form_definitions: dict) -> TransformationAsset:
         sql_content="\n".join(lines),
         created_by=None,
     )
-
-
-# ── Repeat-group asset ───────────────────────────────────────────────────────
 
 
 def _generate_connect_repeat_group_asset(
@@ -144,9 +135,6 @@ def _generate_connect_repeat_group_asset(
         sql_content="\n".join(lines),
         created_by=None,
     )
-
-
-# ── Public API ───────────────────────────────────────────────────────────────
 
 
 def upsert_connect_assets(tenant, tenant_metadata) -> dict:
@@ -216,10 +204,8 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
     """
     assets: list[TransformationAsset] = []
 
-    # Main stg_visits asset (non-repeat columns only)
     assets.append(_generate_stg_visits(tenant, form_definitions))
 
-    # Collect repeat groups across all form definitions
     repeat_groups: dict[str, list[dict]] = {}
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
@@ -228,7 +214,7 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
             value_path = q.get("value", "")
             if not value_path:
                 continue
-            # Group path is everything up to (but not including) the leaf segment
+            # Group path is everything up to (but not including) the leaf segment.
             group_path = value_path.rsplit("/", 1)[0]
             repeat_groups.setdefault(group_path, []).append(q)
 

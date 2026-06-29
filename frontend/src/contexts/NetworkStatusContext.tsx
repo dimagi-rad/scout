@@ -52,7 +52,7 @@ export function NetworkStatusProvider({ children }: { children: React.ReactNode 
       }
     }
 
-    // Fast first check via navigator.onLine
+    // Fast first check before the /health/ poll resolves.
     if (!navigator.onLine) {
       wasOfflineRef.current = true
       setStatus("offline")

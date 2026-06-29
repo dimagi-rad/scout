@@ -51,7 +51,6 @@ export function KnowledgePage() {
 
   const isNew = location.pathname.endsWith("/new")
 
-  // Reset to the first page whenever the filter or search changes.
   useEffect(() => {
     setPage(1)
   }, [knowledgeFilter, knowledgeSearch, activeDomainId])
@@ -147,7 +146,6 @@ export function KnowledgePage() {
 
   return (
     <div className="container mx-auto px-8 py-8">
-      {/* Header */}
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Knowledge Base</h1>
@@ -183,19 +181,16 @@ export function KnowledgePage() {
         </div>
       </div>
 
-      {/* Loading state */}
       {knowledgeStatus === "loading" && (
         <div className="text-muted-foreground">Loading knowledge items...</div>
       )}
 
-      {/* Error state */}
       {knowledgeStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load knowledge items. Please try again.
         </div>
       )}
 
-      {/* List */}
       {knowledgeStatus === "loaded" && (
         <KnowledgeList
           items={filteredItems}
@@ -245,7 +240,6 @@ export function KnowledgePage() {
           </div>
         )}
 
-      {/* Create/Edit Form Dialog */}
       <KnowledgeForm
         open={formOpen}
         onOpenChange={handleFormClose}
@@ -253,7 +247,6 @@ export function KnowledgePage() {
         onSave={handleSave}
       />
 
-      {/* Delete Confirmation Dialog */}
       <AlertDialog open={!!deleteItem} onOpenChange={(open) => !isDeleting && !open && setDeleteItem(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

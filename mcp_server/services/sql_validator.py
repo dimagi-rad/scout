@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 # Dangerous PostgreSQL functions that could be used for data exfiltration or system access
 DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
     {
-        # File system access
         "pg_read_file",
         "pg_read_binary_file",
         "pg_ls_dir",
@@ -35,7 +34,6 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "pg_ls_waldir",
         "pg_ls_archive_statusdir",
         "pg_ls_tmpdir",
-        # Large object manipulation
         "lo_import",
         "lo_export",
         "lo_create",
@@ -43,7 +41,6 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "lo_write",
         "lo_read",
         "lo_unlink",
-        # Remote database access
         "dblink",
         "dblink_connect",
         "dblink_connect_u",
@@ -58,27 +55,21 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "dblink_get_result",
         "dblink_cancel_query",
         "dblink_error_message",
-        # Copy commands via functions
         "pg_copy_from",
         "pg_copy_to",
-        # Extension management
         "pg_extension_config_dump",
-        # Advisory locks (potential for DoS)
         "pg_advisory_lock",
         "pg_advisory_lock_shared",
         "pg_try_advisory_lock",
         "pg_try_advisory_lock_shared",
-        # System information that could aid attacks
         "pg_reload_conf",
         "pg_rotate_logfile",
         "pg_terminate_backend",
         "pg_cancel_backend",
-        # Denial of service / session tampering
         "pg_sleep",
         "pg_sleep_for",
         "pg_sleep_until",
         "set_config",
-        # Command execution
         "query_to_xml",
         "query_to_xml_and_xmlschema",
         "cursor_to_xml",
@@ -209,7 +200,6 @@ class SQLValidator:
         Raises:
             SQLValidationError: If the query fails any validation check
         """
-        # Parse the SQL into an AST
         try:
             statements = sqlglot.parse(sql, dialect=self.dialect)
         except sqlglot.errors.ParseError as e:
@@ -219,7 +209,6 @@ class SQLValidator:
                 error_type="parse_error",
             ) from e
 
-        # Check for empty or multiple statements
         if not statements:
             raise SQLValidationError(
                 "Empty SQL statement",
@@ -227,7 +216,7 @@ class SQLValidator:
                 error_type="empty_statement",
             )
 
-        # Filter out None values (can occur with trailing semicolons)
+        # parse() yields None for trailing semicolons
         valid_statements = [s for s in statements if s is not None]
 
         if len(valid_statements) == 0:
@@ -246,16 +235,9 @@ class SQLValidator:
 
         statement = valid_statements[0]
 
-        # Check statement type - only SELECT allowed
         self._validate_statement_type(statement, sql)
-
-        # Check for dangerous functions
         self._validate_no_dangerous_functions(statement, sql)
-
-        # Reject unqualified system-catalog reads (cross-tenant disclosure)
         self._validate_no_system_catalogs(statement, sql)
-
-        # Check table access permissions
         self._validate_table_access(statement, sql)
 
         return statement
@@ -280,8 +262,6 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
-        # Data-modifying CTEs / subqueries: any embedded INSERT/UPDATE/DELETE/
-        # MERGE/etc. is forbidden even if the outer statement is a SELECT.
         forbidden_tuple = tuple(FORBIDDEN_STATEMENT_TYPES)
         for node in statement.find_all(*forbidden_tuple):
             raise SQLValidationError(
@@ -291,14 +271,11 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
-        # Check if it's a SELECT statement
         if not isinstance(statement, exp.Select):
-            # Also allow UNION, INTERSECT, EXCEPT which wrap SELECT statements
+            # UNION/INTERSECT/EXCEPT wrap SELECTs and are permitted
             if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
-                # These are valid compound SELECT operations
                 return
 
-            # If not a SELECT and not explicitly forbidden, still reject
             raise SQLValidationError(
                 f"Statement type '{type(statement).__name__}' is not allowed. "
                 "Only SELECT queries are permitted.",
@@ -335,7 +312,7 @@ class SQLValidator:
                     error_type="dangerous_function",
                 )
 
-        # Also check for Anonymous functions (raw function calls)
+        # Anonymous = raw function calls sqlglot doesn't model as exp.Func
         for anon in statement.find_all(exp.Anonymous):
             func_name = anon.name.lower() if anon.name else ""
             if func_name in DANGEROUS_FUNCTIONS:
@@ -352,9 +329,7 @@ class SQLValidator:
         for table_info in tables_accessed:
             table_schema = table_info.get("schema")
 
-            # Validate schema if specified in the query
             if table_schema:
-                # Build list of allowed schemas
                 all_allowed_schemas = {"public", self.schema.lower()}
                 all_allowed_schemas.update(s.lower() for s in self.allowed_schemas)
 
@@ -378,7 +353,6 @@ class SQLValidator:
         """
         tables: list[dict[str, str]] = []
 
-        # Collect CTE aliases to exclude them from table references
         cte_aliases: set[str] = set()
         for cte in statement.find_all(exp.CTE):
             if cte.alias:
@@ -386,7 +360,6 @@ class SQLValidator:
 
         for table in statement.find_all(exp.Table):
             table_name = table.name
-            # Skip CTE aliases - they're not real tables
             if table_name.lower() in cte_aliases:
                 continue
             table_info: dict[str, str] = {"table": table_name}
@@ -411,15 +384,11 @@ class SQLValidator:
         Returns:
             The modified expression with appropriate LIMIT
         """
-        # Handle compound queries (UNION, INTERSECT, EXCEPT)
         if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
-            # For compound queries, we need to wrap in a subquery or apply limit to outer
-            # Get existing limit if any
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
                 if limit_value is None:
-                    # Non-literal LIMIT (e.g., subquery, expression) - force cap
                     logger.warning(
                         "Non-literal LIMIT expression detected, forcing cap to %d",
                         self.max_limit,
@@ -431,13 +400,11 @@ class SQLValidator:
                 statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
             return statement
 
-        # Handle regular SELECT
         if isinstance(statement, exp.Select):
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
                 if limit_value is None:
-                    # Non-literal LIMIT (e.g., subquery, expression) - force cap
                     logger.warning(
                         "Non-literal LIMIT expression detected, forcing cap to %d",
                         self.max_limit,

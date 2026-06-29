@@ -1,5 +1,3 @@
-// frontend/src/assets/providers/brandIcons.tsx
-//
 // Real provider brand marks, inlined as React components so existing call-sites
 // (`<Icon className="h-4 w-4" />`) keep working at small sizes. The class controls
 // the box size; each mark carries its own brand fill so it reads correctly on a

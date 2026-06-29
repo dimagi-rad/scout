@@ -30,11 +30,9 @@ interface KnowledgeFormProps {
 
 interface FormState {
   type: KnowledgeType
-  // Entry fields
   title: string
   content: string
   tags: string
-  // Learning editable fields
   description: string
   category: string
   applies_to_tables: string
@@ -132,7 +130,6 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
     }
   }
 
-  // Learning edit form with read-only evidence
   if (isLearning && item && item.type === "learning") {
     const learningItem = item as LearningItem
     return (
@@ -189,7 +186,6 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
                 />
               </div>
 
-              {/* Read-only evidence */}
               {learningItem.original_error && (
                 <div className="space-y-2">
                   <Label>Original Error</Label>
@@ -250,7 +246,6 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
     )
   }
 
-  // Entry create/edit form
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">

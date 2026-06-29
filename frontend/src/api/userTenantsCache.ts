@@ -1,7 +1,5 @@
 import { authApi, type UserTenant } from "./auth"
 
-// ── User-tenants session cache ───────────────────────────────────────────────
-//
 // GET /api/auth/tenants/ synchronously refreshes the user's opportunities,
 // domains, and chatbots from the live CommCare / Connect / OCS APIs whenever the
 // server-side TTL cache is cold. That external round-trip can take ~20s on the

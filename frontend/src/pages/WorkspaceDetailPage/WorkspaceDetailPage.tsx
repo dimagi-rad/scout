@@ -25,8 +25,6 @@ import { SearchFilterBar, type FilterGroup } from "@/components/SearchFilterBar/
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
 
-// ── Members Tab ─────────────────────────────────────────────────────────────
-
 const DEFAULT_NEW_MEMBER_ROLE: WorkspaceMember["role"] = "read_write"
 
 function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
@@ -38,7 +36,6 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
 
-  // Add-member form state
   const [addOpen, setAddOpen] = useState(false)
   const [addEmail, setAddEmail] = useState("")
   const [addRole, setAddRole] = useState<WorkspaceMember["role"]>(DEFAULT_NEW_MEMBER_ROLE)
@@ -106,7 +103,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       setAddEmail("")
       setAddRole(DEFAULT_NEW_MEMBER_ROLE)
       setAddOpen(false)
-      // Defer focus until after the trigger button is re-rendered
+      // Defer focus until the trigger button is re-rendered.
       setTimeout(() => addTriggerRef.current?.focus(), 0)
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : "Failed to add member")
@@ -295,8 +292,6 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
-// ── Tenants Tab ─────────────────────────────────────────────────────────────
-
 type AvailableStatus = "idle" | "loading" | "ready" | "error"
 
 function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
@@ -307,8 +302,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [connectedLoading, setConnectedLoading] = useState(true)
   const [connectedError, setConnectedError] = useState<string | null>(null)
 
-  // Available sources — lazily fetched (potentially slow external refresh),
-  // memoized for the session via the user-tenants cache.
+  // Available sources — lazily fetched (slow external refresh), session-cached.
   const [userTenants, setUserTenants] = useState<UserTenant[]>([])
   const [availableStatus, setAvailableStatus] = useState<AvailableStatus>("idle")
   const [availableError, setAvailableError] = useState<string | null>(null)
@@ -322,7 +316,6 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null)
   const [mutationError, setMutationError] = useState<string | null>(null)
 
-  // Reset search + filter when the add panel is closed manually.
   useEffect(() => {
     if (!showAdd) {
       setQuery("")
@@ -330,7 +323,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }, [showAdd])
 
-  // Load the connected sources (fast). Never blocked on the available list.
+  // Never blocked on the (slower) available list.
   const loadConnected = useCallback(async () => {
     setConnectedLoading(true)
     setConnectedError(null)
@@ -346,9 +339,8 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
 
   useEffect(() => { void loadConnected() }, [loadConnected])
 
-  // Load the available list from the session cache. Resolves instantly after
-  // the first successful fetch (the first fetch may take a moment because the
-  // server refreshes from the external provider APIs).
+  // First fetch is slow (server refreshes from external provider APIs); the
+  // session cache resolves instantly thereafter.
   const loadAvailable = useCallback(async () => {
     if (!userId) return
     setAvailableStatus("loading")
@@ -363,9 +355,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }, [userId])
 
-  // Kick off the available-list fetch in the background after first paint so a
-  // session cache is warm by the time the user opens the add panel — but the
-  // connected-sources view is never blocked on it.
+  // Warm the session cache in the background so the add panel opens instantly.
   useEffect(() => {
     if (isManager) void loadAvailable()
   }, [isManager, loadAvailable])
@@ -386,16 +376,13 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
-  // Tenants the user has access to that are not already in this workspace
   const inWorkspaceIds = new Set(tenants.map((t) => t.tenant_id))
   const available = userTenants.filter((t) => !inWorkspaceIds.has(t.tenant_uuid))
 
   // Internal-UUID → external opportunity ID, for the connected list display.
   const externalIdByUuid = new Map(userTenants.map((t) => [t.tenant_uuid, t.tenant_id]))
 
-  // Provider filter pills, reusing the Workspaces page filter design.
-  // Only shown when more than one provider is present in the available set;
-  // a single-provider set renders just the search box (no "All" + one pill).
+  // Only shown when >1 provider present; a single-provider set renders just the search box.
   const providerFilterGroups = useMemo((): FilterGroup[] => {
     const counts = new Map<string, number>()
     for (const t of available) {
@@ -434,8 +421,7 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
     setMutationError(null)
     try {
       const created = await workspaceApi.addTenant(workspaceId, tenant.tenant_uuid)
-      // Optimistically reflect the new connection without a round-trip; the
-      // backend returns the internal tenant UUID as `tenant_id`.
+      // Optimistic update; backend returns the internal tenant UUID as `tenant_id`.
       setTenants((prev) => [
         ...prev,
         {
@@ -710,8 +696,6 @@ function TenantsTab({ workspaceId, isManager }: { workspaceId: string; isManager
   )
 }
 
-// ── Settings Tab ─────────────────────────────────────────────────────────────
-
 function SettingsTab({
   workspace,
   onRename,
@@ -774,7 +758,6 @@ function SettingsTab({
 
   return (
     <div className="max-w-2xl space-y-8" data-testid="settings-tab">
-      {/* Rename */}
       <section>
         <h3 className="mb-3 text-sm font-medium">Workspace name</h3>
         <form onSubmit={handleSaveName} className="flex items-start gap-3">
@@ -801,7 +784,6 @@ function SettingsTab({
         </form>
       </section>
 
-      {/* System Prompt */}
       <section>
         <h3 className="mb-1 text-sm font-medium">System prompt</h3>
         <p className="mb-3 text-xs text-muted-foreground">
@@ -831,7 +813,6 @@ function SettingsTab({
         </form>
       </section>
 
-      {/* Danger Zone */}
       {isManager && (
         <section className="rounded-lg border border-destructive/30 p-4">
           <h3 className="mb-1 text-sm font-medium text-destructive">Danger zone</h3>
@@ -872,8 +853,6 @@ function SettingsTab({
     </div>
   )
 }
-
-// ── Provider type subtitle ────────────────────────────────────────────────────
 
 /** Friendly, human descriptor for a single provider on the settings header. */
 const PROVIDER_DESCRIPTORS: Record<string, string> = {
@@ -931,8 +910,6 @@ function WorkspaceProviderType({ workspaceId }: { workspaceId: string }) {
   )
 }
 
-// ── Page ────────────────────────────────────────────────────────────────────
-
 export function WorkspaceDetailPage() {
   const { workspaceId, slug } = useParams<{ workspaceId: string; slug?: string }>()
   const [workspace, setWorkspace] = useState<WorkspaceDetail | null>(null)
@@ -943,20 +920,19 @@ export function WorkspaceDetailPage() {
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
 
-  // Keep the top-bar workspace switcher in sync with the workspace being
-  // viewed. On a hard refresh of /workspaces/:id, `activeDomainId` would
-  // otherwise default to domains[0] and show a different workspace there.
+  // Keep the top-bar switcher in sync; on hard refresh `activeDomainId` would
+  // otherwise default to domains[0] and show a different workspace.
   useEffect(() => {
     if (workspaceId) setActiveDomain(workspaceId)
   }, [workspaceId, setActiveDomain])
 
   function handleRename(newName: string) {
     setWorkspace((prev) => prev ? { ...prev, name: newName } : prev)
-    fetchDomains()  // sync sidebar
+    fetchDomains()
   }
 
   function handleDelete() {
-    fetchDomains()  // removes from sidebar
+    fetchDomains()
     navigate("/workspaces")
   }
 
@@ -964,8 +940,7 @@ export function WorkspaceDetailPage() {
     if (!workspaceId) return
     async function fetchWorkspace() {
       setLoading(true)
-      // Clear any prior error so a successful in-place load (e.g. switching from
-      // a dead workspace link to a valid one) doesn't keep rendering the stale
+      // Clear prior error so an in-place reload doesn't keep rendering the stale
       // error screen — the render gate is `if (error || !workspace)`.
       setError(null)
       try {
@@ -980,12 +955,9 @@ export function WorkspaceDetailPage() {
     void fetchWorkspace()
   }, [workspaceId])
 
-  // Canonicalize the address bar to the pretty `/workspaces/<slug>/<uuid>` form
-  // once the display name is loaded. Resolution is always by UUID, so this is
-  // purely cosmetic: old bare `/workspaces/<uuid>` links and stale slugs (e.g.
-  // after a rename) silently rewrite to the current slug. Guarded to only fire
-  // when the workspace is loaded AND the URL slug actually differs, so it can't
-  // loop. Preserves the embed prefix the same way the switcher does.
+  // Canonicalize the URL to `/workspaces/<slug>/<uuid>` once loaded. Resolution
+  // is by UUID, so this is cosmetic. Guarded on slug actually differing so it
+  // can't loop; preserves the embed prefix like the switcher does.
   useEffect(() => {
     if (!workspace || workspace.id !== workspaceId) return
     const desiredSlug = slugifyWorkspaceName(workspace.display_name)
@@ -1001,7 +973,6 @@ export function WorkspaceDetailPage() {
 
   return (
     <div className="p-6">
-      {/* Header */}
       <div className="mb-6">
         <Link
           to="/workspaces"
@@ -1024,7 +995,6 @@ export function WorkspaceDetailPage() {
         </div>
       </div>
 
-      {/* Tabs */}
       <Tabs defaultValue="members">
         <TabsList data-testid="workspace-tabs">
           <TabsTrigger value="members" data-testid="tab-members">Members</TabsTrigger>

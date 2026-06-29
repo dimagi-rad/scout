@@ -18,10 +18,9 @@ interface EmbedSettingsContextValue {
 const EmbedSettingsContext = createContext<EmbedSettingsContextValue | null>(null)
 
 /**
- * Apply an embed theme to the document by toggling the Tailwind `.dark` class
- * on <html>. "auto" follows the OS color-scheme preference. Exported so it can
- * be unit-tested and reused (issue #248, 06#6: theme was parsed but never
- * applied).
+ * Apply an embed theme by toggling the Tailwind `.dark` class on <html>. "auto"
+ * follows the OS color-scheme preference. (issue #248, 06#6: theme was parsed
+ * but never applied.)
  */
 // eslint-disable-next-line react-refresh/only-export-components
 export function applyTheme(theme: EmbedTheme): void {
@@ -34,9 +33,9 @@ export function applyTheme(theme: EmbedTheme): void {
 }
 
 /**
- * Holds the *live* embed mode and theme so the widget's runtime
- * `scout:set-mode` command (and theme switches) take effect, instead of being
- * frozen at the value first read from the URL by a memoized hook.
+ * Holds the *live* embed mode and theme so the widget's runtime `scout:set-mode`
+ * command (and theme switches) take effect, instead of being frozen at the URL
+ * value first read by a memoized hook.
  */
 export function EmbedSettingsProvider({
   initialMode,

@@ -118,7 +118,6 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
         tenant = await workspace.tenants.afirst()
         return await load_tenant_context(tenant.external_id, tenant.provider)
 
-    # Multi-tenant: use the view schema
     try:
         vs = await WorkspaceViewSchema.objects.aget(
             workspace_id=workspace_id,
@@ -149,9 +148,7 @@ async def load_workspace_context(workspace_id: str) -> QueryContext:
 
 def _parse_db_url(url: str, schema: str) -> dict:
     """Parse a database URL into psycopg connection params."""
-    # Defensive validation: schema_name must only contain safe characters before
-    # embedding in the options string. _sanitize_schema_name already guarantees
-    # this, but we re-check here as defence-in-depth.
+    # Defence-in-depth: re-validate schema before interpolating into the options string.
     if not re.match(r"^[a-z][a-z0-9_]*$", schema):
         raise ValueError(f"Invalid schema name: {schema!r}")
 

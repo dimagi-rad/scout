@@ -229,7 +229,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     return list
   }, [domains, recent, search, segment, hasDataOnly])
 
-  // Reset highlight + scroll position whenever the visible set changes.
   function resetView() {
     setHighlight(0)
     if (scrollRef.current) scrollRef.current.scrollTop = 0
@@ -304,7 +303,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight
   }, [highlight])
 
-  // Windowing math.
   const windowed = visible.length > WINDOW_THRESHOLD
   const startIndex = windowed
     ? Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - WINDOW_OVERSCAN)
@@ -410,7 +408,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           align={variant === "topbar" ? "end" : "start"}
           onKeyDown={onKeyDown}
         >
-          {/* Search */}
           <div className="border-b p-2">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -477,7 +474,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             </div>
           )}
 
-          {/* List */}
           <div
             ref={scrollRef}
             onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
@@ -521,7 +517,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             )}
           </div>
 
-          {/* Footer actions */}
           <div className="border-t p-1">
             <button
               data-testid="workspace-manage"

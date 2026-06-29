@@ -1,4 +1,3 @@
-// frontend/src/components/WorkspaceBadge/providerMeta.tsx
 import { Database } from "lucide-react"
 import type { ComponentType, SVGProps } from "react"
 import {

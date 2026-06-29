@@ -12,7 +12,6 @@ describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => 
     const s = useAppStore.getState()
     expect(s.activeDomainId).toBe("ws-b")
     expect(s.threadId).not.toBe("thread-a")
-    // fresh client-generated UUID
     expect(s.threadId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     )
@@ -39,8 +38,7 @@ describe("domainSlice.ensureTenant — surfaces failure, not empty (07#6)", () =
 
     await useAppStore.getState().domainActions.ensureTenant("ocs", "team-1")
 
-    // A failed resolution must be distinguishable from "account has no
-    // opportunities" — the user/operator can tell the two apart.
+    // A failed resolution must be distinguishable from "account has no opportunities".
     expect(useAppStore.getState().domainsStatus).toBe("error")
     expect(useAppStore.getState().domainsError).toBeTruthy()
   })

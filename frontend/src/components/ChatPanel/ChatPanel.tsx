@@ -34,9 +34,7 @@ export function ChatPanel() {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
   const [messageReloadKey, setMessageReloadKey] = useState(0)
   const prevStatusRef = useRef<string>("")
-  // Transient-overload auto-retry (see ./overloadRetry):
-  //   hitRetryableRef — a retryable-error data part arrived during this turn
-  //   retriedRef      — we've already auto-retried this turn once
+  // Transient-overload auto-retry bookkeeping; see ./overloadRetry.
   const hitRetryableRef = useRef(false)
   const retriedRef = useRef(false)
   const prevRetryStatusRef = useRef<string>("")
@@ -72,7 +70,6 @@ export function ChatPanel() {
     },
   })
 
-  // Clear auto-retry bookkeeping at the start of each user-initiated turn.
   function resetOverloadState() {
     hitRetryableRef.current = false
     retriedRef.current = false
@@ -81,7 +78,6 @@ export function ChatPanel() {
 
   const isStreaming = status === "streaming" || status === "submitted"
 
-  // Slash command menu state
   const showSlashMenu =
     !isStreaming && input.startsWith("/") && !input.slice(1).includes(" ")
   const slashQuery = showSlashMenu ? input.slice(1) : ""
@@ -94,14 +90,9 @@ export function ChatPanel() {
     setSlashMenuIndex(0)
   }
 
-  // Load messages from backend when threadId changes (or after a background job
-  // completes). On success — including an empty array for a brand-new thread —
-  // persist this (workspace, thread) pair so a later bare /chat visit can
-  // restore it. We persist ONLY here so a stale/foreign thread (which 404s
-  // below) never gets stamped into this workspace's localStorage. A 404 means
-  // the thread exists but isn't ours / isn't this workspace's: drop the saved
-  // id and start a fresh thread so the user lands in a clean chat instead of a
-  // haunted one.
+  // Persist the (workspace, thread) pair ONLY on a successful load, so a
+  // stale/foreign thread (which 404s below) never gets stamped into this
+  // workspace's localStorage; a 404 instead drops the saved id and starts fresh.
   useEffect(() => {
     if (!threadId || !activeDomainId) return
     let cancelled = false
@@ -135,12 +126,9 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, activeDomainId, messageReloadKey])
 
-  // Reload messages when a background materialization job for this thread
-  // completes — but NOT while we're streaming a new turn. A mid-stream reload
-  // would tear down the in-flight messages array and lose the user's current
-  // tokens. The Thread.updated_at bump from the resume task triggers the
-  // sidebar refetch, so the user still sees the green-dot indicator and can
-  // click into the thread to get the new agent message on a fresh load.
+  // Reload after a background materialization job completes, but NOT mid-stream:
+  // a reload would tear down the in-flight messages and lose the user's tokens.
+  // The Thread.updated_at bump still triggers the sidebar's green-dot indicator.
   useEffect(() => {
     if (isStreaming) return
     if (threadId && recentlyCompletedThreadIds.includes(threadId)) {
@@ -148,7 +136,7 @@ export function ChatPanel() {
     }
   }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
-  // Refresh thread list when streaming finishes (so new threads appear)
+  // Refresh thread list when streaming finishes so new threads appear.
   useEffect(() => {
     if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
       fetchThreads(activeDomainId)
@@ -179,7 +167,6 @@ export function ChatPanel() {
     }
   }, [status, regenerate])
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
@@ -249,7 +236,6 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Message list */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.map((msg: UIMessage, msgIdx: number) => (
           <ChatMessage
@@ -268,7 +254,6 @@ export function ChatPanel() {
         {overloadNotice && <OverloadNotice onRetry={handleOverloadRetry} />}
       </div>
 
-      {/* Materialization progress banner — always visible when a job is active for this thread */}
       {activeMaterializationJob
         && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
         && activeDomainId && (
@@ -278,7 +263,6 @@ export function ChatPanel() {
           />
         )}
 
-      {/* Input area */}
       <div className="border-t p-4">
         <form onSubmit={handleSubmit} className="relative flex gap-2">
           <SlashCommandMenu

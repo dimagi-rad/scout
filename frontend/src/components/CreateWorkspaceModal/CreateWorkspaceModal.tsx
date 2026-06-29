@@ -39,7 +39,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Data-source picker state
   const [sources, setSources] = useState<UserTenant[]>([])
   const [sourcesLoading, setSourcesLoading] = useState(true)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -184,7 +183,6 @@ export function CreateWorkspaceModal({ onClose }: Props) {
               />
             </div>
 
-            {/* Data sources */}
             <div>
               <div className="mb-1 flex items-center justify-between">
                 <Label>Data sources</Label>

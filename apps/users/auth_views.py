@@ -77,8 +77,7 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     except Exception:
         logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
         return False
-    # Treat a falsy / empty result as "resolved nothing" so the flag can't flap.
-    return bool(resolved)
+    return bool(resolved)  # falsy/empty = "resolved nothing" so the flag can't flap
 
 
 async def _aonboarding_complete(user) -> bool:
@@ -221,7 +220,7 @@ def signup_view(request):
 @login_required_json
 def disconnect_provider_view(request, provider_id):
     """Revoke OAuth API token for a provider, keeping the SocialAccount for login."""
-    # Find tokens for this provider — check both provider class id and provider_id
+    # Check both provider class id and provider_id (see SocialAccount.provider note below).
     tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
     if not tokens.exists():
         app_provider_ids = list(
@@ -273,14 +272,12 @@ def providers_view(request):
         connected_providers = set(
             SocialAccount.objects.filter(user=request.user).values_list("provider", flat=True)
         )
-        # Check token validity for connected providers
         tokens = SocialToken.objects.filter(
             account__user=request.user,
         ).select_related("account", "app")
         for social_token in tokens:
             provider = social_token.account.provider
             if token_needs_refresh(social_token.expires_at):
-                # Attempt refresh
                 token_url = get_token_url(provider)
                 if token_url and social_token.token_secret:
                     try:

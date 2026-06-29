@@ -7,16 +7,12 @@ import { workspacePath } from "@/lib/workspacePath"
  * Two-way bridge between the chat URL (`/workspaces/:workspaceId/chat/:threadId`)
  * and the zustand store (`activeDomainId` / `threadId`).
  *
- * Direction 1 — URL → store: when the user navigates directly (bookmark, paste,
- * back/forward), the params drive the store so the correct workspace + thread
- * are restored.
+ * Direction 1 — URL → store: direct navigation (bookmark, paste, back/forward)
+ * drives the store. Direction 2 — store → URL: in-app actions (workspace
+ * switcher, new thread) update the URL so the view stays bookmarkable.
  *
- * Direction 2 — store → URL: when the store changes from in-app actions (e.g.
- * the workspace switcher or starting a new thread), the URL is updated so the
- * current view is bookmarkable.
- *
- * A guard ref records the last (workspaceId, threadId) pair we reconciled so we
- * never bounce an update back to its origin and never create a navigation loop.
+ * A guard ref records the last reconciled (workspaceId, threadId) pair so an
+ * update never bounces back to its origin or creates a navigation loop.
  *
  * @param pathPrefix "" for the main app, "/embed" for the embedded app.
  */
@@ -35,16 +31,15 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
   const setActiveDomain = useAppStore((s) => s.domainActions.setActiveDomain)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
 
-  // Canonical, pretty chat URL for a (workspaceId, threadId) pair. Resolves the
-  // workspace from `domains` so a slug can be derived; degrades to the bare
-  // `/workspaces/<uuid>/chat` form when the workspace isn't loaded yet.
+  // Canonical pretty chat URL; degrades to the bare `/workspaces/<uuid>/chat`
+  // form when the workspace isn't loaded yet (no slug derivable).
   const chatUrl = (workspaceId: string, thread: string | null) => {
     const ws = domains.find((d) => d.id === workspaceId)
     const base = `${pathPrefix}${workspacePath(ws ?? { id: workspaceId })}/chat`
     return thread ? `${base}/${thread}` : base
   }
 
-  // Last pair we reconciled, in either direction. Prevents ping-pong loops.
+  // Last reconciled pair, either direction. Prevents ping-pong loops.
   const syncedRef = useRef<{ workspaceId: string | null; threadId: string | null }>({
     workspaceId: null,
     threadId: null,
@@ -60,9 +55,8 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
       return
     }
 
-    // Only adopt a workspace from the URL once domains have loaded and the id is
-    // valid for this user — otherwise leave the store alone (the redirect logic
-    // below or fetchDomains will pick a sensible default).
+    // Only adopt a URL workspace once domains have loaded and the id is valid
+    // for this user; otherwise leave the store for fetchDomains to default.
     if (domainsStatus === "loaded" && !domains.some((d) => d.id === urlWorkspaceId)) {
       return
     }
@@ -95,22 +89,15 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDomainId, threadId])
 
-  // Canonicalize the address bar: landing on a BARE chat URL
-  // (`/workspaces/<uuid>/chat[/<thread>]`) — or any non-pretty variant — should
-  // rewrite to the slug form once the workspace is resolvable. This runs after
-  // Direction 1 has adopted the URL's workspace into the store, so it relies on
-  // `activeDomainId` rather than re-reading params.
-  //
-  // Loop guard: only rewrite when (a) we're on a chat route, (b) the active
-  // workspace is found in `domains` (so a stable slug exists — never rewrite to
-  // a different form on the next render), and (c) the canonical URL actually
-  // differs from the current pathname. The rewrite is `replace` so it doesn't
-  // add a history entry, and matching `domains` means a second pass produces the
-  // identical canonical path and the `!==` check short-circuits it.
+  // Canonicalize the address bar: rewrite a bare/non-pretty chat URL to the slug
+  // form once the workspace resolves. Loop guard: only rewrite when on a chat
+  // route, the workspace exists in `domains` (so a stable slug exists and a
+  // second pass yields the identical path), and the canonical URL differs from
+  // the current pathname. `replace` avoids adding a history entry.
   useEffect(() => {
     if (!activeDomainId) return
-    // Derive the on-route chat thread from the URL params, not the store, so the
-    // rewrite preserves exactly what's in the address bar.
+    // Derive the thread from URL params, not the store, so the rewrite preserves
+    // exactly what's in the address bar.
     const onChatRoute = urlWorkspaceId === activeDomainId
     if (!onChatRoute) return
     if (!domains.some((d) => d.id === activeDomainId)) return

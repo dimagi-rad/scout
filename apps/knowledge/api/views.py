@@ -25,10 +25,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 
-# Cap the total *decompressed* size of an import archive (arch #254, 01#4). A
-# small zip can decompress to gigabytes; without a guard a READ member could
-# inflate the knowledge base, which is concatenated into the system prompt and
-# re-billed on every LLM call. 25 MB is far above any legitimate markdown export.
+# Cap decompressed import size to prevent a zip bomb inflating the knowledge
+# base, which is re-billed into the system prompt on every LLM call (arch #254, 01#4).
 MAX_IMPORT_DECOMPRESSED_BYTES = 25 * 1024 * 1024
 
 KNOWLEDGE_TYPES = {
@@ -36,8 +34,7 @@ KNOWLEDGE_TYPES = {
         "model": KnowledgeEntry,
         "serializer": KnowledgeEntrySerializer,
         "search_fields": ["title", "content"],
-        # created_by is read by the serializer's created_by_name field; join it
-        # so the page slice doesn't N+1 (arch #254, 05#7).
+        # Join created_by so the page slice doesn't N+1 (arch #254, 05#7).
         "select_related": ["created_by"],
     },
     "learning": {
@@ -87,11 +84,9 @@ class KnowledgeListCreateView(APIView):
         end_index = start_index + page_size
 
         # Paginate in the DB, not in Python (arch #254, finding 05#7). The list
-        # merges two models ordered by ``created_at`` desc; to assemble one page
-        # without serializing every row, fetch from each model only the rows up
-        # to ``end_index`` (DB-side ``ORDER BY created_at DESC LIMIT end_index``),
-        # merge those, then slice the page. Per-page serialization is bounded by
-        # ``page * page_size`` rows per type rather than the full table.
+        # merges two models by created_at desc; fetch only up to end_index per
+        # model, merge, then slice — so serialization is bounded by page*page_size
+        # per type rather than the full table.
         total_count = 0
         candidates = []
         for type_name in types_to_query:
@@ -117,7 +112,6 @@ class KnowledgeListCreateView(APIView):
             serializer = serializer_class(page_window, many=True)
             candidates.extend(serializer.data)
 
-        # Merge the (at most ``end_index`` per type) candidates and slice the page.
         candidates.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         paginated_items = candidates[start_index:end_index]
 
@@ -274,9 +268,8 @@ class KnowledgeExportView(APIView):
                 ).strip()[:80]
                 if not safe_title:
                     safe_title = "untitled"
-                # Disambiguate duplicate-titled entries so distinct entries don't
-                # collapse onto one zip member and silently lose data on a
-                # round trip (arch #262, finding 05#8).
+                # Disambiguate duplicate titles so distinct entries don't collapse
+                # onto one zip member and lose data on round trip (arch #262, finding 05#8).
                 filename = f"{safe_title}.md"
                 suffix = 2
                 while filename in used_filenames:
@@ -324,8 +317,8 @@ class KnowledgeImportView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Reject decompression bombs before reading any member: the zip's own
-        # directory advertises each member's uncompressed size (arch #254, 01#4).
+        # Reject zip bombs before reading any member, using the directory's
+        # advertised uncompressed sizes (arch #254, 01#4).
         total_uncompressed = sum(info.file_size for info in zf.infolist())
         if total_uncompressed > MAX_IMPORT_DECOMPRESSED_BYTES:
             return Response(
@@ -344,21 +337,17 @@ class KnowledgeImportView(APIView):
         skipped = 0
         errors: list[dict] = []
 
-        # Pool of pre-existing entry PKs per title, snapshotted before the import.
-        # Each pool entry is consumed at most once so that (a) re-importing an
-        # export updates the matching rows in place (idempotent), and (b) an
-        # export containing N duplicate-titled entries re-creates N entries
-        # rather than collapsing them onto one (arch #262, finding 05#8).
+        # Pool of pre-existing PKs per title; each consumed at most once so a
+        # re-import updates in place (idempotent) while N duplicate titles map to
+        # N entries instead of collapsing onto one (arch #262, finding 05#8).
         available_by_title: dict[str, list] = {}
         for pk, title in KnowledgeEntry.objects.filter(workspace=workspace).values_list(
             "id", "title"
         ):
             available_by_title.setdefault(title, []).append(pk)
 
-        # The whole import is atomic: a hard DB failure rolls back the batch so
-        # we never leave a partially-applied import (arch #262, finding 05#8).
-        # Per-entry parse/decode errors are collected and reported rather than
-        # aborting the batch or 500ing.
+        # Atomic: a hard DB failure rolls back the whole batch (arch #262, finding
+        # 05#8). Per-entry parse/decode errors are collected, not fatal.
         try:
             with zf, transaction.atomic():
                 for name in zf.namelist():

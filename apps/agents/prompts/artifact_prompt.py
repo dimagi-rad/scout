@@ -1,13 +1,4 @@
-"""
-Artifact creation prompt additions for Scout data agent.
-
-This module provides prompt text that instructs the agent on how and when
-to create interactive artifacts. The prompt covers:
-- When to use each artifact type
-- React component guidelines and available libraries
-- Example code patterns
-- Data handling best practices
-"""
+"""Prompt text instructing the agent how and when to create interactive artifacts."""
 
 ARTIFACT_PROMPT_ADDITION = """
 ## Creating Interactive Artifacts

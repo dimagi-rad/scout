@@ -22,18 +22,10 @@ logger = logging.getLogger(__name__)
 async def materialization_cancel_view(request, workspace_id):
     """POST /api/workspaces/<workspace_id>/materialization/cancel/
 
-    Marks every active ``MaterializationRun`` for this workspace as
-    CANCELLED so the in-process worker observes the cancellation between
-    pages, and signals procrastinate to cancel/abort the underlying jobs.
-
-    The DB state must be flipped *before* signalling procrastinate — the
-    worker's ``progress_updater`` checks the run state on every page;
-    procrastinate's abort signal only takes effect at the next ``await``
-    boundary (and our work runs inside ``asyncio.to_thread``, so it never
-    sees one).
-
-    Delegates to ``cancel_thread_job`` for each matching ThreadJob so that
-    both the run state and the job state are flipped atomically.
+    Marks active MaterializationRuns CANCELLED, then signals procrastinate to
+    abort. DB state must flip *before* the abort signal: the worker's
+    progress_updater checks run state every page, while abort only fires at the
+    next ``await`` (which our to_thread work never reaches).
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -54,12 +46,8 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
-    # Filter by thread__user so a workspace member cannot cancel another
-    # member's chat-driven materialization (which would otherwise trigger a
-    # "Materialization just completed (status=cancelled)" resume message in
-    # the victim's thread). The orphan path below covers untracked runs
-    # (e.g. /refresh/-triggered jobs with no ThreadJob); those are workspace-
-    # scoped, but cancelling them does not inject anything into anyone's chat.
+    # Scope to thread__user so a member can't cancel another member's chat-driven
+    # materialization (which would inject a "cancelled" resume into their thread).
     tjs = [
         tj
         async for tj in ThreadJob.objects.filter(
@@ -68,10 +56,8 @@ async def materialization_cancel_view(request, workspace_id):
             thread__user=user,
         )
     ]
-    # ALL ThreadJobs for these job_ids (any user) — used to distinguish
-    # truly-orphan runs (no ThreadJob exists anywhere, e.g., /refresh/ path)
-    # from runs that belong to another user (which we MUST NOT cancel here
-    # since this endpoint is only allowed to act on the caller's own jobs).
+    # ALL ThreadJobs (any user) — distinguishes truly-orphan runs (no ThreadJob,
+    # e.g. /refresh/ path) from another user's runs, which we must NOT cancel.
     all_tracked_job_ids = {
         pid
         async for pid in ThreadJob.objects.filter(
@@ -79,17 +65,13 @@ async def materialization_cancel_view(request, workspace_id):
         ).values_list("procrastinate_job_id", flat=True)
     }
 
-    # Cancel tracked materializations via cancel_thread_job (which also flips
-    # the ThreadJob state). Track which procrastinate_job_ids we covered.
     total = 0
     tracked_job_ids = set()
     for tj in tjs:
         total += await cancel_thread_job(tj)
         tracked_job_ids.add(tj.procrastinate_job_id)
 
-    # Cancel only TRULY orphan MaterializationRuns (no ThreadJob anywhere).
-    # Runs belonging to other users' ThreadJobs are deliberately skipped —
-    # this endpoint must not disrupt another user's chat-driven materialization.
+    # Only truly-orphan runs (no ThreadJob anywhere); other users' runs are skipped.
     orphan_job_ids = job_ids - all_tracked_job_ids
     if orphan_job_ids:
         logger.info(
@@ -125,18 +107,11 @@ async def materialization_cancel_view(request, workspace_id):
 async def materialization_retry_view(request, workspace_id):
     """POST /api/workspaces/<workspace_id>/materialize/retry/
 
-    Dispatch a fresh ``materialize_workspace`` job without going through the
-    agent and (optionally) bind a new ThreadJob to the supplied ``thread_id``
-    so the existing resume mechanism fires when the new run finishes.
+    Dispatch a fresh ``materialize_workspace`` job outside the agent. With a
+    ``thread_id`` (optional, in the body alongside ``tool_call_id``) it also binds
+    a new ThreadJob so the resume mechanism fires when the run finishes.
 
-    Body: ``{"thread_id": "<uuid>", "tool_call_id": "<id>"}`` — both optional.
-    Without ``thread_id`` we simply dispatch the materialization (no chat
-    resume). With ``thread_id``, a fresh ThreadJob is created and the resume
-    task picks up the new run when it finishes.
-
-    The retry is idempotent on the frontend (button disabled while pending);
-    on the backend we deduplicate against any ACTIVE ThreadJob for the
-    supplied thread before dispatching.
+    Deduplicates against any ACTIVE ThreadJob for the thread before dispatching.
     """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
@@ -153,9 +128,8 @@ async def materialization_retry_view(request, workspace_id):
     thread_id = payload.get("thread_id") or ""
     tool_call_id = payload.get("tool_call_id") or ""
 
-    # Validate the supplied thread belongs to this user + workspace before we
-    # bind anything to it. Without this an attacker who knows another user's
-    # thread_id could attach a materialization to it.
+    # Validate ownership before binding — else a known thread_id lets an attacker
+    # attach a materialization to another user's thread.
     if thread_id:
         thread = await Thread.objects.filter(
             id=thread_id,
@@ -164,10 +138,8 @@ async def materialization_retry_view(request, workspace_id):
         ).afirst()
         if thread is None:
             return JsonResponse({"error": "thread not found in this workspace"}, status=404)
-        # Dedupe: if there is already a materialization in flight for this
-        # thread, return its identity so the frontend can re-bind without
-        # double-dispatching. Mirrors the MCP run_materialization tool's
-        # in-flight guard.
+        # Already in flight: return its identity so the frontend re-binds without
+        # double-dispatching (mirrors the MCP run_materialization guard).
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,

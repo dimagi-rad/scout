@@ -1,15 +1,11 @@
 """
-MCP client for connecting the Scout agent to the MCP data server.
+MCP client connecting the Scout agent to the MCP data server.
 
-The MCP tool *schemas* are static, so the tool list is loaded once and cached
-across chat turns instead of doing a ``tools/list`` HTTP round trip on every
-message (arch #253, finding 10#1). Each cached tool still opens its own MCP
-session at invocation time (langchain-mcp-adapters starts a new session per
-tool call), so caching the list does not pin a long-lived connection.
-
-Every call carries the shared secret in the ``X-Scout-MCP-Secret`` header so the
-MCP server's ``SharedSecretMiddleware`` accepts it (arch #253, finding 01#6).
-A circuit breaker prevents hammering an unavailable server.
+Tool schemas are static, so the tool list is cached across chat turns rather than
+re-fetched per message (arch #253, finding 10#1). Caching the list doesn't pin a
+connection — each tool still opens its own session at invocation time. Every call
+carries the shared secret header for SharedSecretMiddleware (arch #253, 01#6); a
+circuit breaker prevents hammering an unavailable server.
 """
 
 from __future__ import annotations
@@ -24,7 +20,6 @@ from mcp_server.auth import SHARED_SECRET_HEADER
 
 logger = logging.getLogger(__name__)
 
-# Circuit breaker state
 _consecutive_failures: int = 0
 _last_failure_time: float = 0.0
 _CIRCUIT_BREAKER_THRESHOLD = 5

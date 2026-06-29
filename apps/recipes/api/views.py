@@ -126,8 +126,8 @@ async def recipe_run_view(request, workspace_id, recipe_id):
         return JsonResponse(serializer.errors, status=400)
     variable_values = serializer.validated_data.get("variable_values", {})
 
-    # Validate variables (and apply defaults) synchronously so the client gets a
-    # 400 in-band; only a valid request creates a run and dispatches work.
+    # Validate up front so the client gets a 400 in-band; only a valid request
+    # creates a run and dispatches work.
     try:
         values = RecipeRunner.validate_and_default(recipe, variable_values)
     except VariableValidationError as e:
@@ -147,8 +147,7 @@ async def recipe_run_view(request, workspace_id, recipe_id):
         )
         await run_recipe.defer_async(recipe_run_id=str(run.id))
     except Exception as e:
-        # Don't leak internal exception detail to the client; log it behind a
-        # short ref and return the ref (mirrors apps/chat/views.py).
+        # Don't leak exception detail to the client; log behind a ref (mirrors apps/chat/views.py).
         error_ref = hashlib.sha256(f"{time.time()}{e}".encode()).hexdigest()[:8]
         logger.exception("Error dispatching recipe %s [ref=%s]", recipe_id, error_ref)
         return JsonResponse({"error": f"Recipe run failed. Ref: {error_ref}"}, status=500)

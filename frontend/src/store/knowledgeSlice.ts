@@ -4,9 +4,7 @@ import type { DomainSlice } from "./domainSlice"
 
 export type KnowledgeType = "entry" | "learning"
 
-/**
- * KnowledgeEntry - type: "entry"
- */
+// Backend KnowledgeEntry model
 export interface KnowledgeEntryItem {
   id: string
   type: "entry"
@@ -17,9 +15,7 @@ export interface KnowledgeEntryItem {
   updated_at: string
 }
 
-/**
- * AgentLearning - type: "learning"
- */
+// Backend AgentLearning model
 export interface LearningItem {
   id: string
   type: "learning"
@@ -35,14 +31,8 @@ export interface LearningItem {
   created_at: string
 }
 
-/**
- * Union type for all knowledge items
- */
 export type KnowledgeItem = KnowledgeEntryItem | LearningItem
 
-/**
- * Helper to get display name for any knowledge item
- */
 export function getKnowledgeItemName(item: KnowledgeItem): string {
   switch (item.type) {
     case "entry":
@@ -52,9 +42,6 @@ export function getKnowledgeItemName(item: KnowledgeItem): string {
   }
 }
 
-/**
- * Pagination metadata from the API
- */
 export interface PaginationInfo {
   page: number
   page_size: number
@@ -172,7 +159,6 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice, []
       const formData = new FormData()
       formData.append("file", file)
       await api.upload(`/api/workspaces/${activeDomainId}/knowledge/import/`, formData)
-      // Re-fetch to get updated list
       await get().knowledgeActions.fetchKnowledge()
     },
 

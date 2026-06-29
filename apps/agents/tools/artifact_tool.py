@@ -1,14 +1,8 @@
 """
 Artifact creation tools for the Scout data agent platform.
 
-This module provides factory functions to create tools that allow the agent
-to generate interactive visualizations and content artifacts. Artifacts can be
-React components, HTML, Markdown, Plotly charts, or SVG graphics.
-
-The tools support:
-- Creating new artifacts with code and optional data
-- Updating existing artifacts (creates new versions preserving history)
-- Linking artifacts to source SQL queries for provenance tracking
+Factory functions for agent tools that create and version interactive artifacts
+(React, HTML, Markdown, Plotly, SVG), optionally linked to source SQL queries.
 """
 
 import logging
@@ -41,7 +35,6 @@ class UpdateArtifactInput(BaseModel):
     source_queries: list[dict[str, str]] | None = Field(default=None)
 
 
-# Valid artifact types that can be created
 VALID_ARTIFACT_TYPES = frozenset(
     {
         "react",
@@ -56,21 +49,9 @@ VALID_ARTIFACT_TYPES = frozenset(
 def create_artifact_tools(
     workspace: "Workspace", user: "User | None", conversation_id: str | None = None
 ) -> list:
-    """
-    Factory function to create artifact creation tools for a specific workspace.
+    """Create the [create_artifact, update_artifact] tools scoped to a workspace.
 
-    Creates two tools:
-    1. create_artifact: Create a new artifact with code and optional data
-    2. update_artifact: Create a new version of an existing artifact
-
-    Args:
-        workspace: The Workspace model instance for scoping artifacts.
-        user: The User model instance who triggered the conversation.
-              Used to track artifact ownership.
-        conversation_id: The conversation/thread ID for tracking artifact provenance.
-
-    Returns:
-        A list of LangChain tool functions [create_artifact, update_artifact].
+    ``conversation_id`` is recorded on created artifacts for provenance.
     """
 
     @tool(args_schema=CreateArtifactInput)
@@ -147,10 +128,8 @@ def create_artifact_tools(
             - render_url: URL path to render the artifact
             - message: Success or error message
         """
-        # Import here to avoid circular imports
-        from apps.artifacts.models import Artifact
+        from apps.artifacts.models import Artifact  # avoid circular import
 
-        # Validate artifact type
         if artifact_type not in VALID_ARTIFACT_TYPES:
             return {
                 "artifact_id": None,
@@ -162,7 +141,6 @@ def create_artifact_tools(
                 f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_TYPES))}",
             }
 
-        # Validate code is provided
         if not code or not code.strip():
             return {
                 "artifact_id": None,
@@ -173,7 +151,6 @@ def create_artifact_tools(
                 "message": "Code is required. Please provide the artifact source code.",
             }
 
-        # Validate title
         if not title or not title.strip():
             return {
                 "artifact_id": None,
@@ -205,8 +182,6 @@ def create_artifact_tools(
                 title,
             )
 
-            # Build render URL pointing at the real sandbox route
-            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
             render_url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
 
             return {
@@ -263,10 +238,8 @@ def create_artifact_tools(
             - render_url: URL path to render the new version
             - message: Success or error message
         """
-        # Import here to avoid circular imports
-        from apps.artifacts.models import Artifact
+        from apps.artifacts.models import Artifact  # avoid circular import
 
-        # Validate code is provided
         if not code or not code.strip():
             return {
                 "artifact_id": None,
@@ -279,7 +252,6 @@ def create_artifact_tools(
             }
 
         try:
-            # Find the existing artifact
             try:
                 original = await Artifact.objects.aget(id=artifact_id, workspace=workspace)
             except Artifact.DoesNotExist:
@@ -293,18 +265,16 @@ def create_artifact_tools(
                     "message": f"Artifact with ID '{artifact_id}' not found in this workspace.",
                 }
 
-            # Resolve the effective new field values (fall back to the original
-            # when the caller omitted a field).
+            # Fall back to the original when the caller omitted a field.
             new_title = title.strip() if title is not None else original.title
             new_data = data if data is not None else original.data
             new_source_queries = (
                 source_queries if source_queries is not None else original.source_queries
             )
 
-            # No-op guard (arch #254, finding 09#9): versioning writes the entire
-            # React code into a new row per update, so an agent that "updates"
-            # with no actual change accretes full-code copies indefinitely. If
-            # nothing changed, return the existing artifact rather than copying it.
+            # No-op guard (arch #254, finding 09#9): each update copies the full
+            # code into a new row, so "updates" with no change accrete copies
+            # indefinitely. Return the existing artifact instead.
             if (
                 code == original.code
                 and new_title == original.title
@@ -326,7 +296,6 @@ def create_artifact_tools(
                     "message": f"Artifact '{original.title}' is already up to date.",
                 }
 
-            # Create a new version linked to the original
             new_artifact = Artifact(
                 workspace=workspace,
                 created_by=user,
@@ -350,8 +319,6 @@ def create_artifact_tools(
                 workspace.id,
             )
 
-            # Build render URL pointing at the real sandbox route
-            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
             render_url = f"/api/workspaces/{workspace.id}/artifacts/{new_artifact.id}/sandbox/"
 
             return {
@@ -378,7 +345,6 @@ def create_artifact_tools(
                 "message": f"Failed to update artifact: {e!s}",
             }
 
-    # Set tool names explicitly
     create_artifact.name = "create_artifact"
     update_artifact.name = "update_artifact"
 

@@ -253,12 +253,10 @@ export const createDictionarySlice: StateCreator<
         `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`,
         annotations
       )
-      // Update selected table
       const current = get().selectedTable
       if (current && current.schema === schema && current.table === table) {
         set({ selectedTable: { ...current, annotations: updated } })
       }
-      // Update in dictionary cache
       const dict = get().dataDictionary
       if (dict?.schemas?.[schema]?.[table]) {
         dict.schemas[schema][table].annotations = updated
