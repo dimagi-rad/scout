@@ -14,6 +14,7 @@ import {
   ChatOverloadNotice,
   ChatThinkingIndicator,
 } from "@/components/ChatPanel"
+import { ChatEmptyPrompt } from "@/components/ChatEmptyState"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
 import { MaterializationProgressBanner } from "@/components/MaterializationStatus/MaterializationProgressBanner"
 import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
@@ -255,6 +256,29 @@ export const Composer: Story = {
     return (
       <div className="w-[720px] rounded-lg border p-4">
         <ChatComposer input={input} setInput={setInput} onSend={() => undefined} />
+      </div>
+    )
+  },
+}
+
+export const EmptyChatPrompt: Story = {
+  parameters: {
+    layout: "fullscreen",
+  },
+  render: function EmptyChatPromptStory() {
+    const [input, setInput] = useState("")
+    const lastSyncedAt = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString()
+
+    return (
+      <div className="min-h-[220px] bg-background px-6 py-10">
+        <div className="mx-auto max-w-3xl">
+          <ChatEmptyPrompt
+            input={input}
+            setInput={setInput}
+            onSend={() => undefined}
+            lastSyncedAt={lastSyncedAt}
+          />
+        </div>
       </div>
     )
   },

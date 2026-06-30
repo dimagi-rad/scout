@@ -5,32 +5,30 @@ import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { formatRelativeTime } from "@/lib/relativeTime"
+import { cn } from "@/lib/utils"
 import { SLASH_COMMANDS, resolveSlashCommand } from "@/components/ChatPanel/slashCommands"
 import type { SlashCommand } from "@/components/ChatPanel/slashCommands"
 import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
 import { getStarterQuestions } from "./starterQuestions"
 
-interface ChatEmptyStateProps {
+interface ChatEmptyPromptProps {
   input: string
   setInput: (value: string) => void
   onSend: (text: string) => void
   disabled?: boolean
+  lastSyncedAt?: string | null
+  className?: string
 }
 
-export function ChatEmptyState({
+export function ChatEmptyPrompt({
   input,
   setInput,
   onSend,
   disabled = false,
-}: ChatEmptyStateProps) {
-  const workspace = useAppStore((s) =>
-    s.domains.find((d) => d.id === s.activeDomainId),
-  )
+  lastSyncedAt = null,
+  className,
+}: ChatEmptyPromptProps) {
   const [slashMenuIndex, setSlashMenuIndex] = useState(0)
-
-  const provider = workspace?.tenants[0]?.provider
-  const starters = getStarterQuestions(provider)
-  const lastSyncedAt = workspace?.last_synced_at ?? null
 
   // Slash command menu state — mirrors ChatPanel's active-thread input so
   // slash commands work identically here.
@@ -86,6 +84,79 @@ export function ChatEmptyState({
   }
 
   return (
+    <div className={cn("w-full", className)}>
+      <form onSubmit={handleSubmit} className="relative">
+        <SlashCommandMenu
+          query={slashQuery}
+          onSelect={selectSlashCommand}
+          visible={showSlashMenu}
+          selectedIndex={slashMenuIndex}
+        />
+        <Textarea
+          data-testid="chat-input-prominent"
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value)
+            setSlashMenuIndex(0)
+          }}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask about your data..."
+          disabled={disabled}
+          rows={1}
+          className="min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
+        />
+        <Button
+          type="submit"
+          size="icon"
+          disabled={disabled || !input.trim()}
+          className="absolute right-3 top-1/2 -translate-y-1/2"
+        >
+          <ArrowUp className="h-4 w-4" />
+        </Button>
+      </form>
+
+      <p
+        className="mt-3 text-center text-xs text-muted-foreground"
+        data-testid="data-freshness"
+      >
+        Scout can only read your data — never modify or delete it.
+        {lastSyncedAt && (
+          <> Data last synced {formatRelativeTime(lastSyncedAt)}.</>
+        )}
+      </p>
+    </div>
+  )
+}
+
+interface ChatEmptyStateProps {
+  input: string
+  setInput: (value: string) => void
+  onSend: (text: string) => void
+  disabled?: boolean
+}
+
+export function ChatEmptyState({
+  input,
+  setInput,
+  onSend,
+  disabled = false,
+}: ChatEmptyStateProps) {
+  const workspace = useAppStore((s) =>
+    s.domains.find((d) => d.id === s.activeDomainId),
+  )
+
+  const provider = workspace?.tenants[0]?.provider
+  const starters = getStarterQuestions(provider)
+  const lastSyncedAt = workspace?.last_synced_at ?? null
+
+  function submit(text: string) {
+    const trimmed = text.trim()
+    if (!trimmed || disabled) return
+    setInput("")
+    onSend(resolveSlashCommand(trimmed))
+  }
+
+  return (
     <div
       className="flex h-full flex-col items-center justify-center px-6 py-10"
       data-testid="chat-empty-state"
@@ -116,45 +187,14 @@ export function ChatEmptyState({
           ))}
         </div>
 
-        <form onSubmit={handleSubmit} className="relative mt-10">
-          <SlashCommandMenu
-            query={slashQuery}
-            onSelect={selectSlashCommand}
-            visible={showSlashMenu}
-            selectedIndex={slashMenuIndex}
-          />
-          <Textarea
-            data-testid="chat-input-prominent"
-            value={input}
-            onChange={(e) => {
-              setInput(e.target.value)
-              setSlashMenuIndex(0)
-            }}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask about your data..."
-            disabled={disabled}
-            rows={1}
-            className="min-h-0 resize-none rounded-xl border bg-background px-4 py-3 pr-14 text-base shadow-sm"
-          />
-          <Button
-            type="submit"
-            size="icon"
-            disabled={disabled || !input.trim()}
-            className="absolute bottom-3 right-3"
-          >
-            <ArrowUp className="h-4 w-4" />
-          </Button>
-        </form>
-
-        <p
-          className="mt-3 text-center text-xs text-muted-foreground"
-          data-testid="data-freshness"
-        >
-          Scout can only read your data — never modify or delete it.
-          {lastSyncedAt && (
-            <> Data last synced {formatRelativeTime(lastSyncedAt)}.</>
-          )}
-        </p>
+        <ChatEmptyPrompt
+          input={input}
+          setInput={setInput}
+          onSend={onSend}
+          disabled={disabled}
+          lastSyncedAt={lastSyncedAt}
+          className="mt-10"
+        />
       </div>
     </div>
   )
