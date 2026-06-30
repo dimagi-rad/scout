@@ -145,8 +145,10 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         time_expr = _quoted_column(resolved_time.field.expression)
         alias = "date" if granularity else resolved_time.alias
         if granularity:
-            expr = f"date_trunc(%s, {time_expr})::date"
-            params.append(granularity)
+            # Granularity is validated against SUPPORTED_GRANULARITIES above.
+            # Keep it literal so repeated SELECT/GROUP BY expressions do not
+            # require duplicated bound parameters.
+            expr = f"date_trunc('{granularity}', {time_expr})::date"
         else:
             expr = time_expr
         select_parts.append(f"{expr} AS {_quoted_identifier(alias)}")

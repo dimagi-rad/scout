@@ -75,15 +75,38 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
         },
     )
 
-    assert compiled["params"] == ("day", "2026-06-22", "2026-06-28")
+    assert compiled["params"] == ("2026-06-22", "2026-06-28")
     assert compiled["members"] == ["visits.visit_date", "visits.username", "visits.count"]
     assert 'FROM "raw_visits"' in compiled["sql"]
-    assert 'date_trunc(%s, "visit_date")::date AS "date"' in compiled["sql"]
+    assert 'date_trunc(\'day\', "visit_date")::date AS "date"' in compiled["sql"]
     assert '"username" AS "visits__username"' in compiled["sql"]
     assert 'COUNT(*) AS "visits__count"' in compiled["sql"]
     assert 'WHERE "visit_date" BETWEEN %s AND %s' in compiled["sql"]
     assert 'ORDER BY "visits__count" DESC' in compiled["sql"]
     assert compiled["sql"].endswith("LIMIT 50")
+
+
+def test_compile_time_granularity_does_not_duplicate_params(
+    monkeypatch, workspace, semantic_model
+):
+    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "time_dimension": "visits.visit_date",
+            "granularity": "week",
+            "order_by": [{"field": "visits.visit_date", "direction": "desc"}],
+            "limit": 100,
+        },
+    )
+
+    assert compiled["params"] == ()
+    assert compiled["sql"].count("%s") == 0
+    assert 'date_trunc(\'week\', "visit_date")::date AS "date"' in compiled["sql"]
+    assert 'GROUP BY date_trunc(\'week\', "visit_date")::date' in compiled["sql"]
+    assert 'ORDER BY "date" DESC' in compiled["sql"]
 
 
 def test_compile_rejects_unknown_member(monkeypatch, workspace, semantic_model):
