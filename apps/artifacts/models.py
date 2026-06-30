@@ -26,6 +26,7 @@ class ArtifactType(models.TextChoices):
     MARKDOWN = "markdown", "Markdown Document"
     PLOTLY = "plotly", "Plotly Chart"
     SVG = "svg", "SVG Graphic"
+    STORY = "story", "Story"
 
 
 class Artifact(models.Model):
@@ -47,7 +48,8 @@ class Artifact(models.Model):
         version: Version number, incremented when creating new versions.
         parent_artifact: Link to previous version for version tracking.
         conversation_id: Thread ID from the conversation that created this.
-        source_queries: List of SQL queries that generated the underlying data.
+        source_queries: Legacy SQL queries that generated the underlying data.
+        semantic_queries: Structured semantic queries that generated the story data.
         created_at: When the artifact was created.
         updated_at: When the artifact was last modified.
     """
@@ -84,7 +86,7 @@ class Artifact(models.Model):
     artifact_type = models.CharField(
         max_length=20,
         choices=ArtifactType.choices,
-        help_text="The type of artifact (react, html, markdown, plotly, svg).",
+        help_text="The type of artifact (react, html, markdown, plotly, svg, story).",
     )
     code = models.TextField(
         help_text="Source code for the artifact.",
@@ -115,7 +117,12 @@ class Artifact(models.Model):
     source_queries = models.JSONField(
         default=list,
         blank=True,
-        help_text="SQL queries that generated the data for this artifact.",
+        help_text="Legacy SQL queries that generated the data for this artifact.",
+    )
+    semantic_queries = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Structured semantic queries that generated the data for this artifact.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -192,6 +199,7 @@ class Artifact(models.Model):
             parent_artifact=self,
             conversation_id=updates.get("conversation_id", self.conversation_id),
             source_queries=updates.get("source_queries", self.source_queries),
+            semantic_queries=updates.get("semantic_queries", self.semantic_queries),
         )
         new_artifact.save()
         return new_artifact

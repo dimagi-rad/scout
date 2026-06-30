@@ -188,7 +188,7 @@ export const NavigationItems: Story = {
           label="Chat"
           isActivePath={(pathname) => pathname.includes("/chat")}
         />
-        <NavItem to="/data-dictionary" icon={Database} label="Dictionary" />
+        <NavItem to="/datasets" icon={Database} label="Datasets" />
         <NavItem to="/artifacts" icon={BarChart3} label="Artifacts" />
         <NavItem to="/settings" icon={Settings} label="Settings" />
       </nav>

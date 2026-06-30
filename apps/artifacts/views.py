@@ -19,6 +19,7 @@ from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.common.utils import creator_display_name
+from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 from mcp_server.context import load_workspace_context
@@ -357,6 +358,9 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         case 'svg':
                             this.renderSVG(artifact);
                             break;
+                        case 'story':
+                            this.renderStory(artifact);
+                            break;
                         default:
                             this.showError('Unknown artifact type', `Type "${artifact.type}" is not supported.`);
                     }
@@ -645,6 +649,66 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 }
             },
 
+            renderStory(artifact) {
+                const storyDoc = artifact.data && artifact.data.story_doc;
+                if (!storyDoc || !Array.isArray(storyDoc.blocks)) {
+                    this.showError('Story Not Found', 'This story artifact has no story_doc.blocks payload.');
+                    return;
+                }
+
+                const visibleBlocks = storyDoc.blocks.filter(block => !block.hidden);
+                this.container.innerHTML = `
+                    <article class="story-root" style="font-family: system-ui, -apple-system, sans-serif; color: #111827; max-width: 960px; margin: 0 auto;">
+                        ${visibleBlocks.map(block => this.renderStoryBlock(block, artifact.data || {})).join('')}
+                    </article>
+                `;
+            },
+
+            renderStoryBlock(block, data) {
+                const config = block.config || {};
+                if (block.type === 'markdown') {
+                    const body = config.body || '';
+                    return `<section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">${marked.parse(body)}</section>`;
+                }
+                if (block.type === 'stat') {
+                    const queryName = config.query;
+                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
+                    const field = config.field;
+                    const value = rows[0] && field ? rows[0][field] : config.value;
+                    return `
+                        <section style="margin-bottom: 16px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;" data-block-id="${this.escapeHtml(block.id || '')}">
+                            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .04em;">${this.escapeHtml(config.label || block.id || 'Metric')}</div>
+                            <div style="font-size: 32px; font-weight: 700; margin-top: 4px;">${this.escapeHtml(value == null ? '—' : String(value))}</div>
+                        </section>
+                    `;
+                }
+                if (block.type === 'table') {
+                    const queryName = config.query;
+                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
+                    const columns = config.columns || (rows[0] ? Object.keys(rows[0]) : []);
+                    return `
+                        <section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">
+                            ${config.title ? `<h2 style="font-size: 18px; margin: 0 0 8px;">${this.escapeHtml(config.title)}</h2>` : ''}
+                            <div style="overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                                    <thead style="background: #f9fafb;">
+                                        <tr>${columns.map(col => `<th style="text-align: left; padding: 8px; border-bottom: 1px solid #e5e7eb;">${this.escapeHtml(String(col))}</th>`).join('')}</tr>
+                                    </thead>
+                                    <tbody>
+                                        ${rows.map(row => `<tr>${columns.map(col => `<td style="padding: 8px; border-bottom: 1px solid #f3f4f6;">${this.escapeHtml(row[col] == null ? '' : String(row[col]))}</td>`).join('')}</tr>`).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    `;
+                }
+                return `
+                    <section style="margin-bottom: 16px; color: #6b7280;" data-block-id="${this.escapeHtml(block.id || '')}">
+                        Unsupported story block: ${this.escapeHtml(block.type || 'unknown')}
+                    </section>
+                `;
+            },
+
             hideLoading() {
                 const loading = document.getElementById('loading');
                 if (loading) {
@@ -738,7 +802,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
-        has_live_queries = bool(artifact.source_queries)
+        has_live_queries = bool(artifact.source_queries or artifact.semantic_queries)
 
         # Serialize artifact data for embedding in the template
         artifact_json = json.dumps(
@@ -748,7 +812,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
                 "title": artifact.title,
                 "type": artifact.artifact_type,
                 "code": artifact.code,
-                "data": artifact.data if not has_live_queries else {},
+                "data": artifact.data or {},
                 "has_live_queries": has_live_queries,
                 "version": artifact.version,
             }
@@ -798,6 +862,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "code": artifact.code,
             "data": artifact.data,
             "source_queries": artifact.source_queries,
+            "semantic_queries": artifact.semantic_queries,
             "version": artifact.version,
         }
 
@@ -819,7 +884,7 @@ def _json_safe(value: Any) -> Any:
 
 class ArtifactQueryDataView(View):
     """
-    Executes an artifact's source_queries via the MCP query service and returns results.
+    Executes an artifact's semantic_queries/source_queries and returns results.
 
     For artifacts with source_queries, each SQL query is executed against the
     workspace's query schema using the same query service as the MCP server.
@@ -845,26 +910,50 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
-        if not artifact.source_queries:
+        if not artifact.source_queries and not artifact.semantic_queries:
             return JsonResponse({"queries": [], "static_data": artifact.data or {}})
 
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
-        # Route through load_workspace_context so single- vs multi-tenant
-        # workspaces resolve to the correct schema (t_* vs ws_* view schema) and
-        # the inactivity TTL is touched on the right schema.
-        try:
-            ctx = await load_workspace_context(str(artifact.workspace_id))
-        except Exception as e:
-            error_msg = str(e)
-            results = [
-                {"name": entry.get("name", f"query_{i}"), "error": error_msg}
-                for i, entry in enumerate(artifact.source_queries)
-            ]
-            return JsonResponse({"queries": results, "static_data": artifact.data or {}})
-
         results = []
+        for i, entry in enumerate(artifact.semantic_queries):
+            name = entry.get("name", f"semantic_query_{i}")
+            query_spec = {k: v for k, v in entry.items() if k != "name"}
+            result = await run_semantic_query(artifact.workspace, query_spec)
+
+            if not result.get("success", True) or result.get("error"):
+                error_info = result.get("error", {})
+                msg = (
+                    error_info.get("message", "Semantic query failed")
+                    if isinstance(error_info, dict)
+                    else str(error_info)
+                )
+                results.append({"name": name, "semantic_query": query_spec, "error": msg})
+            else:
+                results.append(
+                    {
+                        "name": name,
+                        "semantic_query": result.get("semantic_query", query_spec),
+                        "columns": result.get("columns", []),
+                        "rows": result.get("rows", []),
+                        "row_count": result.get("row_count", 0),
+                        "truncated": result.get("truncated", False),
+                    }
+                )
+
+        # Route legacy SQL artifacts through load_workspace_context so single-
+        # vs multi-tenant workspaces resolve to the correct schema.
+        ctx = None
+        if artifact.source_queries:
+            try:
+                ctx = await load_workspace_context(str(artifact.workspace_id))
+            except Exception as e:
+                error_msg = str(e)
+                for i, entry in enumerate(artifact.source_queries):
+                    results.append({"name": entry.get("name", f"query_{i}"), "error": error_msg})
+                return JsonResponse({"queries": results, "static_data": artifact.data or {}})
+
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")
             sql = entry.get("sql", "")
@@ -886,6 +975,7 @@ class ArtifactQueryDataView(View):
                 results.append(
                     {
                         "name": name,
+                        "sql": sql,
                         "columns": result.get("columns", []),
                         "rows": result.get("rows", []),
                         "row_count": result.get("row_count", 0),
@@ -920,7 +1010,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
                 "description": a.description,
                 "artifact_type": a.artifact_type,
                 "version": a.version,
-                "has_live_queries": bool(a.source_queries),
+                "has_live_queries": bool(a.source_queries or a.semantic_queries),
                 "created_by_name": creator_display_name(a.created_by),
                 "created_at": a.created_at.isoformat(),
                 "updated_at": a.updated_at.isoformat(),

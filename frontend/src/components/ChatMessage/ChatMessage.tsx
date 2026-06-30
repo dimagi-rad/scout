@@ -10,12 +10,16 @@ import { MaterializationFailure } from "@/components/MaterializationStatus/Mater
 import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
 import {
   QueryToolOutput,
+  SemanticCatalogToolOutput,
+  SemanticQueryToolOutput,
   DescribeTableOutput as DescribeTableOutputComponent,
   ListTablesOutput as ListTablesOutputComponent,
   GetMetadataOutput as GetMetadataOutputComponent,
 } from "./ToolOutput"
 import type {
   QueryOutput,
+  SemanticCatalogOutput,
+  SemanticQueryOutput,
   DescribeTableOutput,
   ListTablesOutput,
   GetMetadataOutput,
@@ -56,6 +60,11 @@ function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode
   switch (toolName) {
     case "query":
       return <QueryToolOutput output={output as QueryOutput} />
+    case "semantic_query":
+      return <SemanticQueryToolOutput output={output as SemanticQueryOutput} />
+    case "semantic_catalog":
+    case "describe_dataset":
+      return <SemanticCatalogToolOutput output={output as SemanticCatalogOutput} />
     case "describe_table":
       return <DescribeTableOutputComponent output={output as DescribeTableOutput} />
     case "list_tables":
@@ -167,6 +176,9 @@ function formatToolOutput(output: unknown): string {
 const AUTO_EXPAND_TOOLS = new Set([
   "run_materialization",
   "query",
+  "semantic_query",
+  "semantic_catalog",
+  "describe_dataset",
   "describe_table",
   "list_tables",
   "get_metadata",

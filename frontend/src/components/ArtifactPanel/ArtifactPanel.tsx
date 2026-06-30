@@ -6,7 +6,8 @@ import { withBasePath } from "@/config"
 
 interface QueryResult {
   name: string
-  sql: string
+  sql?: string
+  semantic_query?: Record<string, unknown>
   columns?: string[]
   rows?: unknown[][]
   row_count?: number
@@ -299,10 +300,10 @@ function QueryResultCard({ query }: { query: QueryResult }) {
 
       {expanded && (
         <div className="divide-y divide-border">
-          {/* SQL */}
+          {/* Query spec */}
           <div className="p-3 bg-muted/20">
             <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap overflow-x-auto">
-              {query.sql}
+              {query.sql ?? JSON.stringify(query.semantic_query ?? {}, null, 2)}
             </pre>
           </div>
 

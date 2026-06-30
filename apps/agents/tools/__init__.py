@@ -5,8 +5,9 @@ This module provides local tools that agents use for non-data-access operations:
 creating interactive visualizations, saving reusable workflow recipes, and
 persisting learned corrections.
 
-Data access tools (query, list_tables, describe_table, get_metadata) are
-provided by the MCP server and loaded at runtime via the MCP client.
+Data access tools (semantic_catalog, describe_dataset, semantic_query, and
+materialization tools) are provided by the MCP server and loaded at runtime via
+the MCP client.
 """
 
 from apps.agents.tools.artifact_tool import (

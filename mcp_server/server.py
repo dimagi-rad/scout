@@ -27,12 +27,21 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
 
 from apps.chat.models import Thread, ThreadJob
+from apps.semantic.models import SemanticDataset
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    ensure_semantic_model,
+    serialize_catalog,
+    serialize_dataset,
+)
+from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
@@ -395,6 +404,174 @@ async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: 
                 "tables_accessed": result.get("tables_accessed", []),
             },
             schema=ctx.schema_name,
+            timing_ms=tc["timer"].elapsed_ms,
+            warnings=warnings or None,
+        )
+        return tc["result"]
+
+
+def _serialized_semantic_catalog(workspace: Workspace) -> dict:
+    model = ensure_semantic_model(workspace)
+    return serialize_catalog(model)
+
+
+def _serialized_semantic_dataset(workspace: Workspace, dataset_name: str) -> dict:
+    model = ensure_semantic_model(workspace)
+    dataset = model.datasets.get(name=dataset_name, is_visible=True)
+    return serialize_dataset(dataset)
+
+
+@mcp.tool()
+async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
+    """List the workspace semantic model: datasets, dimensions, measures, and relationships.
+
+    Use this instead of raw table discovery. Returned member names are the only
+    fields that can be used with semantic_query.
+    """
+    async with tool_context(
+        "semantic_catalog", workspace_id, user_id=user_id, thread_id=thread_id
+    ) as tc:
+        if not workspace_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
+            return tc["result"]
+        try:
+            workspace = await Workspace.objects.aget(id=workspace_id)
+            catalog = await sync_to_async(_serialized_semantic_catalog, thread_sensitive=True)(
+                workspace
+            )
+        except Workspace.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
+            return tc["result"]
+        except SemanticCatalogUnavailable as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            return tc["result"]
+
+        tc["result"] = success_response(
+            catalog,
+            schema="semantic",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def describe_dataset(
+    dataset_name: str, workspace_id: str = "", user_id: str = "", thread_id: str = ""
+) -> dict:
+    """Describe one semantic dataset and its queryable members.
+
+    Args:
+        dataset_name: Dataset name from semantic_catalog, for example "visits".
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+    """
+    async with tool_context(
+        "describe_dataset",
+        workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        dataset_name=dataset_name,
+    ) as tc:
+        if not workspace_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
+            return tc["result"]
+        try:
+            workspace = await Workspace.objects.aget(id=workspace_id)
+            payload = await sync_to_async(_serialized_semantic_dataset, thread_sensitive=True)(
+                workspace,
+                dataset_name,
+            )
+        except Workspace.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
+            return tc["result"]
+        except SemanticDataset.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Dataset '{dataset_name}' not found")
+            return tc["result"]
+        except SemanticCatalogUnavailable as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            return tc["result"]
+
+        tc["result"] = success_response(
+            payload,
+            schema="semantic",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+@mcp.tool()
+async def semantic_query(
+    measures: list[str] | None = None,
+    dimensions: list[str] | None = None,
+    time_dimension: str = "",
+    granularity: str = "",
+    filters: list[dict] | None = None,
+    order_by: list[dict] | None = None,
+    limit: int = 100,
+    workspace_id: str = "",
+    user_id: str = "",
+    thread_id: str = "",
+) -> dict:
+    """Run a structured semantic query against the workspace semantic model.
+
+    Args:
+        measures: Semantic measure members such as ["visits.count"].
+        dimensions: Semantic dimension members such as ["visits.username"].
+        time_dimension: Optional time dimension member, such as "visits.visited_at".
+        granularity: Optional time bucket: day, week, month, quarter, or year.
+        filters: Optional filters: [{"field": "visits.username", "operator": "equals", "value": "a@example.com"}].
+        order_by: Optional ordering: [{"field": "visits.count", "direction": "desc"}].
+        limit: Maximum rows, clamped server-side.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+    """
+    async with tool_context(
+        "semantic_query",
+        workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        measures=measures or [],
+        dimensions=dimensions or [],
+        time_dimension=time_dimension,
+        granularity=granularity,
+        filters=filters or [],
+        order_by=order_by or [],
+        limit=limit,
+    ) as tc:
+        if not workspace_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
+            return tc["result"]
+        try:
+            workspace = await Workspace.objects.aget(id=workspace_id)
+        except Workspace.DoesNotExist:
+            tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
+            return tc["result"]
+
+        result = await run_semantic_query(
+            workspace,
+            {
+                "measures": measures or [],
+                "dimensions": dimensions or [],
+                "time_dimension": time_dimension or None,
+                "granularity": granularity or None,
+                "filters": filters or [],
+                "order_by": order_by or [],
+                "limit": limit,
+            },
+        )
+        if not result.get("success", True) or result.get("error"):
+            tc["result"] = result
+            return tc["result"]
+
+        warnings = []
+        if result.get("truncated"):
+            warnings.append("Results were truncated to the semantic query row limit.")
+
+        tc["result"] = success_response(
+            result,
+            schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,
             warnings=warnings or None,
         )

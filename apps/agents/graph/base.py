@@ -26,6 +26,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -40,6 +41,11 @@ from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    ensure_semantic_model,
+    serialize_catalog,
+)
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -70,6 +76,9 @@ MCP_TOOL_NAMES = frozenset(
         "describe_table",
         "query",
         "get_metadata",
+        "semantic_catalog",
+        "describe_dataset",
+        "semantic_query",
         "run_materialization",
         "get_schema_status",
         "get_lineage",
@@ -90,7 +99,17 @@ MCP_TOOL_NAMES = frozenset(
 # (schemas are re-provisioned automatically on the next materialization). It is
 # therefore filtered out before tools are bound to the LLM. The MCP server still
 # defines the tool so operator/HTTP callers are unaffected.
-AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
+AGENT_EXCLUDED_MCP_TOOLS = frozenset(
+    {
+        "teardown_schema",
+        # Semantic-model mode: keep raw SQL/table tools server-side for internal
+        # and operator callers, but do not expose them to the LLM.
+        "query",
+        "list_tables",
+        "describe_table",
+        "get_metadata",
+    }
+)
 
 # Context params the graph injects into every MCP tool call server-side. They
 # are hidden from the LLM-facing tool schema (so the model never sets them) and
@@ -282,6 +301,91 @@ def _render_full_schema(
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _semantic_catalog_context_sync(workspace) -> str:
+    model = ensure_semantic_model(workspace)
+    catalog = serialize_catalog(model)
+    lines = [
+        "Data is loaded and ready through the workspace semantic model.",
+        "",
+        "### Available Datasets",
+        "",
+    ]
+    for dataset in catalog["datasets"]:
+        measures = ", ".join(m["member"] for m in dataset.get("measures", [])[:8])
+        dimensions = ", ".join(
+            d["member"]
+            for d in [*dataset.get("time_dimensions", []), *dataset.get("dimensions", [])][:10]
+        )
+        lines.append(f"**{dataset['name']}**")
+        if dataset.get("description"):
+            lines.append(dataset["description"])
+        if measures:
+            lines.append(f"- Measures: {measures}")
+        if dimensions:
+            lines.append(f"- Dimensions: {dimensions}")
+        lines.append("")
+
+    lines.append(
+        "Use `semantic_catalog` for the full catalog, `describe_dataset` for one "
+        "dataset, and `semantic_query` for all analysis. Do not write SQL."
+    )
+    return "\n".join(lines)
+
+
+async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+    try:
+        return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
+    except SemanticCatalogUnavailable:
+        tenant_count = await workspace.tenants.acount()
+        if tenant_count == 1:
+            tenant = await workspace.tenants.afirst()
+            ts = await TenantSchema.objects.filter(
+                tenant=tenant,
+                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            ).afirst()
+            if ts is None:
+                return _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else (
+                    "No data has been loaded yet. Call `run_materialization` to start "
+                    "loading. This tool returns IMMEDIATELY with `status: started` — do "
+                    "NOT call other data tools in the same turn. Acknowledge to the user "
+                    "in ONE sentence and end your turn. The system will resume the "
+                    "conversation automatically when materialization completes."
+                )
+            if ts.state == SchemaState.MATERIALIZING:
+                return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE if not interactive else (
+                    "A materialization is already in progress in the background. Do NOT "
+                    "trigger another one and do NOT call other data tools. Briefly tell "
+                    "the user it's still loading and end your turn — the system will "
+                    "resume the conversation automatically when materialization completes."
+                )
+            return (
+                "Data is loaded, but no semantic datasets are available yet. "
+                "Run materialization to rebuild the semantic catalog, then use "
+                "`semantic_catalog` and `semantic_query`."
+            )
+        if tenant_count > 1:
+            vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
+            if vs is not None and vs.state == SchemaState.MATERIALIZING:
+                return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE if not interactive else (
+                    "A materialization is already in progress in the background. Do NOT "
+                    "trigger another one and do NOT call other data tools. Briefly tell "
+                    "the user it's still loading and end your turn — the system will "
+                    "resume the conversation automatically when materialization completes."
+                )
+            return (
+                f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
+                "No semantic datasets are available yet. Call `run_materialization` "
+                "to load workspace data and rebuild the semantic catalog."
+            )
+        return _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else (
+            "No data has been loaded yet. Call `run_materialization` to start "
+            "loading. This tool returns IMMEDIATELY with `status: started` — do "
+            "NOT call other data tools in the same turn. Acknowledge to the user "
+            "in ONE sentence and end your turn. The system will resume the "
+            "conversation automatically when materialization completes."
+        )
 
 
 # Guidance injected for HEADLESS (non-interactive) runs — e.g. recipe execution.
@@ -822,10 +926,9 @@ def _build_tools(
     Build the tool list for the agent.
 
     MCP tools (from the Scout MCP server):
-    - query: Execute read-only SQL queries
-    - list_tables: List available tables
-    - describe_table: Get table column details
-    - get_metadata: Full schema snapshot
+    - semantic_catalog: List business-facing datasets and members
+    - describe_dataset: Get dataset dimensions, measures, and relationships
+    - semantic_query: Run structured measure/dimension queries
 
     Local tools (always included):
     - save_learning: For persisting discovered corrections
@@ -912,7 +1015,7 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
 - Provider: {tenant.get_provider_display()}
 - Pipeline: {pipeline_name}
 
-## Query Configuration
+## Semantic Query Configuration
 
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
@@ -920,20 +1023,19 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-        # Pre-fetch schema state and table metadata — no need to call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant, user, interactive)
-        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
     elif tenant_count > 1:
         sections.append("""
-## Query Configuration
+## Semantic Query Configuration
 
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
-        schema_context = await _fetch_multi_tenant_schema_context(workspace, user, interactive)
-        sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
 
     result = "\n".join(sections)
 

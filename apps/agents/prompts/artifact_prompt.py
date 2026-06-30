@@ -1,195 +1,94 @@
-"""
-Artifact creation prompt additions for Scout data agent.
-
-This module provides prompt text that instructs the agent on how and when
-to create interactive artifacts. The prompt covers:
-- When to use each artifact type
-- React component guidelines and available libraries
-- Example code patterns
-- Data handling best practices
-"""
+"""Artifact creation prompt additions for Scout data agent."""
 
 ARTIFACT_PROMPT_ADDITION = """
 ## Creating Interactive Artifacts
 
-You have the ability to create interactive visualizations and content using the `create_artifact` and `update_artifact` tools. Use these when the user's question would benefit from a visual representation rather than just text and tables.
+You can create artifacts with `create_artifact` and `update_artifact`. In
+semantic-model mode, prefer `artifact_type="story"` for data-backed outputs.
+Stories are structured documents with hidden semantic query blocks and visible
+blocks such as markdown, stat, table, and chart.
 
 ### When to Create Artifacts
 
 Create an artifact when:
-- The user asks for a chart, graph, or visualization
-- Data would be clearer as a visual (trends, comparisons, distributions)
-- The user requests a dashboard or interactive view
-- Complex data relationships need to be shown
-- The user explicitly asks for a "visualization" or "chart"
+- The user asks for a chart, graph, dashboard, report, or reusable view
+- The answer contains multiple metrics or trends that should be reopened later
+- A visual or table would be clearer than a chat response
 
-Do NOT create an artifact when:
-- A simple markdown table suffices
-- The user just wants raw numbers
-- The user explicitly asks for text/table format
+Do not create an artifact when a short text answer or small markdown table is enough.
 
-### Artifact Types
+### Story Artifacts
 
-Choose the appropriate artifact type based on the use case:
-
-**react** (Recommended for most visualizations)
-- Interactive dashboards and complex visualizations
-- Charts with user interactions (hover, click, zoom)
-- Multi-chart layouts and data grids
-- Use when you need maximum flexibility
-
-**plotly**
-- Statistical charts and scientific visualizations
-- 3D plots, contour plots, heatmaps
-- When you need Plotly-specific chart types
-- Pass the Plotly figure specification as JSON in the code field
-
-**html**
-- Simple formatted tables with styling
-- Static content with custom CSS
-- Embeddable widgets
-- When React overhead isn't needed
-
-**markdown**
-- Documentation and reports
-- Formatted text with code blocks
-- Content that will be exported or shared as text
-
-**svg**
-- Custom diagrams and flowcharts
-- Icons and simple graphics
-- When you need precise vector control
-
-### React Artifact Guidelines
-
-For React artifacts, follow these patterns:
-
-**Available Libraries (pre-loaded, no imports needed from CDN):**
-- `recharts` - For charts. The sandbox exposes the full Recharts v2 surface:
-  - Charts: `LineChart`, `BarChart`, `AreaChart`, `ComposedChart`, `PieChart`,
-    `RadarChart`, `RadialBarChart`, `ScatterChart`, `FunnelChart`, `Treemap`, `Sankey`
-  - Series: `Line`, `Bar`, `Area`, `Pie`, `Radar`, `RadialBar`, `Scatter`, `Funnel`
-  - Axes & grids: `XAxis`, `YAxis`, `ZAxis`, `CartesianGrid`, `PolarGrid`,
-    `PolarAngleAxis`, `PolarRadiusAxis`
-  - Reference shapes: `ReferenceLine`, `ReferenceArea`, `ReferenceDot`
-  - Decorations: `Tooltip`, `Legend`, `Label`, `LabelList`, `Cell`, `Brush`,
-    `ErrorBar`, `Customized`, `ResponsiveContainer`
-- `react` - Core React (useState, useEffect, useMemo, etc.)
-- `lucide-react` - Icons
-
-**Component Structure:**
-```jsx
-export default function MyChart({ data }) {
-  // data keys match the "name" fields from source_queries
-  // e.g. data.monthly_revenue is an array of row objects
-  const rows = data.monthly_revenue || [];
-
-  return (
-    <div className="p-4">
-      {/* Your visualization */}
-    </div>
-  );
-}
-```
-
-**Styling:**
-- Tailwind CSS classes are available (p-4, flex, grid, text-lg, etc.)
-- Use inline styles for dynamic values
-- Keep visualizations responsive with relative widths
-
-### Live Data via source_queries (CRITICAL — ALWAYS USE)
-
-Artifacts fetch live data at render time. You MUST provide `source_queries` with
-the SQL queries that produce the data your component needs. NEVER embed query
-result rows in the `data` parameter or hard-code data arrays in the component
-code — doing so creates a stale snapshot that never updates. The system executes
-the queries against the project database every time the artifact is viewed, so
-data is always fresh.
-
-Even for small result sets, always use source_queries. The user expects to reopen
-any artifact later and see current data.
-
-Each source query is a dict with "name" and "sql" keys:
-```python
-source_queries=[
-    {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"},
-    {"name": "top_products", "sql": "SELECT p.name, SUM(oi.quantity) AS units_sold FROM order_items oi JOIN products p ON oi.product_id = p.id GROUP BY 1 ORDER BY 2 DESC LIMIT 10"},
-]
-```
-
-The component receives `data.monthly_revenue` (array of row objects with column-name
-keys) and `data.top_products`. Results are always arrays, even for single-row queries.
-
-### Example: React Artifact with Live Queries
+For data-backed artifacts, use:
 
 ```python
 create_artifact(
-    title="Monthly Revenue vs Target",
-    artifact_type="react",
-    code='''
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-
-export default function RevenueChart({ data }) {
-  const rows = data.monthly_revenue || [];
-
-  return (
-    <div className="w-full h-96 p-4">
-      <h2 className="text-xl font-semibold mb-4">Monthly Revenue</h2>
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={rows} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="month" />
-          <YAxis />
-          <Tooltip formatter={(value) => `$${Number(value).toLocaleString()}`} />
-          <Legend />
-          <Line type="monotone" dataKey="revenue" stroke="#8884d8" strokeWidth={2} name="Revenue" />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-    ''',
-    source_queries=[
-        {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at)::date AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"}
-    ]
+    title="Verified Visits This Week",
+    artifact_type="story",
+    data={
+        "story_doc": {
+            "blocks": [
+                {
+                    "id": "q",
+                    "type": "semantic_query",
+                    "hidden": True,
+                    "config": {
+                        "queries": {
+                            "visits_by_worker": {
+                                "measures": ["visits.count"],
+                                "dimensions": ["visits.username"],
+                                "time_dimension": "visits.visit_date",
+                                "granularity": "day",
+                                "filters": [
+                                    {
+                                        "field": "visits.visit_date",
+                                        "operator": "inDateRange",
+                                        "value": ["2026-06-22", "2026-06-28"],
+                                    }
+                                ],
+                                "limit": 100,
+                            }
+                        }
+                    },
+                },
+                {"id": "title", "type": "markdown", "config": {"body": "# Verified Visits"}},
+                {"id": "table", "type": "table", "config": {"query": "visits_by_worker"}},
+            ]
+        }
+    },
+    semantic_queries=[
+        {
+            "name": "visits_by_worker",
+            "measures": ["visits.count"],
+            "dimensions": ["visits.username"],
+            "time_dimension": "visits.visit_date",
+            "granularity": "day",
+            "filters": [
+                {
+                    "field": "visits.visit_date",
+                    "operator": "inDateRange",
+                    "value": ["2026-06-22", "2026-06-28"],
+                }
+            ],
+            "limit": 100,
+        }
+    ],
 )
 ```
 
-### Data Best Practices
+Rules:
+- Use semantic member names from `semantic_catalog` or `describe_dataset`.
+- Do not write raw SQL in artifacts.
+- Do not embed query result rows in `data`; use `semantic_queries` so the story refreshes.
+- Keep each semantic query focused on one logical dataset.
+- Give every query a stable, descriptive `name`; visible story blocks refer to that name.
+- If a semantic member does not exist, call `semantic_catalog` again or ask a clarifying question.
 
-1. **ALWAYS provide source_queries**: Every data-driven artifact MUST have
-   source_queries with the SQL. Never put query results in `data` or hard-code
-   them in the component. This is what makes artifacts reusable with live data.
+### Legacy Artifact Types
 
-2. **Name queries to match component expectations**: The query "name" becomes the
-   key on the data prop. Pick clear, descriptive names.
-
-3. **Handle missing/empty data gracefully**: Always default with `|| []` or `|| {}`
-   so the component renders a meaningful empty state rather than crashing.
-
-4. **Use the `data` parameter only for static config**: Things like color palettes,
-   thresholds, or labels that are not query results. Query results come from
-   source_queries automatically.
-
-5. **Keep queries focused**: One query per logical dataset. A dashboard with KPIs,
-   a trend chart, and a top-N list should have three separate named queries.
-
-### Updating Artifacts
-
-When a user asks to modify an existing artifact:
-1. Use `update_artifact` with the artifact_id from the original creation
-2. Provide the complete new code (not a diff)
-3. Optionally update source_queries if the underlying queries changed
-
-Example:
-```python
-update_artifact(
-    artifact_id="abc-123-...",
-    code="... updated component code ...",
-    source_queries=[{"name": "revenue", "sql": "SELECT ..."}],
-    title="Updated Title"
-)
-```
+Use `react`, `plotly`, `html`, `markdown`, or `svg` only for non-data-backed
+static content or for maintaining an existing legacy artifact. New data-backed
+work should be a story artifact.
 """
 
 

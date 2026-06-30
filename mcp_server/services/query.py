@@ -68,29 +68,33 @@ async def _execute_async(ctx: QueryContext, sql: str, timeout_seconds: int) -> d
 async def _execute_async_parameterized(
     ctx: QueryContext, sql: str, params: tuple, timeout_seconds: int
 ) -> dict[str, Any]:
-    """Run a parameterized SQL query asynchronously. No validation or LIMIT injection."""
+    """Run a trusted parameterized SQL query asynchronously under the read-only role."""
     async with (
         await psycopg.AsyncConnection.connect(**ctx.connection_params, autocommit=True) as conn,
         conn.cursor() as cursor,
     ):
-        await cursor.execute(
-            psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
-        )
-        await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-        await cursor.execute(sql, params)
+        await cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
+        try:
+            await cursor.execute(
+                psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
+            )
+            await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
+            await cursor.execute(sql, params)
 
-        columns: list[str] = []
-        rows: list[list[Any]] = []
+            columns: list[str] = []
+            rows: list[list[Any]] = []
 
-        if cursor.description:
-            columns = [desc[0] for desc in cursor.description]
-            rows = [list(row) for row in await cursor.fetchall()]
+            if cursor.description:
+                columns = [desc[0] for desc in cursor.description]
+                rows = [list(row) for row in await cursor.fetchall()]
 
-        return {
-            "columns": columns,
-            "rows": rows,
-            "row_count": len(rows),
-        }
+            return {
+                "columns": columns,
+                "rows": rows,
+                "row_count": len(rows),
+            }
+        finally:
+            await cursor.execute("RESET ROLE")
 
 
 async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:

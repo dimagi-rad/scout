@@ -14,12 +14,12 @@ export function AppLayout() {
   const prevIsOnlineRef = useRef(isOnline)
 
   const activeDomainId = useAppStore((s) => s.activeDomainId)
-  const dictionaryStatus = useAppStore((s) => s.dictionaryStatus)
+  const datasetStatus = useAppStore((s) => s.datasetStatus)
   const recipeStatus = useAppStore((s) => s.recipeStatus)
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const artifactsStatus = useAppStore((s) => s.artifactsStatus)
 
-  const fetchDictionary = useAppStore((s) => s.dictionaryActions.fetchDictionary)
+  const fetchDatasets = useAppStore((s) => s.datasetActions.fetchDatasets)
   const fetchRecipes = useAppStore((s) => s.recipeActions.fetchRecipes)
   const fetchKnowledge = useAppStore((s) => s.knowledgeActions.fetchKnowledge)
   const fetchArtifacts = useAppStore((s) => s.artifactActions.fetchArtifacts)
@@ -30,18 +30,18 @@ export function AppLayout() {
     prevIsOnlineRef.current = isOnline
 
     if (isOnline && wasOffline) {
-      if (dictionaryStatus === "error") fetchDictionary()
+      if (datasetStatus === "error") fetchDatasets()
       if (recipeStatus === "error") fetchRecipes()
       if (knowledgeStatus === "error") fetchKnowledge()
       if (artifactsStatus === "error") fetchArtifacts()
     }
   }, [
     isOnline,
-    dictionaryStatus,
+    datasetStatus,
     recipeStatus,
     knowledgeStatus,
     artifactsStatus,
-    fetchDictionary,
+    fetchDatasets,
     fetchRecipes,
     fetchKnowledge,
     fetchArtifacts,

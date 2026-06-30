@@ -1,0 +1,432 @@
+"""Semantic catalog bootstrap and serialization."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from asgiref.sync import async_to_sync
+from django.db import transaction
+
+from apps.knowledge.models import TableKnowledge
+from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel, SemanticRelationship
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantMetadata,
+    TenantSchema,
+    WorkspaceViewSchema,
+)
+from mcp_server.context import load_workspace_context
+from mcp_server.pipeline_registry import get_registry
+from mcp_server.services.metadata import (
+    pipeline_describe_table,
+    pipeline_list_tables,
+    workspace_list_tables,
+)
+
+
+class SemanticCatalogUnavailable(Exception):
+    """Raised when no queryable schema is available for a workspace."""
+
+    def __init__(self, message: str, schema_status: str = "unavailable") -> None:
+        super().__init__(message)
+        self.schema_status = schema_status
+
+
+@dataclass(frozen=True)
+class PhysicalTable:
+    name: str
+    type: str
+    description: str
+    columns: list[dict[str, Any]]
+    materialized_row_count: int | None = None
+    materialized_at: str | None = None
+
+
+_SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
+_INTEGER_TYPES = {"smallint", "integer", "bigint", "smallserial", "serial", "bigserial"}
+_NUMERIC_TYPES = {
+    *_INTEGER_TYPES,
+    "decimal",
+    "numeric",
+    "real",
+    "double precision",
+    "money",
+}
+_TIME_TYPES = {
+    "date",
+    "timestamp",
+    "timestamp without time zone",
+    "timestamp with time zone",
+    "time",
+    "time without time zone",
+    "time with time zone",
+}
+
+
+def semantic_name(value: str, *, fallback: str = "field") -> str:
+    """Return a stable slug safe for semantic member names."""
+    normalized = _SAFE_NAME_RE.sub("_", value.strip().lower()).strip("_")
+    if not normalized:
+        normalized = fallback
+    if normalized[0].isdigit():
+        normalized = f"{fallback}_{normalized}"
+    return normalized[:255]
+
+
+def _humanize_name(value: str) -> str:
+    return value.replace("_", " ").strip().title()
+
+
+def _is_numeric(data_type: str) -> bool:
+    return data_type.lower() in _NUMERIC_TYPES
+
+
+def _is_time(data_type: str) -> bool:
+    lowered = data_type.lower()
+    return lowered in _TIME_TYPES or "timestamp" in lowered
+
+
+def _tenant_metadata_for_schema(schema_name: str):
+    ts = TenantSchema.objects.filter(schema_name=schema_name).first()
+    if ts is None:
+        return None
+    return TenantMetadata.objects.filter(tenant_membership__tenant_id=ts.tenant_id).first()
+
+
+def _pipeline_config_for_schema(schema_name: str):
+    registry = get_registry()
+    ts = TenantSchema.objects.filter(schema_name=schema_name).select_related("tenant").first()
+    if ts is None:
+        return registry.get("commcare_sync")
+
+    last_run = (
+        MaterializationRun.objects.filter(
+            tenant_schema=ts,
+            state__in=[
+                MaterializationRun.RunState.COMPLETED,
+                MaterializationRun.RunState.PARTIAL,
+            ],
+        )
+        .order_by("-completed_at")
+        .first()
+    )
+    if last_run:
+        cfg = registry.get(last_run.pipeline)
+        if cfg:
+            return cfg
+    return registry.get_by_provider(ts.tenant.provider) or registry.get("commcare_sync")
+
+
+async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
+    ctx = await load_workspace_context(str(workspace.id))
+    schema_name = ctx.schema_name
+
+    is_view_schema = await WorkspaceViewSchema.objects.filter(
+        workspace_id=workspace.id,
+        schema_name=schema_name,
+        state=SchemaState.ACTIVE,
+    ).aexists()
+
+    if is_view_schema:
+        table_entries = await workspace_list_tables(ctx)
+        pipeline_config = get_registry().get("commcare_sync")
+        tenant_metadata = None
+    else:
+        ts = await TenantSchema.objects.filter(schema_name=schema_name).afirst()
+        if ts is None:
+            table_entries = await workspace_list_tables(ctx)
+            pipeline_config = get_registry().get("commcare_sync")
+            tenant_metadata = None
+        else:
+            last_run = (
+                await MaterializationRun.objects.filter(
+                    tenant_schema=ts,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
+                )
+                .order_by("-completed_at")
+                .afirst()
+            )
+            registry = get_registry()
+            pipeline_config = None
+            if last_run:
+                pipeline_config = registry.get(last_run.pipeline)
+            if pipeline_config is None:
+                tenant = await Tenant.objects.aget(id=ts.tenant_id)
+                pipeline_config = registry.get_by_provider(tenant.provider)
+            if pipeline_config is None:
+                pipeline_config = registry.get("commcare_sync")
+            table_entries = await pipeline_list_tables(ts, pipeline_config)
+            tenant_metadata = await TenantMetadata.objects.filter(
+                tenant_membership__tenant_id=ts.tenant_id
+            ).afirst()
+
+    physical_tables: list[PhysicalTable] = []
+    for entry in table_entries:
+        table_name = entry.get("name", "")
+        if not table_name or table_name.startswith("stg_"):
+            continue
+        detail = await pipeline_describe_table(
+            table_name,
+            ctx,
+            tenant_metadata,
+            pipeline_config,
+        )
+        physical_tables.append(
+            PhysicalTable(
+                name=table_name,
+                type=entry.get("type", "table"),
+                description=(detail or {}).get("description") or entry.get("description", ""),
+                columns=(detail or {}).get("columns", []),
+                materialized_row_count=entry.get("materialized_row_count"),
+                materialized_at=entry.get("materialized_at"),
+            )
+        )
+    return schema_name, physical_tables
+
+
+def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
+    try:
+        return async_to_sync(_load_physical_tables_async)(workspace)
+    except Exception as exc:
+        tenant = workspace.tenant
+        schema_status = "unavailable"
+        if tenant is not None and TenantSchema.objects.filter(
+            tenant=tenant,
+            state=SchemaState.PROVISIONING,
+        ).exists():
+            schema_status = "provisioning"
+        raise SemanticCatalogUnavailable(
+            "Data unavailable. Please refresh workspace data.",
+            schema_status=schema_status,
+        ) from exc
+
+
+def ensure_semantic_model(workspace) -> SemanticModel:
+    """Create or refresh the default semantic catalog from active physical tables."""
+    schema_name, tables = load_physical_tables(workspace)
+    if not tables:
+        raise SemanticCatalogUnavailable("No queryable datasets are available.")
+
+    with transaction.atomic():
+        model, _ = SemanticModel.objects.select_for_update().get_or_create(
+            workspace=workspace,
+            defaults={"name": f"{workspace.name} Semantic Model"},
+        )
+        existing_dataset_ids: set[str] = set()
+        for table in tables:
+            dataset_name = semantic_name(table.name, fallback="dataset")
+            annotation = TableKnowledge.objects.filter(
+                workspace=workspace,
+                table_name=table.name,
+            ).first()
+            dataset, _ = SemanticDataset.objects.update_or_create(
+                workspace=workspace,
+                name=dataset_name,
+                defaults={
+                    "semantic_model": model,
+                    "label": _humanize_name(table.name),
+                    "description": (
+                        annotation.description if annotation and annotation.description else table.description
+                    ),
+                    "schema_name": schema_name,
+                    "table_name": table.name,
+                    "row_count": table.materialized_row_count,
+                    "is_visible": True,
+                    "metadata": {
+                        "source_type": table.type,
+                        "materialized_at": table.materialized_at,
+                        "row_count_verified": False,
+                    },
+                },
+            )
+            existing_dataset_ids.add(str(dataset.id))
+            _sync_fields(dataset, table.columns, annotation)
+
+        SemanticDataset.objects.filter(workspace=workspace).exclude(
+            id__in=existing_dataset_ids
+        ).update(is_visible=False)
+        model.status = SemanticModel.Status.ACTIVE
+        model.diagnostics = []
+        model.save(update_fields=["status", "diagnostics", "updated_at"])
+        return model
+
+
+def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:
+    column_notes = annotation.column_notes if annotation else {}
+    active_names: set[str] = set()
+
+    count_field, _ = SemanticField.objects.update_or_create(
+        dataset=dataset,
+        name="count",
+        defaults={
+            "label": "Count",
+            "description": f"Number of rows in {_humanize_name(dataset.table_name)}.",
+            "field_type": SemanticField.FieldType.MEASURE,
+            "data_type": "integer",
+            "expression": "*",
+            "measure_type": SemanticField.MeasureType.COUNT,
+            "is_visible": True,
+            "metadata": {"generated": True},
+        },
+    )
+    active_names.add(count_field.name)
+
+    for column in columns:
+        column_name = column.get("name", "")
+        if not column_name:
+            continue
+        field_name = semantic_name(column_name)
+        data_type = column.get("type") or column.get("data_type") or ""
+        description = column_notes.get(column_name) or column.get("description", "")
+        field_type = (
+            SemanticField.FieldType.TIME_DIMENSION
+            if _is_time(data_type)
+            else SemanticField.FieldType.DIMENSION
+        )
+        SemanticField.objects.update_or_create(
+            dataset=dataset,
+            name=field_name,
+            defaults={
+                "label": _humanize_name(column_name),
+                "description": description,
+                "field_type": field_type,
+                "data_type": data_type,
+                "expression": column_name,
+                "measure_type": "",
+                "is_visible": True,
+                "metadata": {
+                    "source_column": column_name,
+                    "nullable": column.get("nullable"),
+                    "default": column.get("default"),
+                },
+            },
+        )
+        active_names.add(field_name)
+
+        if _is_numeric(data_type):
+            for measure_type, prefix, label_prefix in (
+                (SemanticField.MeasureType.SUM, "sum", "Total"),
+                (SemanticField.MeasureType.AVG, "avg", "Average"),
+            ):
+                measure_name = semantic_name(f"{prefix}_{column_name}")
+                SemanticField.objects.update_or_create(
+                    dataset=dataset,
+                    name=measure_name,
+                    defaults={
+                        "label": f"{label_prefix} {_humanize_name(column_name)}",
+                        "description": "",
+                        "field_type": SemanticField.FieldType.MEASURE,
+                        "data_type": data_type,
+                        "expression": column_name,
+                        "measure_type": measure_type,
+                        "is_visible": True,
+                        "metadata": {"source_column": column_name, "generated": True},
+                    },
+                )
+                active_names.add(measure_name)
+
+    SemanticField.objects.filter(dataset=dataset).exclude(name__in=active_names).update(
+        is_visible=False
+    )
+
+
+def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
+    datasets = []
+    for dataset in (
+        model.datasets.filter(is_visible=True)
+        .prefetch_related("fields")
+        .order_by("name")
+    ):
+        fields = [f for f in dataset.fields.all() if f.is_visible]
+        dimensions = [
+            _serialize_field(f)
+            for f in fields
+            if f.field_type == SemanticField.FieldType.DIMENSION
+        ]
+        time_dimensions = [
+            _serialize_field(f)
+            for f in fields
+            if f.field_type == SemanticField.FieldType.TIME_DIMENSION
+        ]
+        measures = [
+            _serialize_field(f)
+            for f in fields
+            if f.field_type == SemanticField.FieldType.MEASURE
+        ]
+        relationships = [
+            serialize_relationship(r)
+            for r in SemanticRelationship.objects.filter(
+                workspace=model.workspace,
+                from_dataset=dataset,
+            ).select_related("to_dataset")
+        ]
+        datasets.append(
+            {
+                "id": str(dataset.id),
+                "name": dataset.name,
+                "label": dataset.label or dataset.name,
+                "description": dataset.description,
+                "schema_name": dataset.schema_name,
+                "table_name": dataset.table_name,
+                "primary_key": dataset.primary_key,
+                "row_count": dataset.row_count,
+                "row_count_verified": bool(dataset.metadata.get("row_count_verified")),
+                "dimensions": dimensions,
+                "time_dimensions": time_dimensions,
+                "measures": measures,
+                "relationships": relationships,
+                "metadata": dataset.metadata,
+            }
+        )
+    return {
+        "model": {
+            "id": str(model.id),
+            "name": model.name,
+            "version": model.version,
+            "status": model.status,
+            "diagnostics": model.diagnostics,
+            "updated_at": model.updated_at.isoformat(),
+        },
+        "datasets": datasets,
+    }
+
+
+def serialize_dataset(dataset: SemanticDataset) -> dict[str, Any]:
+    model = dataset.semantic_model
+    catalog = serialize_catalog(model)
+    for entry in catalog["datasets"]:
+        if entry["id"] == str(dataset.id):
+            return {"model": catalog["model"], "dataset": entry}
+    raise SemanticCatalogUnavailable("Dataset is not visible.")
+
+
+def _serialize_field(field: SemanticField) -> dict[str, Any]:
+    return {
+        "id": str(field.id),
+        "name": field.name,
+        "member": field.member_name,
+        "label": field.label or field.name,
+        "description": field.description,
+        "type": field.field_type,
+        "data_type": field.data_type,
+        "measure_type": field.measure_type,
+        "metadata": field.metadata,
+    }
+
+
+def serialize_relationship(relationship: SemanticRelationship) -> dict[str, Any]:
+    return {
+        "id": str(relationship.id),
+        "name": relationship.name,
+        "from_dataset": relationship.from_dataset.name,
+        "to_dataset": relationship.to_dataset.name,
+        "relationship_type": relationship.relationship_type,
+        "join_expression": relationship.join_expression,
+    }

@@ -190,6 +190,143 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
   )
 }
 
+// ---- semantic_query tool ----
+
+export interface SemanticQueryOutput {
+  success: boolean
+  data?: {
+    columns: string[]
+    rows: unknown[][]
+    row_count: number
+    truncated?: boolean
+    semantic_query?: Record<string, unknown>
+    members?: string[]
+  }
+  error?: ToolError
+  warnings?: string[]
+  timing_ms?: number
+  schema?: string
+}
+
+export function SemanticQueryToolOutput({ output }: { output: SemanticQueryOutput }) {
+  if (!output.success || !output.data) {
+    return <ToolErrorRow error={output.error} fallback="Semantic query failed" />
+  }
+
+  const { columns, rows, row_count, truncated, semantic_query, members } = output.data
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 flex-wrap">
+        <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+        <span className="text-xs text-muted-foreground font-medium">Semantic query succeeded</span>
+        <Badge variant="success">{row_count} row{row_count !== 1 ? "s" : ""}</Badge>
+        {output.timing_ms != null && <Badge variant="muted">{output.timing_ms}ms</Badge>}
+        {truncated && <Badge variant="warning">truncated</Badge>}
+      </div>
+
+      {semantic_query && (
+        <div className="rounded bg-muted/40 border border-border/50 px-3 py-2 overflow-x-auto">
+          <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(semantic_query, null, 2)}</pre>
+        </div>
+      )}
+
+      {rows.length > 0 && (
+        <div className="overflow-x-auto rounded border border-border/50">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-border/50 bg-muted/40">
+                {columns.map((col) => (
+                  <th key={col} className="px-2.5 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap">
+                    {col}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => (
+                <tr key={ri} className="border-b border-border/30 last:border-0 hover:bg-muted/20">
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="px-2.5 py-1.5 whitespace-nowrap">
+                      {cell == null ? <span className="text-muted-foreground/50 italic">null</span> : formatCell(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {members && members.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {members.map((member) => (
+            <span key={member} className="text-[10px] font-mono text-muted-foreground/70 bg-muted/40 rounded px-1">
+              {member}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- semantic_catalog / describe_dataset tools ----
+
+export interface SemanticCatalogOutput {
+  success: boolean
+  data?: {
+    model?: { name?: string; version?: number; status?: string }
+    datasets?: Array<{
+      name: string
+      label?: string
+      description?: string
+      measures?: Array<{ member: string }>
+      dimensions?: Array<{ member: string }>
+      time_dimensions?: Array<{ member: string }>
+    }>
+    dataset?: {
+      name: string
+      label?: string
+      description?: string
+      measures?: Array<{ member: string }>
+      dimensions?: Array<{ member: string }>
+      time_dimensions?: Array<{ member: string }>
+    }
+  }
+  error?: ToolError
+  timing_ms?: number
+}
+
+export function SemanticCatalogToolOutput({ output }: { output: SemanticCatalogOutput }) {
+  if (!output.success || !output.data)
+    return <ToolErrorRow error={output.error} fallback="Failed to load semantic catalog" />
+
+  const datasets = output.data.dataset ? [output.data.dataset] : output.data.datasets ?? []
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Database className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+        <span className="text-xs text-muted-foreground font-medium">
+          {datasets.length} dataset{datasets.length !== 1 ? "s" : ""}
+        </span>
+        {output.data.model?.version != null && <Badge variant="muted">model v{output.data.model.version}</Badge>}
+        {output.timing_ms != null && <Badge variant="muted">{output.timing_ms}ms</Badge>}
+      </div>
+      <div className="space-y-1">
+        {datasets.slice(0, 6).map((dataset) => (
+          <div key={dataset.name} className="rounded border border-border/50 bg-muted/20 px-2 py-1.5">
+            <div className="text-xs font-medium">{dataset.label || dataset.name}</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {(dataset.measures?.length ?? 0)} measures ·{" "}
+              {(dataset.dimensions?.length ?? 0) + (dataset.time_dimensions?.length ?? 0)} dimensions
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 // ---- describe_table tool ----
 
 export interface DescribeTableOutput {
@@ -390,4 +527,3 @@ export function GetMetadataOutput({ output }: { output: GetMetadataOutput }) {
     </div>
   )
 }
-

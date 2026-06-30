@@ -93,7 +93,7 @@ export function Sidebar() {
         <NavItem to={`${pathPrefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
         <NavItem to={`${pathPrefix}/knowledge`} icon={BookOpen} label="Knowledge" />
         <NavItem to={`${pathPrefix}/recipes`} icon={ChefHat} label="Recipes" />
-        <NavItem to={`${pathPrefix}/data-dictionary`} icon={Database} label="Data Dictionary" />
+        <NavItem to={`${pathPrefix}/datasets`} icon={Database} label="Datasets" />
       </nav>
 
       {/* Thread History */}

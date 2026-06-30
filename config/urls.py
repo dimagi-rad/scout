@@ -62,6 +62,7 @@ workspace_urlpatterns = [
     path("artifacts/", include("apps.artifacts.urls")),
     path("recipes/", include("apps.recipes.urls")),
     path("knowledge/", include("apps.knowledge.urls")),
+    path("", include("apps.semantic.urls")),
     path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
     path("", include("apps.workspaces.api.urls")),
     # Workspace management
