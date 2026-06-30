@@ -3,7 +3,6 @@ import type { Meta, StoryObj } from "@storybook/react-vite"
 
 import {
   ChatArtifactButton,
-  ChatAvatar,
   ChatReasoningPart,
   ChatTextPart,
   ChatToolCallPart,
@@ -109,15 +108,6 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
-
-export const Avatars: Story = {
-  render: () => (
-    <div className="flex items-center gap-4">
-      <ChatAvatar role="assistant" />
-      <ChatAvatar role="user" />
-    </div>
-  ),
-}
 
 export const UserTextBubble: Story = {
   render: () => (

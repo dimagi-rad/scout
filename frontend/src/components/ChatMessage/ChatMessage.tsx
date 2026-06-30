@@ -7,7 +7,7 @@ import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
-import { Bot, User, Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
+import { Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
 import {
   QueryToolOutput,
   SemanticCatalogToolOutput,
@@ -84,26 +84,6 @@ interface ChatMessageProps {
   activeMaterializationJob?: ActiveJob | null
   recentTerminationsByToolCallId?: Record<string, RecentTermination>
   onRetryDispatched?: () => void
-}
-
-interface ChatAvatarProps {
-  role: "user" | "assistant"
-}
-
-export function ChatAvatar({ role }: ChatAvatarProps) {
-  if (role === "user") {
-    return (
-      <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-        <User className="w-4 h-4 text-primary-foreground" />
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-      <Bot className="w-4 h-4 text-primary" />
-    </div>
-  )
 }
 
 interface ChatTextPartProps {
@@ -438,10 +418,8 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
 
   return (
-    <div className={`flex gap-3 ${isUser ? "justify-end" : ""}`}>
-      {!isUser && <ChatAvatar role="assistant" />}
-
-      <div className={`max-w-[80%] ${isUser ? "order-first" : ""}`}>
+    <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className="max-w-[90%]">
         {message.parts.map((part, i) => {
           if (part.type === "text") {
             return <ChatTextPart key={i} role={isUser ? "user" : "assistant"} text={part.text} />
@@ -479,8 +457,6 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
           return null
         })}
       </div>
-
-      {isUser && <ChatAvatar role="user" />}
     </div>
   )
 }

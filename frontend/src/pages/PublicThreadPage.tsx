@@ -4,7 +4,7 @@ import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Bot, User, Wrench, FileBarChart } from "lucide-react"
+import { Wrench, FileBarChart } from "lucide-react"
 
 interface MessagePart {
   type: string
@@ -91,14 +91,8 @@ function PublicChatMessage({
   const isUser = message.role === "user"
 
   return (
-    <div className={`flex gap-3 ${isUser ? "justify-end" : ""}`}>
-      {!isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
-          <Bot className="w-4 h-4 text-primary" />
-        </div>
-      )}
-
-      <div className={`max-w-[80%] ${isUser ? "order-first" : ""}`}>
+    <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className="max-w-[90%]">
         {message.parts.map((part, i) => {
           if (part.type === "text" && part.text) {
             return (
@@ -157,12 +151,6 @@ function PublicChatMessage({
           return null
         })}
       </div>
-
-      {isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-          <User className="w-4 h-4 text-primary-foreground" />
-        </div>
-      )}
     </div>
   )
 }

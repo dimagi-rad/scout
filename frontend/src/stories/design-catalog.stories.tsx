@@ -31,7 +31,6 @@ const primitiveGroups = [
       ["WorkspaceSwitcher", "src/components/WorkspaceSwitcher/WorkspaceSwitcher.tsx", "Navigation"],
       ["ChatComposer", "src/components/ChatPanel/ChatComposer.tsx", "Composer"],
       ["ChatMessage", "src/components/ChatMessage/ChatMessage.tsx", "Message"],
-      ["ChatAvatar", "src/components/ChatMessage/ChatMessage.tsx", "Message"],
       ["ChatTextPart", "src/components/ChatMessage/ChatMessage.tsx", "Message"],
       ["ChatReasoningPart", "src/components/ChatMessage/ChatMessage.tsx", "Reasoning"],
       ["ChatToolCallPart", "src/components/ChatMessage/ChatMessage.tsx", "Tool call"],
