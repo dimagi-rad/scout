@@ -22,6 +22,8 @@ class TestMcpToolNames:
         assert "query" in MCP_TOOL_NAMES
         assert "get_metadata" in MCP_TOOL_NAMES
         assert "run_materialization" in MCP_TOOL_NAMES
+        assert "list_workspaces" in MCP_TOOL_NAMES
+        assert "list_datasets" in MCP_TOOL_NAMES
 
 
 class TestTeardownSchemaUnbound:
@@ -141,7 +143,7 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_section_present(self, workspace, user):
+    async def test_data_availability_section_present(self, workspace, user, tenant):
         from apps.agents.graph.base import _build_system_prompt
 
         prompt = await _build_system_prompt(workspace, user)
@@ -151,6 +153,12 @@ class TestSystemPrompt:
         assert "get_schema_status" not in prompt
         # When no schema exists, agent is told to call run_materialization
         assert "run_materialization" in prompt
+        assert "list_workspaces" in prompt
+        assert "list_datasets" in prompt
+        # Runtime workspace/provider details are tool-discovered, not preloaded.
+        assert tenant.canonical_name not in prompt
+        assert tenant.external_id not in prompt
+        assert "Pipeline:" not in prompt
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
