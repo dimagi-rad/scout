@@ -60,12 +60,15 @@ interface DatasetDetailResponse {
 }
 
 export type DatasetStatus = "idle" | "loading" | "loaded" | "error" | "not_materialized"
+export type DatasetDetailStatus = "idle" | "loading" | "loaded" | "error"
 
 export interface DatasetSlice {
   datasetCatalog: DatasetCatalog | null
   datasetStatus: DatasetStatus
   datasetError: string | null
   selectedDataset: SemanticDataset | null
+  selectedDatasetStatus: DatasetDetailStatus
+  selectedDatasetError: string | null
   datasetActions: {
     fetchDatasets: () => Promise<void>
     fetchDataset: (datasetName: string) => Promise<void>
@@ -83,9 +86,11 @@ export const createDatasetSlice: StateCreator<
   datasetStatus: "idle",
   datasetError: null,
   selectedDataset: null,
+  selectedDatasetStatus: "idle",
+  selectedDatasetError: null,
   datasetActions: {
     fetchDatasets: async () => {
-      set({ datasetStatus: "loading", datasetError: null })
+      set({ datasetStatus: "loading", datasetError: null, selectedDatasetError: null })
       try {
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active workspace selected.")
@@ -95,6 +100,8 @@ export const createDatasetSlice: StateCreator<
         set({
           datasetCatalog: catalog,
           selectedDataset: catalog.datasets[0] ?? null,
+          selectedDatasetStatus: catalog.datasets[0] ? "loaded" : "idle",
+          selectedDatasetError: null,
           datasetStatus: "loaded",
           datasetError: null,
         })
@@ -104,6 +111,8 @@ export const createDatasetSlice: StateCreator<
         set({
           datasetStatus: status,
           datasetError: error instanceof Error ? error.message : "Failed to load datasets",
+          selectedDatasetStatus: "idle",
+          selectedDatasetError: null,
         })
       }
     },
@@ -111,10 +120,30 @@ export const createDatasetSlice: StateCreator<
     fetchDataset: async (datasetName: string) => {
       const activeDomainId = get().activeDomainId
       if (!activeDomainId) throw new Error("No active workspace selected.")
-      const raw = await api.get<DatasetDetailResponse>(
-        `/api/workspaces/${activeDomainId}/datasets/${datasetName}/`
+      const cachedDataset = get().datasetCatalog?.datasets.find(
+        (dataset) => dataset.name === datasetName
       )
-      set({ selectedDataset: raw.dataset })
+      set({ selectedDatasetStatus: "loading", selectedDatasetError: null })
+      if (cachedDataset) {
+        set({ selectedDataset: cachedDataset })
+      }
+      try {
+        const raw = await api.get<DatasetDetailResponse>(
+          `/api/workspaces/${activeDomainId}/datasets/${datasetName}/`
+        )
+        set({
+          selectedDataset: raw.dataset,
+          selectedDatasetStatus: "loaded",
+          selectedDatasetError: null,
+        })
+      } catch (error) {
+        set({
+          selectedDataset: cachedDataset ?? null,
+          selectedDatasetStatus: "error",
+          selectedDatasetError:
+            error instanceof Error ? error.message : "Failed to load dataset details",
+        })
+      }
     },
 
     clearDatasets: () => {
@@ -123,6 +152,8 @@ export const createDatasetSlice: StateCreator<
         datasetStatus: "idle",
         datasetError: null,
         selectedDataset: null,
+        selectedDatasetStatus: "idle",
+        selectedDatasetError: null,
       })
     },
   },
