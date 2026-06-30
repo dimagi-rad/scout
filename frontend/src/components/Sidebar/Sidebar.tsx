@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
@@ -20,7 +20,13 @@ import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 
 export function Sidebar() {
   const navigate = useNavigate()
+  const sidebarRef = useRef<HTMLDivElement>(null)
   const [isRailExpanded, setIsRailExpanded] = useState(false)
+  const [isTouchDevice, setIsTouchDevice] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(hover: none)").matches
+      : false
+  )
   const user = useAppStore((s) => s.user)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const domains = useAppStore((s) => s.domains)
@@ -46,11 +52,84 @@ export function Sidebar() {
     : null
 
   const collapseSidebar = () => {
-    setIsRailExpanded(false)
     if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
       document.activeElement.blur()
     }
+    window.requestAnimationFrame(() => {
+      const isHovering =
+        !isTouchDevice &&
+        document.visibilityState !== "hidden" &&
+        (sidebarRef.current?.matches(":hover") ?? false)
+      setIsRailExpanded(isHovering)
+    })
   }
+
+  const syncExpandedToInteractionState = useCallback(() => {
+    const sidebar = sidebarRef.current
+    if (!sidebar) return
+
+    const activeElement = document.activeElement
+    const focusInside = activeElement ? sidebar.contains(activeElement) : false
+    const hoverInside =
+      !isTouchDevice &&
+      document.visibilityState !== "hidden" &&
+      sidebar.matches(":hover")
+    const shouldExpand = hoverInside || focusInside
+
+    setIsRailExpanded((current) => (current === shouldExpand ? current : shouldExpand))
+  }, [isTouchDevice])
+
+  const expandFromPointer = () => {
+    if (!isTouchDevice && document.visibilityState !== "hidden") {
+      setIsRailExpanded(true)
+    }
+  }
+
+  const collapseFromPointer = () => {
+    const sidebar = sidebarRef.current
+    const activeElement = document.activeElement
+    const focusInside =
+      sidebar && activeElement ? sidebar.contains(activeElement) : false
+    if (!focusInside) {
+      setIsRailExpanded(false)
+    }
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return undefined
+    }
+
+    const mediaQuery = window.matchMedia("(hover: none)")
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsTouchDevice(event.matches)
+    }
+
+    mediaQuery.addEventListener("change", handleChange)
+    return () => {
+      mediaQuery.removeEventListener("change", handleChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const intervalId = window.setInterval(syncExpandedToInteractionState, 100)
+    const handleDocumentMouseOut = (event: MouseEvent) => {
+      if (event.relatedTarget === null) syncExpandedToInteractionState()
+    }
+
+    window.addEventListener("blur", syncExpandedToInteractionState)
+    window.addEventListener("focus", syncExpandedToInteractionState)
+    document.addEventListener("visibilitychange", syncExpandedToInteractionState)
+    document.addEventListener("mouseout", handleDocumentMouseOut)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener("blur", syncExpandedToInteractionState)
+      window.removeEventListener("focus", syncExpandedToInteractionState)
+      document.removeEventListener("visibilitychange", syncExpandedToInteractionState)
+      document.removeEventListener("mouseout", handleDocumentMouseOut)
+    }
+  }, [syncExpandedToInteractionState])
 
   // Fetch domains on mount
   useEffect(() => {
@@ -74,12 +153,14 @@ export function Sidebar() {
 
   return (
     <div
+      ref={sidebarRef}
       className="scout-sidebar-shell"
       data-expanded={isRailExpanded ? "true" : "false"}
       data-testid="sidebar-shell"
-      onPointerEnter={() => setIsRailExpanded(true)}
-      onPointerLeave={() => setIsRailExpanded(false)}
-      onPointerCancel={() => setIsRailExpanded(false)}
+      onPointerEnter={expandFromPointer}
+      onPointerMove={expandFromPointer}
+      onPointerLeave={collapseFromPointer}
+      onPointerCancel={collapseFromPointer}
       onFocusCapture={() => setIsRailExpanded(true)}
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
