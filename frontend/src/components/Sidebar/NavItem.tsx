@@ -24,7 +24,7 @@ export function NavItem({ to, icon: Icon, label, onNavigate, isActivePath }: Nav
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
-          "scout-sidebar-nav-link flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+          "scout-sidebar-nav-link flex items-center gap-3 rounded-md px-2 py-2 text-sm font-medium transition-colors lg:px-3",
           isActive || forceActive
             ? "bg-accent text-accent-foreground"
             : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"

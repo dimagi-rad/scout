@@ -263,13 +263,13 @@ export function Sidebar() {
           <Button
             variant="ghost"
             size="sm"
-            className="scout-sidebar-nav-link w-full justify-center gap-0 px-2 lg:justify-start lg:gap-1.5 lg:px-3"
+            className="scout-sidebar-nav-link w-full px-2 lg:px-3"
             asChild
             title="Connected Accounts"
             data-testid="sidebar-connections"
           >
             <Link to={`${pathPrefix}/settings/connections`} onClick={collapseSidebar}>
-              <Link2 className="h-4 w-4 shrink-0 lg:mr-2" />
+              <Link2 className="h-4 w-4 shrink-0" />
               <span className="scout-sidebar-label min-w-0 truncate">
                 Connected Accounts
               </span>
@@ -278,7 +278,7 @@ export function Sidebar() {
           <Button
             variant="ghost"
             size="sm"
-            className="scout-sidebar-nav-link w-full justify-center gap-0 px-2 lg:justify-start lg:gap-1.5 lg:px-3"
+            className="scout-sidebar-nav-link w-full px-2 lg:px-3"
             onClick={() => {
               collapseSidebar()
               logout()
@@ -286,7 +286,7 @@ export function Sidebar() {
             title="Logout"
             data-testid="logout-btn"
           >
-            <LogOut className="h-4 w-4 shrink-0 lg:mr-2" />
+            <LogOut className="h-4 w-4 shrink-0" />
             <span className="scout-sidebar-label min-w-0 truncate">Logout</span>
           </Button>
         </div>
