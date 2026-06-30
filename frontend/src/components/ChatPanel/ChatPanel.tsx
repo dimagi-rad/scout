@@ -9,6 +9,7 @@ import { MaterializationProgressBanner } from "@/components/MaterializationStatu
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
+import { ChatCanvasPanel } from "./ChatCanvasPanel"
 import {
   ChatErrorNotice,
   ChatOverloadNotice,
@@ -194,56 +195,64 @@ export function ChatPanel() {
 
   if (messages.length === 0) {
     return (
-      <ChatEmptyState
-        input={input}
-        setInput={setInput}
-        onSend={handleSend}
-        disabled={isStreaming}
-      />
+      <div className="flex h-full min-w-0">
+        <div className="min-w-0 flex-1">
+          <ChatEmptyState
+            input={input}
+            setInput={setInput}
+            onSend={handleSend}
+            disabled={isStreaming}
+          />
+        </div>
+        <ChatCanvasPanel workspaceId={activeDomainId} />
+      </div>
     )
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Message list */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.map((msg: UIMessage, msgIdx: number) => (
-          <ChatMessage
-            key={msg.id}
-            message={msg}
-            isActiveMessage={isStreaming && msgIdx === messages.length - 1}
-            workspaceId={activeDomainId ?? undefined}
-            threadId={threadId}
-            activeMaterializationJob={activeMaterializationJob}
-            recentTerminationsByToolCallId={recentTerminationsByToolCallId}
-            onRetryDispatched={notifyJobLikelyStarted}
-          />
-        ))}
-        {isStreaming && <ChatThinkingIndicator />}
-        {error && <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />}
-        {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
-      </div>
+    <div className="flex h-full min-w-0">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Message list */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+          {messages.map((msg: UIMessage, msgIdx: number) => (
+            <ChatMessage
+              key={msg.id}
+              message={msg}
+              isActiveMessage={isStreaming && msgIdx === messages.length - 1}
+              workspaceId={activeDomainId ?? undefined}
+              threadId={threadId}
+              activeMaterializationJob={activeMaterializationJob}
+              recentTerminationsByToolCallId={recentTerminationsByToolCallId}
+              onRetryDispatched={notifyJobLikelyStarted}
+            />
+          ))}
+          {isStreaming && <ChatThinkingIndicator />}
+          {error && <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />}
+          {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
+        </div>
 
-      {/* Materialization progress banner — always visible when a job is active for this thread */}
-      {activeMaterializationJob
-        && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
-        && activeDomainId && (
-          <MaterializationProgressBanner
-            job={activeMaterializationJob}
-            workspaceId={activeDomainId}
-          />
-        )}
+        {/* Materialization progress banner — always visible when a job is active for this thread */}
+        {activeMaterializationJob
+          && (activeMaterializationJob.state === "pending" || activeMaterializationJob.state === "running")
+          && activeDomainId && (
+            <MaterializationProgressBanner
+              job={activeMaterializationJob}
+              workspaceId={activeDomainId}
+            />
+          )}
 
-      {/* Input area */}
-      <div className="border-t p-4">
-        <ChatComposer
-          input={input}
-          setInput={setInput}
-          onSend={handleSend}
-          isStreaming={isStreaming}
-          onStop={() => stop()}
-        />
+        {/* Input area */}
+        <div className="border-t p-4">
+          <ChatComposer
+            input={input}
+            setInput={setInput}
+            onSend={handleSend}
+            isStreaming={isStreaming}
+            onStop={() => stop()}
+          />
+        </div>
       </div>
+      <ChatCanvasPanel workspaceId={activeDomainId} />
     </div>
   )
 }

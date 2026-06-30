@@ -205,19 +205,13 @@ async def test_run_materialization_advertises_all_injected_params():
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.xfail(
-    reason="blocked by #238: single-tenant schema-context prompt still instructs "
-    "run_materialization(pipeline=...) but the tool has no pipeline param",
-    strict=False,
-)
 async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
     """The agent prompt must not instruct a tool param the real wire does not expose.
 
     Builds the REAL single-tenant ``## Data Availability`` prompt section and checks
-    it against the real ``run_materialization`` schema. The prompt currently tells
-    the agent to call ``run_materialization`` with ``pipeline="..."`` while the wire
-    advertises no such param — the recurring prompt/contract drift class (02#6).
-    Asserts the CORRECT contract; xfail-tracked under #238.
+    it against the real ``run_materialization`` schema. This catches the recurring
+    prompt/contract drift class where the prompt tells the agent to pass an
+    argument the tool does not advertise.
     """
     async with mcp_wire() as (session, _tools):
         resp = await session.list_tools()
@@ -230,12 +224,11 @@ async def test_prompt_does_not_reference_params_absent_from_tool_schema(db):
     # No TenantSchema => the "no data loaded" branch that emits the pipeline= text.
     prompt_section = await _fetch_schema_context(tenant, None)
 
-    if "pipeline=" in prompt_section or 'pipeline="' in prompt_section:
-        assert "pipeline" in tool_params, (
-            "Prompt instructs run_materialization with a `pipeline=` argument, but the "
-            "real tool schema exposes no such param — prompt/contract drift (02#6, #238). "
-            f"Tool params: {sorted(tool_params)}"
-        )
+    assert not ("pipeline=" in prompt_section or 'pipeline="' in prompt_section), (
+        "Prompt instructs run_materialization with a `pipeline=` argument, but the "
+        "real tool schema exposes no such param — prompt/contract drift. "
+        f"Tool params: {sorted(tool_params)}"
+    )
 
 
 # --------------------------------------------------------------------------- #

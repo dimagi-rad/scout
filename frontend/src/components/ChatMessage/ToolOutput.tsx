@@ -309,7 +309,6 @@ export function SemanticCatalogToolOutput({ output }: { output: SemanticCatalogO
         <span className="text-xs text-muted-foreground font-medium">
           {datasets.length} dataset{datasets.length !== 1 ? "s" : ""}
         </span>
-        {output.data.model?.version != null && <Badge variant="muted">model v{output.data.model.version}</Badge>}
         {output.timing_ms != null && <Badge variant="muted">{output.timing_ms}ms</Badge>}
       </div>
       <div className="space-y-1">

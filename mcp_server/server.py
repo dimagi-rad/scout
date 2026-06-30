@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 
 from asgiref.sync import sync_to_async
 from django.core.exceptions import ValidationError as _ValidationError
+from django.db.models import Q
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
@@ -50,6 +51,7 @@ from apps.workspaces.models import (
     TenantMetadata,
     TenantSchema,
     Workspace,
+    WorkspaceMembership,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
@@ -77,6 +79,9 @@ from mcp_server.services.query import execute_query
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("scout")
+
+MAX_WORKSPACE_DISCOVERY_LIMIT = 100
+MAX_DATASET_DISCOVERY_LIMIT = 100
 
 
 async def _resolve_mcp_context(workspace_id: str):
@@ -356,6 +361,320 @@ async def get_lineage(
         tc["result"] = success_response(
             {"model": model_name, "lineage": chain},
             schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+def _clamp_pagination(limit: int, offset: int, *, max_limit: int) -> tuple[int, int]:
+    try:
+        parsed_limit = int(limit)
+    except (TypeError, ValueError):
+        parsed_limit = 50
+    try:
+        parsed_offset = int(offset)
+    except (TypeError, ValueError):
+        parsed_offset = 0
+
+    parsed_limit = max(1, min(parsed_limit, max_limit))
+    parsed_offset = max(0, parsed_offset)
+    return parsed_limit, parsed_offset
+
+
+def _normalize_workspace_ids(workspace_ids: list[str] | str | None) -> list[str]:
+    if workspace_ids is None or workspace_ids == "":
+        return []
+    raw_ids = [workspace_ids] if isinstance(workspace_ids, str) else list(workspace_ids)
+    normalized: list[str] = []
+    for raw_id in raw_ids:
+        try:
+            normalized.append(str(uuid.UUID(str(raw_id))))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError(f"Invalid workspace id: {raw_id!r}") from exc
+    return normalized
+
+
+async def _workspace_summary(workspace: Workspace, role: str = "", active_workspace_id: str = ""):
+    tenants = [tenant async for tenant in workspace.tenants.all()]
+    display_name = tenants[0].format_display_name(workspace.name) if tenants else workspace.name
+    return {
+        "id": str(workspace.id),
+        "name": workspace.name,
+        "display_name": display_name,
+        "role": role,
+        "is_active": bool(active_workspace_id and str(workspace.id) == str(active_workspace_id)),
+        "tenant_count": len(tenants),
+        "tenants": [
+            {
+                "id": str(tenant.id),
+                "provider": tenant.provider,
+                "provider_label": tenant.get_provider_display(),
+                "external_id": tenant.external_id,
+                "canonical_name": tenant.canonical_name,
+            }
+            for tenant in tenants
+        ],
+        "created_at": workspace.created_at.isoformat() if workspace.created_at else None,
+        "updated_at": workspace.updated_at.isoformat() if workspace.updated_at else None,
+    }
+
+
+async def _accessible_workspace_memberships(user_id: str, workspace_ids: list[str] | None = None):
+    qs = WorkspaceMembership.objects.select_related("workspace").filter(user_id=user_id)
+    if workspace_ids:
+        qs = qs.filter(workspace_id__in=workspace_ids)
+    return [membership async for membership in qs.order_by("workspace__name", "workspace_id")]
+
+
+@mcp.tool()
+async def list_workspaces(
+    limit: int = 50,
+    offset: int = 0,
+    search: str = "",
+    workspace_id: str = "",
+    user_id: str = "",
+    thread_id: str = "",
+) -> dict:
+    """List workspaces the acting user can access.
+
+    Use this to discover workspace ids, names, providers, and tenant/profile
+    metadata at runtime instead of relying on system-prompt context.
+
+    Args:
+        limit: Maximum workspaces to return, clamped to 100.
+        offset: Number of matching workspaces to skip.
+        search: Optional case-insensitive search over workspace name and tenant name/id.
+        workspace_id: Active workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; used for access control).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+    """
+    limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_WORKSPACE_DISCOVERY_LIMIT)
+    async with tool_context(
+        "list_workspaces",
+        workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        limit=limit,
+        offset=offset,
+        search=search,
+    ) as tc:
+        if not user_id:
+            tc["result"] = error_response(VALIDATION_ERROR, "user_id is required")
+            return tc["result"]
+
+        qs = (
+            WorkspaceMembership.objects.select_related("workspace")
+            .filter(user_id=user_id)
+            .order_by("workspace__name", "workspace_id")
+        )
+        if search:
+            qs = qs.filter(
+                Q(workspace__name__icontains=search)
+                | Q(workspace__tenants__canonical_name__icontains=search)
+                | Q(workspace__tenants__external_id__icontains=search)
+                | Q(workspace__tenants__provider__icontains=search)
+            ).distinct()
+
+        total = await qs.acount()
+        items = []
+        async for membership in qs[offset : offset + limit]:
+            items.append(
+                await _workspace_summary(
+                    membership.workspace,
+                    role=membership.role,
+                    active_workspace_id=workspace_id,
+                )
+            )
+
+        tc["result"] = success_response(
+            {
+                "workspaces": items,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": offset + len(items) < total,
+            },
+            schema="",
+            timing_ms=tc["timer"].elapsed_ms,
+        )
+        return tc["result"]
+
+
+def _field_summary(field) -> dict:
+    return {
+        "name": field.name,
+        "member": field.member_name,
+        "label": field.label or field.name,
+        "description": field.description,
+        "type": field.field_type,
+        "data_type": field.data_type,
+        "measure_type": field.measure_type,
+        "metadata": field.metadata,
+    }
+
+
+async def _dataset_summary(dataset: SemanticDataset, include_fields: bool) -> dict:
+    payload = {
+        "workspace": {
+            "id": str(dataset.workspace_id),
+            "name": dataset.workspace.name,
+        },
+        "id": str(dataset.id),
+        "name": dataset.name,
+        "label": dataset.label or dataset.name,
+        "description": dataset.description,
+        "schema_name": dataset.schema_name,
+        "table_name": dataset.table_name,
+        "primary_key": dataset.primary_key,
+        "row_count": dataset.row_count,
+        "row_count_verified": bool(dataset.metadata.get("row_count_verified")),
+        "metadata": dataset.metadata,
+    }
+    if include_fields:
+        fields = [
+            _field_summary(field)
+            async for field in dataset.fields.filter(is_visible=True).order_by("field_type", "name")
+        ]
+        payload["fields"] = fields
+    return payload
+
+
+@mcp.tool()
+async def list_datasets(
+    workspace_ids: list[str] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    search: str = "",
+    include_fields: bool = False,
+    workspace_id: str = "",
+    user_id: str = "",
+    thread_id: str = "",
+) -> dict:
+    """List semantic datasets across accessible workspaces with pagination.
+
+    Returns lightweight dataset summaries by default. Set include_fields=true
+    for member summaries, or call describe_dataset for a single dataset.
+
+    Args:
+        workspace_ids: Optional workspace UUIDs to filter. Omit to page across all
+            workspaces accessible to user_id; without user_id, only the active
+            injected workspace_id is allowed.
+        limit: Maximum datasets to return, clamped to 100.
+        offset: Number of matching datasets to skip.
+        search: Optional case-insensitive search over dataset/workspace text.
+        include_fields: Include visible semantic fields for each returned dataset.
+        workspace_id: Active workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; used for access control).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+    """
+    limit, offset = _clamp_pagination(limit, offset, max_limit=MAX_DATASET_DISCOVERY_LIMIT)
+    async with tool_context(
+        "list_datasets",
+        workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+        workspace_ids=workspace_ids or [],
+        limit=limit,
+        offset=offset,
+        search=search,
+        include_fields=include_fields,
+    ) as tc:
+        try:
+            requested_workspace_ids = _normalize_workspace_ids(workspace_ids)
+        except ValueError as exc:
+            tc["result"] = error_response(VALIDATION_ERROR, str(exc))
+            return tc["result"]
+
+        workspace_roles: dict[str, str] = {}
+        if user_id:
+            memberships = await _accessible_workspace_memberships(user_id, requested_workspace_ids)
+            workspaces = [membership.workspace for membership in memberships]
+            workspace_roles = {
+                str(membership.workspace_id): membership.role for membership in memberships
+            }
+            inaccessible_workspace_ids = sorted(
+                set(requested_workspace_ids) - {str(workspace.id) for workspace in workspaces}
+            )
+        else:
+            if not workspace_id:
+                tc["result"] = error_response(
+                    VALIDATION_ERROR, "user_id or workspace_id is required"
+                )
+                return tc["result"]
+            try:
+                active_workspace_id = str(uuid.UUID(str(workspace_id)))
+            except (ValueError, AttributeError, TypeError):
+                tc["result"] = error_response(
+                    VALIDATION_ERROR, f"Invalid workspace id: {workspace_id!r}"
+                )
+                return tc["result"]
+            if requested_workspace_ids and requested_workspace_ids != [active_workspace_id]:
+                tc["result"] = error_response(
+                    VALIDATION_ERROR,
+                    "workspace_ids requires user_id unless it only contains the active workspace",
+                )
+                return tc["result"]
+            try:
+                workspaces = [await Workspace.objects.aget(id=active_workspace_id)]
+            except Workspace.DoesNotExist:
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Workspace '{active_workspace_id}' not found"
+                )
+                return tc["result"]
+            inaccessible_workspace_ids = []
+
+        ready_workspace_ids: list[str] = []
+        workspace_errors: list[dict] = []
+        for workspace in workspaces:
+            try:
+                await sync_to_async(ensure_semantic_model, thread_sensitive=True)(workspace)
+                ready_workspace_ids.append(str(workspace.id))
+            except SemanticCatalogUnavailable as exc:
+                workspace_errors.append(
+                    {
+                        "workspace_id": str(workspace.id),
+                        "workspace_name": workspace.name,
+                        "error": str(exc),
+                        "schema_status": exc.schema_status,
+                    }
+                )
+
+        datasets = []
+        total = 0
+        if ready_workspace_ids:
+            qs = SemanticDataset.objects.select_related("workspace").filter(
+                workspace_id__in=ready_workspace_ids,
+                is_visible=True,
+            )
+            if search:
+                qs = qs.filter(
+                    Q(name__icontains=search)
+                    | Q(label__icontains=search)
+                    | Q(description__icontains=search)
+                    | Q(table_name__icontains=search)
+                    | Q(workspace__name__icontains=search)
+                )
+            qs = qs.order_by("workspace__name", "name", "id")
+            total = await qs.acount()
+            async for dataset in qs[offset : offset + limit]:
+                summary = await _dataset_summary(dataset, include_fields=include_fields)
+                if workspace_roles:
+                    summary["workspace"]["role"] = workspace_roles.get(
+                        str(dataset.workspace_id), ""
+                    )
+                datasets.append(summary)
+
+        tc["result"] = success_response(
+            {
+                "datasets": datasets,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+                "has_more": offset + len(datasets) < total,
+                "workspace_errors": workspace_errors,
+                "inaccessible_workspace_ids": inaccessible_workspace_ids,
+            },
+            schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]

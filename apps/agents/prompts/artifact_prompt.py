@@ -77,12 +77,12 @@ create_artifact(
 ```
 
 Rules:
-- Use semantic member names from `semantic_catalog` or `describe_dataset`.
+- Use semantic member names from `list_datasets` or `describe_dataset`.
 - Do not write raw SQL in artifacts.
 - Do not embed query result rows in `data`; use `semantic_queries` so the story refreshes.
 - Keep each semantic query focused on one logical dataset.
 - Give every query a stable, descriptive `name`; visible story blocks refer to that name.
-- If a semantic member does not exist, call `semantic_catalog` again or ask a clarifying question.
+- If a semantic member does not exist, call `list_datasets` or `describe_dataset` again, or ask a clarifying question.
 
 ### Legacy Artifact Types
 

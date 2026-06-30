@@ -62,7 +62,7 @@ async def test_fetch_schema_context_materializing(mock_tenant, mock_user):
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
-    """Returns compact table list (no columns) when full schema exceeds budget."""
+    """Active schema guidance does not embed table names in the prompt."""
     from apps.workspaces.models import SchemaState
 
     mock_ts = MagicMock()
@@ -85,17 +85,13 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
         },
     ]
 
-    # Full schema text that exceeds 6000 chars
-    big_column_text = "x" * 7000
-
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=mock_tables),
+                new=AsyncMock(return_value=mock_tables),
         ),
-        patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
             new=AsyncMock(return_value=[]),
@@ -103,20 +99,22 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        mock_full.return_value = big_column_text  # triggers fallback
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
-    assert "cases" in result
-    assert "forms" in result
-    assert "1,000" in result or "1000" in result
-    assert "describe_table" in result  # compact fallback note
+    assert "Data is loaded and ready" in result
+    assert "2026-03-02T10:00:00" in result
+    assert "list_datasets" in result
+    assert "describe_dataset" in result
+    assert "cases" not in result
+    assert "forms" not in result
+    assert "1,000" not in result and "1000" not in result
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
-    """Returns full schema with columns when it fits within the 6000-char budget."""
+    """Active schema guidance does not embed column details."""
     from apps.workspaces.models import SchemaState
 
     mock_ts = MagicMock()
@@ -132,26 +130,13 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
         },
     ]
 
-    small_column_text = (
-        "**cases** — CommCare cases (100 rows)\nColumns:\n- case_id (text)\n- closed (boolean)\n"
-    )
-
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
         patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=mock_tables),
+                new=AsyncMock(return_value=mock_tables),
         ),
-        patch(
-            "apps.agents.graph.base.pipeline_describe_table",
-            new=AsyncMock(return_value={"columns": [{"name": "case_id", "type": "text"}]}),
-        ),
-        patch("apps.agents.graph.base._render_full_schema") as mock_full,
-        patch(
-            "apps.agents.graph.base.load_tenant_context", new=AsyncMock(return_value=MagicMock())
-        ),
-        patch("apps.workspaces.models.TenantMetadata") as MockTM,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
             new=AsyncMock(return_value=[]),
@@ -159,13 +144,13 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        mock_full.return_value = small_column_text
-        MockTM.objects.filter.return_value.afirst = AsyncMock(return_value=None)
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
-    assert "case_id" in result or small_column_text in result
-    assert "describe_table" not in result  # no fallback note in full tier
+    assert "Data is loaded and ready" in result
+    assert "list_datasets" in result
+    assert "case_id" not in result
+    assert "cases" not in result
 
 
 @pytest.mark.asyncio
@@ -184,7 +169,6 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
             "apps.agents.graph.base.pipeline_list_tables",
             new=AsyncMock(return_value=[]),
         ),
-        patch("apps.agents.graph.base._render_full_schema") as mock_full,
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
             new=AsyncMock(return_value=[]),
@@ -192,7 +176,6 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
         mock_registry.return_value.get.return_value = MagicMock()
-        mock_full.return_value = ""
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
@@ -205,45 +188,26 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
 async def test_build_system_prompt_no_schema_status_call():
     """The assembled system prompt must not instruct the agent to call get_schema_status."""
     from apps.agents.graph.base import _build_system_prompt
-    from apps.workspaces.models import SchemaState
 
     mock_workspace = MagicMock()
     mock_workspace.system_prompt = None
     mock_workspace.tenants.acount = AsyncMock(return_value=1)
 
-    mock_tenant = MagicMock()
-    mock_tenant.external_id = "test-domain"
-    mock_tenant.canonical_name = "Test"
-    mock_tenant.provider = "commcare"
-    mock_workspace.tenants.afirst = AsyncMock(return_value=mock_tenant)
-
-    mock_ts = MagicMock()
-    mock_ts.state = SchemaState.ACTIVE
-
     with (
         patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
-        patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch("apps.agents.graph.base.get_registry") as mock_reg,
         patch(
-            "apps.agents.graph.base.pipeline_list_tables",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch("apps.agents.graph.base._render_full_schema") as mock_full,
-        patch(
-            "apps.transformations.services.lineage.aget_terminal_assets",
-            new=AsyncMock(return_value=[]),
+            "apps.agents.graph.base._fetch_semantic_model_context",
+            new=AsyncMock(return_value="Data is loaded. Use `list_datasets`."),
         ),
     ):
         MockKR.return_value.retrieve = AsyncMock(return_value="")
-        MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        mock_reg.return_value.get.return_value = MagicMock()
-        mock_full.return_value = ""
 
         prompt = await _build_system_prompt(mock_workspace, MagicMock())
 
     assert "call `get_schema_status`" not in prompt
     assert "start of every conversation" not in prompt
     assert "## Data Availability" in prompt
+    assert "list_datasets" in prompt
 
 
 # --- Multi-tenant ---
@@ -343,7 +307,7 @@ async def test_fetch_multi_tenant_active_materialization_run(mock_multi_workspac
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_fetch_multi_tenant_active_with_tables(mock_multi_workspace, mock_user):
-    """View schema ACTIVE -> emits table list from workspace_list_tables + namespacing hint."""
+    """View schema ACTIVE -> emits status and discovery-tool guidance, not view names."""
     from apps.workspaces.models import SchemaState
 
     vs = MagicMock()
@@ -352,44 +316,9 @@ async def test_fetch_multi_tenant_active_with_tables(mock_multi_workspace, mock_
     completed_run = MagicMock()
     completed_run.completed_at.isoformat.return_value = "2026-05-22T10:00:00"
 
-    tables = [
-        {
-            "name": "tenant_a__raw_cases",
-            "type": "view",
-            "materialized_row_count": None,
-            "row_count_verified": False,
-        },
-        {
-            "name": "tenant_a__raw_forms",
-            "type": "view",
-            "materialized_row_count": None,
-            "row_count_verified": False,
-        },
-        {
-            "name": "tenant_b__raw_cases",
-            "type": "view",
-            "materialized_row_count": None,
-            "row_count_verified": False,
-        },
-        {
-            "name": "tenant_b__raw_forms",
-            "type": "view",
-            "materialized_row_count": None,
-            "row_count_verified": False,
-        },
-    ]
-
     with (
         patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
         patch("apps.agents.graph.base.MaterializationRun") as MockMR,
-        patch(
-            "apps.agents.graph.base.load_workspace_context",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "apps.agents.graph.base.workspace_list_tables",
-            new=AsyncMock(return_value=tables),
-        ),
     ):
         MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=vs)
         MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
@@ -404,10 +333,10 @@ async def test_fetch_multi_tenant_active_with_tables(mock_multi_workspace, mock_
 
     assert "Data is loaded and ready" in result
     assert "2026-05-22T10:00:00" in result
-    assert "tenant_a__raw_cases" in result
-    assert "tenant_b__raw_forms" in result
-    assert "{tenant_name}__{table_name}" in result
-    assert "describe_table" in result
+    assert "tenant_a__raw_cases" not in result
+    assert "tenant_b__raw_forms" not in result
+    assert "list_datasets" in result
+    assert "describe_dataset" in result
 
 
 @pytest.mark.asyncio
@@ -425,13 +354,16 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
 
     with (
         patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
-        patch("apps.agents.graph.base.WorkspaceViewSchema") as MockVS,
-        patch("apps.agents.graph.base.MaterializationRun") as MockMR,
+        patch(
+            "apps.agents.graph.base._fetch_semantic_model_context",
+            new=AsyncMock(
+                return_value=(
+                    "No data has been loaded yet. Call `run_materialization` to start loading."
+                )
+            ),
+        ),
     ):
         MockKR.return_value.retrieve = AsyncMock(return_value="")
-        MockVS.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.objects.filter.return_value.afirst = AsyncMock(return_value=None)
-        MockMR.ACTIVE_STATES = frozenset({"started", "discovering", "loading", "transforming"})
 
         prompt = await _build_system_prompt(ws, MagicMock())
 
@@ -441,3 +373,4 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
     # The old "just call list_tables to discover" hint must not be the only signal
     # — that was the bug. The agent should know up front there is no data.
     assert "Call `list_tables` to see all available tables." not in prompt
+    assert "list_datasets" in prompt

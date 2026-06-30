@@ -15,6 +15,7 @@ export type {
 } from "./dictionarySlice"
 export type {
   DatasetCatalog,
+  DatasetDetailStatus,
   DatasetSlice,
   DatasetStatus,
   SemanticDataset,

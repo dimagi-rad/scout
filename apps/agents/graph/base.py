@@ -44,7 +44,6 @@ from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
     ensure_semantic_model,
-    serialize_catalog,
 )
 from apps.workspaces.models import (
     MaterializationRun,
@@ -52,13 +51,10 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceViewSchema,
 )
-from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
-    pipeline_describe_table,
     pipeline_list_tables,
     transformation_aware_list_tables,
-    workspace_list_tables,
 )
 
 if TYPE_CHECKING:
@@ -76,6 +72,8 @@ MCP_TOOL_NAMES = frozenset(
         "describe_table",
         "query",
         "get_metadata",
+        "list_workspaces",
+        "list_datasets",
         "semantic_catalog",
         "describe_dataset",
         "semantic_query",
@@ -121,9 +119,7 @@ AGENT_EXCLUDED_MCP_TOOLS = frozenset(
 INJECTED_TOOL_PARAMS = frozenset({"workspace_id", "user_id", "thread_id", "tool_call_id"})
 
 
-# Configuration constants
 DEFAULT_MAX_TOKENS = 4096
-SCHEMA_CONTEXT_CHAR_BUDGET = 6000
 
 # Circuit-breaker thresholds for the escalation node. If the last N tool
 # messages all carry one of these error codes, the agent has drifted from
@@ -243,95 +239,14 @@ def _system_prompt_cache_key(workspace, user, interactive: bool = True) -> str:
     return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}"
 
 
-def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
-    """Render a compact schema block: table names, descriptions, row counts."""
-    lines = []
-    if last_materialized_at:
-        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
-    else:
-        lines.append("Data is loaded and ready.\n")
-
-    lines.append("### Available Tables\n")
-    lines.append("| Table | Description | Materialized Rows |")
-    lines.append("|---|---|---|")
-    for t in tables:
-        materialized = t.get("materialized_row_count")
-        row_count = f"{materialized:,}" if materialized is not None else "unknown"
-        desc = t.get("description") or ""
-        lines.append(f"| {t['name']} | {desc} | {row_count} |")
-
-    lines.append(
-        "\nThe `Materialized Rows` column is the count at the last "
-        "materialization — not a live count. Do not quote it as an answer; "
-        "run `SELECT COUNT(*)` to get a verified value."
-    )
-    lines.append("\nUse the `describe_table` tool for column details.")
-    return "\n".join(lines)
-
-
-def _render_full_schema(
-    tables: list[dict],
-    column_map: dict[str, list[dict]],
-    last_materialized_at: str | None,
-) -> str:
-    """Render a full schema block with column details per table."""
-    lines = []
-    if last_materialized_at:
-        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
-    else:
-        lines.append("Data is loaded and ready.\n")
-
-    lines.append("### Available Tables\n")
-    for t in tables:
-        materialized = t.get("materialized_row_count")
-        row_count = f"{materialized:,}" if materialized is not None else "unknown"
-        desc = t.get("description") or ""
-        header = f"**{t['name']}**"
-        if desc:
-            header += f" — {desc}"
-        header += f" ({row_count} rows at last materialization)"
-        lines.append(header)
-
-        cols = column_map.get(t["name"], [])
-        if cols:
-            lines.append("Columns:")
-            for col in cols:
-                col_desc = f" — {col['description']}" if col.get("description") else ""
-                lines.append(f"- {col['name']} ({col['type']}){col_desc}")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
 def _semantic_catalog_context_sync(workspace) -> str:
-    model = ensure_semantic_model(workspace)
-    catalog = serialize_catalog(model)
-    lines = [
-        "Data is loaded and ready through the workspace semantic model.",
-        "",
-        "### Available Datasets",
-        "",
-    ]
-    for dataset in catalog["datasets"]:
-        measures = ", ".join(m["member"] for m in dataset.get("measures", [])[:8])
-        dimensions = ", ".join(
-            d["member"]
-            for d in [*dataset.get("time_dimensions", []), *dataset.get("dimensions", [])][:10]
-        )
-        lines.append(f"**{dataset['name']}**")
-        if dataset.get("description"):
-            lines.append(dataset["description"])
-        if measures:
-            lines.append(f"- Measures: {measures}")
-        if dimensions:
-            lines.append(f"- Dimensions: {dimensions}")
-        lines.append("")
-
-    lines.append(
-        "Use `semantic_catalog` for the full catalog, `describe_dataset` for one "
-        "dataset, and `semantic_query` for all analysis. Do not write SQL."
+    ensure_semantic_model(workspace)
+    return (
+        "Data is loaded and ready through the workspace semantic model. "
+        "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
+        "to page through dataset summaries, `describe_dataset` for one dataset's "
+        "members, and `semantic_query` for analysis. Do not write SQL."
     )
-    return "\n".join(lines)
 
 
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
@@ -363,7 +278,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
                 "Run materialization to rebuild the semantic catalog, then use "
-                "`semantic_catalog` and `semantic_query`."
+                "`list_datasets` and `semantic_query`."
             )
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
@@ -416,8 +331,8 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
-    Tries to build a full schema block (tables + columns). Falls back to a compact
-    block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
+    Reports availability state without embedding table or dataset names. Runtime
+    dataset discovery belongs in MCP tools such as ``list_datasets``.
 
     ``interactive`` selects the materialization guidance: fire-and-resume (chat)
     vs blocking (headless recipe runs).
@@ -472,43 +387,21 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
         tables = await pipeline_list_tables(ts, pipeline_config)
 
     if not tables:
-        return "Data is loaded but no tables are available yet. The materialization may still be completing."
-
-    last_materialized_at = tables[0].get("materialized_at") if tables else None
-
-    # Try full schema with columns
-    try:
-        ctx = await load_tenant_context(tenant.external_id, tenant.provider)
-        from apps.workspaces.models import TenantMetadata
-
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant=tenant, tenant_membership__user=user
-        ).afirst()
-
-        column_map: dict[str, list[dict]] = {}
-        for t in tables:
-            detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
-            if detail:
-                column_map[t["name"]] = detail.get("columns", [])
-
-        full_text = _render_full_schema(tables, column_map, last_materialized_at)
-
-        # Add lineage tool hint when transformation assets exist
-        if terminal_assets:
-            full_text += (
-                "\n\nThese tables are produced by a transformation pipeline. "
-                "Use the `get_lineage` tool to explore how any table was built."
-            )
-
-        if len(full_text) <= SCHEMA_CONTEXT_CHAR_BUDGET:
-            return full_text
-    except Exception:
-        logger.debug(
-            "Could not fetch full schema for context injection, using compact", exc_info=True
+        return (
+            "Data is loaded but no semantic datasets are available yet. The "
+            "materialization may still be completing. Retry `list_datasets` shortly."
         )
 
-    # Fall back to compact
-    compact = _render_compact_schema(tables, last_materialized_at)
+    last_materialized_at = tables[0].get("materialized_at") if tables else None
+    if last_materialized_at:
+        loaded = f"Data is loaded and ready. Last updated: {last_materialized_at}."
+    else:
+        loaded = "Data is loaded and ready."
+    compact = (
+        f"{loaded} Use `list_datasets` to page through dataset summaries, "
+        "`describe_dataset` for one dataset's members, and `semantic_query` "
+        "for analysis."
+    )
     if terminal_assets:
         compact += (
             "\n\nThese tables are produced by a transformation pipeline. "
@@ -567,14 +460,6 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
             "when materialization completes."
         )
 
-    # View schema is ACTIVE — list the namespaced views from information_schema.
-    tables: list[dict] = []
-    try:
-        ctx = await load_workspace_context(str(workspace.id))
-        tables = await workspace_list_tables(ctx)
-    except Exception:
-        logger.debug("Could not fetch multi-tenant table list for context injection", exc_info=True)
-
     last_run = None
     if tenant_ids:
         last_run = (
@@ -592,13 +477,6 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
         last_run.completed_at.isoformat() if last_run and last_run.completed_at else None
     )
 
-    if not tables:
-        return (
-            f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
-            "Data is loaded but no tables are visible yet. The view schema may "
-            "still be initializing — call `list_tables` to re-check shortly."
-        )
-
     lines: list[str] = []
     if last_materialized_at:
         lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}")
@@ -607,14 +485,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
     lines.append("")
     lines.append(_MULTI_TENANT_NAMESPACE_HINT)
     lines.append("")
-    lines.append("### Available Tables")
-    lines.append("")
-    lines.append("| Table |")
-    lines.append("|---|")
-    for t in tables:
-        lines.append(f"| {t['name']} |")
-    lines.append("")
-    lines.append("Use the `describe_table` tool for column details.")
+    lines.append("Use `list_datasets` and `describe_dataset` for dataset details.")
     return "\n".join(lines)
 
 
@@ -926,7 +797,8 @@ def _build_tools(
     Build the tool list for the agent.
 
     MCP tools (from the Scout MCP server):
-    - semantic_catalog: List business-facing datasets and members
+    - list_workspaces: List accessible workspaces and tenant/profile metadata
+    - list_datasets: Page through business-facing datasets across workspaces
     - describe_dataset: Get dataset dimensions, measures, and relationships
     - semantic_query: Run structured measure/dimension queries
 
@@ -974,7 +846,7 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
     2. ARTIFACT_PROMPT_ADDITION: Instructions for creating artifacts
     3. Workspace system prompt: Workspace-specific instructions
     4. Knowledge retriever output: Metrics, rules, learnings
-    5. Tenant context: Tenant name, provider, query config (single-tenant only)
+    5. Runtime discovery guidance and query config
 
     Args:
         workspace: The Workspace model instance.
@@ -1003,30 +875,14 @@ async def _build_system_prompt(workspace: Workspace, user, interactive: bool = T
 
     tenant_count = await workspace.tenants.acount()
 
-    if tenant_count == 1:
-        tenant = await workspace.tenants.afirst()
-        pipeline_config = get_registry().get_by_provider(tenant.provider)
-        pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
-
-        sections.append(f"""
-## Tenant Context
-
-- Tenant: {tenant.canonical_name} ({tenant.external_id})
-- Provider: {tenant.get_provider_display()}
-- Pipeline: {pipeline_name}
-
-## Semantic Query Configuration
-
-- Maximum rows per query: 500
-- Query timeout: 30 seconds
-
-When results are truncated, suggest adding filters or using aggregations to reduce the result size.
-""")
-
-        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
-        sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
-    elif tenant_count > 1:
+    if tenant_count > 0:
         sections.append("""
+## Workspace And Dataset Discovery
+
+Workspace names, providers, pipelines, and dataset lists are runtime data.
+Do not assume they are present in the system prompt. Use `list_workspaces`
+and `list_datasets` when you need to know what is available.
+
 ## Semantic Query Configuration
 
 - Maximum rows per query: 500
@@ -1034,6 +890,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
+
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
         sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
 

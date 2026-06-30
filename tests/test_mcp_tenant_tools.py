@@ -17,6 +17,8 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
@@ -320,8 +322,119 @@ class TestListTablesTool:
 
             result = await list_tables(workspace_id="ws-test")
 
+            assert result["success"] is True
+            assert result["data"]["tables"] == []
+
+
+# ---------------------------------------------------------------------------
+# workspace/dataset discovery tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+class TestWorkspaceAndDatasetDiscoveryTools:
+    async def test_list_workspaces_returns_accessible_workspaces(self, workspace, user):
+        from mcp_server.server import list_workspaces
+
+        result = await list_workspaces(
+            user_id=str(user.id),
+            workspace_id=str(workspace.id),
+            limit=10,
+            offset=0,
+        )
+
         assert result["success"] is True
-        assert result["data"]["tables"] == []
+        assert result["data"]["total"] == 1
+        assert result["data"]["has_more"] is False
+        item = result["data"]["workspaces"][0]
+        assert item["id"] == str(workspace.id)
+        assert item["name"] == workspace.name
+        assert item["role"] == WorkspaceRole.MANAGE
+        assert item["is_active"] is True
+        assert item["tenants"][0]["canonical_name"] == "Test Domain"
+
+    async def test_list_workspaces_requires_user_id(self):
+        from mcp_server.server import list_workspaces
+
+        result = await list_workspaces()
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    async def test_list_datasets_pages_across_accessible_workspaces(self, workspace, user):
+        from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
+        from mcp_server.server import list_datasets
+
+        model = await SemanticModel.objects.acreate(
+            workspace=workspace,
+            name="Test semantic model",
+        )
+        dataset = await SemanticDataset.objects.acreate(
+            workspace=workspace,
+            semantic_model=model,
+            name="raw_users",
+            label="Raw Users",
+            description="Worker roster",
+            schema_name="tenant_schema",
+            table_name="raw_users",
+            row_count=10,
+            metadata={"row_count_verified": False},
+        )
+        await SemanticField.objects.acreate(
+            dataset=dataset,
+            name="count",
+            label="Count",
+            field_type=SemanticField.FieldType.MEASURE,
+            data_type="integer",
+            expression="*",
+            measure_type=SemanticField.MeasureType.COUNT,
+            is_visible=True,
+        )
+
+        with patch("mcp_server.server.ensure_semantic_model", return_value=model):
+            result = await list_datasets(
+                user_id=str(user.id),
+                limit=10,
+                offset=0,
+                include_fields=True,
+            )
+
+        assert result["success"] is True
+        assert result["data"]["total"] == 1
+        item = result["data"]["datasets"][0]
+        assert item["workspace"]["id"] == str(workspace.id)
+        assert item["workspace"]["role"] == WorkspaceRole.MANAGE
+        assert item["name"] == "raw_users"
+        assert item["row_count"] == 10
+        assert item["row_count_verified"] is False
+        assert item["fields"][0]["member"] == "raw_users.count"
+
+    async def test_list_datasets_filters_inaccessible_requested_workspaces(
+        self, workspace, user, other_user, tenant
+    ):
+        from mcp_server.server import list_datasets
+
+        other_workspace = await Workspace.objects.acreate(
+            name="Other workspace",
+            created_by=other_user,
+        )
+        await WorkspaceTenant.objects.acreate(workspace=other_workspace, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=other_workspace,
+            user=other_user,
+            role=WorkspaceRole.MANAGE,
+        )
+
+        result = await list_datasets(
+            user_id=str(user.id),
+            workspace_ids=[str(other_workspace.id)],
+            limit=10,
+            offset=0,
+        )
+
+        assert result["success"] is True
+        assert result["data"]["datasets"] == []
+        assert result["data"]["inaccessible_workspace_ids"] == [str(other_workspace.id)]
 
 
 # ---------------------------------------------------------------------------
