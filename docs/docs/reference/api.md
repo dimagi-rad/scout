@@ -188,8 +188,6 @@ Access levels: `public`, `project`, `specific`.
       "category": "type_mismatch",
       "applies_to_tables": ["events"],
       "original_error": "invalid input syntax for type timestamp",
-      "original_sql": "SELECT timestamp FROM events",
-      "corrected_sql": "SELECT to_timestamp(timestamp / 1000.0) FROM events",
       "confidence_score": 0.9,
       "times_applied": 15,
       "created_at": "2026-01-20T14:30:00Z"

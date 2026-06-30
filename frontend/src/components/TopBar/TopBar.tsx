@@ -10,14 +10,14 @@ export function TopBarProvider({ children }: { children: ReactNode }) {
   return (
     <TopBarSlotContext.Provider value={slotEl}>
       <div
-        className="flex h-11 shrink-0 items-center justify-between border-b px-4"
+        className="flex h-11 min-w-0 shrink-0 items-center justify-between gap-2 overflow-hidden border-b px-3 sm:px-4"
         data-testid="top-bar"
       >
-        <div className="flex items-center gap-2" />
-        <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1" />
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           <div
             ref={setSlotEl}
-            className="flex items-center gap-2"
+            className="flex min-w-0 items-center gap-2"
             data-testid="top-bar-slot"
           />
           <WorkspaceSwitcher variant="topbar" />

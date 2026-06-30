@@ -2,7 +2,7 @@ import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
 
-export type ArtifactType = "react" | "html" | "markdown" | "plotly" | "svg"
+export type ArtifactType = "react" | "html" | "markdown" | "plotly" | "story" | "svg"
 
 export interface ArtifactSummary {
   id: string

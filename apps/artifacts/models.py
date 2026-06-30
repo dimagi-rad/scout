@@ -48,7 +48,7 @@ class Artifact(models.Model):
         version: Version number, incremented when creating new versions.
         parent_artifact: Link to previous version for version tracking.
         conversation_id: Thread ID from the conversation that created this.
-        source_queries: Legacy SQL queries that generated the underlying data.
+        source_queries: Disabled legacy SQL query metadata.
         semantic_queries: Structured semantic queries that generated the story data.
         created_at: When the artifact was created.
         updated_at: When the artifact was last modified.
@@ -117,7 +117,7 @@ class Artifact(models.Model):
     source_queries = models.JSONField(
         default=list,
         blank=True,
-        help_text="Legacy SQL queries that generated the data for this artifact.",
+        help_text="Disabled legacy query metadata for older artifacts.",
     )
     semantic_queries = models.JSONField(
         default=list,
@@ -198,7 +198,7 @@ class Artifact(models.Model):
             version=self.version + 1,
             parent_artifact=self,
             conversation_id=updates.get("conversation_id", self.conversation_id),
-            source_queries=updates.get("source_queries", self.source_queries),
+            source_queries=[],
             semantic_queries=updates.get("semantic_queries", self.semantic_queries),
         )
         new_artifact.save()

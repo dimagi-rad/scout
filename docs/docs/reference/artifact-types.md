@@ -72,10 +72,12 @@ All artifact types support versioning. When the agent creates an updated version
 Artifacts have a `data` JSON field that stores structured data used by the artifact. For example:
 
 - **Plotly** artifacts store chart data and layout configuration.
-- **React** artifacts may store query results that the component renders.
+- **React** artifacts may store static data that the component renders.
+- **Story** artifacts store a structured story document and named semantic query specs for live data.
 
 The `code` field contains the source code (React JSX, HTML markup, Markdown text, Plotly JSON, or SVG markup), and the `data` field contains supplementary structured data.
 
-## Source queries
+## Semantic query provenance
 
-Each artifact tracks the SQL queries that generated its underlying data in the `source_queries` field. This provides traceability from visualization back to the raw query.
+Story artifacts track the named `semantic_queries` that provide their live data.
+Legacy SQL-backed `source_queries` are disabled and are not executed.

@@ -5,43 +5,15 @@ Tests the full tool handler → service → response envelope chain.
 Database access is mocked at the Django ORM / psycopg boundary.
 """
 
-from unittest.mock import patch
-
 import pytest
 
-from mcp_server.context import QueryContext
 from mcp_server.envelope import (
-    CONNECTION_ERROR,
-    INTERNAL_ERROR,
     NOT_FOUND,
-    QUERY_TIMEOUT,
     VALIDATION_ERROR,
     Timer,
     error_response,
     success_response,
 )
-from mcp_server.services.query import execute_query
-
-# --- Fixtures ---
-
-
-@pytest.fixture
-def project_context():
-    """A QueryContext that doesn't require DB access."""
-    return QueryContext(
-        tenant_id="test-tenant",
-        schema_name="public",
-        max_rows_per_query=500,
-        max_query_timeout_seconds=30,
-        connection_params={
-            "host": "localhost",
-            "port": 5432,
-            "dbname": "testdb",
-            "user": "testuser",
-            "password": "testpass",
-        },
-    )
-
 
 # --- Envelope tests ---
 
@@ -100,104 +72,8 @@ class TestEnvelopeFormat:
         assert timer.elapsed_ms >= 0
 
 
-# --- Query service tests ---
-
-
-class TestExecuteQuery:
-    """Test the query service with mocked DB execution."""
-
-    @pytest.mark.asyncio
-    async def test_validation_error_returns_envelope(self, project_context):
-        result = await execute_query(project_context, "DROP TABLE users")
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-
-    @pytest.mark.asyncio
-    async def test_multiple_statements_rejected(self, project_context):
-        result = await execute_query(project_context, "SELECT 1; SELECT 2")
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-        assert "multiple" in result["error"]["message"].lower()
-
-    @pytest.mark.asyncio
-    async def test_dangerous_function_rejected(self, project_context):
-        result = await execute_query(project_context, "SELECT pg_read_file('/etc/passwd')")
-        assert result["success"] is False
-        assert result["error"]["code"] == VALIDATION_ERROR
-        assert "not allowed" in result["error"]["message"].lower()
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_successful_query(self, mock_exec, project_context):
-        mock_exec.return_value = {
-            "columns": ["id", "name"],
-            "rows": [[1, "Alice"], [2, "Bob"]],
-            "row_count": 2,
-        }
-        result = await execute_query(project_context, "SELECT id, name FROM users")
-
-        assert "columns" in result
-        assert result["columns"] == ["id", "name"]
-        assert result["row_count"] == 2
-        assert result["truncated"] is False
-        assert "sql_executed" in result
-        assert "tables_accessed" in result
-        assert "users" in result["tables_accessed"]
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_truncation_detected(self, mock_exec, project_context):
-        """When row_count equals max_limit, truncated should be True."""
-        mock_exec.return_value = {
-            "columns": ["id"],
-            "rows": [[i] for i in range(500)],
-            "row_count": 500,
-        }
-        result = await execute_query(project_context, "SELECT id FROM users")
-        assert result["truncated"] is True
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_limit_injected(self, mock_exec, project_context):
-        mock_exec.return_value = {
-            "columns": ["id"],
-            "rows": [],
-            "row_count": 0,
-        }
-        result = await execute_query(project_context, "SELECT id FROM users")
-        assert "LIMIT" in result["sql_executed"].upper()
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_timeout_error(self, mock_exec, project_context):
-        import psycopg.errors
-
-        mock_exec.side_effect = psycopg.errors.QueryCanceled()
-        result = await execute_query(project_context, "SELECT * FROM users")
-        assert result["success"] is False
-        assert result["error"]["code"] == QUERY_TIMEOUT
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_connection_error(self, mock_exec, project_context):
-        import psycopg
-
-        mock_exec.side_effect = psycopg.OperationalError("could not connect to server")
-        result = await execute_query(project_context, "SELECT * FROM users")
-        assert result["success"] is False
-        assert result["error"]["code"] == CONNECTION_ERROR
-
-    @pytest.mark.asyncio
-    @patch("mcp_server.services.query._execute_async")
-    async def test_unexpected_error(self, mock_exec, project_context):
-        mock_exec.side_effect = RuntimeError("boom")
-        result = await execute_query(project_context, "SELECT * FROM users")
-        assert result["success"] is False
-        assert result["error"]["code"] == INTERNAL_ERROR
-
-
 # --- Server tool handler tests ---
-# NOTE: Tool handler tests for list_tables, describe_table, get_metadata, and query
+# NOTE: Tool handler tests for list_tables, describe_table, and get_metadata
 # have been moved to test_mcp_tenant_tools.py which tests the current tenant-based
 # code paths (load_tenant_context + execute_internal_query).
 
@@ -231,16 +107,16 @@ class TestAuditLogScrubbing:
     def test_scrub_removes_oauth_tokens(self):
         from mcp_server.envelope import scrub_extra_fields
 
-        extra = {"sql": "SELECT 1", "oauth_tokens": {"commcare": "secret"}}
+        extra = {"measures": ["visits.count"], "oauth_tokens": {"commcare": "secret"}}
         scrubbed = scrub_extra_fields(extra)
         assert "oauth_tokens" not in scrubbed
-        assert scrubbed["sql"] == "SELECT 1"
+        assert scrubbed["measures"] == ["visits.count"]
 
     def test_scrub_noop_when_no_tokens(self):
         from mcp_server.envelope import scrub_extra_fields
 
-        extra = {"sql": "SELECT 1"}
-        assert scrub_extra_fields(extra) == {"sql": "SELECT 1"}
+        extra = {"measures": ["visits.count"]}
+        assert scrub_extra_fields(extra) == {"measures": ["visits.count"]}
 
 
 class TestAuthTokenExpiredCode:

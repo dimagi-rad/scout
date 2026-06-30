@@ -4,7 +4,7 @@ Scout's AI agent is built on LangGraph with Claude as the LLM backend. This docu
 
 ## Overview
 
-The agent implements a self-correcting conversation graph that automatically retries failed queries up to three times:
+The agent implements a self-correcting conversation graph that automatically retries failed semantic queries up to three times:
 
 ```
 START
@@ -24,6 +24,7 @@ Key characteristics:
 - **Framework**: LangGraph for conversation flow and state management
 - **Persistence**: PostgreSQL checkpointer for conversation history
 - **Self-correction**: Automatic error detection and retry with diagnosis
+- **Semantic access only**: The agent requests curated datasets and members, not raw SQL
 
 ## Agent state
 
@@ -36,7 +37,7 @@ The agent maintains state across conversation turns:
 | `project_name` | string | For display in responses |
 | `user_id` | string | For audit logging |
 | `user_role` | string | Permission level (viewer, analyst, admin) |
-| `needs_correction` | bool | Flag set when a query fails |
+| `needs_correction` | bool | Flag set when a semantic query fails |
 | `retry_count` | int | Current retry attempt (max 3) |
 | `correction_context` | dict | Error details for diagnosis |
 
@@ -44,52 +45,54 @@ Message history is automatically pruned to keep the last 20 messages plus system
 
 ## MCP integration
 
-The agent accesses project databases through a Model Context Protocol (MCP) server rather than connecting directly. The MCP server (`mcp_server/`) runs as a separate process and provides:
+The agent accesses workspace data through a Model Context Protocol (MCP) server rather than connecting directly. The MCP server (`mcp_server/`) runs as a separate process and provides:
 
-- **SQL execution** with validation, LIMIT injection, and timeout enforcement
-- **Table metadata** and column discovery
+- **Semantic catalog access** for curated datasets, measures, dimensions, and time dimensions
+- **Structured semantic query execution** with row limits and timeout enforcement
 - **Response envelopes** with consistent error codes, timing data, and audit logging
 - **Thread safety** with connection pooling, circuit breaker, and timeout handling
 
 The backend communicates with the MCP server via `langchain-mcp-adapters`, which exposes MCP tools as LangChain tools that the LangGraph agent can call. The MCP server URL is configured via the `MCP_SERVER_URL` environment variable (default: `http://localhost:8100/mcp`).
 
-All MCP tools require a `project_id` parameter to scope data access to the correct project.
+All MCP tools require a `workspace_id` parameter. The agent graph injects this
+server-side so the model does not choose or override the data scope.
 
 ## Tools
 
 The agent has access to tools provided by the MCP server and local tools for artifact and knowledge management.
 
-### execute_sql
+### semantic_catalog
 
-Execute SELECT queries against the project database (via MCP).
+List business-facing datasets and members available in the workspace semantic model.
+
+### describe_dataset
+
+Describe one semantic dataset, including its measures, dimensions, time dimensions, and relationships.
+
+### semantic_query
+
+Run a structured query against the semantic model.
 
 **Parameters:**
-- `query` (string, required): SQL SELECT query to execute
+- `measures` (list, optional): Semantic measure members such as `visits.count`
+- `dimensions` (list, optional): Semantic dimension members such as `visits.username`
+- `time_dimension` (string, optional): Semantic time dimension member
+- `granularity` (string, optional): Time bucket such as `day`, `week`, or `month`
+- `filters` (list, optional): Structured filters
+- `order_by` (list, optional): Structured ordering
+- `limit` (number, optional): Maximum rows
 
 **Returns:**
 - `columns`: List of column names
 - `rows`: Result data
 - `row_count`: Number of rows returned
 - `truncated`: Whether results hit the limit
-- `sql_executed`: The actual SQL run (may include injected LIMIT)
-- `tables_accessed`: Tables referenced in the query
-- `caveats`: Warnings about the results
+- `semantic_query`: Canonical semantic query spec
+- `members`: Semantic members used by the result
 - `error`: Error message if failed
 
-**Security features:**
-- Only SELECT statements allowed
-- Single statement enforcement (no semicolon-separated queries)
-- 40+ dangerous functions blocked (file access, remote DB, etc.)
-- Table/schema allowlist enforcement
-- Automatic LIMIT injection (respects project's `max_rows_per_query`)
-- Query timeout enforcement
-- Rate limiting per user
-
-**Blocked functions include:**
-- File system: `pg_read_file`, `pg_ls_dir`, `pg_stat_file`
-- Large objects: `lo_import`, `lo_export`, `lo_create`
-- Remote access: `dblink`, `dblink_connect`, `dblink_exec`
-- System: `pg_terminate_backend`, `pg_cancel_backend`
+The agent has no raw SQL tool. Scout backend code compiles semantic query specs
+into trusted parameterized database requests.
 
 ### create_artifact
 
@@ -97,11 +100,11 @@ Create interactive visualizations and content.
 
 **Parameters:**
 - `title` (string, required): Human-readable title
-- `artifact_type` (string, required): One of `react`, `plotly`, `html`, `markdown`, `svg`
+- `artifact_type` (string, required): One of `react`, `plotly`, `html`, `markdown`, `svg`, `story`
 - `code` (string, required): Source code for the artifact
 - `description` (string, optional): What the artifact visualizes
 - `data` (dict, optional): JSON data passed to React components as `data` prop
-- `source_queries` (list, optional): SQL queries that generated the data
+- `semantic_queries` (list, optional): Named semantic query specs that provide live story data
 
 **Artifact types:**
 
@@ -112,6 +115,7 @@ Create interactive visualizations and content.
 | `html` | Simple tables, static content | HTML markup |
 | `markdown` | Documentation, reports | Markdown text |
 | `svg` | Custom diagrams, flowcharts | SVG markup |
+| `story` | Semantic-query-backed analysis stories | `data.story_doc` plus `semantic_queries` |
 
 **React artifacts:**
 - Recharts is pre-loaded (no imports from CDN needed)
@@ -143,11 +147,9 @@ Save discovered corrections for future queries.
   - `aggregation`: Gotcha with grouping
   - `naming`: Column/table naming convention
   - `data_quality`: Known data issues
-  - `business_logic`: Domain-specific rules
-  - `other`: Anything else
+- `business_logic`: Domain-specific rules
+- `other`: Anything else
 - `tables` (list, required): Table names this applies to
-- `original_sql` (string, optional): SQL that failed
-- `corrected_sql` (string, optional): SQL that worked
 
 Learnings are automatically injected into future prompts via the knowledge retriever. Duplicate learnings increase confidence score rather than creating new records.
 
@@ -189,11 +191,11 @@ Core agent behavior (~150 lines):
 
 - **Core principles**: Precision over speed, data-driven responses, explain reasoning, acknowledge uncertainty
 - **Response format**: Markdown tables for small results, summaries for large results
-- **Query explanation**: Mandatory plain English breakdown for every SQL query
-- **Provenance requirements**: Source tables, filters, aggregation method, row counts, time range
+- **Query explanation**: Mandatory plain English breakdown for every semantic query
+- **Provenance requirements**: Datasets, semantic members, filters, aggregation method, row counts, time range
 - **Knowledge entries**: Use metric definitions and business rules from the knowledge base
 - **Error handling**: Explain in plain language, identify cause, suggest fix
-- **Security constraints**: SELECT only, schema-scoped, no system tables
+- **Security constraints**: Semantic queries only, workspace-scoped, no system catalogs
 
 ### 2. Artifact prompt
 

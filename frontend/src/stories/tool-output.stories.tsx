@@ -1,19 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite"
 
-import { SqlHighlighter } from "@/components/ChatMessage/SqlHighlighter"
 import {
   DescribeTableOutput,
   GetMetadataOutput,
   ListTablesOutput,
-  QueryToolOutput,
+  SemanticQueryToolOutput,
 } from "@/components/ChatMessage/ToolOutput"
-
-const querySql = `SELECT owner_name, COUNT(*) AS open_cases
-FROM cases
-WHERE status = 'open'
-GROUP BY owner_name
-ORDER BY open_cases DESC
-LIMIT 5`
 
 const meta = {
   title: "Chat Primitives/Tool Output",
@@ -26,20 +18,10 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 
-export const Sql: Story = {
-  render: () => (
-    <div className="w-[640px] rounded bg-zinc-950 px-4 py-3">
-      <pre className="whitespace-pre-wrap">
-        <SqlHighlighter sql={querySql} />
-      </pre>
-    </div>
-  ),
-}
-
-export const QueryResult: Story = {
+export const SemanticQueryResult: Story = {
   render: () => (
     <div className="w-[720px] rounded-lg border p-4">
-      <QueryToolOutput
+      <SemanticQueryToolOutput
         output={{
           success: true,
           schema: "workspace_global_operations",
@@ -54,8 +36,14 @@ export const QueryResult: Story = {
             ],
             row_count: 3,
             truncated: true,
-            sql_executed: querySql,
-            tables_accessed: ["cases", "users"],
+            semantic_query: {
+              measures: ["visits.verified_count"],
+              dimensions: ["visits.owner_name"],
+              time_dimension: "visits.visit_date",
+              granularity: "week",
+              limit: 5,
+            },
+            members: ["visits.owner_name", "visits.verified_count", "visits.visit_date"],
           },
         }}
       />
@@ -151,7 +139,7 @@ export const Metadata: Story = {
 export const ErrorState: Story = {
   render: () => (
     <div className="w-[560px] rounded-lg border p-4">
-      <QueryToolOutput
+      <SemanticQueryToolOutput
         output={{
           success: false,
           error: {

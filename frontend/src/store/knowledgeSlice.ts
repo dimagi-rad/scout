@@ -27,8 +27,6 @@ export interface LearningItem {
   category?: string
   applies_to_tables?: string[]
   original_error?: string
-  original_sql?: string
-  corrected_sql?: string
   confidence_score?: number
   times_applied?: number
   is_active?: boolean

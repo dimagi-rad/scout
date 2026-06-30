@@ -7,12 +7,25 @@ string suitable for inclusion in the agent's system prompt.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from apps.knowledge.models import AgentLearning, KnowledgeEntry, TableKnowledge
 
 if TYPE_CHECKING:
     from apps.workspaces.models import Workspace
+
+_SQL_FENCE_RE = re.compile(r"```sql\b.*?```", re.IGNORECASE | re.DOTALL)
+_SQL_STATEMENT_LINE_RE = re.compile(
+    r"(?im)^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)\b.*$"
+)
+_SQL_REDACTION = "[SQL example removed; use semantic_query members instead.]"
+
+
+def _sanitize_prompt_content(value: str) -> str:
+    """Remove legacy SQL snippets before knowledge is injected into prompts."""
+    value = _SQL_FENCE_RE.sub(_SQL_REDACTION, value)
+    return _SQL_STATEMENT_LINE_RE.sub(_SQL_REDACTION, value)
 
 
 class KnowledgeRetriever:
@@ -60,7 +73,7 @@ class KnowledgeRetriever:
         async for entry in entries:
             lines.append(f"### {entry.title}")
             lines.append("")
-            lines.append(entry.content)
+            lines.append(_sanitize_prompt_content(entry.content))
             lines.append("")
 
         return "\n".join(lines).rstrip()
@@ -77,19 +90,19 @@ class KnowledgeRetriever:
         async for table in tables:
             lines.append(f"### {table.table_name}")
             lines.append("")
-            lines.append(table.description)
+            lines.append(_sanitize_prompt_content(table.description))
             lines.append("")
 
             if table.column_notes:
                 lines.append("**Column Notes:**")
                 for column, note in table.column_notes.items():
-                    lines.append(f"- `{column}`: {note}")
+                    lines.append(f"- `{column}`: {_sanitize_prompt_content(str(note))}")
                 lines.append("")
 
             if table.data_quality_notes:
                 lines.append("**Data Quality Notes:**")
                 for note in table.data_quality_notes:
-                    lines.append(f"- {note}")
+                    lines.append(f"- {_sanitize_prompt_content(str(note))}")
                 lines.append("")
 
             if table.related_tables:
@@ -99,7 +112,9 @@ class KnowledgeRetriever:
                         related_table = relation.get("table", "")
                         join_hint = relation.get("join_hint", "")
                         if join_hint:
-                            lines.append(f"- `{related_table}`: `{join_hint}`")
+                            lines.append(
+                                f"- `{related_table}`: `{_sanitize_prompt_content(str(join_hint))}`"
+                            )
                         else:
                             lines.append(f"- `{related_table}`")
                     else:
@@ -125,7 +140,7 @@ class KnowledgeRetriever:
         lines: list[str] = ["## Learned Corrections", ""]
 
         async for learning in learnings:
-            lines.append(f"- {learning.description}")
+            lines.append(f"- {_sanitize_prompt_content(learning.description)}")
 
             if learning.applies_to_tables:
                 tables_str = ", ".join(f"`{t}`" for t in learning.applies_to_tables)

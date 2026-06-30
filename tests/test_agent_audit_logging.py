@@ -73,7 +73,7 @@ async def test_stream_audit_line_logs_workspace_id_not_empty_project_id(caplog):
                 yield {
                     "event": "on_tool_end",
                     "run_id": "run-1",
-                    "name": "query",
+                    "name": "semantic_query",
                     "data": {"output": _FakeOutput()},
                 }
 

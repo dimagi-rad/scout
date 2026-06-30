@@ -159,8 +159,12 @@ class AgentLearning(models.Model):
     original_error = models.TextField(
         blank=True, help_text="The error message or suspicious result."
     )
-    original_sql = models.TextField(blank=True, help_text="The SQL that failed.")
-    corrected_sql = models.TextField(blank=True, help_text="The SQL that worked.")
+    original_sql = models.TextField(
+        blank=True, help_text="Disabled legacy field retained for old learning records."
+    )
+    corrected_sql = models.TextField(
+        blank=True, help_text="Disabled legacy field retained for old learning records."
+    )
 
     # Confidence and lifecycle
     confidence_score = models.FloatField(

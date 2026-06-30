@@ -30,7 +30,6 @@ class CreateArtifactInput(BaseModel):
     code: str = ""
     description: str = ""
     data: dict | None = None
-    source_queries: list[dict[str, str]] | None = Field(default=None)
     semantic_queries: list[dict[str, Any]] | None = Field(default=None)
 
 
@@ -39,7 +38,6 @@ class UpdateArtifactInput(BaseModel):
     code: str = ""
     title: str | None = None
     data: dict | None = None
-    source_queries: list[dict[str, str]] | None = Field(default=None)
     semantic_queries: list[dict[str, Any]] | None = Field(default=None)
 
 
@@ -83,7 +81,6 @@ def create_artifact_tools(
         code="",
         description="",
         data=None,
-        source_queries=None,
         semantic_queries=None,
     ) -> dict[str, Any]:
         """
@@ -202,7 +199,7 @@ def create_artifact_tools(
                 data=data or {},
                 version=1,
                 conversation_id=conversation_id or "",
-                source_queries=source_queries or [],
+                source_queries=[],
                 semantic_queries=semantic_queries or [],
             )
 
@@ -239,7 +236,7 @@ def create_artifact_tools(
 
     @tool(args_schema=UpdateArtifactInput)
     async def update_artifact(
-        artifact_id, code="", title=None, data=None, source_queries=None, semantic_queries=None
+        artifact_id, code="", title=None, data=None, semantic_queries=None
     ) -> dict[str, Any]:
         """
         Update an existing artifact by creating a new version.
@@ -325,9 +322,7 @@ def create_artifact_tools(
                 version=original.version + 1,
                 parent_artifact=original,
                 conversation_id=original.conversation_id,
-                source_queries=source_queries
-                if source_queries is not None
-                else original.source_queries,
+                source_queries=[],
                 semantic_queries=semantic_queries
                 if semantic_queries is not None
                 else original.semantic_queries,

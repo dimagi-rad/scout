@@ -65,7 +65,7 @@ def recipe_step_1(db, recipe):
         recipe=recipe,
         order=1,
         prompt_template="Show me the top {{limit}} customers in {{region}} region",
-        expected_tool="execute_sql",
+        expected_tool="semantic_query",
         description="Get top customers by region",
     )
 
@@ -77,7 +77,7 @@ def recipe_step_2(db, recipe):
         recipe=recipe,
         order=2,
         prompt_template="What were the total sales for {{region}} starting from {{start_date}}?",
-        expected_tool="execute_sql",
+        expected_tool="semantic_query",
         description="Calculate total sales for region",
     )
 
@@ -313,7 +313,7 @@ class TestRecipeStepModel:
             recipe=recipe,
             order=1,
             prompt_template="Show sales for {{region}}",
-            expected_tool="execute_sql",
+            expected_tool="semantic_query",
             description="Get sales data",
         )
 
@@ -321,7 +321,7 @@ class TestRecipeStepModel:
         assert step.recipe == recipe
         assert step.order == 1
         assert step.prompt_template == "Show sales for {{region}}"
-        assert step.expected_tool == "execute_sql"
+        assert step.expected_tool == "semantic_query"
         assert str(step) == f"Step 1: {recipe.name}"
 
     def test_recipe_step_ordering(self, recipe):
@@ -534,7 +534,7 @@ class TestRecipeRunModel:
             step_order=1,
             prompt="Show sales for North",
             response="Sales data...",
-            tool_used="execute_sql",
+            tool_used="semantic_query",
             started_at="2024-01-15T10:00:00Z",
             completed_at="2024-01-15T10:00:05Z",
         )
@@ -544,7 +544,7 @@ class TestRecipeRunModel:
         assert result["step_order"] == 1
         assert result["prompt"] == "Show sales for North"
         assert result["response"] == "Sales data..."
-        assert result["tool_used"] == "execute_sql"
+        assert result["tool_used"] == "semantic_query"
 
     def test_add_multiple_step_results(self, recipe_run):
         """Test adding multiple step results."""

@@ -149,10 +149,10 @@ This starts five services: backend API (port 8000), frontend (port 3000), MCP se
 ## Security
 
 - **Database isolation**: Each project has its own encrypted DB credentials; connections are read-only with schema-scoped `search_path`
-- **SQL validation**: Only SELECT queries allowed; dangerous functions blocked via sqlglot AST analysis
-- **Table access control**: Per-project allowlist/blocklist for table access
+- **Semantic query access**: Agents query curated datasets through structured semantic query specs, not raw SQL
+- **Table access control**: Read-only roles and semantic-model visibility control accessible data
 - **Rate limiting**: Per-user and per-project query quotas
-- **Query limits**: Automatic LIMIT injection and statement timeouts
+- **Query limits**: Semantic row limits and statement timeouts
 - **Session auth**: Cookie-based sessions with CSRF protection
 
 ## License

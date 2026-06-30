@@ -347,13 +347,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
         }}
       >
         {variant === "topbar" ? (
-          <div className="flex min-w-0 items-center" data-testid="topbar-workspace">
+          <div className="flex min-w-0 max-w-full items-center" data-testid="topbar-workspace">
             <PopoverTrigger asChild>
               <button
                 type="button"
                 data-testid="domain-selector"
                 aria-label="Switch workspace"
-                className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-medium text-foreground transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-sm font-medium text-foreground transition-colors hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
                 {activeWorkspace ? (
                   (() => {
@@ -361,7 +361,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                     return <Icon className="h-4 w-4 shrink-0" aria-hidden />
                   })()
                 ) : null}
-                <span className="truncate">
+                <span className="min-w-0 truncate">
                   {activeWorkspace?.display_name ?? "Select workspace"}
                 </span>
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" aria-hidden />

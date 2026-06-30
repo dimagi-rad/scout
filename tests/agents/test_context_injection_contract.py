@@ -3,9 +3,10 @@
 The agent graph's injecting tool node (`_make_injecting_tool_node` in
 `apps.agents.graph.base`) adds ``workspace_id``, ``user_id``, ``thread_id`` and
 ``tool_call_id`` to the args of **every** MCP tool call. The read tools
-(``list_tables``, ``query``, …) declare ``workspace_id``, ``user_id`` and
-``thread_id`` (the last two carry the actor into the MCP audit trail — arch #257,
-finding 08#8); only the per-call ``tool_call_id`` remains undeclared on them.
+(``semantic_catalog``, ``semantic_query``, …) declare ``workspace_id``,
+``user_id`` and ``thread_id`` (the last two carry the actor into the MCP audit
+trail — arch #257, finding 08#8); only the per-call ``tool_call_id`` remains
+undeclared on them.
 That residual extra succeeds today only because TWO independent library
 behaviours silently tolerate it:
 
@@ -45,7 +46,7 @@ INJECTED_ARGS = {
 # thread_id) but NOT the per-call ``tool_call_id`` — so ``tool_call_id`` is the
 # one injected arg they still rely on the libraries to silently drop.
 # ``run_materialization`` is excluded because it deliberately declares all four.
-ACTOR_DECLARED_TOOLS = ["list_tables", "get_metadata", "get_schema_status"]
+ACTOR_DECLARED_TOOLS = ["semantic_catalog", "semantic_query", "get_schema_status"]
 
 # The args these tools declare (everything injected except ``tool_call_id``).
 DECLARED_ACTOR_ARGS = {"workspace_id", "user_id", "thread_id"}
@@ -96,8 +97,11 @@ def test_fastmcp_arg_model_accepts_and_ignores_injected_extras(tool_name):
     arg_model = tool.fn_metadata.arg_model
 
     declared = set(arg_model.model_fields)
-    assert declared == DECLARED_ACTOR_ARGS, (
-        f"{tool_name} now declares {declared}; update this guardrail if the "
+    assert DECLARED_ACTOR_ARGS.issubset(declared), (
+        f"{tool_name} no longer declares all actor args; declared {declared}"
+    )
+    assert "tool_call_id" not in declared, (
+        f"{tool_name} now declares tool_call_id; update this guardrail if the "
         "injected-arg surface changed"
     )
 
@@ -105,9 +109,9 @@ def test_fastmcp_arg_model_accepts_and_ignores_injected_extras(tool_name):
     # which is exactly the prod-wide breakage we are guarding against.
     validated = arg_model.model_validate(dict(INJECTED_ARGS))
 
-    # FastMCP forwards only the declared fields to the tool fn; the still-
-    # undeclared ``tool_call_id`` must have been dropped here.
+    # FastMCP forwards only declared fields to the tool fn; the still-undeclared
+    # ``tool_call_id`` must have been dropped here.
     forwarded = validated.model_dump_one_level()
-    assert forwarded == {k: INJECTED_ARGS[k] for k in DECLARED_ACTOR_ARGS}, (
-        f"{tool_name} forwarded {forwarded}; injected extras were not handled as expected"
-    )
+    for key in DECLARED_ACTOR_ARGS:
+        assert forwarded[key] == INJECTED_ARGS[key]
+    assert "tool_call_id" not in forwarded

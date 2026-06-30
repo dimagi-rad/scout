@@ -24,7 +24,7 @@ class TestMCPClient:
 
         mock_client = AsyncMock()
         mock_tool = AsyncMock()
-        mock_tool.name = "query"
+        mock_tool.name = "semantic_query"
         mock_client.get_tools.return_value = [mock_tool]
 
         with patch("apps.agents.mcp_client.MultiServerMCPClient", return_value=mock_client):
@@ -33,7 +33,7 @@ class TestMCPClient:
                 tools = await mod.get_mcp_tools()
 
         assert len(tools) == 1
-        assert tools[0].name == "query"
+        assert tools[0].name == "semantic_query"
         mock_client.get_tools.assert_awaited_once()
         mod.reset_circuit_breaker()
 

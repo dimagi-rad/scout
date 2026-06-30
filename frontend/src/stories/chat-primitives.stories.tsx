@@ -20,9 +20,13 @@ const queryOutput = {
     ],
     row_count: 3,
     truncated: true,
-    sql_executed:
-      "SELECT owner_name, COUNT(*) AS open_cases\nFROM cases\nWHERE status = 'open'\nGROUP BY owner_name\nORDER BY open_cases DESC\nLIMIT 5",
-    tables_accessed: ["cases", "users"],
+    semantic_query: {
+      measures: ["visits.open_count"],
+      dimensions: ["visits.owner_name"],
+      time_dimension: "visits.last_activity",
+      limit: 5,
+    },
+    members: ["visits.owner_name", "visits.open_count", "visits.last_activity"],
   },
 }
 
@@ -70,7 +74,7 @@ function assistantWithTool(id: string, toolName: string, toolCallId: string, out
     parts: [
       {
         type: "text",
-        text: "I checked the available schema and ran a focused query.",
+        text: "I checked the semantic catalog and ran a focused semantic query.",
       },
       {
         type: `tool-${toolName}`,
@@ -95,7 +99,7 @@ function reasoningMessage(): UIMessage {
       },
       {
         type: "text",
-        text: "I’ll first inspect the metadata, then query open cases by owner.",
+        text: "I’ll first inspect the semantic catalog, then query open cases by owner.",
       },
     ],
   } as unknown as UIMessage
@@ -170,7 +174,7 @@ export const QueryToolCall: Story = {
   render: () => (
     <div className="w-[780px]">
       <ChatMessage
-        message={assistantWithTool("assistant-query", "query", "tool-query-1", queryOutput)}
+        message={assistantWithTool("assistant-query", "semantic_query", "tool-query-1", queryOutput)}
         isActiveMessage={true}
       />
     </div>

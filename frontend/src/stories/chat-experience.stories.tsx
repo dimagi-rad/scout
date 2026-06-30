@@ -38,11 +38,11 @@ const initialMessages: UIMessage[] = [
     parts: [
       {
         type: "reasoning",
-        text: "Need case status, owner assignment, and a grouped count. Use the current workspace schema.",
+        text: "Need case status, owner assignment, and a grouped count from the semantic model.",
       },
       {
         type: "text",
-        text: "I’ll inspect the available tables, then query open cases by owner.",
+        text: "I’ll inspect the semantic catalog, then query open cases by owner.",
       },
     ],
   } as unknown as UIMessage,
@@ -51,8 +51,8 @@ const initialMessages: UIMessage[] = [
     role: "assistant",
     parts: [
       {
-        type: "tool-list_tables",
-        toolName: "list_tables",
+        type: "tool-semantic_catalog",
+        toolName: "semantic_catalog",
         toolCallId: "tool-list-1",
         state: "output-available",
         input: {},
@@ -60,10 +60,9 @@ const initialMessages: UIMessage[] = [
           success: true,
           timing_ms: 58,
           data: {
-            tables: [
-              { name: "cases", materialized_row_count: 12482 },
-              { name: "forms", materialized_row_count: 87031 },
-              { name: "workers", materialized_row_count: 4218 },
+            datasets: [
+              { name: "visits", label: "Visits", measures: [{ member: "visits.open_count" }], dimensions: [{ member: "visits.owner_name" }] },
+              { name: "workers", label: "Workers", measures: [{ member: "workers.count" }], dimensions: [{ member: "workers.username" }] },
             ],
           },
         }),
@@ -75,12 +74,14 @@ const initialMessages: UIMessage[] = [
     role: "assistant",
     parts: [
       {
-        type: "tool-query",
-        toolName: "query",
+        type: "tool-semantic_query",
+        toolName: "semantic_query",
         toolCallId: "tool-query-1",
         state: "output-available",
         input: {
-          sql: "SELECT owner_name, COUNT(*) AS open_cases FROM cases WHERE status = 'open' GROUP BY owner_name ORDER BY open_cases DESC LIMIT 3",
+          measures: ["visits.open_count"],
+          dimensions: ["visits.owner_name"],
+          limit: 3,
         },
         output: JSON.stringify({
           success: true,
@@ -94,9 +95,12 @@ const initialMessages: UIMessage[] = [
               ["Mina Okafor", 94, "2026-06-22"],
             ],
             row_count: 3,
-            sql_executed:
-              "SELECT owner_name, COUNT(*) AS open_cases\nFROM cases\nWHERE status = 'open'\nGROUP BY owner_name\nORDER BY open_cases DESC\nLIMIT 3",
-            tables_accessed: ["cases", "workers"],
+            semantic_query: {
+              measures: ["visits.open_count"],
+              dimensions: ["visits.owner_name"],
+              limit: 3,
+            },
+            members: ["visits.owner_name", "visits.open_count"],
           },
         }),
       },

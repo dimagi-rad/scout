@@ -242,7 +242,7 @@ class RecipeStep(models.Model):
     expected_tool = models.CharField(
         max_length=100,
         blank=True,
-        help_text="Optional: expected tool the agent should use (e.g., 'execute_sql').",
+        help_text="Optional: expected tool the agent should use (e.g., 'semantic_query').",
     )
     description = models.TextField(
         blank=True,
@@ -300,7 +300,7 @@ class RecipeRun(models.Model):
             "step_order": 1,
             "prompt": "rendered prompt",
             "response": "agent response",
-            "tool_used": "execute_sql",
+            "tool_used": "semantic_query",
             "started_at": "2024-01-15T10:30:00Z",
             "completed_at": "2024-01-15T10:30:05Z",
             "error": null

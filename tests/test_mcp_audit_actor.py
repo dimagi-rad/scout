@@ -14,7 +14,7 @@ import logging
 import pytest
 
 from mcp_server.envelope import tool_context
-from mcp_server.server import query
+from mcp_server.server import semantic_query
 
 
 @pytest.mark.asyncio
@@ -22,7 +22,11 @@ async def test_tool_context_logs_actor_when_provided(caplog):
     """tool_context records user_id and thread_id when threaded through."""
     with caplog.at_level(logging.INFO, logger="mcp_server.audit"):
         async with tool_context(
-            "query", "ws-1", user_id="user-42", thread_id="thread-9", sql="SELECT 1"
+            "semantic_query",
+            "ws-1",
+            user_id="user-42",
+            thread_id="thread-9",
+            measures=["visits.count"],
         ) as tc:
             tc["result"] = {"success": True}
 
@@ -49,22 +53,24 @@ async def test_tool_context_omits_empty_actor(caplog):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_query_tool_threads_actor_into_audit(caplog):
-    """The real ``query`` MCP tool must thread the injected user/thread into the
+async def test_semantic_query_tool_threads_actor_into_audit(caplog):
+    """The real ``semantic_query`` MCP tool must thread the injected user/thread into the
     audit record so the trail has an actor, not just a workspace id."""
     # Empty workspace_id short-circuits with a VALIDATION_ERROR before any DB
     # work, but the audit line is still emitted on context exit — which is where
     # the actor must appear.
     with caplog.at_level(logging.INFO, logger="mcp_server.audit"):
-        await query(
-            sql="SELECT 1",
+        await semantic_query(
+            measures=["visits.count"],
             workspace_id="",
             user_id="actor-user-1",
             thread_id="actor-thread-1",
         )
 
     records = [r for r in caplog.records if r.name == "mcp_server.audit"]
-    assert records, "expected an MCP audit record from query"
+    assert records, "expected an MCP audit record from semantic_query"
     msg = records[0].getMessage()
-    assert "user_id='actor-user-1'" in msg, f"query did not thread actor user: {msg!r}"
-    assert "thread_id='actor-thread-1'" in msg, f"query did not thread actor thread: {msg!r}"
+    assert "user_id='actor-user-1'" in msg, f"semantic_query did not thread actor user: {msg!r}"
+    assert "thread_id='actor-thread-1'" in msg, (
+        f"semantic_query did not thread actor thread: {msg!r}"
+    )

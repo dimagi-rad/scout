@@ -1,5 +1,4 @@
 import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash } from "lucide-react"
-import { SqlHighlighter } from "./SqlHighlighter"
 
 // ---- shared helpers ----
 
@@ -71,8 +70,6 @@ export interface QueryOutput {
     rows: unknown[][]
     row_count: number
     truncated?: boolean
-    sql_executed?: string
-    tables_accessed?: string[]
   }
   error?: ToolError
   warnings?: string[]
@@ -85,7 +82,7 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
     return <ToolErrorRow error={output.error} fallback="Query failed" />
   }
 
-  const { columns, rows, row_count, truncated, sql_executed, tables_accessed } = output.data
+  const { columns, rows, row_count, truncated } = output.data
 
   return (
     <div className="space-y-3">
@@ -116,15 +113,6 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
           </Badge>
         )}
       </div>
-
-      {/* SQL block */}
-      {sql_executed && (
-        <div className="rounded bg-zinc-950 dark:bg-zinc-900 border border-border/50 px-3 py-2.5 overflow-x-auto">
-          <pre className="whitespace-pre-wrap leading-relaxed">
-            <SqlHighlighter sql={sql_executed} />
-          </pre>
-        </div>
-      )}
 
       {/* Warnings */}
       {output.warnings?.map((w, i) => (
@@ -169,21 +157,6 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
               ))}
             </tbody>
           </table>
-        </div>
-      )}
-
-      {/* Tables accessed footer */}
-      {tables_accessed && tables_accessed.length > 0 && (
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-[10px] text-muted-foreground/60">Tables:</span>
-          {tables_accessed.map((t) => (
-            <span
-              key={t}
-              className="text-[10px] font-mono text-muted-foreground/60 bg-muted/40 rounded px-1"
-            >
-              {t}
-            </span>
-          ))}
         </div>
       )}
     </div>

@@ -29,8 +29,8 @@ See [Artifacts](artifacts.md) for details on working with artifacts.
 
 If something goes wrong, the agent will explain the error:
 
-- **SQL validation errors** -- the query was blocked because it contained disallowed operations (e.g., INSERT, DELETE, or dangerous functions).
-- **Execution errors** -- the query ran but failed (e.g., a non-existent column name). The agent will typically retry with corrections automatically.
+- **Semantic query validation errors** -- the request referenced an unknown dataset/member or unsupported filter.
+- **Execution errors** -- the semantic query ran but failed. The agent will typically retry with corrections automatically.
 - **Timeout errors** -- the query exceeded the configured timeout. Try simplifying the query or adding filters to reduce the data scanned.
 - **Rate limit errors** -- you've exceeded the per-user or per-project query quota. Wait a moment and try again.
 

@@ -314,7 +314,7 @@ class TestMCPToolLoading:
     ):
         """When get_mcp_tools() succeeds, the agent should be built with those tools."""
         mock_tool = MagicMock()
-        mock_tool.name = "query"
+        mock_tool.name = "semantic_query"
 
         with (
             patch("apps.chat.views.get_mcp_tools", new_callable=AsyncMock) as mock_mcp,
@@ -365,13 +365,13 @@ class TestAgentGraphAssembly:
         from apps.agents.graph.base import _build_tools
 
         mock_mcp_tool = MagicMock()
-        mock_mcp_tool.name = "query"
+        mock_mcp_tool.name = "semantic_query"
 
         tools = _build_tools(workspace, user, [mock_mcp_tool])
         tool_names = [t.name for t in tools]
 
         # MCP tool should be first
-        assert "query" in tool_names
+        assert "semantic_query" in tool_names
         # Local tools should also be present
         assert "save_learning" in tool_names
         assert "create_artifact" in tool_names
@@ -387,15 +387,15 @@ class TestAgentGraphAssembly:
         assert "save_learning" in tool_names
         assert "create_artifact" in tool_names
         # No MCP tools
-        assert "query" not in tool_names
+        assert "semantic_query" not in tool_names
         assert "list_tables" not in tool_names
 
-    def test_multiple_mcp_tools_preserved(self, user, workspace):
-        """Multiple MCP tools should all be included."""
+    def test_raw_table_tools_filtered(self, user, workspace):
+        """Raw table-inspection tools are not exposed to the agent."""
         from apps.agents.graph.base import _build_tools
 
         mcp_tools = []
-        for name in ["query", "list_tables", "describe_table", "get_metadata"]:
+        for name in ["semantic_query", "list_tables", "describe_table", "get_metadata"]:
             t = MagicMock()
             t.name = name
             mcp_tools.append(t)
@@ -403,8 +403,9 @@ class TestAgentGraphAssembly:
         tools = _build_tools(workspace, user, mcp_tools)
         tool_names = [t.name for t in tools]
 
-        for name in ["query", "list_tables", "describe_table", "get_metadata"]:
-            assert name in tool_names
+        assert "semantic_query" in tool_names
+        for name in ["list_tables", "describe_table", "get_metadata"]:
+            assert name not in tool_names
 
 
 # ---------------------------------------------------------------------------
@@ -459,12 +460,12 @@ class TestSSEStreamFormat:
             yield {
                 "event": "on_tool_end",
                 "run_id": "run-123",
-                "name": "query",
+                "name": "semantic_query",
                 "data": {
                     "output": ToolMessage(
                         content='{"success": true, "data": {"columns": ["id"], "rows": [[1]]}}',
                         tool_call_id="call-123",
-                        name="query",
+                        name="semantic_query",
                     ),
                 },
             }
@@ -490,7 +491,7 @@ class TestSSEStreamFormat:
         # carried by the ToolMessage (arch #246, 06#3), NOT the LangGraph run_id
         # -- otherwise per-card progress / Stop / failure never render live.
         tool_input = next(e for e in events if e["type"] == "tool-input-available")
-        assert tool_input["toolName"] == "query"
+        assert tool_input["toolName"] == "semantic_query"
         assert tool_input["toolCallId"] == "call-123"
 
         tool_output = next(e for e in events if e["type"] == "tool-output-available")
@@ -510,12 +511,12 @@ class TestSSEStreamFormat:
             yield {
                 "event": "on_tool_end",
                 "run_id": "run-456",
-                "name": "query",
+                "name": "semantic_query",
                 "data": {
                     "output": ToolMessage(
                         content=long_output,
                         tool_call_id="call-456",
-                        name="query",
+                        name="semantic_query",
                     ),
                 },
             }
@@ -545,9 +546,13 @@ class TestSSEStreamFormat:
             yield {
                 "event": "on_tool_end",
                 "run_id": "run-ok",
-                "name": "query",
+                "name": "semantic_query",
                 "data": {
-                    "output": ToolMessage(content=payload, tool_call_id="call-ok", name="query"),
+                    "output": ToolMessage(
+                        content=payload,
+                        tool_call_id="call-ok",
+                        name="semantic_query",
+                    ),
                 },
             }
 
@@ -574,12 +579,12 @@ class TestSSEStreamFormat:
                 yield {
                     "event": "on_tool_end",
                     "run_id": "run-dup",
-                    "name": "query",
+                    "name": "semantic_query",
                     "data": {
                         "output": ToolMessage(
                             content="result",
                             tool_call_id="call-dup",
-                            name="query",
+                            name="semantic_query",
                         ),
                     },
                 }
@@ -992,13 +997,13 @@ class TestToolStream:
         async def fake_events(*args, **kwargs):
             yield {
                 "event": "on_tool_end",
-                "run_id": "run-query-1",
-                "name": "query",
+                "run_id": "run-semantic-query-1",
+                "name": "semantic_query",
                 "data": {
                     "output": ToolMessage(
                         content='{"success": true, "rows": []}',
                         tool_call_id="call-q-1",
-                        name="query",
+                        name="semantic_query",
                     ),
                 },
             }

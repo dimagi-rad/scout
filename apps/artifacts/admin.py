@@ -91,7 +91,7 @@ class ArtifactAdmin(admin.ModelAdmin):
         (
             "Source Data",
             {
-                "fields": ("source_queries", "semantic_queries"),
+                "fields": ("semantic_queries",),
                 "classes": ("collapse",),
             },
         ),

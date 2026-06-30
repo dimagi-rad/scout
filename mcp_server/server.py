@@ -74,7 +74,6 @@ from mcp_server.services.metadata import (
     pipeline_list_tables,
     workspace_list_tables,
 )
-from mcp_server.services.query import execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -676,55 +675,6 @@ async def list_datasets(
             },
             schema="semantic",
             timing_ms=tc["timer"].elapsed_ms,
-        )
-        return tc["result"]
-
-
-@mcp.tool()
-async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
-    """Execute a read-only SQL query against the workspace's database.
-
-    The query is validated for safety (SELECT only, no dangerous functions),
-    row limits are enforced, and execution uses a read-only database role.
-
-    Args:
-        sql: A SQL SELECT query to execute.
-        workspace_id: Workspace UUID (injected server-side by the agent graph).
-        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
-        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
-    """
-    async with tool_context(
-        "query", workspace_id, user_id=user_id, thread_id=thread_id, sql=sql
-    ) as tc:
-        try:
-            ctx = await _resolve_mcp_context(workspace_id)
-        except (ValueError, _ValidationError) as e:
-            tc["result"] = error_response(VALIDATION_ERROR, str(e))
-            return tc["result"]
-
-        result = await execute_query(ctx, sql)
-
-        # execute_query returns an error envelope on failure
-        if not result.get("success", True):
-            tc["result"] = result
-            return tc["result"]
-
-        warnings = []
-        if result.get("truncated"):
-            warnings.append(f"Results truncated to {ctx.max_rows_per_query} rows")
-
-        tc["result"] = success_response(
-            {
-                "columns": result["columns"],
-                "rows": result["rows"],
-                "row_count": result["row_count"],
-                "truncated": result.get("truncated", False),
-                "sql_executed": result.get("sql_executed", ""),
-                "tables_accessed": result.get("tables_accessed", []),
-            },
-            schema=ctx.schema_name,
-            timing_ms=tc["timer"].elapsed_ms,
-            warnings=warnings or None,
         )
         return tc["result"]
 

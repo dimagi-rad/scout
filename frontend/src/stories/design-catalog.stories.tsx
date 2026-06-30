@@ -25,6 +25,7 @@ const primitiveGroups = [
     group: "App primitives",
     items: [
       ["Provider icons", "src/assets/providers/brandIcons.tsx", "Brand"],
+      ["ArtifactCard", "src/components/ArtifactCard/ArtifactCard.tsx", "Artifact"],
       ["RoleBadge", "src/components/RoleBadge/RoleBadge.tsx", "Status"],
       ["SearchFilterBar", "src/components/SearchFilterBar/SearchFilterBar.tsx", "Filter"],
       ["NavItem", "src/components/Sidebar/NavItem.tsx", "Navigation"],
@@ -39,7 +40,6 @@ const primitiveGroups = [
       ["ChatErrorNotice", "src/components/ChatPanel/ChatStatus.tsx", "Status"],
       ["ChatOverloadNotice", "src/components/ChatPanel/ChatStatus.tsx", "Status"],
       ["SlashCommandMenu", "src/components/ChatPanel/SlashCommandMenu.tsx", "Command"],
-      ["SqlHighlighter", "src/components/ChatMessage/SqlHighlighter.tsx", "Code"],
       ["Tool outputs", "src/components/ChatMessage/ToolOutput.tsx", "Data display"],
       ["MaterializationProgressBanner", "src/components/MaterializationStatus/MaterializationProgressBanner.tsx", "Status"],
       ["MaterializationFailure", "src/components/MaterializationStatus/MaterializationFailure.tsx", "Status"],

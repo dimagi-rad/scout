@@ -24,8 +24,8 @@ function liveMessage(toolName: string, output: unknown): UIMessage {
 }
 
 describe("ChatMessage live tool cards (arch #246)", () => {
-  it("renders the rich query card from a live JSON-string output", () => {
-    const msg = liveMessage("query", {
+  it("renders the rich semantic query card from a live JSON-string output", () => {
+    const msg = liveMessage("semantic_query", {
       success: true,
       data: {
         columns: ["id", "name"],
@@ -34,12 +34,13 @@ describe("ChatMessage live tool cards (arch #246)", () => {
           [2, "Bob"],
         ],
         row_count: 2,
-        sql_executed: "SELECT id, name FROM users",
+        semantic_query: { measures: ["users.count"], dimensions: ["users.name"] },
+        members: ["users.name", "users.count"],
       },
     })
     render(<ChatMessage message={msg} isActiveMessage={true} />)
     // Rich card markers (not a raw <pre> dump):
-    expect(screen.getByText("Query succeeded")).toBeInTheDocument()
+    expect(screen.getByText("Semantic query succeeded")).toBeInTheDocument()
     expect(screen.getByText("2 rows")).toBeInTheDocument()
     expect(screen.getByText("Alice")).toBeInTheDocument()
   })
@@ -55,7 +56,7 @@ describe("ChatMessage live tool cards (arch #246)", () => {
   })
 
   it("does not corrupt apostrophes in the data (05#2: dropped the repr hack)", () => {
-    const msg = liveMessage("query", {
+    const msg = liveMessage("semantic_query", {
       success: true,
       data: { columns: ["note"], rows: [["it's fine"]], row_count: 1 },
     })

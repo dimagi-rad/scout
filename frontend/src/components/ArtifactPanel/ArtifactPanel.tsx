@@ -6,7 +6,6 @@ import { withBasePath } from "@/config"
 
 interface QueryResult {
   name: string
-  sql?: string
   semantic_query?: Record<string, unknown>
   columns?: string[]
   rows?: unknown[][]
@@ -222,7 +221,7 @@ export function ArtifactPanel() {
             />
           )}
 
-          {/* Data tab: SQL queries and results */}
+          {/* Data tab: semantic queries and results */}
           {activeTab === "data" && (
             <div className="flex-1 overflow-y-auto">
               <div className="p-4 space-y-4">
@@ -303,7 +302,7 @@ function QueryResultCard({ query }: { query: QueryResult }) {
           {/* Query spec */}
           <div className="p-3 bg-muted/20">
             <pre className="text-xs font-mono text-muted-foreground whitespace-pre-wrap overflow-x-auto">
-              {query.sql ?? JSON.stringify(query.semantic_query ?? {}, null, 2)}
+              {JSON.stringify(query.semantic_query ?? {}, null, 2)}
             </pre>
           </div>
 

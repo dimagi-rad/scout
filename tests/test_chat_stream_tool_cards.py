@@ -101,10 +101,10 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
         {
             "event": "on_tool_start",
             "run_id": "run-1",
-            "name": "query",
+            "name": "semantic_query",
             "data": {
                 "input": {
-                    "sql": "SELECT 1",
+                    "measures": ["visits.count"],
                     "workspace_id": "ws-secret",
                     "user_id": "u",
                     "thread_id": "t",
@@ -118,9 +118,9 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
     assert starts, "on_tool_start should emit a tool-input-available chunk"
     start = starts[0]
     assert start["toolCallId"] == "toolu_Q"
-    assert start["toolName"] == "query"
+    assert start["toolName"] == "semantic_query"
     # Real input is surfaced...
-    assert start["input"].get("sql") == "SELECT 1"
+    assert start["input"].get("measures") == ["visits.count"]
     # ...but injected/hidden context params are stripped.
     assert "workspace_id" not in start["input"]
     assert "user_id" not in start["input"]
@@ -133,7 +133,7 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
 
 @pytest.mark.asyncio
 async def test_tool_output_is_parse_safe_json_not_truncated_mid_token():
-    """A large query result must remain valid JSON so the rich card parses it
+    """A large semantic query result must remain valid JSON so the rich card parses it
     LIVE. The old 2000-char hard truncation cut JSON mid-token."""
     rows = [[i, f"name-{i}", "x" * 50] for i in range(200)]
     payload = {
@@ -145,7 +145,7 @@ async def test_tool_output_is_parse_safe_json_not_truncated_mid_token():
         {
             "event": "on_tool_end",
             "run_id": "r",
-            "name": "query",
+            "name": "semantic_query",
             "data": {"output": tm},
         },
     ]
@@ -166,7 +166,7 @@ async def test_tool_output_not_double_indented():
     payload = {"success": True, "data": {"k": "v"}}
     tm = ToolMessage(content=json.dumps(payload), tool_call_id="toolu_C")
     events = [
-        {"event": "on_tool_end", "run_id": "r", "name": "query", "data": {"output": tm}},
+        {"event": "on_tool_end", "run_id": "r", "name": "semantic_query", "data": {"output": tm}},
     ]
     chunks = await _run(events)
     out = next(c for c in chunks if c["type"] == "tool-output-available")["output"]
@@ -214,10 +214,10 @@ async def test_tool_runtime_in_input_does_not_crash_stream():
         {
             "event": "on_tool_start",
             "run_id": "run-1",
-            "name": "query",
+            "name": "semantic_query",
             "data": {
                 "input": {
-                    "sql": "SELECT 1",
+                    "measures": ["visits.count"],
                     "workspace_id": "ws-secret",
                     "tool_call_id": "toolu_RT",
                     "runtime": _make_tool_runtime(),
@@ -239,7 +239,7 @@ async def test_tool_runtime_in_input_does_not_crash_stream():
     assert starts, "on_tool_start should still emit a tool-input-available chunk"
     start = starts[0]
     assert start["toolCallId"] == "toolu_RT"
-    assert start["input"].get("sql") == "SELECT 1"
+    assert start["input"].get("measures") == ["visits.count"]
     # The injected, non-serializable runtime must not surface in the card.
     assert "runtime" not in start["input"]
     assert "workspace_id" not in start["input"]

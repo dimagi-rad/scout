@@ -5,14 +5,12 @@ Tests artifact models, views, access control, versioning, and artifact tools.
 """
 
 import uuid
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient, Client
 
-import apps.artifacts.views as artifact_views
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
 from apps.users.models import Tenant
@@ -22,7 +20,6 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from mcp_server.context import QueryContext
 
 User = get_user_model()
 
@@ -483,7 +480,6 @@ class TestArtifactTools:
                 "code": "export default function Chart() { return <div>Chart</div>; }",
                 "description": "Monthly revenue visualization",
                 "data": {"revenue": [1000, 2000, 3000]},
-                "source_queries": [{"name": "revenue", "sql": "SELECT month, revenue FROM sales"}],
             }
         )
 
@@ -503,9 +499,7 @@ class TestArtifactTools:
         assert artifact.artifact_type == "react"
         assert artifact.code == "export default function Chart() { return <div>Chart</div>; }"
         assert artifact.data["revenue"] == [1000, 2000, 3000]
-        assert artifact.source_queries == [
-            {"name": "revenue", "sql": "SELECT month, revenue FROM sales"}
-        ]
+        assert artifact.source_queries == []
         assert artifact.version == 1
         assert artifact.parent_artifact is None
 
@@ -622,17 +616,8 @@ class TestArtifactQueryDataRouting:
     """Tests for ArtifactQueryDataView schema routing (issue #240, finding 00#6)."""
 
     @pytest.mark.asyncio
-    async def test_query_data_routes_through_workspace_context(self, user):
-        """Live query-data in a multi-tenant workspace must execute against the
-        VIEW schema (ws_*), not the FIRST tenant's t_* schema.
-
-        Before the fix, ArtifactQueryDataView resolved context via
-        workspace.tenants.afirst() + load_tenant_context(external_id), so it ran
-        against the wrong schema (relation-does-not-exist / silent single-tenant
-        slice). The fix routes through load_workspace_context like every other
-        consumer.
-        """
-
+    async def test_legacy_source_queries_do_not_execute(self, user):
+        """Legacy SQL-backed source_queries return a disabled error."""
         ws = await Workspace.objects.acreate(name="Multi WS", created_by=user)
         await WorkspaceMembership.objects.acreate(
             workspace=ws, user=user, role=WorkspaceRole.MANAGE
@@ -651,41 +636,19 @@ class TestArtifactQueryDataRouting:
             source_queries=[{"name": "q", "sql": "SELECT 1"}],
         )
 
-        view_ctx = QueryContext(
-            tenant_id=str(ws.id),
-            schema_name="ws_viewschema123",
-            connection_params={"host": "localhost"},
-        )
-
         client = AsyncClient()
         await sync_to_async(client.force_login)(user)
 
-        with (
-            patch(
-                "apps.artifacts.views.load_workspace_context",
-                new=AsyncMock(return_value=view_ctx),
-            ) as mock_lwc,
-            patch(
-                "apps.artifacts.views.execute_query",
-                new=AsyncMock(
-                    return_value={
-                        "success": True,
-                        "columns": ["n"],
-                        "rows": [[1]],
-                        "row_count": 1,
-                        "truncated": False,
-                    }
-                ),
-            ) as mock_exec,
-        ):
-            resp = await client.get(f"/api/workspaces/{ws.id}/artifacts/{art.id}/query-data/")
+        resp = await client.get(f"/api/workspaces/{ws.id}/artifacts/{art.id}/query-data/")
 
         assert resp.status_code == 200
-        mock_lwc.assert_awaited_once_with(str(ws.id))
-        # The query ran against the view-schema context, not a tenant context.
-        assert mock_exec.await_args.args[0].schema_name == "ws_viewschema123"
         body = resp.json()
-        assert body["queries"][0]["rows"] == [[1]]
-
-        # Regression guard: the view must no longer reach for per-tenant context.
-        assert not hasattr(artifact_views, "load_tenant_context")
+        assert body["queries"] == [
+            {
+                "name": "q",
+                "error": (
+                    "Legacy SQL-backed artifact queries are disabled. "
+                    "Recreate this artifact with semantic_queries."
+                ),
+            }
+        ]

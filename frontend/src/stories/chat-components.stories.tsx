@@ -20,8 +20,8 @@ import { SlashCommandMenu } from "@/components/ChatPanel/SlashCommandMenu"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 
 const queryPart = {
-  type: "tool-query",
-  toolName: "query",
+  type: "tool-semantic_query",
+  toolName: "semantic_query",
   toolCallId: "tool-query-component",
   state: "output-available",
   input: {},
@@ -36,9 +36,12 @@ const queryPart = {
         ["Jordan Lee", 116],
       ],
       row_count: 2,
-      sql_executed:
-        "SELECT owner_name, COUNT(*) AS open_cases\nFROM cases\nWHERE status = 'open'\nGROUP BY owner_name",
-      tables_accessed: ["cases"],
+      semantic_query: {
+        measures: ["visits.open_count"],
+        dimensions: ["visits.owner_name"],
+        limit: 5,
+      },
+      members: ["visits.owner_name", "visits.open_count"],
     },
   }),
 }
@@ -53,12 +56,12 @@ const rawToolPart = {
 }
 
 const errorToolPart = {
-  type: "tool-query",
-  toolName: "query",
+  type: "tool-semantic_query",
+  toolName: "semantic_query",
   toolCallId: "tool-error-component",
   state: "output-error",
   input: {},
-  errorText: "The database rejected this query because the table does not exist.",
+  errorText: "The semantic model could not resolve the requested measure.",
 }
 
 const activeMaterializationJob: ActiveJob = {

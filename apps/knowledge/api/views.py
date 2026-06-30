@@ -34,7 +34,7 @@ KNOWLEDGE_TYPES = {
     "learning": {
         "model": AgentLearning,
         "serializer": AgentLearningSerializer,
-        "search_fields": ["description", "original_error", "original_sql", "corrected_sql"],
+        "search_fields": ["description", "original_error"],
     },
 }
 

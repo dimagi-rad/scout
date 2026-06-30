@@ -8,7 +8,7 @@ so the public viewer can render them in a sandbox. Two things have to hold:
    actually finds them.
 2. The public-thread endpoint returns each artifact's ``code`` and ``data`` so
    the public page can render it in a client-side sandboxed iframe (srcdoc)
-   instead of dumping ``<pre>`` source. Live tenant data (authenticated
+   instead of dumping ``<pre>`` source. Live semantic data (authenticated
    query-data / sandbox routes) is intentionally NOT exposed to anonymous
    viewers.
 """
@@ -46,10 +46,11 @@ async def _setup_shared_thread_with_artifact():
         workspace=ws,
         created_by=user,
         title="Live Dashboard",
-        artifact_type=ArtifactType.REACT,
-        code="export default function C(){return <div/>}",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        data={"story_doc": {"version": 1, "blocks": []}},
         conversation_id=str(thread.id),
-        source_queries=[{"name": "q", "sql": "SELECT 1"}],
+        semantic_queries=[{"name": "q", "measures": ["visits.count"]}],
     )
     # A second artifact from a DIFFERENT conversation must NOT leak in.
     await Artifact.objects.acreate(

@@ -199,24 +199,6 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
                 </div>
               )}
 
-              {learningItem.original_sql && (
-                <div className="space-y-2">
-                  <Label>Original SQL</Label>
-                  <div className="rounded-md border p-3 bg-muted/50 text-sm font-mono">
-                    {learningItem.original_sql}
-                  </div>
-                </div>
-              )}
-
-              {learningItem.corrected_sql && (
-                <div className="space-y-2">
-                  <Label>Corrected SQL</Label>
-                  <div className="rounded-md border p-3 bg-muted/50 text-sm font-mono">
-                    {learningItem.corrected_sql}
-                  </div>
-                </div>
-              )}
-
               {learningItem.confidence_score !== undefined && (
                 <div className="space-y-2">
                   <Label>Confidence</Label>
@@ -292,7 +274,7 @@ export function KnowledgeForm({ open, onOpenChange, item, onSave }: KnowledgeFor
                 name="content"
                 value={form.content}
                 onChange={handleChange}
-                placeholder="Markdown content (metric definitions, SQL snippets, business rules, etc.)"
+                placeholder="Markdown content (metric definitions, semantic-model notes, business rules, etc.)"
                 rows={10}
                 className="font-mono text-sm"
                 required

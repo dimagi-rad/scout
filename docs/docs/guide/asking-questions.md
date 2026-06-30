@@ -1,16 +1,16 @@
 # Asking questions
 
-Scout translates natural language questions into SQL queries. The quality of the results depends on how you phrase your questions and the knowledge available to the agent.
+Scout translates natural language questions into structured semantic queries. The quality of the results depends on how you phrase your questions and the semantic model available to the agent.
 
 ## Tips for good questions
 
 ### Be specific about what you want
 
-Instead of "show me some data", ask "show me the top 10 customers by total order amount in the last 30 days". The more specific your question, the more accurate the SQL will be.
+Instead of "show me some data", ask "show me the top 10 customers by total order amount in the last 30 days". The more specific your question, the easier it is for the agent to choose the right dataset, measures, dimensions, and filters.
 
-### Name tables and columns when you know them
+### Name datasets and fields when you know them
 
-If you know the table or column names, include them: "What is the average `order_total` from the `orders` table?" This reduces ambiguity and helps the agent generate correct SQL on the first try.
+If you know the dataset or field names, include them: "What is the average `order_total` from the `orders` dataset?" This reduces ambiguity and helps the agent choose the correct semantic members on the first try.
 
 ### Specify time ranges explicitly
 
@@ -39,9 +39,9 @@ You can ask for specific formats:
 
 The agent has access to:
 
-- **Data dictionary** -- auto-generated schema documentation listing all visible tables, columns, and their types.
-- **Knowledge entries** -- markdown documents covering metric definitions, business rules, verified queries, and other institutional knowledge.
-- **Table knowledge** -- human-written descriptions of what tables mean, use cases, and data quality notes.
+- **Dataset browser** -- semantic model documentation listing visible datasets, measures, dimensions, and time dimensions.
+- **Knowledge entries** -- markdown documents covering metric definitions, business rules, and other institutional knowledge.
+- **Table knowledge** -- human-written descriptions of what source tables mean, use cases, and data quality notes.
 - **Agent learnings** -- corrections the agent has discovered from previous errors.
 
 The more knowledge you add to a project, the better the agent's answers become.

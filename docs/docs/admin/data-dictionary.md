@@ -1,6 +1,6 @@
 # Data dictionary management
 
-The `generate_data_dictionary` management command introspects a project's target database and generates schema documentation that the agent uses to write SQL queries.
+The `generate_data_dictionary` management command is a legacy schema-documentation tool. Semantic-model mode uses the dataset browser and semantic catalog instead of giving the agent raw schema context for SQL generation.
 
 ## Usage
 

@@ -70,7 +70,6 @@ MCP_TOOL_NAMES = frozenset(
     {
         "list_tables",
         "describe_table",
-        "query",
         "get_metadata",
         "list_workspaces",
         "list_datasets",
@@ -100,9 +99,8 @@ MCP_TOOL_NAMES = frozenset(
 AGENT_EXCLUDED_MCP_TOOLS = frozenset(
     {
         "teardown_schema",
-        # Semantic-model mode: keep raw SQL/table tools server-side for internal
-        # and operator callers, but do not expose them to the LLM.
-        "query",
+        # Semantic-model mode: keep raw table-inspection tools server-side for
+        # internal and operator callers, but do not expose them to the LLM.
         "list_tables",
         "describe_table",
         "get_metadata",
@@ -261,19 +259,27 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
             ).afirst()
             if ts is None:
-                return _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else (
-                    "No data has been loaded yet. Call `run_materialization` to start "
-                    "loading. This tool returns IMMEDIATELY with `status: started` — do "
-                    "NOT call other data tools in the same turn. Acknowledge to the user "
-                    "in ONE sentence and end your turn. The system will resume the "
-                    "conversation automatically when materialization completes."
+                return (
+                    _HEADLESS_MATERIALIZE_GUIDANCE
+                    if not interactive
+                    else (
+                        "No data has been loaded yet. Call `run_materialization` to start "
+                        "loading. This tool returns IMMEDIATELY with `status: started` — do "
+                        "NOT call other data tools in the same turn. Acknowledge to the user "
+                        "in ONE sentence and end your turn. The system will resume the "
+                        "conversation automatically when materialization completes."
+                    )
                 )
             if ts.state == SchemaState.MATERIALIZING:
-                return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE if not interactive else (
-                    "A materialization is already in progress in the background. Do NOT "
-                    "trigger another one and do NOT call other data tools. Briefly tell "
-                    "the user it's still loading and end your turn — the system will "
-                    "resume the conversation automatically when materialization completes."
+                return (
+                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+                    if not interactive
+                    else (
+                        "A materialization is already in progress in the background. Do NOT "
+                        "trigger another one and do NOT call other data tools. Briefly tell "
+                        "the user it's still loading and end your turn — the system will "
+                        "resume the conversation automatically when materialization completes."
+                    )
                 )
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
@@ -283,23 +289,31 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
         if tenant_count > 1:
             vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
             if vs is not None and vs.state == SchemaState.MATERIALIZING:
-                return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE if not interactive else (
-                    "A materialization is already in progress in the background. Do NOT "
-                    "trigger another one and do NOT call other data tools. Briefly tell "
-                    "the user it's still loading and end your turn — the system will "
-                    "resume the conversation automatically when materialization completes."
+                return (
+                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+                    if not interactive
+                    else (
+                        "A materialization is already in progress in the background. Do NOT "
+                        "trigger another one and do NOT call other data tools. Briefly tell "
+                        "the user it's still loading and end your turn — the system will "
+                        "resume the conversation automatically when materialization completes."
+                    )
                 )
             return (
                 f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
                 "No semantic datasets are available yet. Call `run_materialization` "
                 "to load workspace data and rebuild the semantic catalog."
             )
-        return _HEADLESS_MATERIALIZE_GUIDANCE if not interactive else (
-            "No data has been loaded yet. Call `run_materialization` to start "
-            "loading. This tool returns IMMEDIATELY with `status: started` — do "
-            "NOT call other data tools in the same turn. Acknowledge to the user "
-            "in ONE sentence and end your turn. The system will resume the "
-            "conversation automatically when materialization completes."
+        return (
+            _HEADLESS_MATERIALIZE_GUIDANCE
+            if not interactive
+            else (
+                "No data has been loaded yet. Call `run_materialization` to start "
+                "loading. This tool returns IMMEDIATELY with `status: started` — do "
+                "NOT call other data tools in the same turn. Acknowledge to the user "
+                "in ONE sentence and end your turn. The system will resume the "
+                "conversation automatically when materialization completes."
+            )
         )
 
 
@@ -411,9 +425,8 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
 
 _MULTI_TENANT_NAMESPACE_HINT = (
-    "This is a multi-tenant workspace. Tables are namespaced views prefixed with the "
-    "tenant name using double underscore: `{tenant_name}__{table_name}`. "
-    "To query across tenants, use explicit JOINs between namespaced tables."
+    "This is a multi-tenant workspace. Use the semantic catalog rather than "
+    "raw tenant tables; semantic datasets handle the workspace scope."
 )
 
 

@@ -43,7 +43,7 @@ Show me the top {{limit}} customers from the {{region}} region
 for the period {{start_date}} to {{end_date}}.
 ```
 
-Steps also have an optional `expected_tool` field (e.g., `execute_sql`) that indicates what tool the agent should use.
+Steps also have an optional `expected_tool` field (e.g., `semantic_query`) that indicates what tool the agent should use.
 
 ## Creating a recipe
 

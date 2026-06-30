@@ -58,7 +58,9 @@ class TestKnowledgeEntries:
 
         assert "MRR" in result
         assert "Monthly Recurring Revenue" in result
-        assert "SUM(amount)" in result
+        assert "SQL example removed" in result
+        assert "SUM(amount)" not in result
+        assert "SELECT" not in result
 
     @pytest.mark.asyncio
     async def test_multiple_entries(self, workspace, user):
@@ -90,6 +92,7 @@ class TestKnowledgeEntries:
         assert "MRR" in result
         assert "Soft Delete Rule" in result
         assert "Daily Revenue Query" in result
+        assert "SELECT DATE" not in result
 
     @pytest.mark.asyncio
     async def test_entry_content_appears(self, workspace, user):
@@ -182,8 +185,6 @@ class TestAgentLearnings:
             category="type_mismatch",
             applies_to_tables=["orders"],
             original_error="Unexpected revenue value",
-            original_sql="SELECT amount FROM orders",
-            corrected_sql="SELECT amount / 100.0 FROM orders",
             confidence_score=0.8,
             is_active=True,
             discovered_by_user=user,
@@ -265,8 +266,6 @@ class TestAgentLearnings:
             category="naming",
             applies_to_tables=["orders"],
             original_error="Column 'status_name' does not exist",
-            original_sql="SELECT status_name FROM orders",
-            corrected_sql="SELECT status FROM orders",
             confidence_score=0.7,
             is_active=True,
             discovered_by_user=user,
@@ -321,6 +320,7 @@ class TestFullAssembly:
         result = await retriever.retrieve()
 
         assert "MRR" in result
+        assert "SELECT SUM" not in result
         assert "Soft Delete" in result or "deleted_at" in result
         assert "orders" in result.lower()
         assert "cents" in result.lower()

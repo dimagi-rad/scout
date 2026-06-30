@@ -1032,7 +1032,7 @@ class TestCancelMaterialization:
 
 class TestExecuteAsyncIntegration:
     """
-    End-to-end tests for _execute_async and _execute_async_parameterized against
+    End-to-end tests for _execute_async_parameterized against
     a real PostgreSQL server.  These catch driver-level regressions (e.g. SET
     statement_timeout failing with psycopg3's server-side parameters) that
     mock-based tests can't detect.
@@ -1081,7 +1081,7 @@ class TestExecuteAsyncIntegration:
                     VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
                     """
                 )
-                # Create the read-only role required by _execute_async SET ROLE
+                # Create the read-only role required by the executor SET ROLE
                 cur.execute(f'CREATE ROLE "{self.ro_role}"')
                 cur.execute(f'GRANT USAGE ON SCHEMA "{self.schema}" TO "{self.ro_role}"')
                 cur.execute(
@@ -1113,10 +1113,10 @@ class TestExecuteAsyncIntegration:
 
     @pytest.mark.asyncio
     async def test_returns_rows(self):
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
-        result = await _execute_async(
-            self._ctx(), "SELECT name, value FROM items ORDER BY value", 30
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT name, value FROM items ORDER BY value", (), 30
         )
 
         assert result["columns"] == ["name", "value"]
@@ -1126,17 +1126,19 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_statement_timeout_does_not_use_server_side_param(self):
         """Regression: SET statement_timeout TO $1 raises SyntaxError in psycopg3."""
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
         # Would raise psycopg.errors.SyntaxError before the fix
-        result = await _execute_async(self._ctx(), "SELECT 1 AS n", 30)
+        result = await _execute_async_parameterized(self._ctx(), "SELECT 1 AS n", (), 30)
         assert result["row_count"] == 1
 
     @pytest.mark.asyncio
     async def test_empty_result(self):
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
-        result = await _execute_async(self._ctx(), "SELECT name FROM items WHERE value > 9999", 30)
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT name FROM items WHERE value > 9999", (), 30
+        )
 
         assert result["columns"] == ["name"]
         assert result["rows"] == []
@@ -1160,10 +1162,12 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_search_path_is_applied(self):
         """Unqualified table name resolves because search_path is set to the schema."""
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
         # No schema qualifier — relies on SET search_path TO working correctly
-        result = await _execute_async(self._ctx(), "SELECT count(*) AS n FROM items", 30)
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT count(*) AS n FROM items", (), 30
+        )
 
         assert result["row_count"] == 1
         assert result["rows"][0][0] == 3

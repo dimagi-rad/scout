@@ -19,7 +19,8 @@ class TestMcpToolNames:
 
         assert "list_tables" in MCP_TOOL_NAMES
         assert "describe_table" in MCP_TOOL_NAMES
-        assert "query" in MCP_TOOL_NAMES
+        assert "semantic_query" in MCP_TOOL_NAMES
+        assert "semantic_catalog" in MCP_TOOL_NAMES
         assert "get_metadata" in MCP_TOOL_NAMES
         assert "run_materialization" in MCP_TOOL_NAMES
         assert "list_workspaces" in MCP_TOOL_NAMES
@@ -53,7 +54,7 @@ class TestTeardownSchemaUnbound:
             return t
 
         mcp_tools = [
-            _fake_mcp_tool("query"),
+            _fake_mcp_tool("semantic_query"),
             _fake_mcp_tool("list_tables"),
             _fake_mcp_tool("teardown_schema"),
         ]
@@ -63,9 +64,8 @@ class TestTeardownSchemaUnbound:
         tool_names = {t.name for t in tools}
 
         assert "teardown_schema" not in tool_names
-        # The non-destructive MCP tools survive.
-        assert "query" in tool_names
-        assert "list_tables" in tool_names
+        assert "semantic_query" in tool_names
+        assert "list_tables" not in tool_names
 
 
 class TestHeadlessMode:
@@ -80,7 +80,10 @@ class TestHeadlessMode:
     def test_build_tools_headless_swaps_in_blocking_materialization(self):
         from apps.agents.graph.base import _build_tools
 
-        mcp_tools = [self._fake_mcp_tool("query"), self._fake_mcp_tool("run_materialization")]
+        mcp_tools = [
+            self._fake_mcp_tool("semantic_query"),
+            self._fake_mcp_tool("run_materialization"),
+        ]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
         headless = _build_tools(workspace, None, mcp_tools, interactive=False, job_id=7)
@@ -94,7 +97,7 @@ class TestHeadlessMode:
         from apps.agents.graph.base import _build_tools
 
         mcp_rm = self._fake_mcp_tool("run_materialization")
-        mcp_tools = [self._fake_mcp_tool("query"), mcp_rm]
+        mcp_tools = [self._fake_mcp_tool("semantic_query"), mcp_rm]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
         interactive = _build_tools(workspace, None, mcp_tools, interactive=True)

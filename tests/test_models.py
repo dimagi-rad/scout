@@ -63,7 +63,7 @@ class TestKnowledgeModels:
         entry = KnowledgeEntry.objects.create(
             workspace=workspace,
             title="MRR",
-            content="Monthly Recurring Revenue from active subscriptions\n\n```sql\nSELECT SUM(amount) FROM subscriptions WHERE status = 'active'\n```",
+            content="Monthly Recurring Revenue from active subscriptions.",
             tags=["metric", "finance"],
             created_by=user,
         )
@@ -79,8 +79,6 @@ class TestKnowledgeModels:
             category="type_mismatch",
             applies_to_tables=["orders"],
             original_error="Unexpected revenue value",
-            original_sql="SELECT amount FROM orders",
-            corrected_sql="SELECT amount / 100.0 FROM orders",
             discovered_by_user=user,
         )
 

@@ -24,8 +24,8 @@ async def test_injecting_node_includes_workspace_id():
                 tool_calls=[
                     {
                         "id": "call_1",
-                        "name": "query",
-                        "args": {"sql": "SELECT 1"},
+                        "name": "semantic_query",
+                        "args": {"measures": ["visits.count"]},
                     }
                 ],
             )

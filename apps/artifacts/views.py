@@ -22,8 +22,6 @@ from apps.common.utils import creator_display_name
 from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
-from mcp_server.context import load_workspace_context
-from mcp_server.services.query import execute_query
 
 from .models import Artifact
 from .services.export import ArtifactExporter
@@ -802,7 +800,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
-        has_live_queries = bool(artifact.source_queries or artifact.semantic_queries)
+        has_live_queries = bool(artifact.semantic_queries)
 
         # Serialize artifact data for embedding in the template
         artifact_json = json.dumps(
@@ -861,7 +859,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "type": artifact.artifact_type,
             "code": artifact.code,
             "data": artifact.data,
-            "source_queries": artifact.source_queries,
             "semantic_queries": artifact.semantic_queries,
             "version": artifact.version,
         }
@@ -884,14 +881,11 @@ def _json_safe(value: Any) -> Any:
 
 class ArtifactQueryDataView(View):
     """
-    Executes an artifact's semantic_queries/source_queries and returns results.
+    Executes an artifact's semantic_queries and returns results.
 
-    For artifacts with source_queries, each SQL query is executed against the
-    workspace's query schema using the same query service as the MCP server.
-    Routing goes through ``load_workspace_context`` so multi-tenant workspaces hit
-    the ``ws_*`` view schema the agent authored queries against -- not the first
-    tenant's ``t_*`` schema. Results are returned in a format the artifact sandbox
-    can consume directly via mergeQueryResults().
+    Legacy SQL-backed ``source_queries`` are intentionally not executed. Results
+    are returned in a format the artifact sandbox can consume directly via
+    mergeQueryResults().
     """
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
@@ -942,46 +936,17 @@ class ArtifactQueryDataView(View):
                     }
                 )
 
-        # Route legacy SQL artifacts through load_workspace_context so single-
-        # vs multi-tenant workspaces resolve to the correct schema.
-        ctx = None
-        if artifact.source_queries:
-            try:
-                ctx = await load_workspace_context(str(artifact.workspace_id))
-            except Exception as e:
-                error_msg = str(e)
-                for i, entry in enumerate(artifact.source_queries):
-                    results.append({"name": entry.get("name", f"query_{i}"), "error": error_msg})
-                return JsonResponse({"queries": results, "static_data": artifact.data or {}})
-
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")
-            sql = entry.get("sql", "")
-            if not sql:
-                results.append({"name": name, "error": "Empty SQL query"})
-                continue
-
-            result = await execute_query(ctx, sql)
-
-            if not result.get("success", True) or result.get("error"):
-                error_info = result.get("error", {})
-                msg = (
-                    error_info.get("message", "Query failed")
-                    if isinstance(error_info, dict)
-                    else str(error_info)
-                )
-                results.append({"name": name, "error": msg})
-            else:
-                results.append(
-                    {
-                        "name": name,
-                        "sql": sql,
-                        "columns": result.get("columns", []),
-                        "rows": result.get("rows", []),
-                        "row_count": result.get("row_count", 0),
-                        "truncated": result.get("truncated", False),
-                    }
-                )
+            results.append(
+                {
+                    "name": name,
+                    "error": (
+                        "Legacy SQL-backed artifact queries are disabled. "
+                        "Recreate this artifact with semantic_queries."
+                    ),
+                }
+            )
 
         return JsonResponse({"queries": results, "static_data": artifact.data or {}})
 
@@ -1010,7 +975,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
                 "description": a.description,
                 "artifact_type": a.artifact_type,
                 "version": a.version,
-                "has_live_queries": bool(a.source_queries or a.semantic_queries),
+                "has_live_queries": bool(a.semantic_queries),
                 "created_by_name": creator_display_name(a.created_by),
                 "created_at": a.created_at.isoformat(),
                 "updated_at": a.updated_at.isoformat(),

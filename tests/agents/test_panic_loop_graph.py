@@ -13,7 +13,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from apps.agents.graph.base import _should_escalate
 
 
-def _err_tool_message(code: str, tool_call_id: str = "tc", name: str = "query") -> ToolMessage:
+def _err_tool_message(
+    code: str, tool_call_id: str = "tc", name: str = "semantic_query"
+) -> ToolMessage:
     """Build a ToolMessage with a JSON-encoded error envelope, matching the
     shape ``mcp_server.envelope.error_response`` produces.
     """
@@ -21,12 +23,12 @@ def _err_tool_message(code: str, tool_call_id: str = "tc", name: str = "query") 
     return ToolMessage(content=body, tool_call_id=tool_call_id, name=name)
 
 
-def _ok_tool_message(tool_call_id: str = "tc", name: str = "query") -> ToolMessage:
+def _ok_tool_message(tool_call_id: str = "tc", name: str = "semantic_query") -> ToolMessage:
     body = json.dumps({"success": True, "data": {"rows": [[1]]}})
     return ToolMessage(content=body, tool_call_id=tool_call_id, name=name)
 
 
-def _ai_with_tool_call(tool_call_id: str = "tc", name: str = "query") -> AIMessage:
+def _ai_with_tool_call(tool_call_id: str = "tc", name: str = "semantic_query") -> AIMessage:
     return AIMessage(
         content="",
         tool_calls=[{"id": tool_call_id, "name": name, "args": {}}],
@@ -117,19 +119,19 @@ class TestShouldEscalate:
             ToolMessage(
                 content='{"success": false, "error": {"code": "QUERY_TIMEOUT"}}',
                 tool_call_id="a",
-                name="query",
+                name="semantic_query",
             ),
             _ai_with_tool_call("b"),
             ToolMessage(
                 content='{"success": false, "error": {"code": "QUERY_TIMEOUT"}}',
                 tool_call_id="b",
-                name="query",
+                name="semantic_query",
             ),
             _ai_with_tool_call("c"),
             ToolMessage(
                 content='{"success": false, "error": {"code": "QUERY_TIMEOUT"}}',
                 tool_call_id="c",
-                name="query",
+                name="semantic_query",
             ),
         ]
         assert _should_escalate(messages) is False
@@ -148,7 +150,7 @@ class TestShouldEscalate:
                 {"success": False, "error": {"code": code, "message": "x"}},
                 separators=(",", ":"),
             )
-            return ToolMessage(content=body, tool_call_id=tc, name="query")
+            return ToolMessage(content=body, tool_call_id=tc, name="semantic_query")
 
         messages = [
             HumanMessage(content="how many users?"),
@@ -169,7 +171,7 @@ class TestShouldEscalate:
             body = json.dumps(
                 {"success": True, "data": {"rows": [["NOT_FOUND was mentioned here"]]}}
             )
-            return ToolMessage(content=body, tool_call_id=tc, name="query")
+            return ToolMessage(content=body, tool_call_id=tc, name="semantic_query")
 
         messages = [
             HumanMessage(content="show me the log"),
