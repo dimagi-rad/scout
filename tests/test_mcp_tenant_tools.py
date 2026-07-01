@@ -391,7 +391,7 @@ class TestWorkspaceAndDatasetDiscoveryTools:
             is_visible=True,
         )
 
-        with patch("mcp_server.server.ensure_semantic_model", return_value=model):
+        with patch("mcp_server.server.get_active_semantic_model", return_value=model):
             result = await list_datasets(
                 user_id=str(user.id),
                 limit=10,

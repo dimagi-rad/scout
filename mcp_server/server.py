@@ -38,7 +38,7 @@ from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
-    ensure_semantic_model,
+    get_active_semantic_model,
     serialize_catalog,
     serialize_dataset,
 )
@@ -639,7 +639,7 @@ async def list_datasets(
         workspace_errors: list[dict] = []
         for workspace in workspaces:
             try:
-                await sync_to_async(ensure_semantic_model, thread_sensitive=True)(workspace)
+                await sync_to_async(get_active_semantic_model, thread_sensitive=True)(workspace)
                 ready_workspace_ids.append(str(workspace.id))
             except SemanticCatalogUnavailable as exc:
                 workspace_errors.append(
@@ -693,12 +693,12 @@ async def list_datasets(
 
 
 def _serialized_semantic_catalog(workspace: Workspace) -> dict:
-    model = ensure_semantic_model(workspace)
+    model = get_active_semantic_model(workspace)
     return serialize_catalog(model)
 
 
 def _serialized_semantic_dataset(workspace: Workspace, dataset_name: str) -> dict:
-    model = ensure_semantic_model(workspace)
+    model = get_active_semantic_model(workspace)
     dataset = model.datasets.get(name=dataset_name, is_visible=True)
     return serialize_dataset(dataset)
 

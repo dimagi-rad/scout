@@ -37,19 +37,19 @@ from langgraph.prebuilt import ToolNode
 from apps.agents.graph.state import AgentState
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
-from apps.agents.tools.artifact_tool import create_artifact_tools
-from apps.agents.tools.learning_tool import create_save_learning_tool
-from apps.agents.tools.materialization_tool import create_materialization_tool
-from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
+from apps.agents.tools.artifact_tool import create_artifact_tools
+from apps.agents.tools.learning_tool import create_save_learning_tool
+from apps.agents.tools.materialization_tool import create_materialization_tool
+from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
-    ensure_semantic_model,
+    get_active_semantic_model,
 )
 from apps.workspaces.models import (
     MaterializationRun,
@@ -254,7 +254,7 @@ def _system_prompt_cache_key(workspace, user, interactive: bool = True) -> str:
 
 
 def _semantic_catalog_context_sync(workspace) -> str:
-    ensure_semantic_model(workspace)
+    get_active_semantic_model(workspace)
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "

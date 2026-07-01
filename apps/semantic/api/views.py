@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 from apps.semantic.models import SemanticCanvas, SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
-    ensure_semantic_model,
+    get_active_semantic_model,
     serialize_catalog,
     serialize_dataset,
 )
@@ -27,7 +27,7 @@ class DatasetListView(APIView):
         if err:
             return err
         try:
-            model = ensure_semantic_model(workspace)
+            model = get_active_semantic_model(workspace)
         except SemanticCatalogUnavailable as exc:
             return Response(
                 {"error": str(exc), "schema_status": exc.schema_status},
@@ -44,7 +44,7 @@ class DatasetDetailView(APIView):
         if err:
             return err
         try:
-            model = ensure_semantic_model(workspace)
+            model = get_active_semantic_model(workspace)
             dataset = model.datasets.get(name=dataset_name, is_visible=True)
         except SemanticCatalogUnavailable as exc:
             return Response(
@@ -78,7 +78,7 @@ class SemanticCanvasView(APIView):
         if err:
             return err
         try:
-            model = ensure_semantic_model(workspace)
+            model = get_active_semantic_model(workspace)
         except SemanticCatalogUnavailable as exc:
             return Response(
                 {"error": str(exc), "schema_status": exc.schema_status},
@@ -111,7 +111,7 @@ class SemanticCanvasView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         try:
-            model = ensure_semantic_model(workspace)
+            model = get_active_semantic_model(workspace)
         except SemanticCatalogUnavailable as exc:
             return Response(
                 {"error": str(exc), "schema_status": exc.schema_status},
