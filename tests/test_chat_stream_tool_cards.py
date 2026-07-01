@@ -128,6 +128,50 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
     assert "tool_call_id" not in start["input"]
 
 
+@pytest.mark.asyncio
+async def test_local_tool_start_without_tool_call_id_uses_tool_message_id():
+    """Local tools such as artifact_graph_manager do not receive the injected
+    tool_call_id on start. The stream must not start a card with run_id and end
+    it with toolu_ id, because the AI SDK treats that as a missing invocation.
+    """
+    tm = ToolMessage(
+        content=json.dumps({"status": "created"}),
+        tool_call_id="toolu_ARTIFACT",
+        name="artifact_graph_manager",
+    )
+    events = [
+        {
+            "event": "on_tool_start",
+            "run_id": "run-artifact",
+            "name": "artifact_graph_manager",
+            "data": {
+                "input": {
+                    "action": "create",
+                    "title": "Example Artifact",
+                }
+            },
+        },
+        {
+            "event": "on_tool_end",
+            "run_id": "run-artifact",
+            "name": "artifact_graph_manager",
+            "data": {"output": tm},
+        },
+    ]
+    chunks = await _run(events)
+
+    tool_inputs = [c for c in chunks if c["type"] == "tool-input-available"]
+    tool_outputs = [c for c in chunks if c["type"] == "tool-output-available"]
+
+    assert len(tool_inputs) == 1
+    assert len(tool_outputs) == 1
+    assert tool_inputs[0]["toolCallId"] == "toolu_ARTIFACT"
+    assert tool_outputs[0]["toolCallId"] == "toolu_ARTIFACT"
+    assert tool_inputs[0]["toolName"] == "artifact_graph_manager"
+    assert tool_inputs[0]["input"]["action"] == "create"
+    assert tool_inputs[0]["input"]["title"] == "Example Artifact"
+
+
 # --- output JSON stays parse-safe; not double-pretty-printed (13#4/13#7) -----
 
 

@@ -197,6 +197,10 @@ async def langgraph_to_ui_stream(
     # The frontend keys per-card progress / Stop / failure off the toolu_ id
     # (ThreadJob.tool_call_id), so the stream MUST emit that id, not run_id.
     run_to_tool_call_id: dict[str, str] = {}
+    # Some local tools do not receive the injected ``tool_call_id`` in their
+    # on_tool_start input. Defer their input card until on_tool_end, where the
+    # ToolMessage carries the authoritative LLM toolu_ id.
+    pending_tool_starts: dict[str, dict[str, Any]] = {}
 
     # Preamble
     yield _sse({"type": "start"})
@@ -275,10 +279,6 @@ async def langgraph_to_ui_stream(
                 tool_call_id = None
                 if isinstance(raw_input, dict):
                     tool_call_id = raw_input.get("tool_call_id")
-                if not tool_call_id:
-                    tool_call_id = run_id or uuid.uuid4().hex
-                if run_id:
-                    run_to_tool_call_id[run_id] = tool_call_id
 
                 if text_started:
                     yield _sse({"type": "text-end", "id": text_id})
@@ -288,6 +288,18 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "reasoning-end", "id": reasoning_id})
                     reasoning_started = False
                     reasoning_id = f"reasoning-{uuid.uuid4().hex[:8]}"
+
+                if not tool_call_id:
+                    if run_id:
+                        pending_tool_starts[run_id] = {
+                            "toolName": event.get("name", "unknown"),
+                            "input": _redact_tool_input(raw_input),
+                        }
+                        continue
+                    tool_call_id = uuid.uuid4().hex
+
+                if run_id:
+                    run_to_tool_call_id[run_id] = tool_call_id
 
                 yield _sse(
                     {
@@ -338,22 +350,28 @@ async def langgraph_to_ui_stream(
                 # it so this output pairs with the input part the frontend keyed
                 # its per-card affordances off of. Fall back to the start map /
                 # run_id when (rarely) absent.
+                output_tool_call_id = getattr(tool_output, "tool_call_id", None)
+                started_tool_call_id = run_to_tool_call_id.get(run_id or "")
                 tool_call_id = (
-                    getattr(tool_output, "tool_call_id", None)
-                    or run_to_tool_call_id.get(run_id or "")
+                    output_tool_call_id
+                    or started_tool_call_id
                     or run_id
                     or uuid.uuid4().hex
                 )
+                pending_start = pending_tool_starts.pop(run_id or "", None)
 
                 # If on_tool_start never emitted an input part for this call,
                 # emit a minimal one now so AI SDK has a part to attach output to.
-                if not run_id or run_id not in run_to_tool_call_id:
+                if (
+                    not started_tool_call_id
+                    or (output_tool_call_id and output_tool_call_id != started_tool_call_id)
+                ):
                     yield _sse(
                         {
                             "type": "tool-input-available",
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
-                            "input": {},
+                            "input": (pending_start or {}).get("input", {}),
                         }
                     )
 
