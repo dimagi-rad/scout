@@ -129,6 +129,22 @@ def test_graph_doc_unknown_config_key_reports_allowed_keys():
     assert "Allowed config keys for tldr: content, items" in messages_by_block["summary"]
 
 
+def test_graph_doc_allows_recharts_graph_config_keys():
+    doc = graph_doc()
+    doc["blocks"][2]["config"].update(
+        {
+            "recharts": {"type": "BarChart", "children": []},
+            "stacked": True,
+            "y_format": "compact",
+            "height": 320,
+        }
+    )
+
+    codes = {item.get("code") for item in validate_doc(doc)}
+
+    assert "unknown_config_key" not in codes
+
+
 def test_apply_ops_rejects_introduced_diagnostics():
     with pytest.raises(GraphDocError, match="introduced diagnostics"):
         apply_ops(

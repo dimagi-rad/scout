@@ -80,7 +80,10 @@ Block config keys:
 - `period_selector`: `label`, `default_range`, `default_comparison`.
 - `semantic_query`: `queries`, optional `compare`.
 - `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
-  `data_label`, `query`, `transform`.
+  `data_label`, `query`, `transform`, `stacked`, `y_format`, `height`,
+  or `recharts` for an explicit Recharts element tree. Compact graph configs
+  render through Recharts; use `recharts` when the chart needs composition
+  beyond the compact `line`, `bar`, `area`, or `pie` presets.
 - `table`: `title`, `columns`, `query`.
 - `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
   `delta_path`.

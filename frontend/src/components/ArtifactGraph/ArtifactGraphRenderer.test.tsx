@@ -82,11 +82,12 @@ describe("ArtifactGraphRenderer", () => {
       row_count: 1,
     })
 
-    render(<ArtifactGraphRenderer artifact={artifact()} workspaceId="workspace-1" />)
+    const { container } = render(<ArtifactGraphRenderer artifact={artifact()} workspaceId="workspace-1" />)
 
     expect(screen.getByRole("heading", { name: "Visits" })).toBeInTheDocument()
     expect(screen.getByText("Visits by day")).toBeInTheDocument()
-    expect(await screen.findAllByText("visits_count")).toHaveLength(2)
+    await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
+    expect(await screen.findAllByText("visits_count")).toHaveLength(1)
     expect(screen.getAllByText("2026-06-24").length).toBeGreaterThan(0)
     expect(screen.getByText("Total visits")).toBeInTheDocument()
     await waitFor(() => expect(screen.getAllByText("12").length).toBeGreaterThan(0))
