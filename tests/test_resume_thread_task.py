@@ -9,6 +9,7 @@ from django.test import override_settings
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
+from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
@@ -304,6 +305,87 @@ async def test_resume_partial_maps_to_failed():
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_semantic_build_failure_maps_to_failed():
+    """Runs completed but the Cube schema build failed with nothing to serve:
+    the agent must be told the semantic layer is down and the job must FAIL."""
+    _user, ws, _thread, tj = await _make_thread_job_ready_to_resume(
+        email="sem-fail@b.c",
+        ws_name="WSemFail",
+        ext_id="t_sem_fail",
+        schema_name="s_sem_fail",
+        pj_id=9101,
+        tool_call="tc9101",
+    )
+    await SemanticModel.objects.acreate(
+        workspace=ws,
+        name="M",
+        status=SemanticModel.Status.ERROR,
+        metadata={"last_build": {"ok": False, "error": "validator exploded"}},
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["status"] == "resumed"
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "semantic model" in body
+    assert "validator exploded" in body
+    assert "list_datasets" in body
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.FAILED
+    assert "semantic model failed to build" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_semantic_stale_appends_note_and_stays_completed():
+    """A failed rebuild with a last-known-good ACTIVE schema keeps the workspace
+    queryable: the job completes, but the agent is told the model is stale."""
+    _user, ws, _thread, tj = await _make_thread_job_ready_to_resume(
+        email="sem-stale@b.c",
+        ws_name="WSemStale",
+        ext_id="t_sem_stale",
+        schema_name="s_sem_stale",
+        pj_id=9102,
+        tool_call="tc9102",
+    )
+    model = await SemanticModel.objects.acreate(
+        workspace=ws,
+        name="M",
+        metadata={"last_build": {"ok": False, "error": "validator flaked"}},
+    )
+    await CubeSchema.objects.acreate(
+        workspace=ws,
+        semantic_model=model,
+        filename="workspace_stale.yaml",
+        content="cubes: []\n",
+        content_hash="stalehash",
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=(mock_agent, {})),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["terminal_state"] == ThreadJob.State.COMPLETED
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "PREVIOUS semantic model" in body
+    assert "validator flaked" in body
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.COMPLETED
 
 
 @pytest.mark.asyncio

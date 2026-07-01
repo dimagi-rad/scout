@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock
+
 import pytest
 
 from apps.semantic.models import (
@@ -6,13 +8,20 @@ from apps.semantic.models import (
     SemanticDataset,
     SemanticField,
     SemanticModel,
+    SemanticRelationship,
 )
 from apps.semantic.services import catalog as catalog_service
+from apps.semantic.services import cube_schema as cube_schema_service
 from apps.semantic.services import query as query_service
 from apps.semantic.services.catalog import PhysicalTable
 from apps.semantic.services.cube import generate_cube_schema
-from apps.semantic.services.cube_schema import build_cube_security_context
+from apps.semantic.services.cube_schema import (
+    KEEP_INACTIVE_CUBE_SCHEMAS,
+    CubeSchemaBuildError,
+    build_cube_security_context,
+)
 from mcp_server.context import QueryContext
+from mcp_server.pipeline_registry import RelationshipConfig
 
 
 @pytest.fixture
@@ -255,7 +264,8 @@ def test_generate_cube_schema_from_semantic_model(semantic_model):
     assert schema["model"]["version"] == 1
     cube = schema["cubes"][0]
     assert cube["name"] == "visits"
-    assert cube["sql_table"] == '"tenant_schema"."raw_visits"'
+    # Unqualified on purpose: the schema resolves via per-query search_path.
+    assert cube["sql_table"] == '"raw_visits"'
     assert {"name": "count", "type": "count"} in cube["measures"]
     assert {
         "name": "username",
@@ -283,7 +293,7 @@ def test_generate_cube_schema_renders_custom_dataset_as_sql(workspace, semantic_
         label="Large Visits",
         source_kind=SemanticDataset.SourceKind.CUSTOM,
         table_name="large_visits",
-        metadata={"cube_sql": 'select username from "tenant_schema"."raw_visits"'},
+        metadata={"cube_sql": 'select username from "raw_visits"'},
     )
     SemanticField.objects.create(
         dataset=dataset,
@@ -300,7 +310,7 @@ def test_generate_cube_schema_renders_custom_dataset_as_sql(workspace, semantic_
         if cube["name"] == "large_visits"
     )
 
-    assert cube["sql"] == 'select username from "tenant_schema"."raw_visits"'
+    assert cube["sql"] == 'select username from "raw_visits"'
     assert "sql_table" not in cube
 
 
@@ -335,9 +345,7 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     custom_dataset = model.datasets.get(name="visit_users")
 
     assert custom_dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
-    assert custom_dataset.metadata["cube_sql"] == (
-        'select username from "tenant_schema"."raw_visits"'
-    )
+    assert custom_dataset.metadata["cube_sql"] == 'select username from "raw_visits"'
     assert custom_dataset.fields.filter(name="username", is_visible=True).exists()
     assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
 
@@ -374,6 +382,284 @@ def test_invalid_custom_dataset_is_hidden_without_removing_physical(monkeypatch,
         is_visible=True,
     ).exists()
     assert not model.datasets.filter(name="bad_dataset", is_visible=True).exists()
+
+
+def _physical_visits_and_users():
+    return [
+        PhysicalTable(
+            name="raw_visits",
+            type="table",
+            description="Visits",
+            columns=[
+                {"name": "visit_id", "type": "bigint"},
+                {"name": "username", "type": "text"},
+                {"name": "amount", "type": "numeric"},
+            ],
+            primary_key="visit_id",
+        ),
+        PhysicalTable(
+            name="raw_users",
+            type="table",
+            description="Users",
+            columns=[{"name": "username", "type": "text"}],
+            primary_key="username",
+        ),
+    ]
+
+
+def _fake_registry(relationships):
+    pipeline = MagicMock()
+    pipeline.relationships = relationships
+    registry = MagicMock()
+    registry.list.return_value = [pipeline]
+    return registry
+
+
+_VISITS_TO_USERS = RelationshipConfig(
+    from_table="raw_visits",
+    from_column="username",
+    to_table="raw_users",
+    to_column="username",
+    description="Visits reference the FLW",
+)
+
+
+def test_ensure_semantic_model_sets_primary_key_and_skips_id_measures(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: ("tenant_schema", _physical_visits_and_users()),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([]))
+
+    model = catalog_service.ensure_semantic_model(workspace)
+
+    visits = model.datasets.get(name="raw_visits")
+    assert visits.primary_key == "visit_id"
+    assert not visits.fields.filter(name="sum_visit_id").exists()
+    assert not visits.fields.filter(name="avg_visit_id").exists()
+    assert visits.fields.filter(name="sum_amount", is_visible=True).exists()
+
+
+def test_generate_cube_schema_marks_primary_key_dimension(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: ("tenant_schema", _physical_visits_and_users()),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([]))
+    model = catalog_service.ensure_semantic_model(workspace)
+
+    cube = next(c for c in generate_cube_schema(model)["cubes"] if c["name"] == "raw_visits")
+
+    pk_dim = next(d for d in cube["dimensions"] if d["name"] == "visit_id")
+    assert pk_dim["primary_key"] is True
+    assert pk_dim["public"] is True
+    username_dim = next(d for d in cube["dimensions"] if d["name"] == "username")
+    assert "primary_key" not in username_dim
+
+
+def test_ensure_semantic_model_builds_relationships_from_pipeline(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: ("tenant_schema", _physical_visits_and_users()),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([_VISITS_TO_USERS]))
+
+    model = catalog_service.ensure_semantic_model(workspace)
+
+    relationship = SemanticRelationship.objects.get(workspace=workspace)
+    assert relationship.from_dataset.name == "raw_visits"
+    assert relationship.to_dataset.name == "raw_users"
+    assert relationship.relationship_type == SemanticRelationship.RelationshipType.MANY_TO_ONE
+    assert relationship.join_expression == "{raw_visits.username} = {raw_users.username}"
+    assert relationship.metadata["generated"] is True
+
+    cube = next(c for c in generate_cube_schema(model)["cubes"] if c["name"] == "raw_visits")
+    assert cube["joins"] == [
+        {
+            "name": "raw_users",
+            "relationship": "many_to_one",
+            "sql": "{raw_visits.username} = {raw_users.username}",
+        }
+    ]
+
+
+def test_relationship_sync_drops_stale_generated_rows(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: ("tenant_schema", _physical_visits_and_users()),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([_VISITS_TO_USERS]))
+    model = catalog_service.ensure_semantic_model(workspace)
+    hand_authored = SemanticRelationship.objects.create(
+        workspace=workspace,
+        name="manual_link",
+        from_dataset=model.datasets.get(name="raw_visits"),
+        to_dataset=model.datasets.get(name="raw_users"),
+        join_expression="{raw_visits.username} = {raw_users.username}",
+    )
+
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([]))
+    catalog_service.ensure_semantic_model(workspace)
+
+    remaining = SemanticRelationship.objects.filter(workspace=workspace)
+    assert list(remaining.values_list("id", flat=True)) == [hand_authored.id]
+
+
+def test_relationships_match_namespaced_views_within_prefix(monkeypatch, workspace):
+    tables = [
+        PhysicalTable(
+            name="t1__raw_visits",
+            type="view",
+            description="",
+            columns=[{"name": "username", "type": "text"}],
+        ),
+        PhysicalTable(
+            name="t1__raw_users",
+            type="view",
+            description="",
+            columns=[{"name": "username", "type": "text"}],
+        ),
+        PhysicalTable(
+            name="t2__raw_users",
+            type="view",
+            description="",
+            columns=[{"name": "username", "type": "text"}],
+        ),
+    ]
+    monkeypatch.setattr(
+        catalog_service, "load_physical_tables", lambda _workspace: ("ws_schema", tables)
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([_VISITS_TO_USERS]))
+
+    catalog_service.ensure_semantic_model(workspace)
+
+    relationship = SemanticRelationship.objects.get(workspace=workspace)
+    assert relationship.from_dataset.name == "t1__raw_visits"
+    assert relationship.to_dataset.name == "t1__raw_users"
+
+
+@pytest.fixture
+def no_close_old_connections(monkeypatch):
+    """build_and_promote_cube_schema closes worker-thread DB connections; inside
+    pytest-django's per-test transaction that would kill the test connection."""
+    monkeypatch.setattr(cube_schema_service, "close_old_connections", lambda: None)
+
+
+class _FailingValidatorClient:
+    async def validate_schema(self, content):
+        return {"valid": False, "errors": ["boom"]}
+
+
+class _OkCubeClient:
+    async def validate_schema(self, content):
+        return {"valid": True, "errors": []}
+
+    async def invalidate_schema_cache(self, *, security_context):
+        return None
+
+
+async def _fake_workspace_context(workspace_id):
+    return QueryContext(
+        tenant_id=str(workspace_id),
+        schema_name="tenant_schema",
+        connection_params={},
+    )
+
+
+def test_failed_build_keeps_last_known_good_readable(
+    monkeypatch, workspace, semantic_model, no_close_old_connections
+):
+    monkeypatch.setattr(cube_schema_service, "CubeClient", _FailingValidatorClient)
+
+    with pytest.raises(CubeSchemaBuildError):
+        cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+
+    semantic_model.refresh_from_db()
+    # The previous ACTIVE schema still serves, so reads must stay up.
+    assert semantic_model.status == SemanticModel.Status.ACTIVE
+    assert semantic_model.metadata["last_build"]["ok"] is False
+    active = CubeSchema.objects.get(workspace=workspace, status=CubeSchema.Status.ACTIVE)
+    assert active.content_hash == "testhash"
+    assert CubeSchema.objects.filter(workspace=workspace, status=CubeSchema.Status.ERROR).exists()
+
+
+def test_failed_build_without_active_schema_marks_model_error(
+    monkeypatch, workspace, semantic_model, no_close_old_connections
+):
+    CubeSchema.objects.filter(workspace=workspace).delete()
+    monkeypatch.setattr(cube_schema_service, "CubeClient", _FailingValidatorClient)
+
+    with pytest.raises(CubeSchemaBuildError):
+        cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+
+    semantic_model.refresh_from_db()
+    assert semantic_model.status == SemanticModel.Status.ERROR
+    assert semantic_model.metadata["last_build"]["ok"] is False
+
+
+def test_promote_prunes_old_inactive_rows_and_records_last_build(
+    monkeypatch, workspace, semantic_model, no_close_old_connections
+):
+    for i in range(KEEP_INACTIVE_CUBE_SCHEMAS + 3):
+        CubeSchema.objects.create(
+            workspace=workspace,
+            semantic_model=semantic_model,
+            filename=f"old_{i}.yaml",
+            content="cubes: []\n",
+            content_hash=f"old{i}",
+            status=CubeSchema.Status.DRAFT,
+        )
+    monkeypatch.setattr(cube_schema_service, "CubeClient", _OkCubeClient)
+    monkeypatch.setattr(cube_schema_service, "load_workspace_context", _fake_workspace_context)
+
+    promoted = cube_schema_service.build_and_promote_cube_schema(workspace, model=semantic_model)
+
+    assert promoted.status == CubeSchema.Status.ACTIVE
+    semantic_model.refresh_from_db()
+    assert semantic_model.metadata["last_build"]["ok"] is True
+    inactive = CubeSchema.objects.filter(workspace=workspace).exclude(
+        status=CubeSchema.Status.ACTIVE
+    )
+    assert inactive.count() == KEEP_INACTIVE_CUBE_SCHEMAS
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_semantic_query_flags_truncation_at_limit(monkeypatch, workspace, semantic_model):
+    class FullPageCubeClient:
+        async def execute_query(self, cube_query, *, security_context):
+            limit = cube_query["limit"]
+            return {
+                "columns": ["visits.count"],
+                "rows": [[i] for i in range(limit)],
+                "row_count": limit,
+            }
+
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
+    monkeypatch.setattr(query_service, "CubeClient", FullPageCubeClient)
+    monkeypatch.setattr(query_service, "load_workspace_context", _fake_workspace_context)
+
+    result = await query_service.run_semantic_query(
+        workspace, {"measures": ["visits.count"], "limit": 5}
+    )
+    assert result["truncated"] is True
+
+    class SparseCubeClient:
+        async def execute_query(self, cube_query, *, security_context):
+            return {"columns": ["visits.count"], "rows": [[1]], "row_count": 1}
+
+    monkeypatch.setattr(query_service, "CubeClient", SparseCubeClient)
+    result = await query_service.run_semantic_query(
+        workspace,
+        {"measures": ["visits.count"], "limit": query_service.MAX_SEMANTIC_LIMIT},
+    )
+    assert result["truncated"] is False
 
 
 def test_cube_security_context_is_workspace_and_schema_scoped(workspace, semantic_model):
