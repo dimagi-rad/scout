@@ -62,7 +62,11 @@ services:
       platform-db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:4000/readyz && curl -fsS http://localhost:4010/readyz"]
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"Promise.all([fetch('http://localhost:4000/readyz'), fetch('http://localhost:4010/readyz')]).then((responses) => { if (!responses.every((response) => response.ok)) process.exit(1); }).catch(() => process.exit(1));\"",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12
