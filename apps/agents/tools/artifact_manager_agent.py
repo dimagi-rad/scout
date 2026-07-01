@@ -47,6 +47,8 @@ NESTED_MCP_TOOL_NAMES = frozenset(
 )
 NESTED_RECURSION_LIMIT = 18
 NESTED_MAX_TOKENS = 4096
+SUBAGENT_TRACE_MAX_EVENTS = 200
+SUBAGENT_MESSAGE_MAX_CHARS = 40_000
 
 
 class ArtifactManagerInput(BaseModel):
@@ -175,13 +177,25 @@ def create_artifact_manager_tool(
         final_text = ""
         run_to_tool_call_id: dict[str, str] = {}
         pending_tool_starts: dict[str, dict[str, Any]] = {}
+        message_buffers: dict[tuple[str, str], str] = {}
+        trace = _SubagentTraceRecorder()
         try:
+            await _emit_subagent_event(
+                _subagent_status_event(
+                    parent_tool_call_id,
+                    phase="running",
+                    message="Artifact Manager started.",
+                ),
+                trace,
+            )
             async for event in graph.astream_events(input_state, config=config, version="v2"):
                 await _forward_nested_event(
                     event,
                     parent_tool_call_id,
                     run_to_tool_call_id,
                     pending_tool_starts,
+                    message_buffers,
+                    trace,
                 )
                 output = event.get("data", {}).get("output")
                 if event.get("event") == "on_chain_end" and isinstance(output, dict):
@@ -192,7 +206,19 @@ def create_artifact_manager_tool(
             reset_subagent_event_queue(queue_token)
         if messages:
             final_text = _extract_final_text(messages)
-        return _summarize_result(messages, final_text)
+        result = _summarize_result(messages, final_text)
+        await _emit_subagent_event(
+            _subagent_status_event(
+                parent_tool_call_id,
+                phase="completed",
+                message="Artifact Manager completed.",
+                artifact_id=result.get("artifact_id"),
+                artifact_version=result.get("artifact_version"),
+            ),
+            trace,
+        )
+        result["subagent_trace"] = trace.to_dict()
+        return result
 
     artifact_manager.name = "artifact_manager"
     return artifact_manager
@@ -322,6 +348,8 @@ async def _forward_nested_event(
     parent_tool_call_id: str,
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
+    message_buffers: dict[tuple[str, str], str],
+    trace: "_SubagentTraceRecorder",
 ) -> None:
     event_type = event.get("event")
     if event_type == "on_tool_start":
@@ -330,6 +358,7 @@ async def _forward_nested_event(
             parent_tool_call_id,
             run_to_tool_call_id,
             pending_tool_starts,
+            trace,
         )
     elif event_type == "on_tool_end":
         await _forward_nested_tool_end(
@@ -337,20 +366,22 @@ async def _forward_nested_event(
             parent_tool_call_id,
             run_to_tool_call_id,
             pending_tool_starts,
+            trace,
         )
     elif event_type == "on_chat_model_stream":
-        await _forward_nested_chat_stream(event, parent_tool_call_id)
+        await _forward_nested_chat_stream(event, parent_tool_call_id, message_buffers, trace)
     elif event_type in {"on_tool_error", "on_chain_error"}:
-        await emit_subagent_event(
+        await _emit_subagent_event(
             {
                 "type": "data-subagent-error",
+                "id": f"{SUBAGENT_NAME}:{event.get('run_id') or uuid.uuid4().hex}:error",
                 "data": {
                     "parentToolCallId": parent_tool_call_id,
                     "subagentName": SUBAGENT_NAME,
                     "message": str(event.get("data", {}).get("error") or "Subagent error"),
                 },
-                "transient": True,
-            }
+            },
+            trace,
         )
 
 
@@ -359,6 +390,7 @@ async def _forward_nested_tool_start(
     parent_tool_call_id: str,
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
+    trace: "_SubagentTraceRecorder",
 ) -> None:
     from apps.chat.stream import _redact_tool_input
 
@@ -378,7 +410,7 @@ async def _forward_nested_tool_start(
     if run_id:
         run_to_tool_call_id[run_id] = str(tool_call_id)
     child_id = _child_tool_call_id(tool_call_id or run_id)
-    await emit_subagent_event(
+    await _emit_subagent_event(
         {
             "type": "data-subagent-tool-input",
             "id": f"{child_id}:input",
@@ -389,7 +421,8 @@ async def _forward_nested_tool_start(
                 "toolName": event.get("name", "unknown"),
                 "input": _redact_tool_input(raw_input),
             },
-        }
+        },
+        trace,
     )
 
 
@@ -398,6 +431,7 @@ async def _forward_nested_tool_end(
     parent_tool_call_id: str,
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
+    trace: "_SubagentTraceRecorder",
 ) -> None:
     from apps.chat.stream import _tool_content_to_str, _truncate_tool_output
 
@@ -413,7 +447,7 @@ async def _forward_nested_tool_end(
     if not started_tool_call_id or (
         output_tool_call_id and output_tool_call_id != started_tool_call_id
     ):
-        await emit_subagent_event(
+        await _emit_subagent_event(
             {
                 "type": "data-subagent-tool-input",
                 "id": f"{child_id}:input",
@@ -424,9 +458,10 @@ async def _forward_nested_tool_end(
                     "toolName": event.get("name", "unknown"),
                     "input": (pending_start or {}).get("input", {}),
                 },
-            }
+            },
+            trace,
         )
-    await emit_subagent_event(
+    await _emit_subagent_event(
         {
             "type": "data-subagent-tool-output",
             "id": f"{child_id}:output",
@@ -437,25 +472,40 @@ async def _forward_nested_tool_end(
                 "toolName": event.get("name", "unknown"),
                 "output": _truncate_tool_output(_tool_content_to_str(tool_output)),
             },
-        }
+        },
+        trace,
     )
 
 
-async def _forward_nested_chat_stream(event: dict[str, Any], parent_tool_call_id: str) -> None:
+async def _forward_nested_chat_stream(
+    event: dict[str, Any],
+    parent_tool_call_id: str,
+    message_buffers: dict[tuple[str, str], str],
+    trace: "_SubagentTraceRecorder",
+) -> None:
     chunk = event.get("data", {}).get("chunk")
     if not chunk or not hasattr(chunk, "content") or not chunk.content:
         return
+    run_id = str(event.get("run_id") or uuid.uuid4().hex)
     for kind, text in _extract_chunk_texts(chunk.content):
-        await emit_subagent_event(
+        buffer_key = (run_id, kind)
+        next_text = f"{message_buffers.get(buffer_key, '')}{text}"
+        if len(next_text) > SUBAGENT_MESSAGE_MAX_CHARS:
+            next_text = next_text[-SUBAGENT_MESSAGE_MAX_CHARS:]
+        message_buffers[buffer_key] = next_text
+        await _emit_subagent_event(
             {
                 "type": f"data-subagent-{kind}",
+                "id": f"{SUBAGENT_NAME}:{run_id}:{kind}",
                 "data": {
                     "parentToolCallId": parent_tool_call_id,
                     "subagentName": SUBAGENT_NAME,
+                    "kind": kind,
+                    "text": next_text,
                     "delta": text,
                 },
-                "transient": True,
-            }
+            },
+            trace,
         )
 
 
@@ -473,6 +523,72 @@ def _extract_chunk_texts(content: Any) -> list[tuple[str, str]]:
             elif hasattr(block, "text") and block.text:
                 result.append(("text", block.text))
     return result
+
+
+class _SubagentTraceRecorder:
+    """Bounded, JSON-safe subagent event trace persisted in the parent tool result."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+        self._index_by_key: dict[tuple[str, str], int] = {}
+
+    def add(self, event: dict[str, Any]) -> None:
+        clean = _json_safe_event(event)
+        event_type = clean.get("type")
+        event_id = clean.get("id")
+        if isinstance(event_type, str) and isinstance(event_id, str):
+            key = (event_type, event_id)
+            existing = self._index_by_key.get(key)
+            if existing is not None:
+                self.events[existing] = clean
+                return
+            self._index_by_key[key] = len(self.events)
+        if len(self.events) >= SUBAGENT_TRACE_MAX_EVENTS:
+            return
+        self.events.append(clean)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subagentName": SUBAGENT_NAME,
+            "events": self.events,
+        }
+
+
+async def _emit_subagent_event(
+    event: dict[str, Any],
+    trace: _SubagentTraceRecorder,
+) -> None:
+    trace.add(event)
+    await emit_subagent_event(event)
+
+
+def _subagent_status_event(
+    parent_tool_call_id: str,
+    *,
+    phase: str,
+    message: str,
+    artifact_id: Any = None,
+    artifact_version: Any = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "parentToolCallId": parent_tool_call_id,
+        "subagentName": SUBAGENT_NAME,
+        "phase": phase,
+        "message": message,
+    }
+    if artifact_id:
+        data["artifactId"] = artifact_id
+    if artifact_version is not None:
+        data["artifactVersion"] = artifact_version
+    return {
+        "type": "data-subagent-status",
+        "id": f"{SUBAGENT_NAME}:{parent_tool_call_id}:status",
+        "data": data,
+    }
+
+
+def _json_safe_event(event: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(event, default=str))
 
 
 def _child_tool_call_id(raw_id: str) -> str:

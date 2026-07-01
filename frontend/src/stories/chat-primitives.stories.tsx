@@ -125,6 +125,167 @@ function materializationMessage(toolCallId: string): UIMessage {
   } as unknown as UIMessage
 }
 
+function artifactManagerSubagentMessage(state: "loading" | "complete"): UIMessage {
+  const parentToolCallId = "tool-artifact-manager-story"
+  const basePart = {
+    type: "tool-artifact_manager",
+    toolName: "artifact_manager",
+    toolCallId: parentToolCallId,
+    state: state === "loading" ? "input-available" : "output-available",
+    input: {
+      task: "Create an artifact showing module completion by worker.",
+      intent: "create",
+    },
+  }
+
+  if (state === "loading") {
+    return {
+      id: "assistant-artifact-manager-loading",
+      role: "assistant",
+      parts: [basePart],
+    } as unknown as UIMessage
+  }
+
+  return {
+    id: "assistant-artifact-manager-complete",
+    role: "assistant",
+    parts: [
+      {
+        ...basePart,
+        output: {
+          status: "ok",
+          artifact_id: "086f1caa-0675-4ff4-b113-21580b5602bf",
+          artifact_version: 2,
+          touched_blocks: ["title_1", "summary_1", "sq_1", "chart_1", "table_1"],
+          diagnostics: [],
+          runtime_summary: "3/3 queries ok; chart and table blocks validated.",
+          message: "Created 'Module Completion Snapshot' in workspace CHC End-to-End Test.",
+        },
+      },
+      {
+        type: "data-subagent-status",
+        id: "artifact-manager-status-1",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          phase: "running",
+          message: "Planning artifact structure.",
+        },
+      },
+      {
+        type: "data-subagent-text",
+        id: "artifact-manager-text-1",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          text: "I found the completion metrics and selected title, summary, chart, and table blocks.",
+        },
+      },
+      {
+        type: "data-subagent-reasoning",
+        id: "artifact-manager-reasoning-1",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          text: "Use one semantic query for the KPI total and one worker-level query for the chart and table.",
+        },
+      },
+      {
+        type: "data-subagent-tool-input",
+        id: "artifact-manager-overview-input",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-overview",
+          toolName: "artifact_graph_overview",
+          input: {},
+        },
+      },
+      {
+        type: "data-subagent-tool-output",
+        id: "artifact-manager-overview-output",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-overview",
+          toolName: "artifact_graph_overview",
+          output: {
+            blockTypes: ["title", "summary", "semantic_query", "stat", "chart", "table"],
+            allowedInputs: ["data", "title", "subtitle", "columns", "encoding"],
+          },
+        },
+      },
+      {
+        type: "data-subagent-tool-input",
+        id: "artifact-manager-queries-input",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-queries",
+          toolName: "get_artifact_semantic_queries",
+          input: { artifact_id: null },
+        },
+      },
+      {
+        type: "data-subagent-tool-output",
+        id: "artifact-manager-queries-output",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-queries",
+          toolName: "get_artifact_semantic_queries",
+          output: {
+            queries: [
+              { id: "sq_1.totals", row_count: 1, status: "ok" },
+              { id: "sq_1.by_worker", row_count: 3, status: "ok" },
+            ],
+          },
+        },
+      },
+      {
+        type: "data-subagent-tool-input",
+        id: "artifact-manager-write-input",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-write",
+          toolName: "artifact_write",
+          input: {
+            action: "create",
+            title: "Module Completion Snapshot",
+            blocks: ["title_1", "summary_1", "sq_1", "stat_1", "chart_1", "table_1"],
+          },
+        },
+      },
+      {
+        type: "data-subagent-tool-output",
+        id: "artifact-manager-write-output",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          toolCallId: "artifact-manager-write",
+          toolName: "artifact_write",
+          output: {
+            status: "ok",
+            artifact_id: "086f1caa-0675-4ff4-b113-21580b5602bf",
+            diagnostics: [],
+          },
+        },
+      },
+      {
+        type: "data-subagent-status",
+        id: "artifact-manager-status-2",
+        data: {
+          parentToolCallId,
+          subagentName: "artifact_manager",
+          phase: "complete",
+          message: "Artifact validated successfully.",
+        },
+      },
+    ],
+  } as unknown as UIMessage
+}
+
 const meta = {
   title: "Chat Primitives/Messages and Input",
   tags: ["autodocs"],
@@ -232,6 +393,32 @@ export const ArtifactToolCall: Story = {
           ],
         } as unknown as UIMessage}
         isActiveMessage={false}
+      />
+    </div>
+  ),
+}
+
+export const ArtifactManagerSubagent: Story = {
+  render: () => (
+    <div className="w-[780px]">
+      <ChatMessage
+        message={artifactManagerSubagentMessage("complete")}
+        isActiveMessage={false}
+        workspaceId="workspace-story"
+        threadId="thread-story"
+      />
+    </div>
+  ),
+}
+
+export const ArtifactManagerSubagentLoading: Story = {
+  render: () => (
+    <div className="w-[780px]">
+      <ChatMessage
+        message={artifactManagerSubagentMessage("loading")}
+        isActiveMessage
+        workspaceId="workspace-story"
+        threadId="thread-story"
       />
     </div>
   ),

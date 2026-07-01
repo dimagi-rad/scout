@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
+    _SubagentTraceRecorder,
     _forward_nested_event,
     _summarize_result,
     create_artifact_manager_tool,
@@ -21,6 +22,8 @@ async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
     try:
         run_to_tool_call_id: dict[str, str] = {}
         pending_tool_starts: dict[str, dict] = {}
+        message_buffers: dict[tuple[str, str], str] = {}
+        trace = _SubagentTraceRecorder()
         await _forward_nested_event(
             {
                 "event": "on_tool_start",
@@ -31,6 +34,8 @@ async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
             "toolu_PARENT",
             run_to_tool_call_id,
             pending_tool_starts,
+            message_buffers,
+            trace,
         )
         assert queue.empty()
 
@@ -50,6 +55,8 @@ async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
             "toolu_PARENT",
             run_to_tool_call_id,
             pending_tool_starts,
+            message_buffers,
+            trace,
         )
 
         start = await queue.get()
@@ -66,6 +73,7 @@ async def test_nested_local_tool_events_are_buffered_until_tool_message_id():
     assert end["event"]["type"] == "data-subagent-tool-output"
     assert end["event"]["data"]["toolCallId"] == "artifact_manager:toolu_CHILD"
     assert end["event"]["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert trace.to_dict()["events"] == [start["event"], end["event"]]
 
 
 def test_artifact_manager_summary_is_compact():
@@ -113,6 +121,7 @@ async def test_nested_tool_output_is_truncated_with_marker():
     queue: asyncio.Queue = asyncio.Queue()
     token = set_subagent_event_queue(queue)
     try:
+        trace = _SubagentTraceRecorder()
         await _forward_nested_event(
             {
                 "event": "on_tool_end",
@@ -129,6 +138,8 @@ async def test_nested_tool_output_is_truncated_with_marker():
             "toolu_PARENT",
             {},
             {},
+            {},
+            trace,
         )
 
         start = await queue.get()
@@ -139,6 +150,40 @@ async def test_nested_tool_output_is_truncated_with_marker():
     assert start["event"]["type"] == "data-subagent-tool-input"
     assert end["event"]["type"] == "data-subagent-tool-output"
     assert "... (truncated, 100100 chars total)" in end["event"]["data"]["output"]
+
+
+@pytest.mark.asyncio
+async def test_nested_subagent_text_stream_is_persistable():
+    import asyncio
+
+    queue: asyncio.Queue = asyncio.Queue()
+    token = set_subagent_event_queue(queue)
+    try:
+        trace = _SubagentTraceRecorder()
+        message_buffers: dict[tuple[str, str], str] = {}
+        for text in ("Building ", "artifact"):
+            await _forward_nested_event(
+                {
+                    "event": "on_chat_model_stream",
+                    "run_id": "run-model",
+                    "data": {"chunk": AIMessage(content=text)},
+                },
+                "toolu_PARENT",
+                {},
+                {},
+                message_buffers,
+                trace,
+            )
+
+        first = await queue.get()
+        second = await queue.get()
+    finally:
+        reset_subagent_event_queue(token)
+
+    assert first["event"]["type"] == "data-subagent-text"
+    assert first["event"]["data"]["text"] == "Building "
+    assert second["event"]["data"]["text"] == "Building artifact"
+    assert trace.to_dict()["events"] == [second["event"]]
 
 
 @pytest.mark.asyncio
@@ -205,7 +250,7 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
         [],
         conversation_id="thread-1",
     )
-    await tool.ainvoke(
+    result = await tool.ainvoke(
         {
             "task": "create",
             "tool_call_id": "toolu_PARENT",
@@ -213,8 +258,15 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
         }
     )
 
+    status = await queue.get()
     start = await queue.get()
     end = await queue.get()
     assert start["event"]["type"] == "data-subagent-tool-input"
     assert start["event"]["data"]["parentToolCallId"] == "toolu_PARENT"
     assert end["event"]["type"] == "data-subagent-tool-output"
+    assert status["event"]["type"] == "data-subagent-status"
+    assert result["subagent_trace"]["events"][0]["type"] == "data-subagent-status"
+    assert any(
+        event["type"] == "data-subagent-tool-output"
+        for event in result["subagent_trace"]["events"]
+    )

@@ -1,5 +1,6 @@
 """Convert LangChain messages to AI SDK v6 UIMessage format."""
 
+import json
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -72,10 +73,14 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                 }
                 # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
+                output_text = None
                 if tr:
-                    tool_part["output"] = _tool_content_to_str(tr)
+                    output_text = _tool_content_to_str(tr)
+                    tool_part["output"] = output_text
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
+                if tc["name"] == "artifact_manager" and output_text:
+                    parts.extend(_subagent_trace_parts(output_text, parent_tool_call_id=tc["id"]))
 
             if parts:
                 ui_messages.append(
@@ -87,3 +92,39 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                 )
 
     return ui_messages
+
+
+def _subagent_trace_parts(output_text: str, *, parent_tool_call_id: str) -> list[dict]:
+    """Rehydrate persisted Artifact Manager child events into UI data parts."""
+    try:
+        output = json.loads(output_text)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(output, dict):
+        return []
+    trace = output.get("subagent_trace")
+    if not isinstance(trace, dict):
+        return []
+    events = trace.get("events")
+    if not isinstance(events, list):
+        return []
+
+    parts: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if not isinstance(event_type, str) or not event_type.startswith("data-subagent-"):
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        part = {
+            "type": event_type,
+            "data": {**data, "parentToolCallId": parent_tool_call_id},
+        }
+        event_id = event.get("id")
+        if isinstance(event_id, str):
+            part["id"] = event_id
+        parts.append(part)
+    return parts

@@ -7,7 +7,16 @@ import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
 import type { ActiveJob, RecentTermination } from "@/api/jobs"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
-import { Wrench, FileBarChart, Brain, ChevronDown, ChevronRight, Square } from "lucide-react"
+import {
+  Bot,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  CircleDot,
+  FileBarChart,
+  Square,
+  Wrench,
+} from "lucide-react"
 import {
   QueryToolOutput,
   SemanticCatalogToolOutput,
@@ -95,10 +104,10 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
   const isUser = role === "user"
   return (
     <div
-      className={`rounded-lg px-4 py-2 text-sm ${
+      className={`rounded-lg text-sm ${
         isUser
-          ? "bg-primary text-primary-foreground"
-          : "bg-muted prose prose-sm max-w-none"
+          ? "bg-primary px-4 py-2 text-primary-foreground"
+          : "prose prose-sm max-w-none py-1"
       }`}
     >
       {isUser ? text : <Markdown remarkPlugins={[remarkGfm]}>{text}</Markdown>}
@@ -198,6 +207,70 @@ function getSubagentToolData(part: any) {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getSubagentActivityData(part: any) {
+  if (
+    part?.type !== "data-subagent-status"
+    && part?.type !== "data-subagent-text"
+    && part?.type !== "data-subagent-reasoning"
+    && part?.type !== "data-subagent-error"
+  ) {
+    return null
+  }
+  const data = part.data
+  if (
+    data == null
+    || typeof data !== "object"
+    || typeof data.parentToolCallId !== "string"
+  ) {
+    return null
+  }
+  return {
+    type: part.type as string,
+    id: typeof part.id === "string" ? part.id : undefined,
+    parentToolCallId: data.parentToolCallId as string,
+    subagentName: typeof data.subagentName === "string" ? data.subagentName : undefined,
+    phase: typeof data.phase === "string" ? data.phase : undefined,
+    message: typeof data.message === "string" ? data.message : undefined,
+    text: typeof data.text === "string"
+      ? data.text
+      : typeof data.delta === "string"
+        ? data.delta
+        : undefined,
+    artifactId: typeof data.artifactId === "string" ? data.artifactId : undefined,
+    artifactVersion: data.artifactVersion,
+  }
+}
+
+function artifactManagerSummaryText(rawOutput: unknown): string | null {
+  const output = parseOutput(rawOutput)
+  if (output == null || typeof output !== "object") return null
+  const summary = output as {
+    status?: string
+    artifact_id?: string | null
+    artifact_version?: number | string | null
+    diagnostics?: unknown[]
+    runtime_summary?: string
+    message?: string
+  }
+  const diagnosticsCount = Array.isArray(summary.diagnostics)
+    ? summary.diagnostics.length
+    : null
+  const lines = ["**Final output**"]
+  if (summary.status) lines.push(`Status: \`${summary.status}\``)
+  if (summary.artifact_id) {
+    lines.push(
+      `Artifact: \`${summary.artifact_id}\`${summary.artifact_version != null ? ` v${summary.artifact_version}` : ""}`,
+    )
+  }
+  if (diagnosticsCount != null) lines.push(`Diagnostics: ${diagnosticsCount}`)
+  if (summary.runtime_summary) lines.push(`Runtime: ${summary.runtime_summary}`)
+  if (summary.message && !summary.message.startsWith("[{")) {
+    lines.push(summary.message)
+  }
+  return lines.length > 1 ? lines.join("\n\n") : null
+}
+
 interface ToolCallPartProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   part: any
@@ -210,14 +283,123 @@ interface ToolCallPartProps {
   recentTermination?: RecentTermination | null
   onRetryDispatched?: () => void
   childParts?: any[]
+  subagentEvents?: any[]
   isNested?: boolean
 }
 
-export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched, childParts = [], isNested = false }: ToolCallPartProps) {
+interface SubagentActivityPanelProps {
+  events: any[]
+  childParts: any[]
+  isLoading: boolean
+  rawOutput: unknown
+  workspaceId?: string
+  threadId?: string
+  onRetryDispatched?: () => void
+}
+
+function SubagentActivityPanel({
+  events,
+  childParts,
+  isLoading,
+  rawOutput,
+  workspaceId,
+  threadId,
+  onRetryDispatched,
+}: SubagentActivityPanelProps) {
+  const summaryText = artifactManagerSummaryText(rawOutput)
+  const latestStatus = [...events]
+    .reverse()
+    .find((event) => event.type === "data-subagent-status")
+  const activityParts = events.flatMap((event, eventIndex) => {
+    const text = event.text || event.message || event.phase || ""
+    if (!text) return []
+    const id = event.id ?? `subagent-${eventIndex}`
+    if (event.type === "data-subagent-reasoning") {
+      return [{ id, type: "reasoning", text }]
+    }
+    if (event.type === "data-subagent-error") {
+      return [{ id, type: "text", text: `Error: ${text}` }]
+    }
+    return [{ id, type: "text", text }]
+  })
+
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="flex items-center gap-1 font-medium text-foreground">
+          <Bot className="h-3.5 w-3.5 text-sky-600" />
+          Run
+        </span>
+        {latestStatus?.phase && (
+          <span className="rounded-sm border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] text-sky-700">
+            {latestStatus.phase}
+          </span>
+        )}
+        {isLoading && (
+          <span className="flex items-center gap-1 text-muted-foreground">
+            <CircleDot className="h-3 w-3 animate-pulse text-sky-600" />
+            working
+          </span>
+        )}
+      </div>
+
+      {activityParts.length === 0 && childParts.length === 0 && isLoading && (
+        <ChatTextPart role="assistant" text="Starting Artifact Manager..." />
+      )}
+
+      {activityParts.length > 0 && (
+        <div className="space-y-1" data-testid="subagent-activity-log">
+          {activityParts.map((activityPart, activityIndex) => (
+            activityPart.type === "reasoning" ? (
+              <ChatReasoningPart
+                key={activityPart.id}
+                part={activityPart}
+                index={activityIndex}
+                isLatest
+                isActiveMessage
+              />
+            ) : (
+              <ChatTextPart
+                key={activityPart.id}
+                role="assistant"
+                text={activityPart.text}
+              />
+            )
+          ))}
+        </div>
+      )}
+
+      {childParts.length > 0 && (
+        <div className="space-y-1" data-testid="tool-call-children-artifact_manager">
+          {childParts.map((childPart, childIndex) => (
+            <ChatToolCallPart
+              key={(childPart as any).toolCallId ?? childIndex}
+              part={childPart}
+              index={childIndex}
+              isLatest={false}
+              isActiveMessage={false}
+              workspaceId={workspaceId}
+              threadId={threadId}
+              onRetryDispatched={onRetryDispatched}
+              isNested
+            />
+          ))}
+        </div>
+      )}
+
+      {summaryText && <ChatTextPart role="assistant" text={summaryText} />}
+    </div>
+  )
+}
+
+export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched, childParts = [], subagentEvents = [], isNested = false }: ToolCallPartProps) {
   const toolName = getToolName(part)
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const hasChildren = childParts.length > 0
+  const isSubagentCard = toolName === "artifact_manager" && !isNested
+  const hasSubagentActivity = subagentEvents.length > 0
+  const isErrored = part.state === "output-error"
 
   // Scope activeMaterializationJob to THIS specific tool-call card via
   // toolCallId — without this, the progress block and Stop button would
@@ -249,7 +431,8 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // Also stay expanded when we have a failure card to show so the user can
   // see the error inline rather than having to expand a collapsed card.
   const autoExpanded =
-    (toolName === "artifact_manager" && hasChildren)
+    (toolName === "artifact_manager" && (hasChildren || hasSubagentActivity || isLoading))
+    || (isNested && (isLoading || isErrored))
     || (
       AUTO_EXPAND_TOOLS.has(toolName)
       && (
@@ -264,16 +447,17 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const expanded = effectiveOverride ?? autoExpanded
   const toggleExpanded = () => setOverride({ whenLatest: isLatest, value: !expanded })
 
-  const isErrored = part.state === "output-error"
   const richOutput =
-    hasOutput && part.output != null && !isErrored ? renderToolOutput(toolName, part.output) : null
+    hasOutput && part.output != null && !isErrored && !isSubagentCard
+      ? renderToolOutput(toolName, part.output)
+      : null
   // Fallback text for the <pre> view: an output-error part carries its message
   // in errorText (no `output`); otherwise show the raw output when no rich card
   // matched. Either way, the <pre> renders the FULL text — the historical
   // `.slice(0, 2000)` silently dropped the tail with no marker (13#4).
   const fallbackText = isErrored
     ? (part.errorText ?? "The tool reported an error.")
-    : hasOutput && part.output != null && !richOutput
+    : hasOutput && part.output != null && !richOutput && !isSubagentCard
       ? formatToolOutput(part.output)
       : null
 
@@ -304,6 +488,8 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
       className={
         isNested
           ? "border-l border-border/70 pl-2 text-xs"
+          : isSubagentCard
+            ? "rounded border border-sky-200 bg-sky-50/40 my-1 text-xs"
           : "rounded border bg-muted/30 my-1 text-xs"
       }
     >
@@ -319,14 +505,18 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           ) : (
             <ChevronRight className="w-3 h-3 text-muted-foreground shrink-0" />
           )}
-          <Wrench className="w-3 h-3 text-muted-foreground shrink-0" />
+          {isSubagentCard ? (
+            <Bot className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+          ) : (
+            <Wrench className="w-3 h-3 text-muted-foreground shrink-0" />
+          )}
           <span className="text-muted-foreground">
             {displayToolName(toolName)}
             {isLoading && "..."}
           </span>
-          {hasChildren && !isNested && (
+          {hasChildren && !isNested && !isSubagentCard && (
             <span className="ml-auto rounded-sm bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              {childParts.length} subagent {childParts.length === 1 ? "call" : "calls"}
+              {childParts.length} {childParts.length === 1 ? "call" : "calls"}
             </span>
           )}
         </button>
@@ -353,6 +543,8 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
         )}
       </div>
       {expanded && (
+        isSubagentCard
+        ||
         hasChildren
         ||
         toolName === "run_materialization" && (matchingJob || matchingFailure)
@@ -360,7 +552,17 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
         || fallbackText
       ) && (
         <div className="border-t px-3 py-2.5">
-          {hasChildren && (
+          {isSubagentCard ? (
+            <SubagentActivityPanel
+              events={subagentEvents}
+              childParts={childParts}
+              isLoading={isLoading}
+              rawOutput={part.output}
+              workspaceId={workspaceId}
+              threadId={threadId}
+              onRetryDispatched={onRetryDispatched}
+            />
+          ) : hasChildren && (
             <div
               className="mb-2 space-y-1"
               data-testid={`tool-call-children-${toolName}`}
@@ -492,6 +694,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const childToolPartsByParent = new Map<string, any[]>()
   const childToolPartsById = new Map<string, any>()
+  const subagentEventsByParent = new Map<string, any[]>()
 
   for (const part of message.parts) {
     if (isToolUIPart(part)) {
@@ -504,7 +707,14 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
     }
 
     const subagentData = getSubagentToolData(part)
-    if (!subagentData) continue
+    if (!subagentData) {
+      const activityData = getSubagentActivityData(part)
+      if (!activityData) continue
+      const events = subagentEventsByParent.get(activityData.parentToolCallId) ?? []
+      events.push(activityData)
+      subagentEventsByParent.set(activityData.parentToolCallId, events)
+      continue
+    }
     const child =
       childToolPartsById.get(subagentData.toolCallId)
       ?? {
@@ -573,7 +783,7 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               toolCallId && recentTerminationsByToolCallId
                 ? recentTerminationsByToolCallId[toolCallId] ?? null
                 : null
-            return <ChatToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} />
+            return <ChatToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} />
           }
 
           return null

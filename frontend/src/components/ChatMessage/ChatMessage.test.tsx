@@ -112,6 +112,25 @@ describe("ChatMessage live tool cards (arch #246)", () => {
             output: JSON.stringify({ status: "created" }),
           },
         },
+        {
+          type: "data-subagent-status",
+          id: "artifact_manager_status",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            phase: "running",
+            message: "Artifact Manager started.",
+          },
+        },
+        {
+          type: "data-subagent-text",
+          id: "artifact_manager_text",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            text: "I inspected the artifact blocks.",
+          },
+        },
       ],
     } as unknown as UIMessage
 
@@ -119,9 +138,16 @@ describe("ChatMessage live tool cards (arch #246)", () => {
 
     expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
     expect(screen.getByText("Artifact Manager")).toBeInTheDocument()
-    expect(screen.getByText("1 subagent call")).toBeInTheDocument()
+    expect(screen.queryByText("subagent")).not.toBeInTheDocument()
+    expect(screen.queryByText("1 call")).not.toBeInTheDocument()
+    expect(screen.getByTestId("subagent-activity-log")).toBeInTheDocument()
+    expect(screen.getByText("I inspected the artifact blocks.")).toBeInTheDocument()
     expect(screen.getByTestId("tool-call-children-artifact_manager")).toBeInTheDocument()
     expect(screen.getByTestId("tool-call-artifact_write")).toBeInTheDocument()
+    expect(screen.queryByText(/"status": "created"/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("tool-call-artifact_write"))
+    expect(screen.getByText(/"status": "created"/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId("tool-call-artifact_manager"))
     expect(screen.queryByTestId("tool-call-artifact_write")).not.toBeInTheDocument()
@@ -136,5 +162,27 @@ describe("ChatMessage live tool cards (arch #246)", () => {
 
     expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
     expect(screen.queryByText("nested")).not.toBeInTheDocument()
+  })
+
+  it("shows loading feedback for an artifact manager subagent with no child events yet", () => {
+    const msg = {
+      id: "m4",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-artifact_manager",
+          toolName: "artifact_manager",
+          toolCallId: "toolu_PARENT",
+          state: "input-available",
+          input: { task: "Create a dashboard" },
+        },
+      ],
+    } as unknown as UIMessage
+
+    render(<ChatMessage message={msg} isActiveMessage={true} />)
+
+    expect(screen.queryByText("subagent")).not.toBeInTheDocument()
+    expect(screen.getByText("working")).toBeInTheDocument()
+    expect(screen.getByText("Starting Artifact Manager...")).toBeInTheDocument()
   })
 })
