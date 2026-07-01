@@ -240,6 +240,13 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     # empty (and falsely marked FAILED by teardown_schema).
     await _rebuild_dependent_view_schemas([new_schema.tenant_id])
 
+    # Step 3c: Single-tenant workspaces query the tenant schema directly (no
+    # view schema), so the sibling rebuild above skips them. The generated Cube
+    # YAML is schema-agnostic (tables resolve via per-query search_path), so
+    # the swap itself doesn't break them — but the refreshed data may have new
+    # or removed columns, which only a semantic-model rebuild picks up.
+    await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
+
     # Step 4: Schedule teardown of previously active schemas with a delay to allow
     # in-flight queries against the old schema to complete before it is dropped.
     old_schemas = TenantSchema.objects.filter(
@@ -799,6 +806,50 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
             "id": str(cube_schema.id),
             "content_hash": cube_schema.content_hash,
         },
+    }
+
+
+async def _rebuild_single_tenant_semantic_models(tenant_ids) -> None:
+    """Defer a semantic-model rebuild for single-tenant workspaces on ``tenant_ids``.
+
+    Best-effort, mirroring _rebuild_dependent_view_schemas: a failed defer must
+    not block the caller.
+    """
+    qs = (
+        Workspace.objects.filter(workspace_tenants__tenant_id__in=tenant_ids)
+        .annotate(num_tenants=_multi_tenant_count_subquery())
+        .filter(num_tenants=1)
+        .distinct()
+    )
+    async for ws_id in qs.values_list("id", flat=True).aiterator():
+        try:
+            await rebuild_workspace_semantic_model.defer_async(workspace_id=str(ws_id))
+        except Exception:
+            logger.exception("Failed to defer semantic model rebuild for workspace %s", ws_id)
+
+
+@task
+async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
+    """Rebuild the semantic model + Cube schema after workspace data changed shape."""
+    try:
+        workspace = await Workspace.objects.aget(id=workspace_id)
+    except Workspace.DoesNotExist:
+        logger.exception("rebuild_workspace_semantic_model: workspace %s not found", workspace_id)
+        return {"error": "Workspace not found"}
+    try:
+        cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+    except CubeSchemaBuildError as exc:
+        logger.warning("Semantic model rebuild failed for workspace %s: %s", workspace_id, exc)
+        return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
+    except Exception as exc:
+        logger.exception("Semantic model rebuild failed for workspace %s", workspace_id)
+        return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
+    return {
+        "cube_schema": {
+            "ok": True,
+            "id": str(cube_schema.id),
+            "content_hash": cube_schema.content_hash,
+        }
     }
 
 
