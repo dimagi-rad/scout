@@ -44,7 +44,13 @@ module.exports = {
       return 'scout_healthcheck';
     }
     const hash = securityContext.cubeSchemaHash || 'unknown';
-    return `scout_${securityContext.workspaceId}_${securityContext.semanticModelId}_${hash}`
+    // schemaName must be part of the app id: the generated YAML is
+    // schema-agnostic (tables resolve via the driver's search_path), so a
+    // blue-green tenant-schema swap changes neither the YAML nor its hash.
+    // Without schemaName here, Cube would keep serving queries through the
+    // cached driver whose search_path still points at the old (dropped) schema.
+    const schema = securityContext.schemaName || 'noschema';
+    return `scout_${securityContext.workspaceId}_${securityContext.semanticModelId}_${hash}_${schema}`
       .replace(/[^a-zA-Z0-9_]/g, '_')
       .slice(0, 180);
   },

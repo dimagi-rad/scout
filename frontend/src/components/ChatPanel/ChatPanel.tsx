@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { getCsrfToken, api, ApiError } from "@/api/client"
 import { BASE_PATH } from "@/config"
 import { useAppStore } from "@/store/store"
@@ -10,6 +10,11 @@ import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { ChatEmptyState } from "@/components/ChatEmptyState"
 import { ChatComposer } from "./ChatComposer"
 import { ChatCanvasPanel } from "./ChatCanvasPanel"
+import { ChatThreadHeader, type ThreadPanelMode } from "./ChatThreadHeader"
+import {
+  ChatThreadSidePanel,
+  type ThreadArtifactSummary,
+} from "./ChatThreadSidePanel"
 import {
   ChatErrorNotice,
   ChatOverloadNotice,
@@ -21,11 +26,20 @@ import { decideOverloadAction, isRetryableErrorPart } from "./overloadRetry"
 export function ChatPanel() {
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const threadId = useAppStore((s) => s.threadId)
+  const threads = useAppStore((s) => s.threads)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
+  const updateThreadTitle = useAppStore((s) => s.uiActions.updateThreadTitle)
   const newThread = useAppStore((s) => s.uiActions.newThread)
+  const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [input, setInput] = useState("")
   const [messageReloadKey, setMessageReloadKey] = useState(0)
+  const [threadPanelOpen, setThreadPanelOpen] = useState(false)
+  const [threadPanelMode, setThreadPanelMode] = useState<ThreadPanelMode>("files")
+  const [threadArtifacts, setThreadArtifacts] = useState<ThreadArtifactSummary[]>([])
+  const [threadArtifactsStatus, setThreadArtifactsStatus] =
+    useState<"idle" | "loading" | "loaded" | "error">("idle")
+  const [threadArtifactsError, setThreadArtifactsError] = useState<string | null>(null)
   const prevStatusRef = useRef<string>("")
   // Transient-overload auto-retry (see ./overloadRetry):
   //   hitRetryableRef — a retryable-error data part arrived during this turn
@@ -42,6 +56,9 @@ export function ChatPanel() {
     notifyJobLikelyStarted,
   } = useWorkspaceJobs()
   const activeMaterializationJob = jobsByThreadId[threadId] ?? null
+  const currentThread = threads.find((thread) => thread.id === threadId)
+  const threadTitle = currentThread?.title ?? "Untitled"
+  const titleIsCustom = currentThread?.title_is_custom ?? false
 
   // Use a ref so the transport body closure always reads fresh values,
   // even though useChat caches the transport from the first render.
@@ -73,6 +90,42 @@ export function ChatPanel() {
   }
 
   const isStreaming = status === "streaming" || status === "submitted"
+
+  const loadThreadArtifacts = useCallback(async () => {
+    if (!activeDomainId || !threadId) return
+    setThreadArtifactsStatus("loading")
+    setThreadArtifactsError(null)
+    try {
+      const response = await api.get<{ results: ThreadArtifactSummary[] }>(
+        `/api/workspaces/${activeDomainId}/threads/${threadId}/artifacts/`,
+      )
+      setThreadArtifacts(response.results)
+      setThreadArtifactsStatus("loaded")
+    } catch (loadError) {
+      setThreadArtifactsStatus("error")
+      setThreadArtifactsError(
+        loadError instanceof Error ? loadError.message : "Failed to load files",
+      )
+    }
+  }, [activeDomainId, threadId])
+
+  function openThreadFiles() {
+    if (threadPanelOpen && threadPanelMode === "files") {
+      setThreadPanelOpen(false)
+      return
+    }
+    setThreadPanelMode("files")
+    setThreadPanelOpen(true)
+  }
+
+  function openThreadCanvas() {
+    if (threadPanelOpen && threadPanelMode === "canvas") {
+      setThreadPanelOpen(false)
+      return
+    }
+    setThreadPanelMode("canvas")
+    setThreadPanelOpen(true)
+  }
 
   // Load messages from backend when threadId changes (or after a background job
   // completes). On success — including an empty array for a brand-new thread —
@@ -115,6 +168,25 @@ export function ChatPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId, activeDomainId, messageReloadKey])
 
+  useEffect(() => {
+    setThreadPanelOpen(false)
+    setThreadArtifacts([])
+    setThreadArtifactsStatus("idle")
+    setThreadArtifactsError(null)
+  }, [threadId])
+
+  useEffect(() => {
+    if (messages.length === 0) {
+      setThreadPanelOpen(false)
+    }
+  }, [messages.length])
+
+  useEffect(() => {
+    if (threadPanelOpen && threadPanelMode === "files") {
+      void loadThreadArtifacts()
+    }
+  }, [threadPanelOpen, threadPanelMode, loadThreadArtifacts])
+
   // Reload messages when a background materialization job for this thread
   // completes — but NOT while we're streaming a new turn. A mid-stream reload
   // would tear down the in-flight messages array and lose the user's current
@@ -132,9 +204,19 @@ export function ChatPanel() {
   useEffect(() => {
     if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
       fetchThreads(activeDomainId)
+      if (threadPanelOpen && threadPanelMode === "files") {
+        void loadThreadArtifacts()
+      }
     }
     prevStatusRef.current = status
-  }, [status, activeDomainId, fetchThreads])
+  }, [
+    status,
+    activeDomainId,
+    fetchThreads,
+    loadThreadArtifacts,
+    threadPanelMode,
+    threadPanelOpen,
+  ])
 
   // Auto-retry a turn once if it hit a transient Anthropic overload; if the
   // retry also hits it, surface a notice instead. See ./overloadRetry.
@@ -185,6 +267,11 @@ export function ChatPanel() {
     newThread()
   }
 
+  async function handleTitleChange(title: string) {
+    if (!activeDomainId || !threadId) return
+    await updateThreadTitle(threadId, title, activeDomainId)
+  }
+
   if (!activeDomainId) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -195,16 +282,13 @@ export function ChatPanel() {
 
   if (messages.length === 0) {
     return (
-      <div className="flex h-full min-w-0">
-        <div className="min-w-0 flex-1">
-          <ChatEmptyState
-            input={input}
-            setInput={setInput}
-            onSend={handleSend}
-            disabled={isStreaming}
-          />
-        </div>
-        <ChatCanvasPanel workspaceId={activeDomainId} />
+      <div className="h-full min-w-0">
+        <ChatEmptyState
+          input={input}
+          setInput={setInput}
+          onSend={handleSend}
+          disabled={isStreaming}
+        />
       </div>
     )
   }
@@ -212,6 +296,15 @@ export function ChatPanel() {
   return (
     <div className="flex h-full min-w-0">
       <div className="flex min-w-0 flex-1 flex-col">
+        <ChatThreadHeader
+          title={threadTitle}
+          titleIsCustom={titleIsCustom}
+          panelOpen={threadPanelOpen}
+          panelMode={threadPanelMode}
+          onTitleChange={handleTitleChange}
+          onOpenFiles={openThreadFiles}
+          onOpenCanvas={openThreadCanvas}
+        />
         {/* Message list */}
         <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
           {messages.map((msg: UIMessage, msgIdx: number) => (
@@ -252,7 +345,17 @@ export function ChatPanel() {
           />
         </div>
       </div>
-      <ChatCanvasPanel workspaceId={activeDomainId} />
+      <ChatThreadSidePanel
+        open={threadPanelOpen}
+        mode={threadPanelMode}
+        artifacts={threadArtifacts}
+        filesStatus={threadArtifactsStatus}
+        filesError={threadArtifactsError}
+        onClose={() => setThreadPanelOpen(false)}
+        onOpenArtifact={openArtifact}
+        onRefreshFiles={loadThreadArtifacts}
+        canvas={<ChatCanvasPanel workspaceId={activeDomainId} />}
+      />
     </div>
   )
 }

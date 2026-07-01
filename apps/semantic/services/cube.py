@@ -29,7 +29,7 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     for dataset in model.datasets.filter(is_visible=True).prefetch_related("fields"):
         fields = [field for field in dataset.fields.all() if field.is_visible]
         dimensions = [
-            _cube_dimension(field)
+            _cube_dimension(field, is_primary_key=_is_primary_key_field(dataset, field))
             for field in fields
             if field.field_type
             in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
@@ -51,7 +51,10 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
                 continue
             cube["sql"] = cube_sql
         else:
-            cube["sql_table"] = _sql_table(dataset.schema_name, dataset.table_name)
+            # Deliberately unqualified: the physical schema is resolved per query
+            # via the search_path that cube.js sets from the security context, so
+            # a blue-green tenant-schema swap does not invalidate this YAML.
+            cube["sql_table"] = _quote_identifier(dataset.table_name)
         joins = joins_by_dataset.get(dataset.name)
         if joins:
             cube["joins"] = joins
@@ -77,12 +80,20 @@ def generate_cube_schema_yaml(model: SemanticModel) -> str:
     )
 
 
-def _cube_dimension(field: SemanticField) -> dict[str, Any]:
+def _is_primary_key_field(dataset, field: SemanticField) -> bool:
+    return bool(dataset.primary_key) and field.expression == dataset.primary_key
+
+
+def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> dict[str, Any]:
     payload = {
         "name": field.name,
         "sql": _cube_sql(field.expression),
         "type": "time" if field.field_type == SemanticField.FieldType.TIME_DIMENSION else _cube_type(field.data_type),
     }
+    if is_primary_key:
+        payload["primary_key"] = True
+        # Cube hides primary-key dimensions by default; keep it queryable.
+        payload["public"] = True
     if field.description:
         payload["description"] = field.description
     return payload
@@ -114,12 +125,6 @@ def _cube_sql(expression: str) -> str:
     if expression == "*":
         return "*"
     return f"{{CUBE}}.{_quote_identifier(expression)}"
-
-
-def _sql_table(schema_name: str, table_name: str) -> str:
-    if schema_name:
-        return f"{_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
-    return _quote_identifier(table_name)
 
 
 def _quote_identifier(value: str) -> str:

@@ -19,6 +19,7 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
@@ -1401,6 +1402,37 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     return status, summary
 
 
+async def _semantic_layer_state(workspace) -> tuple[str, str]:
+    """Classify the workspace's semantic layer for the resume prompt.
+
+    Returns ``(state, error)``:
+
+    - ``"ready"`` — an active Cube schema exists and the latest build succeeded.
+    - ``"stale"`` — an active schema is still serving, but the latest rebuild
+      failed (recorded by ``build_and_promote_cube_schema`` in
+      ``SemanticModel.metadata["last_build"]``); new tables/fields from this
+      load may be missing.
+    - ``"unavailable"`` — a model row exists but nothing is queryable.
+    - ``"unknown"`` — no model row at all (a build was never attempted, e.g.
+      legacy data); the agent's own tool errors are the honest signal there.
+    """
+    model = await SemanticModel.objects.filter(workspace=workspace).afirst()
+    if model is None:
+        return "unknown", ""
+    last_build = (model.metadata or {}).get("last_build") or {}
+    error = str(last_build.get("error") or "")
+    has_active = await CubeSchema.objects.filter(
+        workspace=workspace,
+        semantic_model=model,
+        status=CubeSchema.Status.ACTIVE,
+    ).aexists()
+    if not has_active:
+        return "unavailable", error or "no active Cube schema was built"
+    if last_build and not last_build.get("ok", True):
+        return "stale", error
+    return "ready", ""
+
+
 @task(pass_context=True)
 async def resume_thread_after_materialization(context, thread_job_id: str) -> dict:
     """Inject a system-framed message into the LangGraph conversation and
@@ -1474,6 +1506,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                     "the workspace query layer (view schema) is missing or was never built"
                 )
 
+    # The agent is semantic-only (no raw SQL), so a data load whose Cube schema
+    # build failed leaves the workspace unqueryable even though every run
+    # completed — the previous silent path here made the agent claim success
+    # and then hit "No active semantic model" with no explanation.
+    semantic_state, semantic_error = "ready", ""
+    if status in ("completed", "partial") and not view_schema_failed:
+        semantic_state, semantic_error = await _semantic_layer_state(workspace)
+    semantic_unavailable = semantic_state == "unavailable"
+
     if view_schema_failed:
         if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: the view schema is FAILED because a tenant schema it depends
@@ -1503,6 +1544,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 f"plainly that a system-side fix is required and quote the error summary "
                 f"above. Per-tenant: {summary}"
             )
+    elif semantic_unavailable:
+        body = (
+            f"{SYSTEM_RESUME_MARKER} The data loaded, BUT the semantic model "
+            f"(the Cube schema that makes datasets queryable) FAILED to build, "
+            f"so semantic tools (list_datasets / semantic_query) will NOT work "
+            f"for this workspace. Error: {semantic_error}. Do NOT silently "
+            f"re-run materialization — the data is already loaded and a re-run "
+            f"would likely hit the same build error. Tell the user plainly that "
+            f"the data loaded but the semantic layer failed to build, and quote "
+            f"the error. Per-tenant: {summary}"
+        )
     elif status == "no_runs":
         logger.warning(
             "resume: no MaterializationRun rows for ThreadJob %s job_id=%s; "
@@ -1552,6 +1604,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"{SYSTEM_RESUME_MARKER} Materialization just completed "
             f"(status={status}). Please continue with the user's original request "
             f"using the now-loaded data. Per-tenant: {summary}"
+        )
+
+    if semantic_state == "stale":
+        body += (
+            f" Note: the semantic model refresh FAILED after this load "
+            f"({semantic_error or 'unknown error'}), so queries run against the "
+            f"PREVIOUS semantic model — tables or fields added by this load may "
+            f"be missing from list_datasets/semantic_query until a rebuild "
+            f"succeeds. Disclose this if it affects your answer."
         )
 
     timeout_s = getattr(settings, "AGENT_RESUME_TIMEOUT_S", 120)
@@ -1661,12 +1722,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     terminal = (
         ThreadJob.State.CANCELLED
         if status == "cancelled"
-        # A view-schema build failure leaves the workspace with no queryable
-        # surface even when every per-tenant run completed, so it is not a
-        # success — flip to FAILED so the spinner clears into an error state.
+        # A view-schema or Cube-schema build failure leaves the workspace with
+        # no queryable surface even when every per-tenant run completed, so it
+        # is not a success — flip to FAILED so the spinner clears into an
+        # error state.
         else (
             ThreadJob.State.FAILED
-            if (status in ("failed", "partial", "no_runs") or view_schema_failed)
+            if (
+                status in ("failed", "partial", "no_runs")
+                or view_schema_failed
+                or semantic_unavailable
+            )
             else ThreadJob.State.COMPLETED
         )
     )
@@ -1685,6 +1751,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 "Per-tenant data loaded, but the workspace query layer (view "
                 f"schema) failed to build: {view_schema_error}. A system-side "
                 "fix is required — re-running materialization will not help."
+            )
+        elif semantic_unavailable:
+            error_summary = (
+                "Data loaded, but the semantic model failed to build: "
+                f"{semantic_error or 'unknown error'}. Semantic queries are "
+                "unavailable until a rebuild succeeds."
             )
         elif status == "no_runs":
             error_summary = (

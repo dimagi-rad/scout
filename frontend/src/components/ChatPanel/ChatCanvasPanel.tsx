@@ -44,6 +44,7 @@ import {
 
 interface ChatCanvasPanelProps {
   workspaceId: string
+  className?: string
 }
 
 type LoadStatus = "idle" | "loading" | "loaded" | "error"
@@ -51,7 +52,7 @@ type SaveStatus = "idle" | "saving" | "saved" | "error"
 
 const EMPTY_DATASETS: SemanticDataset[] = []
 
-export function ChatCanvasPanel({ workspaceId }: ChatCanvasPanelProps) {
+export function ChatCanvasPanel({ workspaceId, className }: ChatCanvasPanelProps) {
   const [status, setStatus] = useState<LoadStatus>("loading")
   const [error, setError] = useState<string | null>(null)
   const [canvas, setCanvas] = useState<SemanticCanvasResponse | null>(null)
@@ -159,7 +160,7 @@ export function ChatCanvasPanel({ workspaceId }: ChatCanvasPanelProps) {
   }
 
   return (
-    <aside className="hidden h-full w-[25rem] shrink-0 flex-col border-l bg-background lg:flex">
+    <div className={cn("flex h-full min-h-0 flex-col bg-background", className)}>
       <div className="flex h-12 items-center justify-between gap-3 border-b px-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -290,7 +291,7 @@ export function ChatCanvasPanel({ workspaceId }: ChatCanvasPanelProps) {
           </div>
         </div>
       )}
-    </aside>
+    </div>
   )
 }
 

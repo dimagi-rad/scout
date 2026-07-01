@@ -42,13 +42,15 @@ _SYSTEM_CATALOG_RE = re.compile(
 def compile_custom_dataset_sql(
     definition_sql: str,
     *,
-    schema_name: str,
     allowed_tables: dict[str, str],
 ) -> str:
     """Return a workspace-scoped SELECT statement for a custom dataset.
 
     ``allowed_tables`` maps lower-case semantic dataset names and physical table
     names to the real physical table/view name in the workspace query schema.
+    Table references stay schema-unqualified on purpose: both execution paths
+    (Cube's driver and infer_custom_dataset_columns) set search_path to the
+    workspace's current schema, so a tenant-schema swap never stales this SQL.
     """
     sql = _normalize_single_statement(definition_sql)
     lowered = sql.lstrip().lower()
@@ -74,7 +76,7 @@ def compile_custom_dataset_sql(
             raise CustomDatasetError(
                 f"Custom dataset SQL references unknown workspace table '{table_key}'."
             )
-        return f"{keyword} {_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
+        return f"{keyword} {_quote_identifier(table_name)}"
 
     return _TABLE_REF_RE.sub(replace_table, sql)
 

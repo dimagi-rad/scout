@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -11,6 +12,14 @@ import jwt
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+# Cube's /v1/load long-polls up to continueWaitTimeout (~5s default) and then
+# returns {"error": "Continue wait"}; the caller is expected to re-issue the
+# same request until the result is ready. Budget enough re-polls to cover the
+# 30s Postgres statement_timeout plus compile overhead.
+CONTINUE_WAIT_ERROR = "continue wait"
+QUERY_TOTAL_TIMEOUT_SECONDS = 60.0
+CONTINUE_WAIT_POLL_DELAY_SECONDS = 0.5
 
 
 class CubeConfigurationError(RuntimeError):
@@ -47,17 +56,27 @@ class CubeClient:
         if not self.base_url:
             raise CubeConfigurationError("CUBE_API_URL is not configured.")
 
+        # POST rather than GET: filter-heavy queries can exceed URL limits.
         url = f"{self.base_url}/cubejs-api/v1/load"
+        headers = self._headers(security_context)
+        deadline = time.monotonic() + QUERY_TOTAL_TIMEOUT_SECONDS
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                url,
-                params={"query": json.dumps(cube_query)},
-                headers=self._headers(security_context),
-            )
-            response.raise_for_status()
-        payload = response.json()
-        if payload.get("error"):
-            raise RuntimeError(str(payload["error"]))
+            while True:
+                response = await client.post(url, json={"query": cube_query}, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+                error = payload.get("error")
+                if isinstance(error, str) and error.strip().lower() == CONTINUE_WAIT_ERROR:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "Cube query timed out: results were still pending after "
+                            f"{QUERY_TOTAL_TIMEOUT_SECONDS:.0f}s."
+                        )
+                    await asyncio.sleep(CONTINUE_WAIT_POLL_DELAY_SECONDS)
+                    continue
+                if error:
+                    raise RuntimeError(str(error))
+                break
         data = payload.get("data") or []
         if not isinstance(data, list):
             raise TypeError("Cube returned an unexpected data payload.")

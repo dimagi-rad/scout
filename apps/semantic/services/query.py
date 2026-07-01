@@ -100,7 +100,8 @@ async def run_semantic_query(
         "columns": result.get("columns", []),
         "rows": result.get("rows", []),
         "row_count": result.get("row_count", 0),
-        "truncated": compiled["limit"] == MAX_SEMANTIC_LIMIT,
+        # A full page means the limit may have cut the result set off.
+        "truncated": result.get("row_count", 0) >= compiled["limit"],
         "semantic_query": compiled["query"],
         "members": compiled["members"],
     }

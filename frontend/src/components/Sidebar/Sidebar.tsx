@@ -274,6 +274,7 @@ export function Sidebar() {
               </div>
             )}
             {threads.map((thread) => {
+              const historyTitle = thread.history_title?.trim() || thread.title
               const job = jobsByThreadId[thread.id]
               const lastUpdated = new Date(thread.updated_at)
               const baseline = thread.last_viewed_at
@@ -288,7 +289,7 @@ export function Sidebar() {
                     collapseSidebar()
                     navigate(chatBase ? `${chatBase}/${thread.id}` : `${pathPrefix}/chat`)
                   }}
-                  title={thread.title}
+                  title={historyTitle}
                   data-testid={`sidebar-thread-${thread.id}`}
                   className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                     thread.id === threadId
@@ -296,7 +297,7 @@ export function Sidebar() {
                       : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                   }`}
                 >
-                  <span className="flex-1 truncate">{thread.title}</span>
+                  <span className="flex-1 truncate">{historyTitle}</span>
                   {job ? (
                     <span
                       className="flex items-center gap-1 text-xs"

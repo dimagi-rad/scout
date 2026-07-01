@@ -5,6 +5,8 @@ import { markThreadViewed } from "@/api/threads"
 export interface Thread {
   id: string
   title: string
+  history_title?: string
+  title_is_custom: boolean
   created_at: string
   updated_at: string
   is_shared: boolean
@@ -31,6 +33,11 @@ export interface UiSlice {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
     fetchThreads: (workspaceId: string) => Promise<void>
+    updateThreadTitle: (
+      threadId: string,
+      title: string,
+      workspaceId: string,
+    ) => Promise<Thread>
     updateThreadSharing: (
       threadId: string,
       data: { is_shared?: boolean; is_public?: boolean },
@@ -78,6 +85,21 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
         console.error("[Scout] Failed to load threads:", error)
         set({ threadsStatus: "error" })
       }
+    },
+    updateThreadTitle: async (threadId: string, title: string, workspaceId: string) => {
+      const result = await api.patch<Thread>(
+        `/api/workspaces/${workspaceId}/threads/${threadId}/`,
+        { title },
+      )
+      set((state) => {
+        const exists = state.threads.some((t) => t.id === threadId)
+        return {
+          threads: exists
+            ? state.threads.map((t) => (t.id === threadId ? { ...t, ...result } : t))
+            : [result, ...state.threads],
+        }
+      })
+      return result
     },
     updateThreadSharing: async (
       threadId: string,

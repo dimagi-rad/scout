@@ -7,6 +7,7 @@ function thread(id: string, title: string): Thread {
   return {
     id,
     title,
+    title_is_custom: title !== "Untitled",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     is_shared: false,

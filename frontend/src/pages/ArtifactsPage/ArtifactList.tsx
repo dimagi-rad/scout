@@ -1,6 +1,6 @@
 import { Search } from "lucide-react"
+import { useNavigate } from "react-router-dom"
 import { ArtifactCard } from "@/components/ArtifactCard"
-import { useAppStore } from "@/store/store"
 import { Input } from "@/components/ui/input"
 import type { ArtifactSummary } from "@/store/artifactSlice"
 
@@ -13,10 +13,10 @@ interface ArtifactListProps {
 }
 
 export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete }: ArtifactListProps) {
-  const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
+  const navigate = useNavigate()
 
   function handleOpen(artifact: ArtifactSummary) {
-    openArtifact(artifact.id)
+    navigate(`/artifacts/${artifact.id}`)
   }
 
   if (items.length === 0 && !search) {

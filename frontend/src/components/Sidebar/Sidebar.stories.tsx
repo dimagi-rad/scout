@@ -40,7 +40,9 @@ const workspaces: TenantMembership[] = [
 const threads: Thread[] = [
   {
     id: "thread-1",
-    title: "Verified visits by worker",
+    title: "Untitled",
+    history_title: "Verified visits by worker",
+    title_is_custom: false,
     created_at: "2026-06-29T13:10:00Z",
     updated_at: "2026-06-30T12:35:00Z",
     last_viewed_at: "2026-06-30T11:00:00Z",
@@ -51,6 +53,8 @@ const threads: Thread[] = [
   {
     id: "thread-2",
     title: "Payment reconciliation for June",
+    history_title: "Payment reconciliation for June",
+    title_is_custom: true,
     created_at: "2026-06-27T09:00:00Z",
     updated_at: "2026-06-27T10:20:00Z",
     last_viewed_at: "2026-06-27T10:20:00Z",
@@ -61,6 +65,8 @@ const threads: Thread[] = [
   {
     id: "thread-3",
     title: "Long-running materialization review",
+    history_title: "Long-running materialization review",
+    title_is_custom: true,
     created_at: "2026-06-20T14:00:00Z",
     updated_at: "2026-06-21T15:40:00Z",
     last_viewed_at: "2026-06-21T15:40:00Z",

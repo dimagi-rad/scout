@@ -9,7 +9,7 @@ from django.contrib import admin
 
 from apps.common.admin import ReadOnlyModelAdmin
 
-from .models import Thread, ThreadJob
+from .models import Thread, ThreadArtifact, ThreadJob
 
 
 @admin.register(Thread)
@@ -32,3 +32,11 @@ class ThreadJobAdmin(ReadOnlyModelAdmin):
     ]
     list_filter = ["job_type", "state", "created_at"]
     search_fields = ["thread__title", "tool_call_id"]
+
+
+@admin.register(ThreadArtifact)
+class ThreadArtifactAdmin(ReadOnlyModelAdmin):
+    list_display = ["thread", "artifact", "source", "last_seen_at"]
+    list_filter = ["source", "last_seen_at"]
+    search_fields = ["thread__title", "artifact__title", "message_id", "tool_call_id"]
+    raw_id_fields = ["thread", "artifact", "workspace"]

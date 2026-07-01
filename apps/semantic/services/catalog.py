@@ -35,6 +35,7 @@ from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
     pipeline_describe_table,
     pipeline_list_tables,
+    pipeline_table_primary_keys,
     workspace_list_tables,
 )
 
@@ -55,6 +56,7 @@ class PhysicalTable:
     columns: list[dict[str, Any]]
     materialized_row_count: int | None = None
     materialized_at: str | None = None
+    primary_key: str = ""
 
 
 _SAFE_NAME_RE = re.compile(r"[^a-zA-Z0-9_]+")
@@ -94,6 +96,12 @@ def _humanize_name(value: str) -> str:
 
 def _is_numeric(data_type: str) -> bool:
     return data_type.lower() in _NUMERIC_TYPES
+
+
+def _is_identifier_column(column_name: str, dataset: SemanticDataset) -> bool:
+    """Identifier-ish columns get no sum/avg measures — those aggregates are noise."""
+    lowered = column_name.lower()
+    return lowered == "id" or lowered.endswith("_id") or column_name == dataset.primary_key
 
 
 def _is_time(data_type: str) -> bool:
@@ -178,6 +186,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 tenant_membership__tenant_id=ts.tenant_id
             ).afirst()
 
+    primary_keys = await pipeline_table_primary_keys(ctx)
     physical_tables: list[PhysicalTable] = []
     for entry in table_entries:
         table_name = entry.get("name", "")
@@ -197,6 +206,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
                 columns=(detail or {}).get("columns", []),
                 materialized_row_count=entry.get("materialized_row_count"),
                 materialized_at=entry.get("materialized_at"),
+                primary_key=primary_keys.get(table_name, ""),
             )
         )
     return schema_name, physical_tables
@@ -250,6 +260,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                     "custom_dataset": None,
                     "schema_name": schema_name,
                     "table_name": table.name,
+                    "primary_key": table.primary_key,
                     "row_count": table.materialized_row_count,
                     "is_visible": True,
                     "metadata": {
@@ -270,6 +281,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         ).update(is_visible=False)
 
         diagnostics = _sync_custom_datasets(model, workspace, schema_name)
+        _sync_relationships(model, workspace)
         model.status = SemanticModel.Status.ACTIVE
         model.diagnostics = diagnostics
         model.save(update_fields=["status", "diagnostics", "updated_at"])
@@ -319,7 +331,6 @@ def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> 
                 )
             compiled_sql = compile_custom_dataset_sql(
                 custom.definition_sql,
-                schema_name=schema_name,
                 allowed_tables=allowed_tables,
             )
             columns = infer_custom_dataset_columns(workspace, compiled_sql)
@@ -375,6 +386,92 @@ def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> 
     return diagnostics
 
 
+def _relationship_endpoints(rel, datasets_by_table: dict[str, list[SemanticDataset]]):
+    """Yield (from_dataset, to_dataset) pairs a pipeline relationship maps onto.
+
+    Matches plain tenant tables by exact name, and multi-tenant namespaced
+    views (``<prefix>__<table>``) prefix-for-prefix so tenant A's visits only
+    join tenant A's users.
+    """
+    for from_dataset in datasets_by_table.get(rel.from_table, []):
+        for to_dataset in datasets_by_table.get(rel.to_table, []):
+            yield from_dataset, to_dataset
+    suffix = f"__{rel.from_table}"
+    for table_name, from_datasets in datasets_by_table.items():
+        if not table_name.endswith(suffix) or table_name == rel.from_table:
+            continue
+        prefix = table_name[: -len(suffix)]
+        for from_dataset in from_datasets:
+            for to_dataset in datasets_by_table.get(f"{prefix}__{rel.to_table}", []):
+                yield from_dataset, to_dataset
+
+
+def _sync_relationships(model: SemanticModel, workspace) -> None:
+    """Derive dataset relationships from the pipelines' declared table links.
+
+    Pipeline YAMLs declare physical foreign-key-ish links (from_table/from_column
+    -> to_table/to_column). Emit one SemanticRelationship per link whose two
+    endpoints are visible physical datasets with the referenced columns, with a
+    Cube join expression over the generated member names. Only rows stamped
+    ``metadata.generated`` are managed here; hand-authored relationships are
+    left untouched.
+    """
+    datasets = list(
+        model.datasets.filter(
+            workspace=workspace,
+            source_kind=SemanticDataset.SourceKind.PHYSICAL,
+            is_visible=True,
+        ).prefetch_related("fields")
+    )
+    datasets_by_table: dict[str, list[SemanticDataset]] = {}
+    for dataset in datasets:
+        datasets_by_table.setdefault(dataset.table_name, []).append(dataset)
+
+    def visible_field(dataset: SemanticDataset, column: str):
+        field_name = semantic_name(column)
+        return next(
+            (f for f in dataset.fields.all() if f.name == field_name and f.is_visible),
+            None,
+        )
+
+    active_names: set[str] = set()
+    for pipeline in get_registry().list():
+        for rel in pipeline.relationships:
+            for from_dataset, to_dataset in _relationship_endpoints(rel, datasets_by_table):
+                from_field = visible_field(from_dataset, rel.from_column)
+                to_field = visible_field(to_dataset, rel.to_column)
+                if from_field is None or to_field is None:
+                    continue
+                name = semantic_name(
+                    f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}"
+                )
+                relationship_type = (
+                    SemanticRelationship.RelationshipType.ONE_TO_ONE
+                    if rel.from_column == from_dataset.primary_key
+                    else SemanticRelationship.RelationshipType.MANY_TO_ONE
+                )
+                SemanticRelationship.objects.update_or_create(
+                    workspace=workspace,
+                    name=name,
+                    defaults={
+                        "from_dataset": from_dataset,
+                        "to_dataset": to_dataset,
+                        "relationship_type": relationship_type,
+                        "join_expression": (
+                            f"{{{from_dataset.name}.{from_field.name}}} = "
+                            f"{{{to_dataset.name}.{to_field.name}}}"
+                        ),
+                        "metadata": {"generated": True, "description": rel.description},
+                    },
+                )
+                active_names.add(name)
+
+    SemanticRelationship.objects.filter(
+        workspace=workspace,
+        metadata__generated=True,
+    ).exclude(name__in=active_names).delete()
+
+
 def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:
     column_notes = annotation.column_notes if annotation else {}
     active_names: set[str] = set()
@@ -427,7 +524,7 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
         )
         active_names.add(field_name)
 
-        if _is_numeric(data_type):
+        if _is_numeric(data_type) and not _is_identifier_column(column_name, dataset):
             for measure_type, prefix, label_prefix in (
                 (SemanticField.MeasureType.SUM, "sum", "Total"),
                 (SemanticField.MeasureType.AVG, "avg", "Average"),
@@ -509,6 +606,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
             "version": model.version,
             "status": model.status,
             "diagnostics": model.diagnostics,
+            "last_build": (model.metadata or {}).get("last_build"),
             "updated_at": model.updated_at.isoformat(),
         },
         "datasets": datasets,

@@ -19,7 +19,8 @@ class Thread(models.Model):
         on_delete=models.CASCADE,
         related_name="threads",
     )
-    title = models.CharField(max_length=200, default="New chat")
+    title = models.CharField(max_length=203, default="", blank=True)
+    title_is_custom = models.BooleanField(default=False)
     is_shared = models.BooleanField(default=False)
     share_token = models.CharField(max_length=64, unique=True, null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -46,6 +47,54 @@ class Thread(models.Model):
         elif not self.is_shared:
             self.share_token = None
         super().save(*args, **kwargs)
+
+
+class ThreadArtifact(models.Model):
+    """Explicit file relationship between a chat thread and an artifact version."""
+
+    class Source(models.TextChoices):
+        CREATED = "created", "Created"
+        UPDATED = "updated", "Updated"
+        MENTIONED = "mentioned", "Mentioned"
+        ATTACHED = "attached", "Attached"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.ForeignKey(
+        "chat.Thread",
+        on_delete=models.CASCADE,
+        related_name="artifact_links",
+    )
+    artifact = models.ForeignKey(
+        "artifacts.Artifact",
+        on_delete=models.CASCADE,
+        related_name="thread_links",
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="thread_artifact_links",
+    )
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.MENTIONED)
+    message_id = models.CharField(max_length=128, blank=True, default="")
+    tool_call_id = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["thread", "artifact"],
+                name="unique_thread_artifact_link",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["thread", "-last_seen_at"], name="chat_thart_thread_seen"),
+            models.Index(fields=["workspace", "-last_seen_at"], name="chat_thart_ws_seen"),
+        ]
+        ordering = ["-last_seen_at"]
+
+    def __str__(self):
+        return f"{self.artifact_id} in thread {self.thread_id}"
 
 
 class ThreadJob(models.Model):

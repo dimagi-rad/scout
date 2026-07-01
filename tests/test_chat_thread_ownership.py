@@ -230,6 +230,8 @@ async def test_upsert_thread_bumps_updated_at_on_subsequent_turn():
     await _upsert_thread(thread_id, user, "first turn", workspace=ws)
     initial = await Thread.objects.aget(id=thread_id)
     initial_updated_at = initial.updated_at
+    assert initial.title == "first turn"
+    assert initial.title_is_custom is False
 
     # Postgres timestamps have microsecond precision; sleep a beat so the
     # bump is observable.

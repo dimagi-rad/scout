@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 
 from django.http import JsonResponse
 
+from apps.chat.artifact_links import (
+    backfill_thread_artifact_links,
+    serialize_thread_artifact_link,
+)
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.helpers import (
     CheckpointerUnavailable,
@@ -13,9 +17,11 @@ from apps.chat.helpers import (
     async_login_required,
 )
 from apps.chat.message_converter import langchain_messages_to_ui
-from apps.chat.models import Thread
+from apps.chat.models import Thread, ThreadArtifact
 
 logger = logging.getLogger(__name__)
+
+THREAD_TITLE_PREVIEW_CHARS = 200
 
 
 async def _get_thread(thread_id, user, *, workspace_id=None):
@@ -46,8 +52,73 @@ async def _update_thread_sharing(thread, is_shared=None):
     return {
         "id": str(thread.id),
         "is_shared": thread.is_shared,
+        "is_public": thread.is_shared,
         "share_token": thread.share_token,
     }
+
+
+def _thread_summary(thread, *, history_title: str | None = None):
+    display_title = _display_thread_title(thread)
+    return {
+        "id": str(thread.id),
+        "title": display_title or "Untitled",
+        "history_title": history_title or _history_thread_title(thread),
+        "title_is_custom": thread.title_is_custom,
+        "created_at": thread.created_at.isoformat(),
+        "updated_at": thread.updated_at.isoformat(),
+        "is_shared": thread.is_shared,
+        "is_public": thread.is_shared,
+        "share_token": thread.share_token,
+        "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
+}
+
+
+def _short_thread_title(title: str) -> str:
+    clean = title.strip()
+    if len(clean) > THREAD_TITLE_PREVIEW_CHARS:
+        return f"{clean[:THREAD_TITLE_PREVIEW_CHARS].rstrip()}..."
+    return clean
+
+
+def _display_thread_title(thread) -> str:
+    if not thread.title_is_custom:
+        return "Untitled"
+    return _short_thread_title(thread.title) or "Untitled"
+
+
+def _history_thread_title(thread) -> str:
+    if thread.title_is_custom:
+        return _display_thread_title(thread)
+    return _short_thread_title(thread.title) or "Untitled"
+
+
+async def _thread_summary_for_response(thread):
+    history_title = _history_thread_title(thread)
+    if not thread.title_is_custom and history_title == "Untitled":
+        history_title = await _first_user_message_title(thread.id) or history_title
+    return _thread_summary(thread, history_title=history_title)
+
+
+async def _first_user_message_title(thread_id) -> str:
+    try:
+        messages = await _load_thread_messages(thread_id)
+    except CheckpointerUnavailable:
+        return ""
+    for message in messages:
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "").strip()
+        if content:
+            return _short_thread_title(content)
+        parts = message.get("parts") or []
+        text = " ".join(
+            str(part.get("text") or "").strip()
+            for part in parts
+            if part.get("type") == "text" and part.get("text")
+        ).strip()
+        if text:
+            return _short_thread_title(text)
+    return ""
 
 
 async def _get_thread_artifacts(thread_id):
@@ -63,20 +134,25 @@ async def _get_thread_artifacts(thread_id):
     they intentionally are NOT exposed here. Public rendering uses the embedded
     static ``data`` only; live tenant data is never served to anonymous viewers.
     """
-    from apps.artifacts.models import Artifact
-
+    thread = await Thread.objects.filter(id=thread_id).select_related("workspace").afirst()
+    if thread is None:
+        return []
+    await backfill_thread_artifact_links(thread)
+    queryset = (
+        ThreadArtifact.objects.filter(thread=thread)
+        .select_related("artifact")
+        .order_by("artifact__created_at")
+    )
     return [
         {
-            "id": str(a.id),
-            "title": a.title,
-            "artifact_type": a.artifact_type,
-            "code": a.code,
-            "data": a.data,
-            "version": a.version,
+            "id": str(link.artifact.id),
+            "title": link.artifact.title,
+            "artifact_type": link.artifact.artifact_type,
+            "code": link.artifact.code,
+            "data": link.artifact.data,
+            "version": link.artifact.version,
         }
-        async for a in Artifact.objects.filter(conversation_id=str(thread_id)).order_by(
-            "created_at"
-        )
+        async for link in queryset
     ]
 
 
@@ -88,19 +164,11 @@ async def _list_threads(user, *, workspace_id):
     if workspace is None:
         return None
 
-    return [
-        {
-            "id": str(t.id),
-            "title": t.title,
-            "created_at": t.created_at.isoformat(),
-            "updated_at": t.updated_at.isoformat(),
-            "is_shared": t.is_shared,
-            "last_viewed_at": t.last_viewed_at.isoformat() if t.last_viewed_at else None,
-        }
-        async for t in Thread.objects.filter(user=user, workspace=workspace).order_by(
-            "-updated_at"
-        )[:50]
-    ]
+    summaries = []
+    queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
+    async for thread in queryset:
+        summaries.append(await _thread_summary_for_response(thread))
+    return summaries
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
@@ -146,6 +214,46 @@ async def thread_list_view(request, workspace_id):
 
 
 @async_login_required
+async def thread_detail_view(request, workspace_id, thread_id):
+    """GET/PATCH /api/workspaces/<workspace_id>/threads/<thread_id>/."""
+
+    user = request._authenticated_user
+    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+
+    if request.method == "GET":
+        if thread is None:
+            return JsonResponse({"error": "Thread not found"}, status=404)
+        return JsonResponse(await _thread_summary_for_response(thread))
+
+    if request.method == "PATCH":
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, ValueError):
+            return JsonResponse({"error": "Invalid JSON"}, status=400)
+        title = _short_thread_title(str(body.get("title", "")))
+        if thread is None:
+            thread = Thread(
+                id=thread_id,
+                user=user,
+                workspace=workspace,
+                title=title,
+                title_is_custom=bool(title),
+            )
+            await thread.asave()
+        else:
+            thread.title = title
+            thread.title_is_custom = bool(title)
+            await thread.asave(update_fields=["title", "title_is_custom", "updated_at"])
+        return JsonResponse(await _thread_summary_for_response(thread))
+
+    return JsonResponse({"error": "Method not allowed"}, status=405)
+
+
+@async_login_required
 async def thread_messages_view(request, workspace_id, thread_id):
     """
     GET /api/chat/threads/<thread_id>/messages/
@@ -183,6 +291,33 @@ async def thread_messages_view(request, workspace_id, thread_id):
             status=503,
         )
     return JsonResponse(ui_messages, safe=False)
+
+
+@async_login_required
+async def thread_artifacts_view(request, workspace_id, thread_id):
+    """GET /api/workspaces/<workspace_id>/threads/<thread_id>/artifacts/."""
+
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    user = request._authenticated_user
+    workspace, _, _ = await _resolve_workspace_and_membership(user, workspace_id)
+    if workspace is None:
+        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+
+    thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
+    if thread is None:
+        return JsonResponse({"results": []})
+
+    await backfill_thread_artifact_links(thread)
+    queryset = (
+        ThreadArtifact.objects.filter(thread=thread)
+        .select_related("artifact")
+        .order_by("-last_seen_at")
+    )
+    return JsonResponse(
+        {"results": [serialize_thread_artifact_link(link) async for link in queryset]}
+    )
 
 
 @async_login_required
@@ -280,7 +415,7 @@ async def public_thread_view(request, share_token):
         {
             "thread": {
                 "id": str(thread.id),
-                "title": thread.title,
+                "title": _thread_summary(thread)["title"],
                 "created_at": thread.created_at.isoformat(),
             },
             "messages": messages,

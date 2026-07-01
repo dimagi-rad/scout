@@ -11,7 +11,11 @@ import {
   ChatComposer,
   ChatErrorNotice,
   ChatOverloadNotice,
+  ChatThreadHeader,
+  ChatThreadSidePanel,
   ChatThinkingIndicator,
+  type ThreadArtifactSummary,
+  type ThreadPanelMode,
 } from "@/components/ChatPanel"
 import { ChatEmptyPrompt } from "@/components/ChatEmptyState"
 import { MaterializationFailure } from "@/components/MaterializationStatus/MaterializationFailure"
@@ -100,6 +104,33 @@ const failedMaterialization: RecentTermination = {
   error_summary: "The source returned a 403 while fetching the forms table.",
   retry_available: true,
 }
+
+const threadArtifacts: ThreadArtifactSummary[] = [
+  {
+    id: "086f1caa-0675-4ff4-b113-21580b5602bf",
+    title: "Module Completion Snapshot",
+    description: "Completion rates by worker with a summary KPI and supporting table.",
+    artifact_type: "story",
+    version: 2,
+    source: "created",
+    created_at: "2026-07-01T14:10:00Z",
+    updated_at: "2026-07-01T14:15:00Z",
+    linked_at: "2026-07-01T14:10:00Z",
+    last_seen_at: "2026-07-01T14:15:00Z",
+  },
+  {
+    id: "d52ea613-817a-457e-85cc-d10d9888e9b1",
+    title: "Worker Detail Review",
+    description: "A detail table referenced while refining the completion chart.",
+    artifact_type: "react",
+    version: 1,
+    source: "mentioned",
+    created_at: "2026-07-01T13:40:00Z",
+    updated_at: "2026-07-01T13:40:00Z",
+    linked_at: "2026-07-01T14:12:00Z",
+    last_seen_at: "2026-07-01T14:12:00Z",
+  },
+]
 
 const meta = {
   title: "Chat Primitives/Individual Components",
@@ -241,6 +272,78 @@ export const ArtifactButton: Story = {
       <ChatArtifactButton artifactId="8fb03f9d-9868-4fb9-a2b8-0ce9f65882ba" isActive />
     </div>
   ),
+}
+
+export const ThreadHeaderWithDrawer: Story = {
+  parameters: {
+    layout: "fullscreen",
+  },
+  render: function ThreadHeaderWithDrawerStory() {
+    const [title, setTitle] = useState("Untitled")
+    const [titleIsCustom, setTitleIsCustom] = useState(false)
+    const [panelOpen, setPanelOpen] = useState(true)
+    const [panelMode, setPanelMode] = useState<ThreadPanelMode>("files")
+
+    function openFiles() {
+      if (panelOpen && panelMode === "files") {
+        setPanelOpen(false)
+        return
+      }
+      setPanelMode("files")
+      setPanelOpen(true)
+    }
+
+    function openCanvas() {
+      if (panelOpen && panelMode === "canvas") {
+        setPanelOpen(false)
+        return
+      }
+      setPanelMode("canvas")
+      setPanelOpen(true)
+    }
+
+    return (
+      <div className="flex h-[520px] bg-background">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <ChatThreadHeader
+            title={title}
+            titleIsCustom={titleIsCustom}
+            panelOpen={panelOpen}
+            panelMode={panelMode}
+            onTitleChange={(nextTitle) => {
+              setTitle(nextTitle || "Untitled")
+              setTitleIsCustom(Boolean(nextTitle))
+            }}
+            onOpenFiles={openFiles}
+            onOpenCanvas={openCanvas}
+          />
+          <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+            Chat transcript
+          </div>
+        </div>
+        <ChatThreadSidePanel
+          open={panelOpen}
+          mode={panelMode}
+          artifacts={threadArtifacts}
+          filesStatus="loaded"
+          filesError={null}
+          onClose={() => setPanelOpen(false)}
+          onOpenArtifact={() => undefined}
+          onRefreshFiles={() => undefined}
+          canvas={
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="border-b px-3 py-2 text-sm font-medium">Semantic canvas</div>
+              <div className="grid gap-2 p-3">
+                <div className="rounded-md border px-3 py-2 text-sm">visits</div>
+                <div className="rounded-md border px-3 py-2 text-sm">workers</div>
+                <div className="rounded-md border px-3 py-2 text-sm">modules</div>
+              </div>
+            </div>
+          }
+        />
+      </div>
+    )
+  },
 }
 
 export const Composer: Story = {

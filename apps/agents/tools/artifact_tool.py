@@ -137,6 +137,8 @@ def create_artifact_tools(
         """
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
+        from apps.chat.artifact_links import link_artifact_to_thread
+        from apps.chat.models import ThreadArtifact
 
         # Validate artifact type
         if artifact_type not in VALID_ARTIFACT_TYPES:
@@ -197,6 +199,12 @@ def create_artifact_tools(
                 conversation_id=conversation_id or "",
                 source_queries=[],
                 semantic_queries=semantic_queries or [],
+            )
+            await link_artifact_to_thread(
+                artifact,
+                conversation_id,
+                workspace,
+                source=ThreadArtifact.Source.CREATED,
             )
 
             logger.info(
@@ -266,6 +274,8 @@ def create_artifact_tools(
         """
         # Import here to avoid circular imports
         from apps.artifacts.models import Artifact
+        from apps.chat.artifact_links import link_artifact_to_thread
+        from apps.chat.models import ThreadArtifact
 
         try:
             # Find the existing artifact
@@ -317,13 +327,19 @@ def create_artifact_tools(
                 data=data if data is not None else original.data,
                 version=original.version + 1,
                 parent_artifact=original,
-                conversation_id=original.conversation_id,
+                conversation_id=conversation_id or original.conversation_id,
                 source_queries=[],
                 semantic_queries=semantic_queries
                 if semantic_queries is not None
                 else original.semantic_queries,
             )
             await new_artifact.asave()
+            await link_artifact_to_thread(
+                new_artifact,
+                conversation_id or new_artifact.conversation_id,
+                workspace,
+                source=ThreadArtifact.Source.UPDATED,
+            )
 
             logger.info(
                 "Created artifact version %s (v%d) from %s for workspace %s",

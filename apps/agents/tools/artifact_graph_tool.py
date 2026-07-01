@@ -23,6 +23,8 @@ from apps.artifacts.services.graph_manifest import (
     sync_artifact_semantic_query_manifest,
 )
 from apps.artifacts.services.graph_runtime import check_graph_artifact
+from apps.chat.artifact_links import link_artifact_to_thread
+from apps.chat.models import ThreadArtifact
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -64,6 +66,12 @@ def create_artifact_graph_tools(
         artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id)
         if artifact is None:
             return {"status": "not_found", "message": "No graph artifact found."}
+        await link_artifact_to_thread(
+            artifact,
+            conversation_id or artifact.conversation_id,
+            workspace,
+            source=ThreadArtifact.Source.MENTIONED,
+        )
         doc = story_doc_from_artifact_data(artifact.data)
         diagnostics = validate_doc(doc)
         manifest = build_semantic_query_manifest(doc)
@@ -85,6 +93,12 @@ def create_artifact_graph_tools(
         artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id=None)
         if artifact is None:
             return {"status": "not_found", "message": "Graph artifact not found."}
+        await link_artifact_to_thread(
+            artifact,
+            conversation_id or artifact.conversation_id,
+            workspace,
+            source=ThreadArtifact.Source.MENTIONED,
+        )
         await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
         clean_limit = max(1, min(int(limit or 50), 100))
         clean_offset = max(0, int(offset or 0))
@@ -137,6 +151,7 @@ def create_artifact_graph_tools(
                 return await _replace_graph_artifact(
                     workspace,
                     user,
+                    conversation_id=conversation_id,
                     artifact_id=artifact_id,
                     title=title,
                     story_doc=story_doc,
@@ -146,6 +161,7 @@ def create_artifact_graph_tools(
                 return await _apply_graph_ops(
                     workspace,
                     user,
+                    conversation_id=conversation_id,
                     artifact_id=artifact_id,
                     title=title,
                     ops=ops,
@@ -155,6 +171,12 @@ def create_artifact_graph_tools(
                 artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id)
                 if artifact is None:
                     return {"status": "error", "message": "Graph artifact not found."}
+                await link_artifact_to_thread(
+                    artifact,
+                    conversation_id or artifact.conversation_id,
+                    workspace,
+                    source=ThreadArtifact.Source.MENTIONED,
+                )
                 runtime = await check_graph_artifact(
                     artifact,
                     user_id=str(user.id) if user else "",
@@ -210,6 +232,12 @@ async def _create_graph_artifact(
         source_queries=[],
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
+    await link_artifact_to_thread(
+        artifact,
+        conversation_id,
+        workspace,
+        source=ThreadArtifact.Source.CREATED,
+    )
     return await _write_result("created", artifact, diagnostics, run_check, user)
 
 
@@ -217,6 +245,7 @@ async def _replace_graph_artifact(
     workspace: Workspace,
     user: User | None,
     *,
+    conversation_id: str | None,
     artifact_id: str | None,
     title: str | None,
     story_doc: dict[str, Any] | None,
@@ -240,8 +269,15 @@ async def _replace_graph_artifact(
         data={"story_doc": doc},
         semantic_queries=[],
         semantic_query_manifest={},
+        conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
+    await link_artifact_to_thread(
+        new_artifact,
+        conversation_id or new_artifact.conversation_id,
+        workspace,
+        source=ThreadArtifact.Source.UPDATED,
+    )
     return await _write_result("replaced", new_artifact, diagnostics, run_check, user, original)
 
 
@@ -249,6 +285,7 @@ async def _apply_graph_ops(
     workspace: Workspace,
     user: User | None,
     *,
+    conversation_id: str | None,
     artifact_id: str | None,
     title: str | None,
     ops: list[dict[str, Any]] | None,
@@ -271,8 +308,15 @@ async def _apply_graph_ops(
         data={"story_doc": updated_doc},
         semantic_queries=[],
         semantic_query_manifest={},
+        conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
+    await link_artifact_to_thread(
+        new_artifact,
+        conversation_id or new_artifact.conversation_id,
+        workspace,
+        source=ThreadArtifact.Source.UPDATED,
+    )
     return await _write_result("updated", new_artifact, diagnostics, run_check, user, original)
 
 
