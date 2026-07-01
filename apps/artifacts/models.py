@@ -124,6 +124,11 @@ class Artifact(models.Model):
         blank=True,
         help_text="Structured semantic queries that generated the data for this artifact.",
     )
+    semantic_query_manifest = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Normalized semantic query dependency manifest for graph artifacts.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     is_deleted = models.BooleanField(default=False)
@@ -200,6 +205,10 @@ class Artifact(models.Model):
             conversation_id=updates.get("conversation_id", self.conversation_id),
             source_queries=[],
             semantic_queries=updates.get("semantic_queries", self.semantic_queries),
+            semantic_query_manifest=updates.get(
+                "semantic_query_manifest",
+                self.semantic_query_manifest,
+            ),
         )
         new_artifact.save()
         return new_artifact
@@ -228,3 +237,47 @@ class Artifact(models.Model):
             current = current.parent_artifact
             depth += 1
         return list(reversed(history))
+
+
+class ArtifactSemanticQuery(models.Model):
+    """Normalized semantic query dependency for one artifact version."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    artifact = models.ForeignKey(
+        Artifact,
+        on_delete=models.CASCADE,
+        related_name="semantic_query_records",
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="artifact_semantic_queries",
+    )
+    query_key = models.CharField(max_length=500)
+    query_hash = models.CharField(max_length=64, db_index=True)
+    query_type = models.CharField(max_length=50, default="semantic")
+    validation_status = models.CharField(max_length=50, default="valid")
+    query_payload = models.JSONField(default=dict, blank=True)
+    members = models.JSONField(default=list, blank=True)
+    datasets = models.JSONField(default=list, blank=True)
+    dependencies = models.JSONField(default=list, blank=True)
+    block_locations = models.JSONField(default=list, blank=True)
+    unresolved_references = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["query_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["artifact", "query_key"],
+                name="unique_artifact_semantic_query_key",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "query_key"]),
+            models.Index(fields=["artifact", "query_key"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.artifact_id}: {self.query_key}"

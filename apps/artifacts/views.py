@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from asgiref.sync import sync_to_async
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -23,8 +24,12 @@ from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
-from .models import Artifact
+from .models import Artifact, ArtifactSemanticQuery, ArtifactType
 from .services.export import ArtifactExporter
+from .services.graph_manifest import (
+    semantic_query_summary,
+    sync_artifact_semantic_query_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -860,6 +865,7 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "code": artifact.code,
             "data": artifact.data,
             "semantic_queries": artifact.semantic_queries,
+            "semantic_query_manifest": artifact.semantic_query_manifest,
             "version": artifact.version,
         }
 
@@ -904,8 +910,20 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
+        if artifact.artifact_type == ArtifactType.STORY:
+            await sync_to_async(
+                sync_artifact_semantic_query_manifest,
+                thread_sensitive=True,
+            )(artifact)
+
         if not artifact.source_queries and not artifact.semantic_queries:
-            return JsonResponse({"queries": [], "static_data": artifact.data or {}})
+            return JsonResponse(
+                {
+                    "queries": [],
+                    "static_data": artifact.data or {},
+                    "semantic_query_manifest": artifact.semantic_query_manifest or {},
+                }
+            )
 
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
@@ -914,7 +932,11 @@ class ArtifactQueryDataView(View):
         for i, entry in enumerate(artifact.semantic_queries):
             name = entry.get("name", f"semantic_query_{i}")
             query_spec = {k: v for k, v in entry.items() if k != "name"}
-            result = await run_semantic_query(artifact.workspace, query_spec)
+            result = await run_semantic_query(
+                artifact.workspace,
+                query_spec,
+                user_id=str(user.id),
+            )
 
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
@@ -948,7 +970,69 @@ class ArtifactQueryDataView(View):
                 }
             )
 
-        return JsonResponse({"queries": results, "static_data": artifact.data or {}})
+        return JsonResponse(
+            {
+                "queries": results,
+                "static_data": artifact.data or {},
+                "semantic_query_manifest": artifact.semantic_query_manifest or {},
+            }
+        )
+
+
+class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
+    """
+    GET /api/workspaces/<workspace_id>/artifacts/<artifact_id>/semantic-queries/
+    Returns paginated graph artifact semantic query dependencies.
+    """
+
+    def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        workspace, err = resolve_workspace(request.user, workspace_id)
+        if err:
+            return err
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
+        if artifact.artifact_type == ArtifactType.STORY:
+            sync_artifact_semantic_query_manifest(artifact)
+
+        limit = _bounded_int(request.GET.get("limit"), default=25, lower=1, upper=100)
+        offset = _bounded_int(request.GET.get("offset"), default=0, lower=0, upper=100_000)
+        queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
+        total_count = queryset.count()
+        records = list(queryset[offset : offset + limit])
+        manifest = artifact.semantic_query_manifest or {}
+        return JsonResponse(
+            {
+                "artifact": {
+                    "id": str(artifact.id),
+                    "title": artifact.title,
+                    "version": artifact.version,
+                    "artifact_type": artifact.artifact_type,
+                },
+                "semantic_queries": [semantic_query_summary(record) for record in records],
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "count": len(records),
+                    "total_count": total_count,
+                    "has_more": offset + len(records) < total_count,
+                },
+                "manifest": {
+                    "schema_version": manifest.get("schema_version"),
+                    "generated_at": manifest.get("generated_at"),
+                    "source": manifest.get("source"),
+                    "entry_count": len(manifest.get("entries") or []),
+                    "unresolved_count": len(manifest.get("unresolved") or []),
+                    "unresolved": manifest.get("unresolved") or [],
+                },
+            }
+        )
+
+
+def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lower, min(parsed, upper))
 
 
 class ArtifactListView(LoginRequiredJsonMixin, View):

@@ -8,7 +8,27 @@ with filtering, search, and inline editing capabilities.
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import Artifact
+from .models import Artifact, ArtifactSemanticQuery
+
+
+class ArtifactSemanticQueryInline(admin.TabularInline):
+    """Read-only semantic query dependency rows for graph artifacts."""
+
+    model = ArtifactSemanticQuery
+    extra = 0
+    can_delete = False
+    fields = (
+        "query_key",
+        "validation_status",
+        "query_type",
+        "members",
+        "datasets",
+        "unresolved_references",
+    )
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Artifact)
@@ -44,6 +64,7 @@ class ArtifactAdmin(admin.ModelAdmin):
     )
     raw_id_fields = ("workspace", "created_by", "parent_artifact")
     date_hierarchy = "created_at"
+    inlines = (ArtifactSemanticQueryInline,)
 
     fieldsets = (
         (
@@ -91,7 +112,7 @@ class ArtifactAdmin(admin.ModelAdmin):
         (
             "Source Data",
             {
-                "fields": ("semantic_queries",),
+                "fields": ("semantic_queries", "semantic_query_manifest"),
                 "classes": ("collapse",),
             },
         ),
@@ -141,3 +162,32 @@ class ArtifactAdmin(admin.ModelAdmin):
         return format_html(" -> ".join(links))
 
     version_history_display.short_description = "Version History"
+
+
+@admin.register(ArtifactSemanticQuery)
+class ArtifactSemanticQueryAdmin(admin.ModelAdmin):
+    """Admin interface for graph artifact semantic dependency records."""
+
+    list_display = (
+        "query_key",
+        "artifact",
+        "workspace",
+        "validation_status",
+        "query_type",
+        "updated_at",
+    )
+    list_filter = ("validation_status", "query_type", "workspace")
+    search_fields = ("query_key", "artifact__title", "members", "datasets")
+    raw_id_fields = ("artifact", "workspace")
+    readonly_fields = (
+        "id",
+        "query_hash",
+        "query_payload",
+        "members",
+        "datasets",
+        "dependencies",
+        "block_locations",
+        "unresolved_references",
+        "created_at",
+        "updated_at",
+    )

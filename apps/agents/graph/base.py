@@ -36,6 +36,7 @@ from langgraph.prebuilt import ToolNode
 from apps.agents.graph.state import AgentState
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
+from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
@@ -843,6 +844,7 @@ def _build_tools(
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
     tools.append(create_save_learning_tool(workspace, user))
+    tools.extend(create_artifact_graph_tools(workspace, user, conversation_id=conversation_id))
     tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
     if not interactive:

@@ -1,94 +1,86 @@
 """Artifact creation prompt additions for Scout data agent."""
 
 ARTIFACT_PROMPT_ADDITION = """
-## Creating Interactive Artifacts
+## Artifacts And Semantic Graphs
 
-You can create artifacts with `create_artifact` and `update_artifact`. In
-semantic-model mode, prefer `artifact_type="story"` for data-backed outputs.
-Stories are structured documents with hidden semantic query blocks and visible
-blocks such as markdown, stat, table, and chart.
+Create an artifact when the user asks for a chart, graph, dashboard, report,
+reusable view, or any multi-metric answer that should be reopened later.
 
-### When to Create Artifacts
+### Semantic graph artifacts
 
-Create an artifact when:
-- The user asks for a chart, graph, dashboard, report, or reusable view
-- The answer contains multiple metrics or trends that should be reopened later
-- A visual or table would be clearer than a chat response
+For all data-backed work, use `artifact_graph_manager`. Do not call
+`create_artifact` or `update_artifact` for `artifact_type="story"`; those tools
+only maintain legacy non-data-backed artifacts.
 
-Do not create an artifact when a short text answer or small markdown table is enough.
+The graph manager creates `story` artifacts whose canonical document lives in
+`data.story_doc`. That doc is a typed graph:
 
-### Story Artifacts
-
-For data-backed artifacts, use:
-
-```python
-create_artifact(
-    title="Verified Visits This Week",
-    artifact_type="story",
-    data={
-        "story_doc": {
-            "blocks": [
-                {
-                    "id": "q",
-                    "type": "semantic_query",
-                    "hidden": True,
-                    "config": {
-                        "queries": {
-                            "visits_by_worker": {
-                                "measures": ["visits.count"],
-                                "dimensions": ["visits.username"],
-                                "time_dimension": "visits.visit_date",
-                                "granularity": "day",
-                                "filters": [
-                                    {
-                                        "field": "visits.visit_date",
-                                        "operator": "inDateRange",
-                                        "value": ["2026-06-22", "2026-06-28"],
-                                    }
-                                ],
-                                "limit": 100,
-                            }
-                        }
-                    },
-                },
-                {"id": "title", "type": "markdown", "config": {"body": "# Verified Visits"}},
-                {"id": "table", "type": "table", "config": {"query": "visits_by_worker"}},
-            ]
-        }
-    },
-    semantic_queries=[
-        {
-            "name": "visits_by_worker",
+```json
+{
+  "schema_version": 1,
+  "name": "Weekly visits",
+  "prd": "Short durable spec of the question, audience, data, and sections.",
+  "blocks": [
+    {"id": "title", "type": "title", "config": {"text": "Weekly visits"}},
+    {"id": "range", "type": "date_filter", "config": {"default": "last_30_days"}},
+    {
+      "id": "q",
+      "type": "semantic_query",
+      "hidden": true,
+      "inputs": {"date_range": {"$ref": "range.value"}},
+      "config": {
+        "queries": {
+          "visits_by_day": {
             "measures": ["visits.count"],
-            "dimensions": ["visits.username"],
             "time_dimension": "visits.visit_date",
             "granularity": "day",
-            "filters": [
-                {
-                    "field": "visits.visit_date",
-                    "operator": "inDateRange",
-                    "value": ["2026-06-22", "2026-06-28"],
-                }
-            ],
-            "limit": 100,
+            "limit": 100
+          }
         }
-    ],
-)
+      }
+    },
+    {
+      "id": "chart",
+      "type": "graph",
+      "inputs": {"data": {"$ref": "q.visits_by_day"}},
+      "config": {
+        "title": "Visits by day",
+        "chart_type": "line",
+        "x_key": "date",
+        "series": ["visits_count"]
+      }
+    }
+  ]
+}
 ```
 
+Supported block types: `title`, `section`, `question`, `tldr`, `markdown`,
+`date_filter`, `period_selector`, `semantic_query`, `graph`, `table`, `stat`.
+Hidden `semantic_query` blocks publish row outputs; visible blocks bind to those
+outputs with refs like `{ "$ref": "q.visits_by_day" }`.
+
 Rules:
-- Use semantic member names from `list_datasets` or `describe_dataset`.
-- Do not write raw SQL in artifacts.
-- Do not embed query result rows in `data`; use `semantic_queries` so the story refreshes.
-- Keep each semantic query focused on one logical dataset.
-- Give every query a stable, descriptive `name`; visible story blocks refer to that name.
-- If a semantic member does not exist, call `list_datasets` or `describe_dataset` again, or ask a clarifying question.
+- Use semantic member names from `list_datasets` / `describe_dataset`.
+- Never write raw SQL in graph artifacts.
+- Never store query result rows in `data.story_doc`.
+- Query specs support only: `measures`, `dimensions`, `time_dimension`,
+  `granularity`, `filters`, `order_by`, `limit`.
+- Never use raw Cube keys like `timeDimensions`, `dateRange`, `order`,
+  `segments`, `timezone`, or filter key `member`.
+- A query bound to `date_range` or `compare` must include `time_dimension`.
+- Time-bucketed rows expose the bucket as `date`; member result keys are
+  snake_case, e.g. `visits.count` becomes `visits_count`.
+- Use `artifact_graph_overview` for read-only questions about an existing graph.
+- Use `get_artifact_semantic_queries` when you need paginated dependency
+  introspection for a graph artifact.
+- Use `artifact_graph_manager` with `action="create"`, `action="apply"`,
+  `action="replace"`, or `action="check"` for all graph writes/checks.
 
-### Legacy Artifact Types
+### Legacy artifact types
 
-Use `react`, `plotly`, `html`, `markdown`, or `svg` only for non-data-backed
-static content or for maintaining an existing legacy artifact. New data-backed
-work should be a story artifact.
+Use `create_artifact` and `update_artifact` only for non-data-backed `react`,
+`plotly`, `html`, `markdown`, or `svg` artifacts, or to maintain existing legacy
+static artifacts.
 """
 
 

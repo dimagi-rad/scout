@@ -90,9 +90,9 @@ def create_artifact_tools(
         such as charts, tables, dashboards, or formatted content. The artifact
         will be rendered in an interactive preview.
 
-        IMPORTANT: For data-driven artifacts, create a "story" artifact and
-        provide semantic_queries with structured measure/dimension query specs.
-        Do NOT embed query results in the data parameter.
+        IMPORTANT: Do not use this tool for data-backed semantic graph/story
+        artifacts. Use artifact_graph_manager for charts, tables, dashboards,
+        and reports backed by semantic queries.
 
         Args:
             title: Human-readable title for the artifact. Should describe
@@ -107,8 +107,7 @@ def create_artifact_tools(
                 - "html": Static HTML content (for simple tables, formatted text).
                 - "markdown": Markdown content (for documentation, reports).
                 - "svg": SVG graphic (for custom diagrams, icons).
-                - "story": Structured semantic story document (recommended
-                  for data-backed charts, tables, and reports).
+                - "story": Not accepted here. Use artifact_graph_manager.
 
             code: The source code for the artifact:
                 - For "react": JSX code with a default export component.
@@ -117,19 +116,15 @@ def create_artifact_tools(
                 - For "html": HTML markup
                 - For "markdown": Markdown text
                 - For "svg": SVG markup
-                - For "story": leave code blank and provide data.story_doc.
+                - For "story": use artifact_graph_manager instead.
 
             description: Optional description of what this artifact visualizes.
                 Helps users understand the artifact's purpose.
 
-            data: Optional static JSON data to pass to the artifact. Story
-                artifacts require data.story_doc and should put live-data
-                requests in semantic_queries.
+            data: Optional static JSON data to pass to the artifact.
 
-            semantic_queries: List of named semantic query specs that provide
-                live data to a story artifact. Each entry must include "name"
-                plus semantic_query arguments such as measures, dimensions,
-                filters, time_dimension, granularity, and limit.
+            semantic_queries: Legacy compatibility field. New data-backed
+                artifacts must use artifact_graph_manager.
 
         Returns:
             A dict containing:
@@ -154,20 +149,21 @@ def create_artifact_tools(
                 "message": f"Invalid artifact_type '{artifact_type}'. "
                 f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_TYPES))}",
             }
+        if artifact_type == "story":
+            return {
+                "artifact_id": None,
+                "status": "error",
+                "title": title,
+                "type": artifact_type,
+                "render_url": None,
+                "message": (
+                    "Story artifacts are semantic graph artifacts. Use "
+                    "artifact_graph_manager with action='create' instead."
+                ),
+            }
 
         # Validate code/story content is provided
-        if artifact_type == "story":
-            story_doc = (data or {}).get("story_doc") if isinstance(data, dict) else None
-            if not story_doc:
-                return {
-                    "artifact_id": None,
-                    "status": "error",
-                    "title": title,
-                    "type": artifact_type,
-                    "render_url": None,
-                    "message": "Story artifacts require data.story_doc.",
-                }
-        elif not code or not code.strip():
+        if not code or not code.strip():
             return {
                 "artifact_id": None,
                 "status": "error",
@@ -287,19 +283,19 @@ def create_artifact_tools(
                 }
 
             if original.artifact_type == "story":
-                next_data = data if data is not None else original.data
-                story_doc = next_data.get("story_doc") if isinstance(next_data, dict) else None
-                if not story_doc:
-                    return {
-                        "artifact_id": None,
-                        "previous_version_id": artifact_id,
-                        "status": "error",
-                        "version": None,
-                        "title": None,
-                        "render_url": None,
-                        "message": "Story artifacts require data.story_doc.",
-                    }
-            elif not code or not code.strip():
+                return {
+                    "artifact_id": None,
+                    "previous_version_id": artifact_id,
+                    "status": "error",
+                    "version": None,
+                    "title": None,
+                    "render_url": None,
+                    "message": (
+                        "Story artifacts are semantic graph artifacts. Use "
+                        "artifact_graph_manager with action='apply' or action='replace'."
+                    ),
+                }
+            if not code or not code.strip():
                 return {
                     "artifact_id": None,
                     "previous_version_id": artifact_id,

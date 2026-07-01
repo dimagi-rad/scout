@@ -13,6 +13,7 @@ from .views import (
     ArtifactListView,
     ArtifactQueryDataView,
     ArtifactSandboxView,
+    ArtifactSemanticQueryView,
     ArtifactUndeleteView,
 )
 
@@ -40,6 +41,11 @@ urlpatterns = [
         "<uuid:artifact_id>/query-data/",
         ArtifactQueryDataView.as_view(),
         name="query_data",
+    ),
+    path(
+        "<uuid:artifact_id>/semantic-queries/",
+        ArtifactSemanticQueryView.as_view(),
+        name="semantic_queries",
     ),
     path(
         "<uuid:artifact_id>/export/<str:format>/",

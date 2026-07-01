@@ -3,6 +3,7 @@ import { useAppStore } from "@/store/store"
 import { X, Eye, Database, RefreshCw, Loader2, FileDown } from "lucide-react"
 import { api } from "@/api/client"
 import { withBasePath } from "@/config"
+import { ArtifactGraphRenderer, type ArtifactDetail } from "@/components/ArtifactGraph"
 
 interface QueryResult {
   name: string
@@ -17,6 +18,7 @@ interface QueryResult {
 interface QueryDataResponse {
   queries: QueryResult[]
   static_data: Record<string, unknown>
+  semantic_query_manifest?: Record<string, unknown>
 }
 
 type Tab = "view" | "data"
@@ -35,12 +37,20 @@ export function ArtifactPanel() {
   const [queryData, setQueryData] = useState<QueryDataResponse | null>(null)
   const [dataLoading, setDataLoading] = useState(false)
   const [dataError, setDataError] = useState<string | null>(null)
+  const [artifactDetail, setArtifactDetail] = useState<ArtifactDetail | null>(null)
+  const [artifactLoading, setArtifactLoading] = useState(false)
+  const [artifactError, setArtifactError] = useState<string | null>(null)
   const [panelWidth, setPanelWidth] = useState(DEFAULT_WIDTH)
   const [isResizing, setIsResizing] = useState(false)
   const panelRef = useRef<HTMLElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  const isGraphArtifact = artifactDetail?.type === "story"
 
   const handleExportPdf = useCallback(() => {
+    if (isGraphArtifact) {
+      window.print()
+      return
+    }
     // Trigger print inside the sandboxed iframe so the print job is scoped to
     // the artifact content, not the surrounding app. The sandbox HTML listens
     // for this message and calls window.print() (browser "Save as PDF").
@@ -53,7 +63,21 @@ export function ArtifactPanel() {
     // here: the message is a trivial non-secret "scout-print" signal sent only
     // to our own artifact iframe via iframeRef, so there is nothing to leak.
     iframeRef.current?.contentWindow?.postMessage({ type: "scout-print" }, "*")
-  }, [])
+  }, [isGraphArtifact])
+
+  const fetchArtifactDetail = useCallback(async (id: string) => {
+    if (!activeDomainId) return
+    setArtifactLoading(true)
+    setArtifactError(null)
+    try {
+      const data = await api.get<ArtifactDetail>(`/api/workspaces/${activeDomainId}/artifacts/${id}/data/`)
+      setArtifactDetail(data)
+    } catch (e) {
+      setArtifactError(e instanceof Error ? e.message : "Failed to load artifact")
+    } finally {
+      setArtifactLoading(false)
+    }
+  }, [activeDomainId])
 
   const fetchQueryData = useCallback(async (id: string) => {
     if (!activeDomainId) return
@@ -74,6 +98,12 @@ export function ArtifactPanel() {
       fetchQueryData(artifactId)
     }
   }, [artifactId, activeTab, fetchQueryData])
+
+  useEffect(() => {
+    if (artifactId) {
+      fetchArtifactDetail(artifactId)
+    }
+  }, [artifactId, fetchArtifactDetail])
 
   useEffect(() => {
     function handleMessage(event: MessageEvent) {
@@ -99,6 +129,8 @@ export function ArtifactPanel() {
     setActiveTab("view")
     setQueryData(null)
     setDataError(null)
+    setArtifactDetail(null)
+    setArtifactError(null)
   }, [artifactId])
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -200,25 +232,43 @@ export function ArtifactPanel() {
             </div>
           </div>
 
-          {/* View tab: iframe */}
+          {/* View tab */}
           {activeTab === "view" && (
-            <iframe
-              ref={iframeRef}
-              key={artifactId}
-              src={activeDomainId ? withBasePath(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/`) : ""}
-              className="flex-1 w-full"
-              // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
-              // served same-origin and session-authenticated, and it executes
-              // agent-generated (prompt-injectable) code. With allow-same-origin
-              // that code could read the viewer's cookies/CSRF token, issue
-              // credentialed /api/ requests, and reach window.parent — a full
-              // session takeover. Omitting it gives the frame a unique opaque
-              // origin: scripts still run and render UI, but the frame cannot
-              // touch the parent origin or send credentialed same-origin
-              // requests. Do NOT re-add allow-same-origin.
-              sandbox="allow-scripts allow-modals"
-              title="Artifact"
-            />
+            <>
+              {artifactLoading && (
+                <div className="flex flex-1 items-center justify-center text-muted-foreground">
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                  <span className="text-sm">Loading artifact...</span>
+                </div>
+              )}
+              {artifactError && (
+                <div className="flex flex-1 items-center justify-center p-4 text-sm text-destructive">
+                  {artifactError}
+                </div>
+              )}
+              {!artifactLoading && !artifactError && isGraphArtifact && artifactDetail && activeDomainId && (
+                <ArtifactGraphRenderer artifact={artifactDetail} workspaceId={activeDomainId} />
+              )}
+              {!artifactLoading && !artifactError && !isGraphArtifact && (
+                <iframe
+                  ref={iframeRef}
+                  key={artifactId}
+                  src={activeDomainId ? withBasePath(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/sandbox/`) : ""}
+                  className="flex-1 w-full"
+                  // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
+                  // served same-origin and session-authenticated, and it executes
+                  // agent-generated (prompt-injectable) code. With allow-same-origin
+                  // that code could read the viewer's cookies/CSRF token, issue
+                  // credentialed /api/ requests, and reach window.parent — a full
+                  // session takeover. Omitting it gives the frame a unique opaque
+                  // origin: scripts still run and render UI, but the frame cannot
+                  // touch the parent origin or send credentialed same-origin
+                  // requests. Do NOT re-add allow-same-origin.
+                  sandbox="allow-scripts allow-modals"
+                  title="Artifact"
+                />
+              )}
+            </>
           )}
 
           {/* Data tab: semantic queries and results */}
@@ -260,6 +310,10 @@ export function ArtifactPanel() {
                   </div>
                 )}
 
+                {queryData?.semantic_query_manifest && (
+                  <ManifestSummary manifest={queryData.semantic_query_manifest} />
+                )}
+
                 {queryData?.queries?.length === 0 && !dataLoading && (
                   <div className="text-center py-12 text-muted-foreground text-sm">
                     This artifact has no stored queries. Data was embedded statically.
@@ -276,6 +330,33 @@ export function ArtifactPanel() {
       )}
     </aside>
     </>
+  )
+}
+
+function ManifestSummary({ manifest }: { manifest: Record<string, unknown> }) {
+  const entries = Array.isArray(manifest.entries) ? manifest.entries : []
+  const unresolved = Array.isArray(manifest.unresolved) ? manifest.unresolved : []
+  const generatedAt = typeof manifest.generated_at === "string" ? manifest.generated_at : null
+  return (
+    <div className="rounded-lg border border-border p-3 text-sm">
+      <div className="flex items-center justify-between gap-3">
+        <div className="font-medium">Semantic dependencies</div>
+        <div className="text-xs text-muted-foreground">
+          {entries.length} {entries.length === 1 ? "query" : "queries"}
+          {unresolved.length > 0 ? `, ${unresolved.length} unresolved` : ""}
+        </div>
+      </div>
+      {generatedAt && (
+        <div className="mt-1 text-xs text-muted-foreground">Manifest generated {generatedAt}</div>
+      )}
+      {unresolved.length > 0 && (
+        <div className="mt-2 space-y-1 text-xs text-destructive">
+          {unresolved.slice(0, 3).map((item, index) => (
+            <div key={index}>{JSON.stringify(item)}</div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
