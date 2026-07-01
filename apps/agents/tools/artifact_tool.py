@@ -91,7 +91,7 @@ def create_artifact_tools(
         will be rendered in an interactive preview.
 
         IMPORTANT: Do not use this tool for data-backed semantic graph/story
-        artifacts. Use artifact_graph_manager for charts, tables, dashboards,
+        artifacts. Use artifact_manager for charts, tables, dashboards,
         and reports backed by semantic queries.
 
         Args:
@@ -107,7 +107,7 @@ def create_artifact_tools(
                 - "html": Static HTML content (for simple tables, formatted text).
                 - "markdown": Markdown content (for documentation, reports).
                 - "svg": SVG graphic (for custom diagrams, icons).
-                - "story": Not accepted here. Use artifact_graph_manager.
+                - "story": Not accepted here. Use artifact_manager.
 
             code: The source code for the artifact:
                 - For "react": JSX code with a default export component.
@@ -116,7 +116,7 @@ def create_artifact_tools(
                 - For "html": HTML markup
                 - For "markdown": Markdown text
                 - For "svg": SVG markup
-                - For "story": use artifact_graph_manager instead.
+                - For "story": use artifact_manager instead.
 
             description: Optional description of what this artifact visualizes.
                 Helps users understand the artifact's purpose.
@@ -124,7 +124,7 @@ def create_artifact_tools(
             data: Optional static JSON data to pass to the artifact.
 
             semantic_queries: Legacy compatibility field. New data-backed
-                artifacts must use artifact_graph_manager.
+                artifacts must use artifact_manager.
 
         Returns:
             A dict containing:
@@ -158,7 +158,7 @@ def create_artifact_tools(
                 "render_url": None,
                 "message": (
                     "Story artifacts are semantic graph artifacts. Use "
-                    "artifact_graph_manager with action='create' instead."
+                    "artifact_manager with action='create' instead."
                 ),
             }
 
@@ -292,7 +292,7 @@ def create_artifact_tools(
                     "render_url": None,
                     "message": (
                         "Story artifacts are semantic graph artifacts. Use "
-                        "artifact_graph_manager with action='apply' or action='replace'."
+                        "artifact_manager with action='apply' or action='replace'."
                     ),
                 }
             if not code or not code.strip():

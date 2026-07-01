@@ -67,6 +67,38 @@ class TestTeardownSchemaUnbound:
         assert "semantic_query" in tool_names
         assert "list_tables" not in tool_names
 
+    def test_parent_graph_exposes_artifact_manager_not_primitives(self):
+        from apps.agents.graph.base import _build_tools
+
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+        tools = _build_tools(workspace, None, [])
+        tool_names = {t.name for t in tools}
+
+        assert "artifact_manager" in tool_names
+        assert "artifact_write" not in tool_names
+        assert "artifact_graph_overview" not in tool_names
+        assert "get_artifact_semantic_queries" not in tool_names
+
+    def test_artifact_manager_tool_call_id_hidden_from_llm_schema(self):
+        from apps.agents.graph.base import INJECTED_TOOL_PARAMS, _build_tools, _llm_tool_schemas
+
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+        schemas = _llm_tool_schemas(
+            _build_tools(workspace, None, []),
+            hidden_params=list(INJECTED_TOOL_PARAMS),
+        )
+        artifact_schema = next(
+            item
+            for item in schemas
+            if isinstance(item, dict)
+            and item["function"]["name"] == "artifact_manager"
+        )
+        props = artifact_schema["function"]["parameters"]["properties"]
+
+        assert "task" in props
+        assert "tool_call_id" not in props
+        assert "subagent_event_queue" not in props
+
 
 class TestHeadlessMode:
     """interactive=False swaps the interactive MCP run_materialization (fire-and-

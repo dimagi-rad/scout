@@ -8,9 +8,19 @@ reusable view, or any multi-metric answer that should be reopened later.
 
 ### Semantic graph artifacts
 
-For all data-backed work, use `artifact_graph_manager`. Do not call
+For all data-backed work, use `artifact_manager`. Do not call
 `create_artifact` or `update_artifact` for `artifact_type="story"`; those tools
 only maintain legacy non-data-backed artifacts.
+Call `artifact_manager` with a clear `task`, optional `artifact_id`, and optional
+`intent` such as `create`, `apply`, `replace`, `check`, or `inspect`. The
+Artifact Manager subagent owns the lower-level graph reads, writes, validation,
+and semantic-query verification.
+When the user asks to create, revise, check, inspect, or open a semantic graph
+artifact, call `artifact_manager` first. Do not preflight the task by calling
+`list_datasets`, `describe_dataset`, `semantic_query`, `artifact_graph_overview`,
+`get_artifact_semantic_queries`, or `artifact_write` from the parent agent; put
+all artifact-specific data discovery and verification instructions into the
+`artifact_manager.task` instead.
 
 The graph manager creates `story` artifacts whose canonical document lives in
 `data.story_doc`. That doc is a typed graph:
@@ -59,6 +69,22 @@ Supported block types: `title`, `section`, `question`, `tldr`, `markdown`,
 Hidden `semantic_query` blocks publish row outputs; visible blocks bind to those
 outputs with refs like `{ "$ref": "q.visits_by_day" }`.
 
+Block config keys:
+- `title`: `text`, optional `subtitle`.
+- `section`: `title`, `body` (markdown body text). Do not use `text`.
+- `question`: `text`.
+- `tldr`: `content` for a short summary, or `items` for bullet-like strings.
+  Do not use `text`.
+- `markdown`: `body` or `content`. Do not use `text`.
+- `date_filter`: `label`, `default`.
+- `period_selector`: `label`, `default_range`, `default_comparison`.
+- `semantic_query`: `queries`, optional `compare`.
+- `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
+  `data_label`, `query`, `transform`.
+- `table`: `title`, `columns`, `query`.
+- `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
+  `delta_path`.
+
 Rules:
 - Use semantic member names from `list_datasets` / `describe_dataset`.
 - Never write raw SQL in graph artifacts.
@@ -70,11 +96,8 @@ Rules:
 - A query bound to `date_range` or `compare` must include `time_dimension`.
 - Time-bucketed rows expose the bucket as `date`; member result keys are
   snake_case, e.g. `visits.count` becomes `visits_count`.
-- Use `artifact_graph_overview` for read-only questions about an existing graph.
-- Use `get_artifact_semantic_queries` when you need paginated dependency
-  introspection for a graph artifact.
-- Use `artifact_graph_manager` with `action="create"`, `action="apply"`,
-  `action="replace"`, or `action="check"` for all graph writes/checks.
+- Use `artifact_manager` for graph writes/checks/inspection; do not call
+  lower-level graph artifact tools directly from the parent agent.
 
 ### Legacy artifact types
 

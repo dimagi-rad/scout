@@ -41,7 +41,7 @@ class ArtifactSemanticQueriesInput(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
-class ArtifactGraphManagerInput(BaseModel):
+class ArtifactWriteInput(BaseModel):
     action: str = Field(description="One of: create, replace, apply, check.")
     artifact_id: str | None = Field(default=None)
     title: str | None = None
@@ -104,8 +104,8 @@ def create_artifact_graph_tools(
             "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
         }
 
-    @tool(args_schema=ArtifactGraphManagerInput)
-    async def artifact_graph_manager(
+    @tool(args_schema=ArtifactWriteInput)
+    async def artifact_write(
         action: str,
         artifact_id: str | None = None,
         title: str | None = None,
@@ -167,8 +167,8 @@ def create_artifact_graph_tools(
         except GraphDocError as exc:
             return {"status": "error", "message": str(exc)}
         except Exception as exc:
-            logger.exception("artifact_graph_manager failed for workspace %s", workspace.id)
-            return {"status": "error", "message": f"Artifact graph manager failed: {exc}"}
+            logger.exception("artifact_write failed for workspace %s", workspace.id)
+            return {"status": "error", "message": f"Artifact write failed: {exc}"}
         return {
             "status": "error",
             "message": "Unsupported action. Use create, replace, apply, or check.",
@@ -176,8 +176,8 @@ def create_artifact_graph_tools(
 
     artifact_graph_overview.name = "artifact_graph_overview"
     get_artifact_semantic_queries.name = "get_artifact_semantic_queries"
-    artifact_graph_manager.name = "artifact_graph_manager"
-    return [artifact_graph_overview, get_artifact_semantic_queries, artifact_graph_manager]
+    artifact_write.name = "artifact_write"
+    return [artifact_graph_overview, get_artifact_semantic_queries, artifact_write]
 
 
 async def _create_graph_artifact(

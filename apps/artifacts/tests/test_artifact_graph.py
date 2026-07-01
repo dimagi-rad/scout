@@ -10,6 +10,7 @@ from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
 from apps.artifacts.services.graph_manifest import sync_artifact_semantic_query_manifest
+from apps.artifacts.services.graph_runtime import check_graph_artifact
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
@@ -109,6 +110,25 @@ def test_graph_doc_rejects_raw_query_keys_and_missing_time_dimension():
     assert "query_window_without_time_dimension" in codes
 
 
+def test_graph_doc_unknown_config_key_reports_allowed_keys():
+    doc = {
+        "schema_version": 1,
+        "blocks": [
+            {"id": "intro", "type": "markdown", "config": {"text": "Wrong key"}},
+            {"id": "summary", "type": "tldr", "config": {"text": "Wrong key"}},
+        ],
+    }
+
+    diagnostics = [
+        item for item in validate_doc(doc) if item.get("code") == "unknown_config_key"
+    ]
+
+    assert len(diagnostics) == 2
+    messages_by_block = {item["block_id"]: item["message"] for item in diagnostics}
+    assert "Allowed config keys for markdown: body, content" in messages_by_block["intro"]
+    assert "Allowed config keys for tldr: content, items" in messages_by_block["summary"]
+
+
 def test_apply_ops_rejects_introduced_diagnostics():
     with pytest.raises(GraphDocError, match="introduced diagnostics"):
         apply_ops(
@@ -180,7 +200,7 @@ async def test_semantic_query_dependency_api_paginates(
 @pytest.mark.asyncio
 async def test_graph_manager_creates_story_and_generic_tool_rejects_story(workspace, member_user):
     graph_tool = next(
-        item for item in create_artifact_graph_tools(workspace, member_user, "thread") if item.name == "artifact_graph_manager"
+        item for item in create_artifact_graph_tools(workspace, member_user, "thread") if item.name == "artifact_write"
     )
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
@@ -217,4 +237,36 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
         }
     )
     assert rejected["status"] == "error"
-    assert "artifact_graph_manager" in rejected["message"]
+    assert "artifact_manager" in rejected["message"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_check_graph_artifact_loads_workspace_in_async_context(workspace, member_user):
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id="thread",
+        data={"story_doc": graph_doc()},
+    )
+    artifact = await Artifact.objects.aget(pk=artifact.pk)
+
+    with patch(
+        "apps.artifacts.services.graph_runtime.run_semantic_query",
+        new=AsyncMock(
+            return_value={
+                "success": True,
+                "columns": ["date", "visits_count"],
+                "rows": [{"date": "2026-01-01", "visits_count": 1}],
+                "row_count": 1,
+                "truncated": False,
+            }
+        ),
+    ) as query:
+        result = await check_graph_artifact(artifact, user_id=str(member_user.id))
+
+    assert result["summary"] == "1/1 queries ok"
+    assert query.await_args.args[0].id == workspace.id

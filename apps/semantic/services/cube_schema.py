@@ -40,6 +40,22 @@ def ensure_cube_schema(workspace, *, model: SemanticModel | None = None) -> Cube
     return build_and_promote_cube_schema(workspace, model=model)
 
 
+def get_active_cube_schema(workspace, *, model: SemanticModel) -> CubeSchema:
+    """Return the current active Cube schema without generating a new one."""
+    active = (
+        CubeSchema.objects.filter(
+            workspace=workspace,
+            semantic_model=model,
+            status=CubeSchema.Status.ACTIVE,
+        )
+        .order_by("-updated_at")
+        .first()
+    )
+    if active is None:
+        raise CubeSchemaBuildError("No active Cube schema is available. Refresh workspace data.")
+    return active
+
+
 def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = None) -> CubeSchema:
     """Generate Cube YAML, validate it, and promote it if valid."""
     try:

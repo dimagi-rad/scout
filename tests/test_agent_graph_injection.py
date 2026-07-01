@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from langchain_core.messages import AIMessage
 
-from apps.agents.graph.base import _make_injecting_tool_node
+from apps.agents.graph.base import SUBAGENT_EVENT_QUEUE_CONFIG_KEY, _make_injecting_tool_node
 from apps.agents.graph.state import AgentState
 
 
@@ -25,7 +25,7 @@ def test_make_injecting_tool_node_injects_thread_id_and_tool_call_id(monkeypatch
 
     base_node = MagicMock()
 
-    async def fake_ainvoke(payload):
+    async def fake_ainvoke(payload, **kwargs):
         captured_messages.append(payload["messages"])
         return {"messages": []}
 
@@ -63,6 +63,42 @@ def test_make_injecting_tool_node_injects_thread_id_and_tool_call_id(monkeypatch
     assert forwarded_args["user_id"] == "user-1"
     assert forwarded_args["thread_id"] == "thread-1"
     assert forwarded_args["tool_call_id"] == "tc-abc-123"
+
+
+def test_make_injecting_tool_node_injects_subagent_queue_for_artifact_manager(monkeypatch):
+    """The Artifact Manager local tool gets the active stream queue directly,
+    so child events do not rely on ContextVar propagation inside ToolNode.
+    """
+    monkeypatch.setattr(
+        "apps.agents.graph.base.LOCAL_CONTEXT_TOOL_NAMES",
+        {"artifact_manager"},
+    )
+
+    captured_messages: list = []
+    base_node = MagicMock()
+
+    async def fake_ainvoke(payload, **kwargs):
+        captured_messages.append(payload["messages"])
+        return {"messages": []}
+
+    base_node.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+    node = _make_injecting_tool_node(base_node, {})
+    queue = asyncio.Queue()
+    ai_msg = AIMessage(
+        content="",
+        tool_calls=[{"name": "artifact_manager", "id": "tc-art", "args": {"task": "build"}}],
+    )
+
+    asyncio.run(
+        node(
+            {"messages": [ai_msg]},
+            config={"configurable": {SUBAGENT_EVENT_QUEUE_CONFIG_KEY: queue}},
+        )
+    )
+
+    forwarded_args = captured_messages[0][-1].tool_calls[0]["args"]
+    assert forwarded_args["tool_call_id"] == "tc-art"
+    assert forwarded_args[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] is queue
 
 
 def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, caplog):

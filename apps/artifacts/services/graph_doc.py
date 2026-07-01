@@ -186,9 +186,12 @@ def validate_doc(doc: Any) -> list[dict[str, Any]]:
         allowed = CONFIG_KEYS.get(block_type, set())
         unknown_keys = sorted(k for k in config if k not in allowed)
         if unknown_keys:
+            allowed_text = ", ".join(sorted(allowed)) if allowed else "(none)"
             diagnostics.append(
                 problem(
-                    f"Unsupported config key(s): {', '.join(unknown_keys)}",
+                    "Unsupported config key(s): "
+                    f"{', '.join(unknown_keys)}. "
+                    f"Allowed config keys for {block_type}: {allowed_text}",
                     block_id=block_id,
                     code="unknown_config_key",
                 )

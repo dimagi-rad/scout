@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from apps.semantic.services.query import run_semantic_query
+from apps.workspaces.models import Workspace
 
 from .graph_doc import expected_result_keys, member_to_key, normalize_doc, validate_doc
 from .graph_manifest import build_semantic_query_manifest
@@ -20,10 +21,11 @@ async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]
     entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]
     query_results = []
     actual_keys: dict[str, list[str]] = {}
+    workspace = await Workspace.objects.aget(pk=artifact.workspace_id)
     for entry in entries:
         query = dict(entry.get("query") or {})
         query.setdefault("limit", CHECK_ROW_LIMIT)
-        result = await run_semantic_query(artifact.workspace, query, user_id=user_id)
+        result = await run_semantic_query(workspace, query, user_id=user_id)
         if not result.get("success", True) or result.get("error"):
             error = result.get("error")
             message = error.get("message") if isinstance(error, dict) else str(error)

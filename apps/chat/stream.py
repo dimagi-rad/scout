@@ -25,6 +25,7 @@ Chunk types used:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -37,6 +38,7 @@ from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import INJECTED_TOOL_PARAMS
+from apps.agents.subagents.events import SUBAGENT_EVENT_QUEUE_CONFIG_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +179,43 @@ def _truncate_tool_output(content: str) -> str:
     )
 
 
+def _is_nested_subagent_graph_event(event: dict[str, Any]) -> bool:
+    """True for LangGraph events produced inside a parent-facing subagent tool.
+
+    Subagent tools forward their own UI events through ``subagent_event_queue``
+    with explicit ``parentToolCallId`` metadata. LangGraph may also surface the
+    nested graph's raw events through the parent callback stream. If we translate
+    those raw events here, the browser shows child tools as top-level cards and
+    the nested version is no longer the single source of truth.
+    """
+    metadata = event.get("metadata") or {}
+    if isinstance(metadata, dict) and metadata.get("subagent"):
+        return True
+    tags = event.get("tags") or []
+    return isinstance(tags, list) and "subagent" in tags
+
+
+def _with_parent_tool_call_id(
+    event: dict[str, Any],
+    *,
+    parent_tool_call_id: str,
+) -> dict[str, Any]:
+    """Return a subagent UI chunk linked to the authoritative parent tool id."""
+    patched = dict(event)
+    data = patched.get("data")
+    if isinstance(data, dict):
+        patched["data"] = {**data, "parentToolCallId": parent_tool_call_id}
+    return patched
+
+
+def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    parent_id = data.get("parentToolCallId")
+    return parent_id if isinstance(parent_id, str) and parent_id else None
+
+
 audit_logger = logging.getLogger("scout.agent.audit")
 
 
@@ -201,12 +240,36 @@ async def langgraph_to_ui_stream(
     # on_tool_start input. Defer their input card until on_tool_end, where the
     # ToolMessage carries the authoritative LLM toolu_ id.
     pending_tool_starts: dict[str, dict[str, Any]] = {}
+    # Subagent tools may emit child UI events before the parent local-tool
+    # ``toolu_`` id is available to the stream bridge. Buffer those child
+    # chunks and stamp them with the authoritative parent id immediately before
+    # the parent tool output is emitted.
+    pending_subagent_events: list[dict[str, Any]] = []
 
     # Preamble
     yield _sse({"type": "start"})
     yield _sse({"type": "start-step"})
 
-    event_stream = agent.astream_events(input_state, config=config, version="v2")
+    event_queue: asyncio.Queue = asyncio.Queue()
+    stream_config = {
+        **config,
+        "configurable": {
+            **(config.get("configurable") or {}),
+            SUBAGENT_EVENT_QUEUE_CONFIG_KEY: event_queue,
+        },
+    }
+    event_stream = agent.astream_events(input_state, config=stream_config, version="v2")
+
+    async def _pump_parent_events() -> None:
+        try:
+            async for parent_event in event_stream:
+                await event_queue.put({"source": "parent", "event": parent_event})
+        except Exception as exc:
+            await event_queue.put({"source": "parent_error", "error": exc})
+        finally:
+            await event_queue.put({"source": "parent_done"})
+
+    parent_pump = asyncio.create_task(_pump_parent_events())
 
     try:
         deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
@@ -215,9 +278,33 @@ async def langgraph_to_ui_stream(
             if asyncio.get_event_loop().time() > deadline:
                 raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
             try:
-                event = await event_stream.__anext__()
-            except StopAsyncIteration:
+                item = await asyncio.wait_for(
+                    event_queue.get(),
+                    timeout=max(0.1, deadline - asyncio.get_event_loop().time()),
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
+
+            source = item.get("source")
+            if source == "subagent":
+                event = item.get("event")
+                if isinstance(event, dict):
+                    parent_id = _subagent_parent_tool_call_id(event)
+                    if parent_id and not parent_id.startswith("missing-parent-"):
+                        yield _sse(event)
+                    else:
+                        pending_subagent_events.append(event)
+                continue
+            if source == "parent_error":
+                raise item["error"]
+            if source == "parent_done":
                 break
+            if source != "parent":
+                continue
+
+            event = item.get("event") or {}
+            if _is_nested_subagent_graph_event(event):
+                continue
 
             event_type = event.get("event")
 
@@ -342,7 +429,7 @@ async def langgraph_to_ui_stream(
                     "tool_call tool=%s user_id=%s thread_id=%s workspace_id=%s",
                     tool_name,
                     input_state.get("user_id", ""),
-                    config.get("configurable", {}).get("thread_id", ""),
+                    stream_config.get("configurable", {}).get("thread_id", ""),
                     input_state.get("workspace_id", ""),
                 )
 
@@ -374,6 +461,16 @@ async def langgraph_to_ui_stream(
                             "input": (pending_start or {}).get("input", {}),
                         }
                     )
+
+                if tool_name == "artifact_manager" and pending_subagent_events:
+                    for subagent_event in pending_subagent_events:
+                        yield _sse(
+                            _with_parent_tool_call_id(
+                                subagent_event,
+                                parent_tool_call_id=str(tool_call_id),
+                            )
+                        )
+                    pending_subagent_events.clear()
 
                 yield _sse(
                     {
@@ -486,6 +583,11 @@ async def langgraph_to_ui_stream(
                     "errorText": f"An error occurred while processing your request. Ref: {ref}",
                 }
             )
+    finally:
+        if not parent_pump.done():
+            parent_pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await parent_pump
 
     # Close any open parts
     if reasoning_started:

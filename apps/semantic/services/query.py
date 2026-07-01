@@ -13,12 +13,12 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import close_old_connections
 
 from apps.semantic.models import SemanticDataset, SemanticField
-from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
+from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
 from apps.semantic.services.cube_client import CubeClient, CubeConfigurationError
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
     build_cube_security_context,
-    ensure_cube_schema,
+    get_active_cube_schema,
 )
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR, error_response
@@ -115,7 +115,7 @@ def _compile_semantic_query_for_async(workspace, query_spec: dict[str, Any]) -> 
 
 
 def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
-    model = ensure_semantic_model(workspace)
+    model = get_active_semantic_model(workspace)
 
     measures = _as_list(query_spec.get("measures"))
     dimensions = _as_list(query_spec.get("dimensions"))
@@ -171,7 +171,7 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         members.append(member.member)
 
     _validate_order_by(order_by, members, resolved_time)
-    cube_schema = ensure_cube_schema(workspace, model=model)
+    cube_schema = get_active_cube_schema(workspace, model=model)
 
     canonical_query = {
         "measures": measures,

@@ -30,17 +30,22 @@ from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import AgentState
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
-from apps.agents.tools.artifact_graph_tool import create_artifact_graph_tools
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
+from apps.agents.subagents.events import (
+    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    reset_subagent_event_queue,
+    set_subagent_event_queue,
+)
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
@@ -83,6 +88,8 @@ MCP_TOOL_NAMES = frozenset(
     }
 )
 
+LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager"})
+
 # MCP tools the server advertises but that must NEVER be exposed to the agent.
 #
 # ``teardown_schema`` (arch #237 / finding 00#2) physically DROPs every tenant
@@ -115,7 +122,15 @@ AGENT_EXCLUDED_MCP_TOOLS = frozenset(
 # per-call from the LangChain tool_call's own id; the rest come from agent
 # state. Kept here as the single source of truth so the SSE stream's
 # input-redaction stays in lockstep with what the graph injects.
-INJECTED_TOOL_PARAMS = frozenset({"workspace_id", "user_id", "thread_id", "tool_call_id"})
+INJECTED_TOOL_PARAMS = frozenset(
+    {
+        "workspace_id",
+        "user_id",
+        "thread_id",
+        "tool_call_id",
+        SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    }
+)
 
 
 DEFAULT_MAX_TOKENS = 4096
@@ -515,14 +530,15 @@ def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
     hidden = set(hidden_params)
     result: list = []
     for tool in tools:
-        if tool.name not in MCP_TOOL_NAMES:
-            result.append(tool)
-            continue
-
         schema = tool.get_input_schema().model_json_schema()
         props = schema.get("properties", {})
         to_hide = hidden & set(props)
+
         if not to_hide:
+            result.append(tool)
+            continue
+
+        if tool.name not in MCP_TOOL_NAMES and tool.name not in LOCAL_CONTEXT_TOOL_NAMES:
             result.append(tool)
             continue
 
@@ -559,17 +575,25 @@ def _make_injecting_tool_node(
     LLM generated.
     """
 
-    async def injecting_node(state: AgentState) -> dict[str, Any]:
+    async def injecting_node(
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, Any]:
         messages = list(state["messages"])
         last_msg = messages[-1]
+        event_queue = None
+        if isinstance(config, dict):
+            event_queue = (config.get("configurable") or {}).get(
+                SUBAGENT_EVENT_QUEUE_CONFIG_KEY
+            )
 
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             modified_msg = copy.copy(last_msg)
             modified_calls = []
             for tc in last_msg.tool_calls:
+                tc_id = tc.get("id") or ""
                 if tc["name"] in MCP_TOOL_NAMES:
                     extra = {k: state.get(v, "") for k, v in injections.items()}
-                    tc_id = tc.get("id") or ""
                     if not tc_id:
                         logger.warning(
                             "MCP tool call '%s' has no id; tool_call_id will be empty — "
@@ -578,12 +602,22 @@ def _make_injecting_tool_node(
                         )
                     extra["tool_call_id"] = tc_id
                     tc = {**tc, "args": {**tc["args"], **extra}}
+                elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
+                    extra = {"tool_call_id": tc_id}
+                    if tc["name"] == "artifact_manager":
+                        extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
+                    tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
             modified_msg.tool_calls = modified_calls
             messages = [*messages[:-1], modified_msg]
 
-        return await base_tool_node.ainvoke({"messages": messages})
+        token = set_subagent_event_queue(event_queue)
+        try:
+            return await base_tool_node.ainvoke({"messages": messages}, config=config)
+        finally:
+            reset_subagent_event_queue(token)
 
+    injecting_node.__annotations__["config"] = RunnableConfig | None
     return injecting_node
 
 
@@ -818,8 +852,8 @@ def _build_tools(
 
     Local tools (always included):
     - save_learning: For persisting discovered corrections
-    - create_artifact: For creating interactive visualizations
-    - update_artifact: For updating existing artifacts
+    - artifact_manager: For semantic graph/story artifact work
+    - create_artifact/update_artifact: For legacy non-story artifacts
     - save_as_recipe: For creating replayable analysis workflows
 
     Args:
@@ -843,8 +877,17 @@ def _build_tools(
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
+    from apps.agents.tools.artifact_manager_agent import create_artifact_manager_tool
+
     tools.append(create_save_learning_tool(workspace, user))
-    tools.extend(create_artifact_graph_tools(workspace, user, conversation_id=conversation_id))
+    tools.append(
+        create_artifact_manager_tool(
+            workspace,
+            user,
+            mcp_tools or [],
+            conversation_id=conversation_id,
+        )
+    )
     tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
     if not interactive:

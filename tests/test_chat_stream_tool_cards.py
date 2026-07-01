@@ -50,6 +50,148 @@ async def _run(events: list[dict]) -> list[dict]:
     return _parse_sse(chunks)
 
 
+class _QueuedSubagentEventAgent:
+    def astream_events(self, input_state, *, config, version):
+        async def _gen():
+            queue = config["configurable"]["subagent_event_queue"]
+            await queue.put(
+                {
+                    "source": "subagent",
+                    "event": {
+                        "type": "data-subagent-tool-input",
+                        "id": "artifact_manager:toolu_CHILD:input",
+                        "data": {
+                            "toolCallId": "artifact_manager:toolu_CHILD",
+                            "toolName": "artifact_write",
+                            "input": {"action": "check"},
+                            "parentToolCallId": "toolu_PARENT",
+                            "subagentName": "artifact_manager",
+                        },
+                    },
+                }
+            )
+            return
+            yield
+
+        return _gen()
+
+
+class _BufferedSubagentEventAgent:
+    def astream_events(self, input_state, *, config, version):
+        async def _gen():
+            queue = config["configurable"]["subagent_event_queue"]
+            yield {
+                "event": "on_tool_start",
+                "run_id": "run-parent",
+                "name": "artifact_manager",
+                "data": {"input": {"task": "build artifact"}},
+            }
+            await queue.put(
+                {
+                    "source": "subagent",
+                    "event": {
+                        "type": "data-subagent-tool-input",
+                        "id": "artifact_manager:toolu_CHILD:input",
+                        "data": {
+                            "toolCallId": "artifact_manager:toolu_CHILD",
+                            "toolName": "artifact_write",
+                            "input": {"action": "check"},
+                            "parentToolCallId": "missing-parent-abc",
+                            "subagentName": "artifact_manager",
+                        },
+                    },
+                }
+            )
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-parent",
+                "name": "artifact_manager",
+                "data": {
+                    "output": ToolMessage(
+                        content=json.dumps({"status": "done"}),
+                        tool_call_id="toolu_PARENT",
+                        name="artifact_manager",
+                    )
+                },
+            }
+
+        return _gen()
+
+
+@pytest.mark.asyncio
+async def test_stream_merges_queued_subagent_tool_events():
+    chunks = [
+        c
+        async for c in stream.langgraph_to_ui_stream(
+            _QueuedSubagentEventAgent(), {}, {"configurable": {"thread_id": "t1"}}
+        )
+    ]
+    parsed = _parse_sse(chunks)
+
+    child = next(c for c in parsed if c.get("type") == "data-subagent-tool-input")
+    assert child["data"]["toolCallId"] == "artifact_manager:toolu_CHILD"
+    assert child["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert child["data"]["subagentName"] == "artifact_manager"
+
+
+@pytest.mark.asyncio
+async def test_stream_buffers_subagent_events_until_parent_tool_id_is_known():
+    chunks = [
+        c
+        async for c in stream.langgraph_to_ui_stream(
+            _BufferedSubagentEventAgent(), {}, {"configurable": {"thread_id": "t1"}}
+        )
+    ]
+    parsed = _parse_sse(chunks)
+
+    parent_input_idx = next(
+        i
+        for i, c in enumerate(parsed)
+        if c.get("type") == "tool-input-available" and c.get("toolCallId") == "toolu_PARENT"
+    )
+    child_idx = next(i for i, c in enumerate(parsed) if c.get("type") == "data-subagent-tool-input")
+    parent_output_idx = next(
+        i
+        for i, c in enumerate(parsed)
+        if c.get("type") == "tool-output-available" and c.get("toolCallId") == "toolu_PARENT"
+    )
+
+    child = parsed[child_idx]
+    assert parent_input_idx < child_idx < parent_output_idx
+    assert child["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert child["data"]["toolCallId"] == "artifact_manager:toolu_CHILD"
+
+
+@pytest.mark.asyncio
+async def test_stream_ignores_raw_subagent_graph_events():
+    """Nested subagent graph events are forwarded through the queue with parent
+    linkage. The raw callback events must not also render as top-level cards.
+    """
+    tm = ToolMessage(
+        content=json.dumps({"status": "created"}),
+        tool_call_id="toolu_CHILD",
+        name="artifact_write",
+    )
+    events = [
+        {
+            "event": "on_tool_end",
+            "run_id": "raw-subagent-run",
+            "name": "artifact_write",
+            "tags": ["subagent", "artifact_manager"],
+            "metadata": {"subagent": "artifact_manager"},
+            "data": {"output": tm},
+        }
+    ]
+    chunks = await _run(events)
+
+    leaked = [
+        c
+        for c in chunks
+        if c.get("type") == "tool-output-available" and c.get("toolCallId") == "toolu_CHILD"
+    ]
+    assert leaked == []
+
+
 # --- toolCallId is the LLM toolu_ id, not the LangGraph run_id (06#3) --------
 
 
@@ -130,20 +272,20 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
 
 @pytest.mark.asyncio
 async def test_local_tool_start_without_tool_call_id_uses_tool_message_id():
-    """Local tools such as artifact_graph_manager do not receive the injected
+    """Local tools such as artifact_manager do not receive the injected
     tool_call_id on start. The stream must not start a card with run_id and end
     it with toolu_ id, because the AI SDK treats that as a missing invocation.
     """
     tm = ToolMessage(
         content=json.dumps({"status": "created"}),
         tool_call_id="toolu_ARTIFACT",
-        name="artifact_graph_manager",
+        name="artifact_manager",
     )
     events = [
         {
             "event": "on_tool_start",
             "run_id": "run-artifact",
-            "name": "artifact_graph_manager",
+            "name": "artifact_manager",
             "data": {
                 "input": {
                     "action": "create",
@@ -154,7 +296,7 @@ async def test_local_tool_start_without_tool_call_id_uses_tool_message_id():
         {
             "event": "on_tool_end",
             "run_id": "run-artifact",
-            "name": "artifact_graph_manager",
+            "name": "artifact_manager",
             "data": {"output": tm},
         },
     ]
@@ -167,7 +309,7 @@ async def test_local_tool_start_without_tool_call_id_uses_tool_message_id():
     assert len(tool_outputs) == 1
     assert tool_inputs[0]["toolCallId"] == "toolu_ARTIFACT"
     assert tool_outputs[0]["toolCallId"] == "toolu_ARTIFACT"
-    assert tool_inputs[0]["toolName"] == "artifact_graph_manager"
+    assert tool_inputs[0]["toolName"] == "artifact_manager"
     assert tool_inputs[0]["input"]["action"] == "create"
     assert tool_inputs[0]["input"]["title"] == "Example Artifact"
 

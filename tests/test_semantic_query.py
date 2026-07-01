@@ -71,7 +71,7 @@ def semantic_model(workspace):
 
 
 def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -112,7 +112,7 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
 def test_compile_time_granularity_does_not_duplicate_params(
     monkeypatch, workspace, semantic_model
 ):
-    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -134,7 +134,7 @@ def test_compile_time_granularity_does_not_duplicate_params(
 
 
 def test_compile_rejects_unknown_member(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
 
     with pytest.raises(query_service.SemanticQueryError, match="Unknown semantic field"):
         query_service._compile_semantic_query(
@@ -160,7 +160,7 @@ def test_compile_rejects_cross_dataset_query(monkeypatch, workspace, semantic_mo
         data_type="text",
         expression="username",
     )
-    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
 
     with pytest.raises(query_service.SemanticQueryError, match="one dataset"):
         query_service._compile_semantic_query(
@@ -169,6 +169,43 @@ def test_compile_rejects_cross_dataset_query(monkeypatch, workspace, semantic_mo
                 "measures": ["visits.count"],
                 "dimensions": ["users.username"],
             },
+        )
+
+
+def test_compile_uses_active_semantic_model_without_refresh(
+    monkeypatch,
+    workspace,
+    semantic_model,
+):
+    def fail_refresh(_workspace):
+        raise AssertionError("semantic query execution must not refresh the semantic catalog")
+
+    monkeypatch.setattr(catalog_service, "load_physical_tables", fail_refresh)
+
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {"measures": ["visits.count"], "limit": 10},
+    )
+
+    assert compiled["cube_query"] == {"measures": ["visits.count"], "limit": 10}
+
+
+def test_compile_requires_prebuilt_active_semantic_model_without_refresh(
+    monkeypatch,
+    workspace,
+):
+    def fail_refresh(_workspace):
+        raise AssertionError("semantic query execution must not refresh the semantic catalog")
+
+    monkeypatch.setattr(catalog_service, "load_physical_tables", fail_refresh)
+
+    with pytest.raises(
+        catalog_service.SemanticCatalogUnavailable,
+        match="No active semantic model",
+    ):
+        query_service._compile_semantic_query(
+            workspace,
+            {"measures": ["visits.count"], "limit": 10},
         )
 
 
@@ -194,7 +231,7 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
             connection_params={},
         )
 
-    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
     monkeypatch.setattr(query_service, "CubeClient", FakeCubeClient)
     monkeypatch.setattr(query_service, "load_workspace_context", fake_context)
 

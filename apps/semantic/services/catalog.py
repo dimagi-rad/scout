@@ -276,6 +276,20 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         return model
 
 
+def get_active_semantic_model(workspace) -> SemanticModel:
+    """Return the current queryable semantic model without refreshing it."""
+    model = SemanticModel.objects.filter(
+        workspace=workspace,
+        status=SemanticModel.Status.ACTIVE,
+    ).first()
+    if model is None:
+        raise SemanticCatalogUnavailable(
+            "No active semantic model is available. Refresh workspace data.",
+            schema_status="unavailable",
+        )
+    return model
+
+
 def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> list[dict[str, Any]]:
     """Compile active custom datasets into queryable semantic datasets."""
     diagnostics: list[dict[str, Any]] = []
