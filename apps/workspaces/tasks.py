@@ -19,6 +19,7 @@ from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import (
@@ -404,6 +405,30 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
 
+    cube_schema_outcome: dict | None = None
+    if all_succeeded and (
+        workspace_tenant_count <= 1
+        or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
+    ):
+        try:
+            cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+            cube_schema_outcome = {
+                "ok": True,
+                "id": str(cube_schema.id),
+                "content_hash": cube_schema.content_hash,
+                "error": None,
+            }
+        except CubeSchemaBuildError as exc:
+            logger.warning(
+                "Semantic Cube schema build failed for workspace %s: %s",
+                workspace_id,
+                exc,
+            )
+            cube_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+        except Exception as exc:
+            logger.exception("Semantic Cube schema build failed for workspace %s", workspace_id)
+            cube_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+
     # Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing
     # a tenant from THIS workspace drops & recreates its raw_* tables, which
     # cascade-drops the namespaced views inside every OTHER workspace's view
@@ -421,6 +446,7 @@ async def materialize_workspace_core(
         "tenants": tenant_results,
         "all_succeeded": all_succeeded,
         "view_schema": view_schema_outcome,
+        "cube_schema": cube_schema_outcome,
     }
 
 
@@ -741,7 +767,38 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         vs.schema_name,
         workspace_id,
     )
-    return {"status": "active", "schema_name": vs.schema_name}
+    try:
+        cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+    except CubeSchemaBuildError as exc:
+        logger.warning(
+            "Semantic Cube schema build failed after view schema rebuild for workspace %s: %s",
+            workspace_id,
+            exc,
+        )
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "cube_schema": {"ok": False, "error": str(exc)[:500]},
+        }
+    except Exception as exc:
+        logger.exception(
+            "Semantic Cube schema build failed after view schema rebuild for workspace %s",
+            workspace_id,
+        )
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "cube_schema": {"ok": False, "error": str(exc)[:500]},
+        }
+    return {
+        "status": "active",
+        "schema_name": vs.schema_name,
+        "cube_schema": {
+            "ok": True,
+            "id": str(cube_schema.id),
+            "content_hash": cube_schema.content_hash,
+        },
+    }
 
 
 @task

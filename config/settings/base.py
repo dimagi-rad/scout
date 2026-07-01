@@ -144,6 +144,13 @@ DATABASES = {
 # Separate from the application database to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
 
+# Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
+# and local setups that have not started the cube service yet.
+CUBE_API_URL = env("CUBE_API_URL", default="")
+CUBE_VALIDATOR_URL = env("CUBE_VALIDATOR_URL", default="")
+CUBEJS_API_SECRET = env("CUBEJS_API_SECRET", default="")
+CUBE_SCHEMA_VALIDATION_REQUIRED = env.bool("CUBE_SCHEMA_VALIDATION_REQUIRED", default=False)
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.0/ref/settings/#auth-password-validators

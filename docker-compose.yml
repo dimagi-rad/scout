@@ -28,11 +28,44 @@ services:
       - DJANGO_SETTINGS_MODULE=config.settings.development
       - DB_CREDENTIAL_KEY=${DB_CREDENTIAL_KEY}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
+      - CUBE_API_URL=http://cube:4000
+      - CUBE_VALIDATOR_URL=http://cube:4010
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-dev-cube-secret-change-me}
     expose:
       - "8100"
     depends_on:
       platform-db:
         condition: service_healthy
+      cube:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Cube semantic query runtime
+  cube:
+    build:
+      context: ./cube_config
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://platform:${PLATFORM_DB_PASSWORD:-devpassword}@platform-db:5432/agent_platform
+      - MANAGED_DATABASE_URL=${MANAGED_DATABASE_URL:-postgresql://platform:${PLATFORM_DB_PASSWORD:-devpassword}@platform-db:5432/agent_platform}
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-dev-cube-secret-change-me}
+      - CUBEJS_DEV_MODE=${CUBEJS_DEV_MODE:-true}
+      - CUBEJS_TELEMETRY=false
+      - CUBEJS_EXTERNAL_DEFAULT=false
+      - CUBEJS_PRE_AGGREGATIONS_SCHEMA=false
+      - CUBEJS_PORT=4000
+      - CUBE_VALIDATOR_PORT=4010
+    ports:
+      - "${CUBE_PORT:-4000}:4000"
+      - "${CUBE_VALIDATOR_PORT:-4010}:4010"
+    depends_on:
+      platform-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4000/readyz && curl -fsS http://localhost:4010/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   # Django API server (ASGI via uvicorn)
@@ -52,6 +85,9 @@ services:
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
       - MAX_CONNECTIONS_PER_PROJECT=5
+      - CUBE_API_URL=http://cube:4000
+      - CUBE_VALIDATOR_URL=http://cube:4010
+      - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-dev-cube-secret-change-me}
     volumes:
       - ./apps:/app/apps
       - ./config:/app/config
@@ -63,6 +99,8 @@ services:
         condition: service_healthy
       mcp-server:
         condition: service_started
+      cube:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/"]
       interval: 30s

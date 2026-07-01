@@ -10,7 +10,18 @@ from asgiref.sync import async_to_sync
 from django.db import transaction
 
 from apps.knowledge.models import TableKnowledge
-from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel, SemanticRelationship
+from apps.semantic.models import (
+    CustomDataset,
+    SemanticDataset,
+    SemanticField,
+    SemanticModel,
+    SemanticRelationship,
+)
+from apps.semantic.services.custom_datasets import (
+    CustomDatasetError,
+    compile_custom_dataset_sql,
+    infer_custom_dataset_columns,
+)
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
@@ -219,7 +230,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
             workspace=workspace,
             defaults={"name": f"{workspace.name} Semantic Model"},
         )
-        existing_dataset_ids: set[str] = set()
+        existing_physical_dataset_ids: set[str] = set()
         for table in tables:
             dataset_name = semantic_name(table.name, fallback="dataset")
             annotation = TableKnowledge.objects.filter(
@@ -235,6 +246,8 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                     "description": (
                         annotation.description if annotation and annotation.description else table.description
                     ),
+                    "source_kind": SemanticDataset.SourceKind.PHYSICAL,
+                    "custom_dataset": None,
                     "schema_name": schema_name,
                     "table_name": table.name,
                     "row_count": table.materialized_row_count,
@@ -246,16 +259,106 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                     },
                 },
             )
-            existing_dataset_ids.add(str(dataset.id))
+            existing_physical_dataset_ids.add(str(dataset.id))
             _sync_fields(dataset, table.columns, annotation)
 
-        SemanticDataset.objects.filter(workspace=workspace).exclude(
-            id__in=existing_dataset_ids
+        SemanticDataset.objects.filter(
+            workspace=workspace,
+            source_kind=SemanticDataset.SourceKind.PHYSICAL,
+        ).exclude(
+            id__in=existing_physical_dataset_ids
         ).update(is_visible=False)
+
+        diagnostics = _sync_custom_datasets(model, workspace, schema_name)
         model.status = SemanticModel.Status.ACTIVE
-        model.diagnostics = []
+        model.diagnostics = diagnostics
         model.save(update_fields=["status", "diagnostics", "updated_at"])
         return model
+
+
+def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> list[dict[str, Any]]:
+    """Compile active custom datasets into queryable semantic datasets."""
+    diagnostics: list[dict[str, Any]] = []
+    valid_custom_ids: set[str] = set()
+    physical_datasets = list(
+        model.datasets.filter(
+            workspace=workspace,
+            source_kind=SemanticDataset.SourceKind.PHYSICAL,
+            is_visible=True,
+        )
+    )
+    allowed_tables: dict[str, str] = {}
+    physical_names = {dataset.name for dataset in physical_datasets}
+    for dataset in physical_datasets:
+        allowed_tables[dataset.name.lower()] = dataset.table_name
+        allowed_tables[dataset.table_name.lower()] = dataset.table_name
+
+    for custom in CustomDataset.objects.filter(
+        workspace=workspace,
+        is_visible=True,
+        status=CustomDataset.Status.ACTIVE,
+    ).order_by("name"):
+        try:
+            if custom.name in physical_names:
+                raise CustomDatasetError(
+                    f"Custom dataset name '{custom.name}' conflicts with a physical dataset."
+                )
+            compiled_sql = compile_custom_dataset_sql(
+                custom.definition_sql,
+                schema_name=schema_name,
+                allowed_tables=allowed_tables,
+            )
+            columns = infer_custom_dataset_columns(workspace, compiled_sql)
+            if not columns:
+                raise CustomDatasetError("Custom dataset query did not return columns.")
+        except CustomDatasetError as exc:
+            diagnostic = {
+                "level": "error",
+                "dataset": custom.name,
+                "message": str(exc),
+            }
+            diagnostics.append(diagnostic)
+            CustomDataset.objects.filter(id=custom.id).update(
+                status=CustomDataset.Status.ERROR,
+                diagnostics=[diagnostic],
+            )
+            SemanticDataset.objects.filter(workspace=workspace, custom_dataset=custom).update(
+                is_visible=False
+            )
+            continue
+
+        dataset, _ = SemanticDataset.objects.update_or_create(
+            workspace=workspace,
+            name=custom.name,
+            defaults={
+                "semantic_model": model,
+                "label": custom.label or _humanize_name(custom.name),
+                "description": custom.description,
+                "source_kind": SemanticDataset.SourceKind.CUSTOM,
+                "custom_dataset": custom,
+                "schema_name": schema_name,
+                "table_name": custom.name,
+                "row_count": None,
+                "is_visible": True,
+                "metadata": {
+                    "source_type": "custom",
+                    "cube_sql": compiled_sql,
+                    "row_count_verified": False,
+                },
+            },
+        )
+        _sync_fields(dataset, columns, None)
+        CustomDataset.objects.filter(id=custom.id).update(diagnostics=[])
+        valid_custom_ids.add(str(custom.id))
+
+    stale_custom_datasets = SemanticDataset.objects.filter(
+        workspace=workspace,
+        source_kind=SemanticDataset.SourceKind.CUSTOM,
+    )
+    if valid_custom_ids:
+        stale_custom_datasets = stale_custom_datasets.exclude(custom_dataset_id__in=valid_custom_ids)
+    stale_custom_datasets.update(is_visible=False)
+    return diagnostics
 
 
 def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:

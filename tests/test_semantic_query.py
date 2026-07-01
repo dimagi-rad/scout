@@ -1,8 +1,18 @@
 import pytest
 
-from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
+from apps.semantic.models import (
+    CubeSchema,
+    CustomDataset,
+    SemanticDataset,
+    SemanticField,
+    SemanticModel,
+)
+from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services import query as query_service
+from apps.semantic.services.catalog import PhysicalTable
 from apps.semantic.services.cube import generate_cube_schema
+from apps.semantic.services.cube_schema import build_cube_security_context
+from mcp_server.context import QueryContext
 
 
 @pytest.fixture
@@ -50,6 +60,13 @@ def semantic_model(workspace):
         expression="amount",
         measure_type=SemanticField.MeasureType.SUM,
     )
+    CubeSchema.objects.create(
+        workspace=workspace,
+        semantic_model=model,
+        filename="workspace_test.yaml",
+        content="cubes: []\n",
+        content_hash="testhash",
+    )
     return model
 
 
@@ -75,15 +92,21 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
         },
     )
 
-    assert compiled["params"] == ("2026-06-22", "2026-06-28")
     assert compiled["members"] == ["visits.visit_date", "visits.username", "visits.count"]
-    assert 'FROM "raw_visits"' in compiled["sql"]
-    assert 'date_trunc(\'day\', "visit_date")::date AS "date"' in compiled["sql"]
-    assert '"username" AS "visits__username"' in compiled["sql"]
-    assert 'COUNT(*) AS "visits__count"' in compiled["sql"]
-    assert 'WHERE "visit_date" BETWEEN %s AND %s' in compiled["sql"]
-    assert 'ORDER BY "visits__count" DESC' in compiled["sql"]
-    assert compiled["sql"].endswith("LIMIT 50")
+    assert compiled["cube_query"] == {
+        "measures": ["visits.count"],
+        "dimensions": ["visits.username"],
+        "filters": [
+            {
+                "member": "visits.visit_date",
+                "operator": "inDateRange",
+                "values": ["2026-06-22", "2026-06-28"],
+            }
+        ],
+        "limit": 50,
+        "timeDimensions": [{"dimension": "visits.visit_date", "granularity": "day"}],
+        "order": [["visits.count", "desc"]],
+    }
 
 
 def test_compile_time_granularity_does_not_duplicate_params(
@@ -102,11 +125,12 @@ def test_compile_time_granularity_does_not_duplicate_params(
         },
     )
 
-    assert compiled["params"] == ()
-    assert compiled["sql"].count("%s") == 0
-    assert 'date_trunc(\'week\', "visit_date")::date AS "date"' in compiled["sql"]
-    assert 'GROUP BY date_trunc(\'week\', "visit_date")::date' in compiled["sql"]
-    assert 'ORDER BY "date" DESC' in compiled["sql"]
+    assert compiled["cube_query"] == {
+        "measures": ["visits.count"],
+        "limit": 100,
+        "timeDimensions": [{"dimension": "visits.visit_date", "granularity": "week"}],
+        "order": [["visits.visit_date", "desc"]],
+    }
 
 
 def test_compile_rejects_unknown_member(monkeypatch, workspace, semantic_model):
@@ -148,6 +172,46 @@ def test_compile_rejects_cross_dataset_query(monkeypatch, workspace, semantic_mo
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, semantic_model):
+    captured = {}
+
+    class FakeCubeClient:
+        async def execute_query(self, cube_query, *, security_context):
+            captured["cube_query"] = cube_query
+            captured["security_context"] = security_context
+            return {
+                "columns": ["visits.count"],
+                "rows": [[3]],
+                "row_count": 1,
+            }
+
+    async def fake_context(_workspace_id):
+        return QueryContext(
+            tenant_id=str(workspace.id),
+            schema_name="tenant_schema",
+            connection_params={},
+        )
+
+    monkeypatch.setattr(query_service, "ensure_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "CubeClient", FakeCubeClient)
+    monkeypatch.setattr(query_service, "load_workspace_context", fake_context)
+
+    result = await query_service.run_semantic_query(
+        workspace,
+        {"measures": ["visits.count"], "limit": 10},
+        user_id="user-1",
+    )
+
+    assert result["columns"] == ["visits.count"]
+    assert result["rows"] == [[3]]
+    assert captured["cube_query"] == {"measures": ["visits.count"], "limit": 10}
+    assert captured["security_context"]["workspaceId"] == str(workspace.id)
+    assert captured["security_context"]["userId"] == "user-1"
+    assert captured["security_context"]["readonlyRole"] == "tenant_schema_ro"
+
+
 def test_generate_cube_schema_from_semantic_model(semantic_model):
     schema = generate_cube_schema(semantic_model)
 
@@ -166,3 +230,134 @@ def test_generate_cube_schema_from_semantic_model(semantic_model):
         "sql": '{CUBE}."visit_date"',
         "type": "time",
     } in cube["dimensions"]
+
+
+def test_generate_cube_schema_renders_custom_dataset_as_sql(workspace, semantic_model):
+    custom = CustomDataset.objects.create(
+        workspace=workspace,
+        name="large_visits",
+        definition_sql="select username from raw_visits",
+    )
+    dataset = SemanticDataset.objects.create(
+        semantic_model=semantic_model,
+        workspace=workspace,
+        custom_dataset=custom,
+        name="large_visits",
+        label="Large Visits",
+        source_kind=SemanticDataset.SourceKind.CUSTOM,
+        table_name="large_visits",
+        metadata={"cube_sql": 'select username from "tenant_schema"."raw_visits"'},
+    )
+    SemanticField.objects.create(
+        dataset=dataset,
+        name="username",
+        label="Username",
+        field_type=SemanticField.FieldType.DIMENSION,
+        data_type="text",
+        expression="username",
+    )
+
+    cube = next(
+        cube
+        for cube in generate_cube_schema(semantic_model)["cubes"]
+        if cube["name"] == "large_visits"
+    )
+
+    assert cube["sql"] == 'select username from "tenant_schema"."raw_visits"'
+    assert "sql_table" not in cube
+
+
+def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: (
+            "tenant_schema",
+            [
+                PhysicalTable(
+                    name="raw_visits",
+                    type="table",
+                    description="Visits",
+                    columns=[{"name": "username", "type": "text"}],
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        catalog_service,
+        "infer_custom_dataset_columns",
+        lambda _workspace, _sql: [{"name": "username", "type": "text"}],
+    )
+    CustomDataset.objects.create(
+        workspace=workspace,
+        name="visit_users",
+        definition_sql="select username from raw_visits",
+    )
+
+    model = catalog_service.ensure_semantic_model(workspace)
+    custom_dataset = model.datasets.get(name="visit_users")
+
+    assert custom_dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
+    assert custom_dataset.metadata["cube_sql"] == (
+        'select username from "tenant_schema"."raw_visits"'
+    )
+    assert custom_dataset.fields.filter(name="username", is_visible=True).exists()
+    assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
+
+
+def test_invalid_custom_dataset_is_hidden_without_removing_physical(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: (
+            "tenant_schema",
+            [
+                PhysicalTable(
+                    name="raw_visits",
+                    type="table",
+                    description="Visits",
+                    columns=[{"name": "username", "type": "text"}],
+                )
+            ],
+        ),
+    )
+    custom = CustomDataset.objects.create(
+        workspace=workspace,
+        name="bad_dataset",
+        definition_sql="drop table raw_visits",
+    )
+
+    model = catalog_service.ensure_semantic_model(workspace)
+    custom.refresh_from_db()
+
+    assert custom.status == CustomDataset.Status.ERROR
+    assert model.datasets.filter(
+        name="raw_visits",
+        source_kind=SemanticDataset.SourceKind.PHYSICAL,
+        is_visible=True,
+    ).exists()
+    assert not model.datasets.filter(name="bad_dataset", is_visible=True).exists()
+
+
+def test_cube_security_context_is_workspace_and_schema_scoped(workspace, semantic_model):
+    cube_schema = CubeSchema.objects.get(semantic_model=semantic_model)
+    ctx = QueryContext(
+        tenant_id=str(workspace.id),
+        schema_name="tenant_schema",
+        connection_params={},
+    )
+
+    security_context = build_cube_security_context(
+        workspace,
+        semantic_model,
+        cube_schema,
+        ctx,
+        user_id="user-1",
+    )
+
+    assert security_context["workspaceId"] == str(workspace.id)
+    assert security_context["semanticModelId"] == str(semantic_model.id)
+    assert security_context["cubeSchemaHash"] == "testhash"
+    assert security_context["schemaName"] == "tenant_schema"
+    assert security_context["readonlyRole"] == "tenant_schema_ro"
+    assert security_context["userId"] == "user-1"

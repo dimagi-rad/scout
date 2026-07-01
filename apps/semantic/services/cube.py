@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import yaml
+
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
 
 
@@ -37,13 +39,19 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             for field in fields
             if field.field_type == SemanticField.FieldType.MEASURE
         ]
-        cube = {
+        cube: dict[str, Any] = {
             "name": dataset.name,
-            "sql_table": _sql_table(dataset.schema_name, dataset.table_name),
             "description": dataset.description,
             "dimensions": dimensions,
             "measures": measures,
         }
+        if dataset.source_kind == dataset.SourceKind.CUSTOM:
+            cube_sql = dataset.metadata.get("cube_sql") or dataset.metadata.get("sql")
+            if not cube_sql:
+                continue
+            cube["sql"] = cube_sql
+        else:
+            cube["sql_table"] = _sql_table(dataset.schema_name, dataset.table_name)
         joins = joins_by_dataset.get(dataset.name)
         if joins:
             cube["joins"] = joins
@@ -57,6 +65,16 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         },
         "cubes": cubes,
     }
+
+
+def generate_cube_schema_yaml(model: SemanticModel) -> str:
+    """Return Cube YAML content for the active semantic model."""
+    schema = generate_cube_schema(model)
+    return yaml.safe_dump(
+        {"cubes": schema["cubes"]},
+        sort_keys=False,
+        allow_unicode=False,
+    )
 
 
 def _cube_dimension(field: SemanticField) -> dict[str, Any]:

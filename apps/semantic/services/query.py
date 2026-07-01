@@ -1,8 +1,7 @@
 """Structured semantic query execution.
 
 This is intentionally not a general SQL interface. The caller names semantic
-members and Scout compiles the narrow supported query shape into trusted SQL.
-The backend can be swapped to Cube without changing the API contract.
+members and Scout translates the narrow supported query shape into a Cube query.
 """
 
 from __future__ import annotations
@@ -11,12 +10,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from asgiref.sync import async_to_sync, sync_to_async
+from django.db import close_old_connections
 
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
+from apps.semantic.services.cube_client import CubeClient, CubeConfigurationError
+from apps.semantic.services.cube_schema import (
+    CubeSchemaBuildError,
+    build_cube_security_context,
+    ensure_cube_schema,
+)
 from mcp_server.context import load_workspace_context
-from mcp_server.envelope import VALIDATION_ERROR, error_response
-from mcp_server.services.query import execute_internal_query
+from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR, error_response
 
 MAX_SEMANTIC_LIMIT = 500
 SUPPORTED_FILTERS = {
@@ -54,10 +59,15 @@ def run_semantic_query_sync(workspace, query_spec: dict[str, Any]) -> dict[str, 
     return async_to_sync(run_semantic_query)(workspace, query_spec)
 
 
-async def run_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
+async def run_semantic_query(
+    workspace,
+    query_spec: dict[str, Any],
+    *,
+    user_id: str = "",
+) -> dict[str, Any]:
     """Execute a structured semantic query and return tabular results."""
     try:
-        compiled = await sync_to_async(_compile_semantic_query, thread_sensitive=True)(
+        compiled = await sync_to_async(_compile_semantic_query_for_async, thread_sensitive=True)(
             workspace,
             query_spec,
         )
@@ -65,11 +75,26 @@ async def run_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str,
         return error_response(VALIDATION_ERROR, str(exc))
     except SemanticQueryError as exc:
         return error_response(VALIDATION_ERROR, str(exc))
+    except CubeSchemaBuildError as exc:
+        return error_response(VALIDATION_ERROR, str(exc))
 
     ctx = await load_workspace_context(str(workspace.id))
-    result = await execute_internal_query(ctx, compiled["sql"], compiled["params"])
-    if not result.get("success", True):
-        return result
+    security_context = build_cube_security_context(
+        workspace,
+        compiled["model"],
+        compiled["cube_schema"],
+        ctx,
+        user_id=user_id,
+    )
+    try:
+        result = await CubeClient().execute_query(
+            compiled["cube_query"],
+            security_context=security_context,
+        )
+    except CubeConfigurationError as exc:
+        return error_response(VALIDATION_ERROR, str(exc))
+    except Exception as exc:
+        return error_response(CONNECTION_ERROR, f"Cube query execution failed: {exc}")
 
     return {
         "columns": result.get("columns", []),
@@ -79,6 +104,14 @@ async def run_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str,
         "semantic_query": compiled["query"],
         "members": compiled["members"],
     }
+
+
+def _compile_semantic_query_for_async(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
+    try:
+        close_old_connections()
+        return _compile_semantic_query(workspace, query_spec)
+    finally:
+        close_old_connections()
 
 
 def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, Any]:
@@ -126,68 +159,19 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
             "Semantic queries must target one dataset in this first version. Use one dataset's members only."
         )
 
-    dataset = (
-        resolved_measures[0].dataset
-        if resolved_measures
-        else resolved_dimensions[0].dataset
-        if resolved_dimensions
-        else resolved_time.dataset
-        if resolved_time
-        else resolved_filters[0][0].dataset
-    )
-
-    select_parts: list[str] = []
-    group_parts: list[str] = []
-    params: list[Any] = []
     members: list[str] = []
 
     if resolved_time:
-        time_expr = _quoted_column(resolved_time.field.expression)
-        alias = "date" if granularity else resolved_time.alias
-        if granularity:
-            # Granularity is validated against SUPPORTED_GRANULARITIES above.
-            # Keep it literal so repeated SELECT/GROUP BY expressions do not
-            # require duplicated bound parameters.
-            expr = f"date_trunc('{granularity}', {time_expr})::date"
-        else:
-            expr = time_expr
-        select_parts.append(f"{expr} AS {_quoted_identifier(alias)}")
-        group_parts.append(expr)
         members.append(resolved_time.member)
 
     for member in resolved_dimensions:
-        expr = _quoted_column(member.field.expression)
-        select_parts.append(f"{expr} AS {_quoted_identifier(member.alias)}")
-        group_parts.append(expr)
         members.append(member.member)
 
     for member in resolved_measures:
-        select_parts.append(f"{_measure_sql(member.field)} AS {_quoted_identifier(member.alias)}")
         members.append(member.member)
 
-    where_parts: list[str] = []
-    for member, filter_spec in resolved_filters:
-        where_parts.append(_filter_sql(member, filter_spec, params))
-
-    if not select_parts:
-        select_parts.append("COUNT(*) AS count")
-
-    sql_parts = [
-        f"SELECT {', '.join(select_parts)}",
-        f"FROM {_quoted_identifier(dataset.table_name)}",
-    ]
-    if where_parts:
-        sql_parts.append(f"WHERE {' AND '.join(where_parts)}")
-    if group_parts:
-        sql_parts.append(f"GROUP BY {', '.join(group_parts)}")
-
-    order_parts = _order_by_sql(order_by, members, resolved_time)
-    if order_parts:
-        sql_parts.append(f"ORDER BY {', '.join(order_parts)}")
-    elif resolved_time:
-        sql_parts.append(f"ORDER BY {_quoted_identifier('date' if granularity else resolved_time.alias)} ASC")
-
-    sql_parts.append(f"LIMIT {limit}")
+    _validate_order_by(order_by, members, resolved_time)
+    cube_schema = ensure_cube_schema(workspace, model=model)
 
     canonical_query = {
         "measures": measures,
@@ -199,12 +183,81 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         "limit": limit,
     }
     return {
-        "sql": "\n".join(sql_parts),
-        "params": tuple(params),
+        "cube_query": _cube_query(
+            resolved_measures=resolved_measures,
+            resolved_dimensions=resolved_dimensions,
+            resolved_time=resolved_time,
+            granularity=granularity,
+            resolved_filters=resolved_filters,
+            order_by=order_by,
+            limit=limit,
+        ),
+        "model": model,
+        "cube_schema": cube_schema,
         "limit": limit,
         "query": canonical_query,
         "members": members,
     }
+
+
+def _cube_query(
+    *,
+    resolved_measures: list[ResolvedMember],
+    resolved_dimensions: list[ResolvedMember],
+    resolved_time: ResolvedMember | None,
+    granularity: str,
+    resolved_filters: list[tuple[ResolvedMember, dict[str, Any]]],
+    order_by: list,
+    limit: int,
+) -> dict[str, Any]:
+    query: dict[str, Any] = {
+        "measures": [member.member for member in resolved_measures],
+        "dimensions": [member.member for member in resolved_dimensions],
+        "filters": [
+            _cube_filter(member, filter_spec)
+            for member, filter_spec in resolved_filters
+        ],
+        "limit": limit,
+    }
+    if resolved_time:
+        time_dimension = {"dimension": resolved_time.member}
+        if granularity:
+            time_dimension["granularity"] = granularity
+        query["timeDimensions"] = [time_dimension]
+    if order_by:
+        query["order"] = _cube_order(order_by)
+    elif resolved_time:
+        query["order"] = [[resolved_time.member, "asc"]]
+    return {key: value for key, value in query.items() if value not in ([], None, "")}
+
+
+def _cube_filter(member: ResolvedMember, filter_spec: dict[str, Any]) -> dict[str, Any]:
+    operator = filter_spec.get("operator", "equals")
+    payload: dict[str, Any] = {
+        "member": member.member,
+        "operator": operator,
+    }
+    if operator not in {"set", "notSet"}:
+        value = filter_spec.get("value")
+        if operator == "inDateRange" and (
+            not isinstance(value, list | tuple) or len(value) != 2
+        ):
+            raise SemanticQueryError("inDateRange requires value [start, end].")
+        payload["values"] = value if isinstance(value, list) else [value]
+    return payload
+
+
+def _cube_order(order_by: list) -> list[list[str]]:
+    order = []
+    for item in order_by:
+        if not isinstance(item, dict):
+            continue
+        field = item.get("field") or item.get("member")
+        direction = str(item.get("direction", "asc")).lower()
+        if direction not in {"asc", "desc"}:
+            direction = "asc"
+        order.append([str(field), direction])
+    return order
 
 
 def _as_list(value: Any) -> list:
@@ -264,67 +317,11 @@ def _resolve_filter(model, filter_spec: dict[str, Any]) -> tuple[ResolvedMember,
     return member, filter_spec
 
 
-def _measure_sql(field: SemanticField) -> str:
-    measure_type = field.measure_type
-    if measure_type == SemanticField.MeasureType.COUNT:
-        return "COUNT(*)"
-    expr = _quoted_column(field.expression)
-    if measure_type == SemanticField.MeasureType.SUM:
-        return f"SUM({expr})"
-    if measure_type == SemanticField.MeasureType.AVG:
-        return f"AVG({expr})"
-    if measure_type == SemanticField.MeasureType.MIN:
-        return f"MIN({expr})"
-    if measure_type == SemanticField.MeasureType.MAX:
-        return f"MAX({expr})"
-    if measure_type == SemanticField.MeasureType.NUMBER:
-        return expr
-    raise SemanticQueryError(f"Unsupported measure type '{measure_type}' for {field.member_name}.")
-
-
-def _filter_sql(member: ResolvedMember, filter_spec: dict[str, Any], params: list[Any]) -> str:
-    operator = filter_spec.get("operator", "equals")
-    value = filter_spec.get("value")
-    expr = _measure_sql(member.field) if member.field.field_type == SemanticField.FieldType.MEASURE else _quoted_column(member.field.expression)
-
-    if operator == "equals":
-        params.append(value)
-        return f"{expr} = %s"
-    if operator == "notEquals":
-        params.append(value)
-        return f"{expr} <> %s"
-    if operator == "contains":
-        params.append(f"%{value}%")
-        return f"{expr}::text ILIKE %s"
-    if operator == "notContains":
-        params.append(f"%{value}%")
-        return f"{expr}::text NOT ILIKE %s"
-    if operator == "gt":
-        params.append(value)
-        return f"{expr} > %s"
-    if operator == "gte":
-        params.append(value)
-        return f"{expr} >= %s"
-    if operator == "lt":
-        params.append(value)
-        return f"{expr} < %s"
-    if operator == "lte":
-        params.append(value)
-        return f"{expr} <= %s"
-    if operator == "inDateRange":
-        if not isinstance(value, list | tuple) or len(value) != 2:
-            raise SemanticQueryError("inDateRange requires value [start, end].")
-        params.extend([value[0], value[1]])
-        return f"{expr} BETWEEN %s AND %s"
-    if operator == "set":
-        return f"{expr} IS NOT NULL"
-    if operator == "notSet":
-        return f"{expr} IS NULL"
-    raise SemanticQueryError(f"Unsupported filter operator '{operator}'.")
-
-
-def _order_by_sql(order_by: list, selected_members: list[str], resolved_time: ResolvedMember | None) -> list[str]:
-    parts = []
+def _validate_order_by(
+    order_by: list,
+    selected_members: list[str],
+    resolved_time: ResolvedMember | None,
+) -> None:
     selected_aliases = {m.replace(".", "__") for m in selected_members}
     if resolved_time:
         selected_aliases.add("date")
@@ -332,23 +329,6 @@ def _order_by_sql(order_by: list, selected_members: list[str], resolved_time: Re
         if not isinstance(item, dict):
             continue
         field = item.get("field") or item.get("member")
-        direction = str(item.get("direction", "asc")).lower()
-        if direction not in {"asc", "desc"}:
-            direction = "asc"
         alias = "date" if field == (resolved_time.member if resolved_time else None) else str(field).replace(".", "__")
         if alias not in selected_aliases:
             raise SemanticQueryError(f"Cannot order by '{field}' because it is not selected.")
-        parts.append(f"{_quoted_identifier(alias)} {direction.upper()}")
-    return parts
-
-
-def _quoted_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
-
-
-def _quoted_column(value: str) -> str:
-    if value == "*":
-        return value
-    if "." in value or '"' in value:
-        raise SemanticQueryError(f"Unsupported field expression '{value}'.")
-    return _quoted_identifier(value)

@@ -425,6 +425,19 @@ async def _accessible_workspace_memberships(user_id: str, workspace_ids: list[st
     return [membership async for membership in qs.order_by("workspace__name", "workspace_id")]
 
 
+async def _resolve_accessible_workspace(workspace_id: str, user_id: str = "") -> Workspace:
+    if user_id:
+        membership = await (
+            WorkspaceMembership.objects.select_related("workspace")
+            .filter(workspace_id=workspace_id, user_id=user_id)
+            .afirst()
+        )
+        if membership is None:
+            raise Workspace.DoesNotExist
+        return membership.workspace
+    return await Workspace.objects.aget(id=workspace_id)
+
+
 @mcp.tool()
 async def list_workspaces(
     limit: int = 50,
@@ -704,7 +717,7 @@ async def semantic_catalog(workspace_id: str = "", user_id: str = "", thread_id:
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
         try:
-            workspace = await Workspace.objects.aget(id=workspace_id)
+            workspace = await _resolve_accessible_workspace(workspace_id, user_id)
             catalog = await sync_to_async(_serialized_semantic_catalog, thread_sensitive=True)(
                 workspace
             )
@@ -746,7 +759,7 @@ async def describe_dataset(
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
         try:
-            workspace = await Workspace.objects.aget(id=workspace_id)
+            workspace = await _resolve_accessible_workspace(workspace_id, user_id)
             payload = await sync_to_async(_serialized_semantic_dataset, thread_sensitive=True)(
                 workspace,
                 dataset_name,
@@ -813,7 +826,7 @@ async def semantic_query(
             tc["result"] = error_response(VALIDATION_ERROR, "workspace_id is required")
             return tc["result"]
         try:
-            workspace = await Workspace.objects.aget(id=workspace_id)
+            workspace = await _resolve_accessible_workspace(workspace_id, user_id)
         except Workspace.DoesNotExist:
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
@@ -829,6 +842,7 @@ async def semantic_query(
                 "order_by": order_by or [],
                 "limit": limit,
             },
+            user_id=user_id,
         )
         if not result.get("success", True) or result.get("error"):
             tc["result"] = result

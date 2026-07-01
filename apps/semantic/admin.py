@@ -1,6 +1,8 @@
 from django.contrib import admin
 
 from .models import (
+    CubeSchema,
+    CustomDataset,
     SemanticCanvas,
     SemanticDataset,
     SemanticField,
@@ -33,10 +35,18 @@ class SemanticModelAdmin(admin.ModelAdmin):
 
 @admin.register(SemanticDataset)
 class SemanticDatasetAdmin(admin.ModelAdmin):
-    list_display = ("name", "label", "workspace", "table_name", "is_visible", "updated_at")
-    list_filter = ("is_visible", "workspace")
+    list_display = (
+        "name",
+        "label",
+        "workspace",
+        "source_kind",
+        "table_name",
+        "is_visible",
+        "updated_at",
+    )
+    list_filter = ("source_kind", "is_visible", "workspace")
     search_fields = ("name", "label", "description", "table_name")
-    raw_id_fields = ("semantic_model", "workspace")
+    raw_id_fields = ("semantic_model", "workspace", "custom_dataset")
     inlines = (SemanticFieldInline,)
 
 
@@ -54,6 +64,24 @@ class SemanticRelationshipAdmin(admin.ModelAdmin):
     list_filter = ("relationship_type", "workspace")
     search_fields = ("name", "join_expression")
     raw_id_fields = ("workspace", "from_dataset", "to_dataset")
+
+
+@admin.register(CustomDataset)
+class CustomDatasetAdmin(admin.ModelAdmin):
+    list_display = ("name", "label", "workspace", "status", "is_visible", "updated_at")
+    list_filter = ("status", "is_visible", "workspace")
+    search_fields = ("name", "label", "description", "definition_sql")
+    raw_id_fields = ("workspace", "created_by")
+    readonly_fields = ("diagnostics",)
+
+
+@admin.register(CubeSchema)
+class CubeSchemaAdmin(admin.ModelAdmin):
+    list_display = ("filename", "workspace", "semantic_model", "status", "content_hash", "updated_at")
+    list_filter = ("status", "workspace")
+    search_fields = ("filename", "content_hash", "content")
+    raw_id_fields = ("workspace", "semantic_model")
+    readonly_fields = ("content_hash", "diagnostics", "created_at", "updated_at")
 
 
 @admin.register(SemanticCanvas)

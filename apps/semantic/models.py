@@ -6,6 +6,7 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 
 
 class SemanticModel(models.Model):
@@ -40,6 +41,10 @@ class SemanticModel(models.Model):
 class SemanticDataset(models.Model):
     """Business-facing dataset exposed to the agent and dataset browser."""
 
+    class SourceKind(models.TextChoices):
+        PHYSICAL = "physical", "Physical"
+        CUSTOM = "custom", "Custom"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     semantic_model = models.ForeignKey(
         SemanticModel,
@@ -54,6 +59,18 @@ class SemanticDataset(models.Model):
     name = models.SlugField(max_length=255)
     label = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
+    source_kind = models.CharField(
+        max_length=20,
+        choices=SourceKind.choices,
+        default=SourceKind.PHYSICAL,
+    )
+    custom_dataset = models.OneToOneField(
+        "semantic.CustomDataset",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="semantic_dataset",
+    )
     schema_name = models.CharField(max_length=255, blank=True)
     table_name = models.CharField(max_length=255)
     primary_key = models.CharField(max_length=255, blank=True)
@@ -73,6 +90,7 @@ class SemanticDataset(models.Model):
         ]
         indexes = [
             models.Index(fields=["workspace", "is_visible"]),
+            models.Index(fields=["workspace", "source_kind", "is_visible"]),
         ]
 
     def __str__(self) -> str:
@@ -182,6 +200,103 @@ class SemanticRelationship(models.Model):
 
     def __str__(self) -> str:
         return self.name
+
+
+class CustomDataset(models.Model):
+    """Workspace-authored dataset definition compiled into the semantic model."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        DRAFT = "draft", "Draft"
+        ERROR = "error", "Error"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="custom_datasets",
+    )
+    name = models.SlugField(max_length=255)
+    label = models.CharField(max_length=255, blank=True)
+    description = models.TextField(blank=True)
+    definition_sql = models.TextField(blank=True)
+    definition_json = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    diagnostics = models.JSONField(default=list, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="custom_datasets",
+    )
+    is_visible = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "name"],
+                name="unique_custom_dataset_name_per_workspace",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status", "is_visible"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.label or self.name
+
+
+class CubeSchema(models.Model):
+    """Active Cube YAML generated from a workspace semantic model."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        DRAFT = "draft", "Draft"
+        ERROR = "error", "Error"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="cube_schemas",
+    )
+    semantic_model = models.ForeignKey(
+        SemanticModel,
+        on_delete=models.CASCADE,
+        related_name="cube_schemas",
+    )
+    filename = models.CharField(max_length=255)
+    content = models.TextField()
+    content_hash = models.CharField(max_length=64, db_index=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+    diagnostics = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["workspace__name", "filename"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "filename"],
+                name="unique_cube_schema_filename_per_workspace",
+            ),
+            models.UniqueConstraint(
+                fields=["workspace", "semantic_model"],
+                condition=Q(status="active"),
+                name="unique_active_cube_schema_per_model",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "status"]),
+            models.Index(fields=["semantic_model", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.workspace}: {self.filename}"
 
 
 class SemanticCanvas(models.Model):

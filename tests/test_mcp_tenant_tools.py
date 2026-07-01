@@ -436,6 +436,30 @@ class TestWorkspaceAndDatasetDiscoveryTools:
         assert result["data"]["datasets"] == []
         assert result["data"]["inaccessible_workspace_ids"] == [str(other_workspace.id)]
 
+    async def test_semantic_catalog_rejects_inaccessible_workspace(
+        self, workspace, user, other_user, tenant
+    ):
+        from mcp_server.server import semantic_catalog
+
+        other_workspace = await Workspace.objects.acreate(
+            name="Other workspace",
+            created_by=other_user,
+        )
+        await WorkspaceTenant.objects.acreate(workspace=other_workspace, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=other_workspace,
+            user=other_user,
+            role=WorkspaceRole.MANAGE,
+        )
+
+        result = await semantic_catalog(
+            user_id=str(user.id),
+            workspace_id=str(other_workspace.id),
+        )
+
+        assert result["success"] is False
+        assert result["error"]["code"] == NOT_FOUND
+
 
 # ---------------------------------------------------------------------------
 # describe_table tool handler
