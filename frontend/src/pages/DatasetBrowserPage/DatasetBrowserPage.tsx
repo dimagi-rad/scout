@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
+import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { Check, ChevronDown, Database, RefreshCw, Search, Sigma, Table2, X } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
@@ -37,6 +38,9 @@ function CreatedBadge({ testId }: { testId?: string }) {
 }
 
 export function DatasetBrowserPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const { datasetName: routeDatasetName } = useParams<{ datasetName?: string }>()
   const catalog = useAppStore((s) => s.datasetCatalog)
   const status = useAppStore((s) => s.datasetStatus)
   const error = useAppStore((s) => s.datasetError)
@@ -48,12 +52,28 @@ export function DatasetBrowserPage() {
   const [search, setSearch] = useState("")
   const [datasetPickerOpen, setDatasetPickerOpen] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const routeFetchRef = useRef<string | null>(null)
+  const datasetBasePath = location.pathname.startsWith("/embed/")
+    ? "/embed/datasets"
+    : "/datasets"
 
   useEffect(() => {
     if (!activeDomainId) return
     void fetchDatasets()
     return () => clearDatasets()
   }, [activeDomainId, fetchDatasets, clearDatasets])
+
+  useEffect(() => {
+    routeFetchRef.current = null
+  }, [activeDomainId, routeDatasetName])
+
+  useEffect(() => {
+    if (!routeDatasetName || status !== "loaded") return
+    if (selectedDataset?.name === routeDatasetName) return
+    if (routeFetchRef.current === routeDatasetName) return
+    routeFetchRef.current = routeDatasetName
+    void fetchDataset(routeDatasetName)
+  }, [fetchDataset, routeDatasetName, selectedDataset?.name, status])
 
   const filteredDatasets = useMemo(() => {
     return filterDatasets(catalog?.datasets ?? [], search)
@@ -70,6 +90,10 @@ export function DatasetBrowserPage() {
   const selectDataset = (dataset: SemanticDataset, resetSearch = true) => {
     setDatasetPickerOpen(false)
     if (resetSearch) setSearch("")
+    const nextPath = `${datasetBasePath}/${encodeURIComponent(dataset.name)}`
+    if (location.pathname !== nextPath) {
+      navigate(nextPath)
+    }
     if (selectedDataset?.id !== dataset.id || selectedDatasetStatus === "error") {
       void fetchDataset(dataset.name)
     }
@@ -239,7 +263,7 @@ export function DatasetBrowserPage() {
           </div>
         </header>
 
-        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto">
+        <main className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
           {isDatasetLoading ? (
             <CenteredState
               icon={<RefreshCw className="h-8 w-8 animate-spin" />}
@@ -255,9 +279,16 @@ export function DatasetBrowserPage() {
                 if (target) {
                   selectDataset(target)
                 } else {
+                  navigate(`${datasetBasePath}/${encodeURIComponent(name)}`)
                   void fetchDataset(name)
                 }
               }}
+            />
+          ) : selectedDatasetStatus === "error" && routeDatasetName ? (
+            <CenteredState
+              icon={<Database className="h-12 w-12" />}
+              title="Dataset not found"
+              body={selectedDatasetError ?? `Could not load ${routeDatasetName}.`}
             />
           ) : (
             <CenteredState
@@ -408,7 +439,7 @@ function DatasetDetail({
   const showTableName = dataset.table_name && dataset.table_name !== dataset.name
 
   return (
-    <div className="mx-auto max-w-5xl p-4 sm:p-6">
+    <div className="mx-auto w-full max-w-7xl min-w-0 p-4 sm:p-6 lg:p-8">
       <div className="mb-6 border-b pb-5">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h2 className="min-w-0 break-words text-xl font-semibold sm:text-2xl">
@@ -448,61 +479,80 @@ function DatasetDetail({
         </div>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_20rem]">
-        <div className="space-y-6">
-          <FieldSection
-            title="Measures"
-            icon={<Sigma className="h-4 w-4" />}
-            fields={dataset.measures}
-          />
-          <FieldSection
-            title="Dimensions"
-            icon={<Database className="h-4 w-4" />}
-            fields={[...dataset.time_dimensions, ...dataset.dimensions]}
-          />
-        </div>
-
-        <aside className="space-y-4">
-          <div className="rounded-md border p-4">
-            <h3 className="text-sm font-medium">Relationships</h3>
-            {dataset.relationships.length === 0 ? (
-              <p className="mt-2 text-sm text-muted-foreground">No relationships defined yet.</p>
-            ) : (
-              <div className="mt-3 space-y-3" data-testid="dataset-relationships">
-                {dataset.relationships.map((relationship) => {
-                  const outgoing = relationship.direction !== "incoming"
-                  const other = outgoing ? relationship.to_dataset : relationship.from_dataset
-                  return (
-                    <div key={`${relationship.id}-${relationship.direction}`} className="text-sm">
-                      <div className="flex min-w-0 items-center gap-1.5 font-medium">
-                        <span className="text-muted-foreground">{outgoing ? "→" : "←"}</span>
-                        <button
-                          type="button"
-                          className="truncate text-left text-primary hover:underline"
-                          onClick={() => onOpenDataset(other)}
-                          data-testid={`relationship-target-${other}`}
-                        >
-                          {other}
-                        </button>
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {relationship.relationship_type}
-                        {outgoing ? "" : " (referenced by)"}
-                      </div>
-                      {relationship.join_expression && (
-                        <code className="mt-1 block truncate rounded bg-muted px-2 py-1 text-[11px]">
-                          {relationship.join_expression}
-                        </code>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </aside>
+      <div className="min-w-0 space-y-8">
+        <RelationshipsSection
+          relationships={dataset.relationships}
+          onOpenDataset={onOpenDataset}
+        />
+        <FieldSection
+          title="Measures"
+          icon={<Sigma className="h-4 w-4" />}
+          fields={dataset.measures}
+        />
+        <FieldSection
+          title="Dimensions"
+          icon={<Database className="h-4 w-4" />}
+          fields={[...dataset.time_dimensions, ...dataset.dimensions]}
+        />
       </div>
     </div>
+  )
+}
+
+function RelationshipsSection({
+  relationships,
+  onOpenDataset,
+}: {
+  relationships: SemanticDataset["relationships"]
+  onOpenDataset: (name: string) => void
+}) {
+  return (
+    <section className="min-w-0">
+      <div className="mb-3 flex items-center gap-2">
+        <h3 className="text-sm font-semibold">Relationships</h3>
+        <Badge variant="secondary">{relationships.length}</Badge>
+      </div>
+      {relationships.length === 0 ? (
+        <div className="rounded-md border border-dashed px-4 py-3 text-sm text-muted-foreground">
+          No relationships defined yet.
+        </div>
+      ) : (
+        <div
+          className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-3"
+          data-testid="dataset-relationships"
+        >
+          {relationships.map((relationship) => {
+            const outgoing = relationship.direction !== "incoming"
+            const other = outgoing ? relationship.to_dataset : relationship.from_dataset
+            return (
+              <button
+                key={`${relationship.id}-${relationship.direction}`}
+                type="button"
+                className="group min-w-0 rounded-md border bg-background px-4 py-3 text-left transition-colors hover:border-primary/30 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35"
+                onClick={() => onOpenDataset(other)}
+                data-testid={`relationship-target-${other}`}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="text-sm text-muted-foreground">{outgoing ? "→" : "←"}</span>
+                  <span className="truncate text-base font-semibold text-foreground group-hover:text-primary">
+                    {other}
+                  </span>
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  {relationship.relationship_type}
+                  {outgoing ? "" : " (referenced by)"}
+                </span>
+                {relationship.join_expression && (
+                  <code className="mt-2 block truncate rounded bg-muted px-2 py-1 text-[11px] text-muted-foreground">
+                    {relationship.join_expression}
+                  </code>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -516,18 +566,18 @@ function FieldSection({
   fields: SemanticField[]
 }) {
   return (
-    <section>
+    <section className="min-w-0">
       <div className="mb-3 flex items-center gap-2">
         {icon}
         <h3 className="text-sm font-semibold">{title}</h3>
         <Badge variant="secondary">{fields.length}</Badge>
       </div>
-      <div className="overflow-hidden rounded-md border">
-        <Table className="min-w-[42rem]">
+      <div className="overflow-x-auto rounded-md border">
+        <Table className="min-w-[56rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[32%]">Member</TableHead>
-              <TableHead className="w-[20%]">Type</TableHead>
+              <TableHead className="w-[44%]">Member</TableHead>
+              <TableHead className="w-[14%]">Type</TableHead>
               <TableHead>Description</TableHead>
             </TableRow>
           </TableHeader>
@@ -542,8 +592,8 @@ function FieldSection({
               fields.map((field) => (
                 <TableRow key={field.id}>
                   <TableCell>
-                    <span className="flex flex-wrap items-center gap-1.5">
-                      <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{field.member}</code>
+                    <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <code className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 text-xs">{field.member}</code>
                       {isCreatedField(field) && (
                         <CreatedBadge testId={`field-created-badge-${field.name}`} />
                       )}
@@ -551,7 +601,7 @@ function FieldSection({
                     <div className="mt-1 text-sm font-medium">{field.label}</div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline">
+                    <Badge variant="outline" className="whitespace-nowrap">
                       {field.measure_type || field.data_type || field.type}
                     </Badge>
                   </TableCell>

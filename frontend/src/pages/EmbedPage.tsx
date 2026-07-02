@@ -40,6 +40,7 @@ const embedRouter = createBrowserRouter([
       { path: "recipes/:id", element: <RecipesPage /> },
       { path: "recipes/:id/runs/:runId", element: <RecipesPage /> },
       { path: "datasets", element: <DatasetBrowserPage /> },
+      { path: "datasets/:datasetName", element: <DatasetBrowserPage /> },
       { path: "data-dictionary", element: <Navigate to="/embed/datasets" replace /> },
       { path: "settings/connections", element: <ConnectionsPage /> },
       { path: "workspaces", element: <WorkspacesPage /> },
