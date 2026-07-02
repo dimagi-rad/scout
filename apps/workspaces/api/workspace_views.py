@@ -1,5 +1,9 @@
 """Workspace management API views."""
 
+import asyncio
+import logging
+
+from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models import Count, OuterRef, Subquery
@@ -10,6 +14,12 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
+from apps.users.services.credential_resolver import aget_fresh_access_token
+from apps.users.services.tenant_resolution import (
+    resolve_commcare_domains,
+    resolve_connect_opportunities,
+    resolve_ocs_chatbots,
+)
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -21,6 +31,47 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
+
+logger = logging.getLogger(__name__)
+
+# Bounded so a slow upstream export can't tie up the sync DRF worker thread.
+SHARE_REFRESH_TIMEOUT = 8  # seconds
+
+_PROVIDER_RESOLVERS = {
+    "commcare": resolve_commcare_domains,
+    "commcare_connect": resolve_connect_opportunities,
+    "ocs": resolve_ocs_chatbots,
+}
+
+
+async def _arefresh_target_for_workspace(target, providers) -> bool:
+    """Best-effort, bounded server-side refresh of *target*'s memberships for the
+    workspace's tenant providers, using the target's OWN (refresh-aware) token.
+
+    This is what lets a manager add someone who was granted access upstream after
+    the target's last Scout login — without the target manually reconnecting.
+    Returns True if the target had a usable token for at least one provider (used
+    to distinguish "no access upstream" from "needs to reconnect" in the error).
+    """
+    tried = False
+    for provider in providers:
+        resolve = _PROVIDER_RESOLVERS.get(provider)
+        if resolve is None:
+            continue
+        token = await aget_fresh_access_token(target, provider)
+        if not token:
+            continue
+        tried = True
+        try:
+            await asyncio.wait_for(resolve(target, token), timeout=SHARE_REFRESH_TIMEOUT)
+        except Exception:
+            logger.warning(
+                "Share-time refresh failed for target=%s provider=%s",
+                target.id,
+                provider,
+                exc_info=True,
+            )
+    return tried
 
 
 def _is_last_manager(workspace, membership):
@@ -401,15 +452,33 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        workspace_tenant_ids = workspace.workspace_tenants.values_list("tenant_id", flat=True)
-        shares_tenant = TenantMembership.objects.filter(
-            user=target, tenant_id__in=workspace_tenant_ids
-        ).exists()
-        if not shares_tenant:
-            return Response(
-                {"error": "User is not part of this workspace's tenants."},
-                status=status.HTTP_403_FORBIDDEN,
+        workspace_tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
+
+        def target_shares_tenant():
+            return TenantMembership.objects.filter(
+                user=target, tenant_id__in=workspace_tenant_ids
+            ).exists()
+
+        if not target_shares_tenant():
+            # The target may have been granted access upstream (Connect/HQ/OCS)
+            # after their last Scout login. Refresh their memberships server-side
+            # using their own token, then re-check — no manual reconnect needed.
+            providers = list(
+                workspace.workspace_tenants.values_list("tenant__provider", flat=True).distinct()
             )
+            had_token = async_to_sync(_arefresh_target_for_workspace)(target, providers)
+            if not target_shares_tenant():
+                if had_token:
+                    msg = (
+                        "This user doesn't have access to this workspace's data "
+                        "source in the source system (e.g. the Connect opportunity)."
+                    )
+                else:
+                    msg = (
+                        "This user needs to sign into Scout again to refresh their "
+                        "access (Connections in the left menu)."
+                    )
+                return Response({"error": msg}, status=status.HTTP_403_FORBIDDEN)
 
         if WorkspaceMembership.objects.filter(workspace=workspace, user=target).exists():
             return Response(
