@@ -13,6 +13,7 @@ from apps.semantic.models import (
 from apps.semantic.services import catalog as catalog_service
 from apps.semantic.services import cube_schema as cube_schema_service
 from apps.semantic.services import query as query_service
+from apps.semantic.services import sample_rows as sample_rows_service
 from apps.semantic.services.catalog import PhysicalTable
 from apps.semantic.services.cube import generate_cube_schema
 from apps.semantic.services.cube_schema import (
@@ -467,6 +468,79 @@ def test_ensure_semantic_model_sets_primary_key_and_skips_id_measures(monkeypatc
     assert not visits.fields.filter(name="sum_visit_id").exists()
     assert not visits.fields.filter(name="avg_visit_id").exists()
     assert visits.fields.filter(name="sum_amount", is_visible=True).exists()
+
+
+def test_ensure_semantic_model_infers_cube_display_formats(monkeypatch, workspace):
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: (
+            "tenant_schema",
+            [
+                PhysicalTable(
+                    name="raw_payments",
+                    type="table",
+                    description="Payments",
+                    columns=[
+                        {"name": "id", "type": "bigint"},
+                        {"name": "payment_usd", "type": "numeric"},
+                        {"name": "completion_rate", "type": "numeric"},
+                    ],
+                    primary_key="id",
+                ),
+            ],
+        ),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([]))
+
+    model = catalog_service.ensure_semantic_model(workspace)
+
+    dataset = model.datasets.get(name="raw_payments")
+    assert dataset.fields.get(name="count").metadata["format"] == "number_0"
+    assert dataset.fields.get(name="payment_usd").metadata == {
+        "source_column": "payment_usd",
+        "nullable": None,
+        "default": None,
+        "format": "currency_2",
+        "currency": "USD",
+    }
+    assert dataset.fields.get(name="completion_rate").metadata["format"] == "percent_1"
+
+    cube = next(c for c in generate_cube_schema(model)["cubes"] if c["name"] == "raw_payments")
+    payment_measure = next(m for m in cube["measures"] if m["name"] == "sum_payment_usd")
+    assert payment_measure["format"] == "currency_2"
+    assert payment_measure["currency"] == "USD"
+
+
+def test_sample_dataset_rows_uses_semantic_query(monkeypatch, workspace, semantic_model):
+    captured = {}
+
+    def fake_run_semantic_query(_workspace, query_spec):
+        captured["query_spec"] = query_spec
+        return {
+            "columns": ["visits.username"],
+            "rows": [["alice"]],
+            "row_count": 1,
+            "members": query_spec["dimensions"],
+            "semantic_query": query_spec,
+        }
+
+    monkeypatch.setattr(sample_rows_service, "run_semantic_query_sync", fake_run_semantic_query)
+
+    result = sample_rows_service.sample_dataset_rows(
+        workspace,
+        "visits",
+        limit=3,
+        fields=["username"],
+    )
+
+    assert captured["query_spec"] == {
+        "dimensions": ["visits.username"],
+        "measures": [],
+        "limit": 3,
+    }
+    assert result["sample_kind"] == "semantic_query"
+    assert result["rows"] == [{"visits.username": "alice"}]
 
 
 def test_generate_cube_schema_marks_primary_key_dimension(monkeypatch, workspace):

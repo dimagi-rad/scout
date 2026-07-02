@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.subagents.forwarding import NestedEventForwarder
 from apps.agents.tools.canvas_manager_agent import (
+    CANVAS_MANAGER_SYSTEM_PROMPT,
     _summarize_result,
     create_canvas_manager_tool,
 )
@@ -46,6 +47,17 @@ def test_canvas_manager_summary_prefers_final_json_and_commit_truth():
     assert summary["changes"] == ["field/raw_visits.total_amount — new"]
     assert summary["diagnostics"] == []
     assert "total_amount" in summary["message"]
+
+
+def test_canvas_manager_prompt_teaches_dataset_edit_capabilities():
+    prompt = CANVAS_MANAGER_SYSTEM_PROMPT
+
+    assert "ADD new dimensions and measures" in prompt
+    assert "Field value format / display format" in prompt
+    assert "`format`" in prompt
+    assert "`currency`" in prompt
+    assert "CTE datasets" in prompt
+    assert "decimal_02" in prompt
 
 
 def test_canvas_manager_summary_falls_back_to_tool_diagnostics():

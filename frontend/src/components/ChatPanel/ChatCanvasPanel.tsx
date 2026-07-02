@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleAlert,
   Code2,
+  Columns3,
   Database,
   Link2,
   Loader2,
@@ -24,6 +25,9 @@ import {
   applyCanvasOps,
   commitCanvas,
   fetchCanvas,
+  fieldKind,
+  fieldKindLabel,
+  formatDiffKey,
   formatDiffValue,
   groupByDataset,
   pendingObjects,
@@ -285,6 +289,8 @@ function DatasetGroupCard({
     group.fields.length > 0
     || group.relationships.length > 0
     || (dataset != null && Object.keys(dataset.diff).length > 0)
+  const measures = group.fields.filter((entry) => fieldKind(entry) === "measure")
+  const dimensions = group.fields.filter((entry) => fieldKind(entry) !== "measure")
 
   return (
     <section className="rounded-md border" data-testid={`canvas-dataset-${group.name}`}>
@@ -331,17 +337,24 @@ function DatasetGroupCard({
             <DiffLines entry={dataset} className="border-b px-3 py-2" />
           )}
           {dataset?.object_type === "custom_dataset" && <CteDraftDetail entry={dataset} />}
-          {group.fields.map((entry) => (
-            <ChildRow
-              key={entry.object_uuid}
-              entry={entry}
+          {measures.length > 0 && (
+            <FieldSection
+              title="Measures"
+              entries={measures}
               icon={<Sigma className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-              title={entry.label || entry.name}
-              detail={fieldDetail(entry)}
               busy={busy}
               onOps={onOps}
             />
-          ))}
+          )}
+          {dimensions.length > 0 && (
+            <FieldSection
+              title="Dimensions"
+              entries={dimensions}
+              icon={<Columns3 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+              busy={busy}
+              onOps={onOps}
+            />
+          )}
           {group.relationships.map((entry) => (
             <ChildRow
               key={entry.object_uuid}
@@ -356,6 +369,39 @@ function DatasetGroupCard({
         </div>
       )}
     </section>
+  )
+}
+
+function FieldSection({
+  title,
+  entries,
+  icon,
+  busy,
+  onOps,
+}: {
+  title: string
+  entries: CanvasObjectEntry[]
+  icon: ReactNode
+  busy: boolean
+  onOps: (ops: CanvasOp[]) => Promise<boolean>
+}) {
+  return (
+    <div className="border-b last:border-b-0">
+      <div className="px-3 pt-2 pl-8 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {title}
+      </div>
+      {entries.map((entry) => (
+        <ChildRow
+          key={entry.object_uuid}
+          entry={entry}
+          icon={icon}
+          title={entry.label || entry.name}
+          detail={fieldDetail(entry)}
+          busy={busy}
+          onOps={onOps}
+        />
+      ))}
+    </div>
   )
 }
 
@@ -451,7 +497,7 @@ function DiffLines({ entry, className }: { entry: CanvasObjectEntry; className?:
     <div className={cn("space-y-1", className)}>
       {Object.entries(entry.diff).map(([key, delta]) => (
         <div key={key} className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-2 text-xs">
-          <span className="truncate font-medium">{key}</span>
+          <span className="truncate font-medium">{formatDiffKey(key)}</span>
           <span className="min-w-0">
             {showFrom && (
               <span className="text-muted-foreground line-through">
@@ -494,7 +540,8 @@ function CteDraftDetail({ entry }: { entry: CanvasObjectEntry }) {
 
 function fieldDetail(entry: CanvasObjectEntry): string {
   if (entry.state === "edited") {
-    return `${Object.keys(entry.diff).sort().join(", ")} changed`
+    const changed = Object.keys(entry.diff).sort().map(formatDiffKey).join(", ")
+    return `${fieldKindLabel(entry)} · ${changed} changed`
   }
   const fields = entry.fields
   const fieldType = typeof fields.field_type === "string" ? fields.field_type : ""

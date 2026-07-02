@@ -12,6 +12,7 @@ import { api } from "@/api/client"
 export type CanvasState = "new" | "edited" | "unchanged" | "deleted" | "conflict"
 
 export type CanvasObjectType = "dataset" | "field" | "relationship" | "custom_dataset"
+export type CanvasFieldKind = "measure" | "time_dimension" | "dimension" | "field"
 
 export interface CanvasDiagnostic {
   code: string
@@ -105,6 +106,43 @@ export function formatDiffValue(value: unknown, limit = 160): string {
   if (value === null || value === undefined || value === "") return "(empty)"
   const text = String(value).replace(/\s+/g, " ").trim()
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
+}
+
+const DIFF_LABELS: Record<string, string> = {
+  currency: "Currency",
+  data_type: "Data type",
+  description: "Description",
+  expression: "Expression",
+  field_type: "Field type",
+  format: "Value format",
+  label: "Label",
+  measure_type: "Measure type",
+  name: "Name",
+  primary_key: "Primary key",
+  relationship_type: "Relationship type",
+}
+
+export function formatDiffKey(key: string): string {
+  return DIFF_LABELS[key] ?? key.replace(/_/g, " ")
+}
+
+function stringField(source: Record<string, unknown>, key: string): string {
+  const value = source[key]
+  return typeof value === "string" ? value : ""
+}
+
+export function fieldKind(entry: CanvasObjectEntry): CanvasFieldKind {
+  const fieldType = stringField(entry.fields, "field_type") || stringField(entry.base, "field_type")
+  if (fieldType === "measure") return "measure"
+  if (fieldType === "time_dimension") return "time_dimension"
+  if (fieldType === "dimension") return "dimension"
+  return "field"
+}
+
+export function fieldKindLabel(entry: CanvasObjectEntry): string {
+  const kind = fieldKind(entry)
+  if (kind === "time_dimension") return "time dimension"
+  return kind
 }
 
 /** Objects with anything pending — drives the count badge + commit gating. */
@@ -209,19 +247,35 @@ function summarizeGroup(group: CanvasDatasetGroup, pendingChildren: CanvasObject
   } else if (dataset && dataset.state !== "unchanged" && Object.keys(dataset.diff).length > 0) {
     parts.push(`${Object.keys(dataset.diff).sort().join(", ")} edited`)
   }
-  const newFields = pendingChildren.filter(
-    (entry) => entry.object_type === "field" && entry.state === "new",
-  ).length
-  const editedFields = pendingChildren.filter(
-    (entry) => entry.object_type === "field" && entry.state === "edited",
-  ).length
-  const deletedFields = pendingChildren.filter(
-    (entry) => entry.object_type === "field" && entry.state === "deleted",
-  ).length
+  const fieldChangeSummary = summarizeFieldChanges(
+    pendingChildren.filter((entry) => entry.object_type === "field"),
+  )
   const links = pendingChildren.filter((entry) => entry.object_type === "relationship").length
-  if (newFields) parts.push(`${newFields} field${newFields === 1 ? "" : "s"} added`)
-  if (editedFields) parts.push(`${editedFields} field${editedFields === 1 ? "" : "s"} edited`)
-  if (deletedFields) parts.push(`${deletedFields} field${deletedFields === 1 ? "" : "s"} removed`)
+  parts.push(...fieldChangeSummary)
   if (links) parts.push(`${links} link${links === 1 ? "" : "s"}`)
   return parts.length > 0 ? parts.join(" · ") : "No pending changes"
+}
+
+function summarizeFieldChanges(fields: CanvasObjectEntry[]): string[] {
+  const parts: string[] = []
+  const states: Array<["new" | "edited" | "deleted", string]> = [
+    ["new", "added"],
+    ["edited", "edited"],
+    ["deleted", "removed"],
+  ]
+  const kindOrder = ["measure", "dimension", "time dimension", "field"]
+  for (const [state, verb] of states) {
+    const byKind = new Map<string, number>()
+    for (const entry of fields) {
+      if (entry.state !== state) continue
+      const noun = fieldKindLabel(entry)
+      byKind.set(noun, (byKind.get(noun) ?? 0) + 1)
+    }
+    for (const noun of kindOrder) {
+      const count = byKind.get(noun) ?? 0
+      if (!count) continue
+      parts.push(`${count} ${noun}${count === 1 ? "" : "s"} ${verb}`)
+    }
+  }
+  return parts
 }

@@ -18,6 +18,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
+from apps.semantic.canvas.objects import FIELD_METADATA_KEYS
 from apps.semantic.canvas.service import ChangeType, ObjectType, base_and_state
 from apps.semantic.models import (
     CustomDataset,
@@ -165,11 +166,17 @@ def _locked_base(canvas, change):
 
 def _commit_update(canvas, model, workspace, change):
     obj = _locked_base(canvas, change)
-    curated = set((obj.metadata or {}).get("curated_fields", []))
-    for key, value in change.fields.items():
-        setattr(obj, key, value)
-        curated.add(key)
     metadata = dict(obj.metadata or {})
+    curated = set(metadata.get("curated_fields", []))
+    for key, value in change.fields.items():
+        if change.object_type == ObjectType.FIELD and key in FIELD_METADATA_KEYS:
+            if value:
+                metadata[key] = value
+            else:
+                metadata.pop(key, None)
+        else:
+            setattr(obj, key, value)
+        curated.add(key)
     metadata["curated_fields"] = sorted(curated)
     obj.metadata = metadata
     obj.save()
@@ -209,6 +216,10 @@ def _create_field(model, change, user):
     metadata = {"source": CANVAS_SOURCE}
     if user is not None and getattr(user, "id", None):
         metadata["created_by"] = str(user.id)
+    for key in FIELD_METADATA_KEYS:
+        value = fields.get(key)
+        if value:
+            metadata[key] = value
     return SemanticField.objects.create(
         id=change.object_uuid,
         dataset=dataset,

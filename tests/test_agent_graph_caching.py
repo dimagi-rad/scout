@@ -61,3 +61,37 @@ async def test_system_prompt_cache_invalidates_on_prompt_change():
 
         assert result1 != result2
         assert MockRetriever.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_cache_separates_canvas_write_mode():
+    """Write-capable chats must not reuse a read-only canvas prompt."""
+    from apps.agents.graph.base import _build_system_prompt, _system_prompt_cache
+
+    _system_prompt_cache.clear()
+
+    workspace = MagicMock()
+    workspace.id = "test-ws-id-3"
+    workspace.system_prompt = ""
+    workspace.tenants = MagicMock()
+    workspace.tenants.acount = AsyncMock(return_value=0)
+
+    user = MagicMock()
+    user.id = "test-user-id"
+
+    with patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever:
+        mock_retriever = MagicMock()
+        mock_retriever.retrieve = AsyncMock(return_value="")
+        MockRetriever.return_value = mock_retriever
+
+        readonly = await _build_system_prompt(workspace, user, canvas_write=False)
+        writable = await _build_system_prompt(workspace, user, canvas_write=True)
+
+        assert "role is read-only" in readonly
+        assert "delegate the whole job to the `canvas_manager` tool" in writable
+        assert "value format / display" in writable
+        assert "number format or currency" in writable
+        assert "field metadata `format`" in writable
+        assert "optional `currency`" in writable
+        assert "CTE/SQL-derived" in writable
+        assert MockRetriever.call_count == 2

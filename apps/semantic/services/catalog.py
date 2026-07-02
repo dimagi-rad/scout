@@ -69,6 +69,39 @@ _NUMERIC_TYPES = {
     "double precision",
     "money",
 }
+_DISPLAY_METADATA_KEYS = {"format", "currency"}
+_CURRENCY_COLUMN_TOKENS = {
+    "amount",
+    "balance",
+    "budget",
+    "charge",
+    "charges",
+    "cost",
+    "earned",
+    "fee",
+    "fees",
+    "paid",
+    "payment",
+    "price",
+    "revenue",
+    "salary",
+    "spend",
+    "usd",
+    "wage",
+    "wages",
+}
+_CURRENCY_CODES_BY_TOKEN = {
+    "aud": "AUD",
+    "cad": "CAD",
+    "dollar": "USD",
+    "dollars": "USD",
+    "eur": "EUR",
+    "gbp": "GBP",
+    "inr": "INR",
+    "jpy": "JPY",
+    "usd": "USD",
+}
+_PERCENT_COLUMN_TOKENS = {"percent", "percentage", "pct", "rate", "ratio", "share"}
 _TIME_TYPES = {
     "date",
     "timestamp",
@@ -98,6 +131,10 @@ def _is_numeric(data_type: str) -> bool:
     return data_type.lower() in _NUMERIC_TYPES
 
 
+def _is_integer(data_type: str) -> bool:
+    return data_type.lower() in _INTEGER_TYPES
+
+
 def _is_identifier_column(column_name: str, dataset: SemanticDataset) -> bool:
     """Identifier-ish columns get no sum/avg measures — those aggregates are noise."""
     lowered = column_name.lower()
@@ -121,6 +158,51 @@ def _fallback_primary_key(table_type: str, columns: list[dict[str, Any]]) -> str
     if any(column.get("name") == "id" for column in columns):
         return "id"
     return ""
+
+
+def _column_tokens(column_name: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", column_name.lower()) if token}
+
+
+def _infer_currency(column_name: str) -> str:
+    for token in _column_tokens(column_name):
+        code = _CURRENCY_CODES_BY_TOKEN.get(token)
+        if code:
+            return code
+    return ""
+
+
+def _infer_display_metadata(
+    column_name: str,
+    data_type: str,
+    *,
+    measure_type: str = "",
+) -> dict[str, str]:
+    """Infer Cube display metadata from the raw column name/type.
+
+    Cube's native vocabulary is named formats like ``number_2`` and
+    ``currency_2`` plus an optional ISO currency code. We keep the inference
+    conservative: identifiers stay unformatted, money-ish names get currency
+    formatting, and generic decimals get two decimal places.
+    """
+    if measure_type == SemanticField.MeasureType.COUNT:
+        return {"format": "number_0"}
+    if not _is_numeric(data_type):
+        return {}
+
+    tokens = _column_tokens(column_name)
+    lowered_type = data_type.lower()
+    if tokens & _PERCENT_COLUMN_TOKENS:
+        return {"format": "percent_1"}
+    if lowered_type == "money" or tokens & _CURRENCY_COLUMN_TOKENS:
+        metadata = {"format": "currency_2"}
+        currency = _infer_currency(column_name)
+        if currency:
+            metadata["currency"] = currency
+        return metadata
+    if _is_integer(data_type) and measure_type != SemanticField.MeasureType.AVG:
+        return {"format": "number_0"}
+    return {"format": "number_2"}
 
 
 def _tenant_metadata_for_schema(schema_name: str):
@@ -266,6 +348,12 @@ def _apply_curation(existing, defaults: dict[str, Any]) -> dict[str, Any]:
             new_metadata["curated_fields"] = sorted(curated)
         if metadata.get("source"):
             new_metadata["source"] = metadata["source"]
+        for key in _DISPLAY_METADATA_KEYS:
+            if key in curated:
+                if key in metadata:
+                    new_metadata[key] = metadata[key]
+                else:
+                    new_metadata.pop(key, None)
         defaults["metadata"] = new_metadata
     return defaults
 
@@ -552,7 +640,14 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
             "expression": "*",
             "measure_type": SemanticField.MeasureType.COUNT,
             "is_visible": True,
-            "metadata": {"generated": True},
+            "metadata": {
+                "generated": True,
+                **_infer_display_metadata(
+                    "count",
+                    "integer",
+                    measure_type=SemanticField.MeasureType.COUNT,
+                ),
+            },
         },
     )
 
@@ -582,6 +677,11 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                     "source_column": column_name,
                     "nullable": column.get("nullable"),
                     "default": column.get("default"),
+                    **(
+                        {}
+                        if _is_identifier_column(column_name, dataset)
+                        else _infer_display_metadata(column_name, data_type)
+                    ),
                 },
             },
         )
@@ -601,7 +701,15 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                         "expression": column_name,
                         "measure_type": measure_type,
                         "is_visible": True,
-                        "metadata": {"source_column": column_name, "generated": True},
+                        "metadata": {
+                            "source_column": column_name,
+                            "generated": True,
+                            **_infer_display_metadata(
+                                column_name,
+                                data_type,
+                                measure_type=measure_type,
+                            ),
+                        },
                     },
                 )
 

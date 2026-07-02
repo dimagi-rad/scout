@@ -27,6 +27,7 @@ from apps.semantic.canvas import (
     resolve_thread_canvas,
 )
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
+from apps.semantic.services.sample_rows import sample_dataset_rows
 from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 if TYPE_CHECKING:
@@ -98,6 +99,33 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
     canvas_read = create_canvas_read_tool(workspace, user, conversation_id)
 
     @tool
+    async def canvas_sample_rows(
+        dataset: str,
+        limit: int = 5,
+        fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Read a bounded semantic-model sample for reasoning.
+
+        Use this when column names/types are not enough to choose labels,
+        descriptions, display formats, or currency codes. The dataset must
+        already exist in the saved semantic model; pending CTE drafts are
+        validated separately by canvas diagnostics. Optional fields may be
+        field names or dataset.field members; otherwise visible dimensions are
+        sampled.
+        """
+
+        def _sample() -> dict[str, Any]:
+            try:
+                return sample_dataset_rows(workspace, dataset, limit, fields)
+            except SemanticCatalogUnavailable as exc:
+                return {"errors": [{"code": "UNAVAILABLE", "message": str(exc)}]}
+            except Exception as exc:
+                logger.exception("canvas_sample_rows failed for workspace %s", workspace.id)
+                return {"errors": [{"code": "SAMPLE_FAILED", "message": str(exc)[:500]}]}
+
+        return await sync_to_async(_sample, thread_sensitive=True)()
+
+    @tool
     async def canvas_apply(operations: list[dict]) -> dict[str, Any]:
         """Apply one atomic batch of canvas ops (the ONLY write path).
 
@@ -148,4 +176,4 @@ def create_canvas_tools(workspace: Workspace, user: User | None, conversation_id
 
         return await sync_to_async(_commit, thread_sensitive=True)()
 
-    return [canvas_read, canvas_apply, canvas_commit]
+    return [canvas_read, canvas_sample_rows, canvas_apply, canvas_commit]

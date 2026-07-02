@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
 import {
+  fieldKind,
+  fieldKindLabel,
+  formatDiffKey,
   formatDiffValue,
   groupByDataset,
   pendingObjects,
@@ -51,6 +54,21 @@ describe("canvasApi helpers", () => {
     expect(formatDiffValue("a\n b")).toBe("a b")
     expect(formatDiffValue("x".repeat(200)).length).toBeLessThanOrEqual(160)
   })
+
+  it("labels value format diffs and classifies field kinds", () => {
+    expect(formatDiffKey("format")).toBe("Value format")
+    expect(formatDiffKey("currency")).toBe("Currency")
+    const measure = makeEntry({
+      object_type: "field",
+      fields: { field_type: "measure" },
+    })
+    const dimension = makeEntry({
+      object_type: "field",
+      base: { field_type: "time_dimension" },
+    })
+    expect(fieldKind(measure)).toBe("measure")
+    expect(fieldKindLabel(dimension)).toBe("time dimension")
+  })
 })
 
 describe("groupByDataset", () => {
@@ -86,7 +104,7 @@ describe("groupByDataset", () => {
     expect(group.relationships.map((entry) => entry.name)).toEqual(["visits_to_users"])
     expect(group.state).toBe("edited")
     expect(group.pendingCount).toBe(2)
-    expect(group.summary).toBe("1 field added · 1 link")
+    expect(group.summary).toBe("1 measure added · 1 link")
   })
 
   it("synthesizes a group for edits whose dataset row is not on the canvas", () => {
@@ -107,6 +125,33 @@ describe("groupByDataset", () => {
     expect(groups[0].dataset).toBeNull()
     expect(groups[0].state).toBe("edited")
     expect(groups[0].summary).toBe("1 field edited")
+  })
+
+  it("summarizes measure and dimension diffs separately", () => {
+    const groups = groupByDataset(
+      makeProjection([
+        makeEntry({
+          object_type: "field",
+          object_uuid: "m1",
+          name: "sum_amount",
+          dataset: "raw_payments",
+          state: "edited",
+          diff: { format: { from: "number_2", to: "currency_2" } },
+          base: { field_type: "measure" },
+        }),
+        makeEntry({
+          object_type: "field",
+          object_uuid: "d1",
+          name: "amount",
+          dataset: "raw_payments",
+          state: "edited",
+          diff: { currency: { from: "", to: "USD" } },
+          base: { field_type: "dimension" },
+        }),
+      ]),
+    )
+
+    expect(groups[0].summary).toBe("1 measure edited · 1 dimension edited")
   })
 
   it("marks CTE drafts and escalates conflicts, sorting pending first", () => {

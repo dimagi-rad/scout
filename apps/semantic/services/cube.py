@@ -104,6 +104,7 @@ def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> di
         payload["public"] = True
     if field.description:
         payload["description"] = field.description
+    _apply_display_metadata(payload, field)
     return payload
 
 
@@ -117,7 +118,18 @@ def _cube_measure(field: SemanticField) -> dict[str, Any]:
         payload["sql"] = _cube_sql(field.expression)
     if field.description:
         payload["description"] = field.description
+    _apply_display_metadata(payload, field)
     return payload
+
+
+def _apply_display_metadata(payload: dict[str, Any], field: SemanticField) -> None:
+    metadata = field.metadata or {}
+    display_format = metadata.get("format")
+    if isinstance(display_format, str) and display_format.strip():
+        payload["format"] = display_format.strip()
+    currency = metadata.get("currency")
+    if isinstance(currency, str) and currency.strip():
+        payload["currency"] = currency.strip().upper()
 
 
 def _cube_type(data_type: str) -> str:
