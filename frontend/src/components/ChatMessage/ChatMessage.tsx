@@ -115,10 +115,17 @@ export function ChatTextPart({ role, text }: ChatTextPartProps) {
   )
 }
 
+// Parent-facing subagent tools: rendered as a grouped card with nested child
+// calls and streamed activity instead of a plain tool row.
+const SUBAGENT_TOOL_LABELS: Record<string, string> = {
+  artifact_manager: "Artifact Manager",
+  canvas_manager: "Canvas Manager",
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function isArtifactToolPart(part: any): boolean {
   const name = getToolName(part)
-  if (name === "artifact_manager") return false
+  if (name in SUBAGENT_TOOL_LABELS) return false
   if (name === "create_artifact" || name === "update_artifact") return true
   if (part.state === "output-available" && part.output != null) {
     const output = part.output
@@ -131,9 +138,30 @@ function isArtifactToolPart(part: any): boolean {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractArtifactId(part: any): string | null {
   if (part.state !== "output-available" || part.output == null) return null
-  const output = part.output
-  if (typeof output === "object" && "artifact_id" in output) {
-    return output.artifact_id as string
+  return extractArtifactIdFromOutput(part.output)
+}
+
+function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
+  const output = parseOutput(rawOutput)
+  if (output == null) return null
+  if (typeof output === "object" && !Array.isArray(output)) {
+    if (
+      "artifact_id" in output
+      && typeof output.artifact_id === "string"
+      && output.artifact_id
+    ) {
+      return output.artifact_id
+    }
+    if (
+      "artifact" in output
+      && output.artifact != null
+      && typeof output.artifact === "object"
+      && "id" in output.artifact
+      && typeof output.artifact.id === "string"
+      && output.artifact.id
+    ) {
+      return output.artifact.id
+    }
   }
   if (typeof output === "string") {
     const match = output.match(
@@ -175,8 +203,7 @@ const AUTO_EXPAND_TOOLS = new Set([
 ])
 
 function displayToolName(toolName: string): string {
-  if (toolName === "artifact_manager") return "Artifact Manager"
-  return toolName
+  return SUBAGENT_TOOL_LABELS[toolName] ?? toolName
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -252,6 +279,7 @@ function artifactManagerSummaryText(rawOutput: unknown): string | null {
     diagnostics?: unknown[]
     runtime_summary?: string
     message?: string
+    committed?: boolean
   }
   const diagnosticsCount = Array.isArray(summary.diagnostics)
     ? summary.diagnostics.length
@@ -264,6 +292,9 @@ function artifactManagerSummaryText(rawOutput: unknown): string | null {
     )
   }
   if (diagnosticsCount != null) lines.push(`Diagnostics: ${diagnosticsCount}`)
+  if (typeof summary.committed === "boolean") {
+    lines.push(`Committed: ${summary.committed ? "yes" : "no"}`)
+  }
   if (summary.runtime_summary) lines.push(`Runtime: ${summary.runtime_summary}`)
   if (summary.message && !summary.message.startsWith("[{")) {
     lines.push(summary.message)
@@ -288,6 +319,7 @@ interface ToolCallPartProps {
 }
 
 interface SubagentActivityPanelProps {
+  toolName: string
   events: any[]
   childParts: any[]
   isLoading: boolean
@@ -298,6 +330,7 @@ interface SubagentActivityPanelProps {
 }
 
 function SubagentActivityPanel({
+  toolName,
   events,
   childParts,
   isLoading,
@@ -344,7 +377,7 @@ function SubagentActivityPanel({
       </div>
 
       {activityParts.length === 0 && childParts.length === 0 && isLoading && (
-        <ChatTextPart role="assistant" text="Starting Artifact Manager..." />
+        <ChatTextPart role="assistant" text={`Starting ${displayToolName(toolName)}...`} />
       )}
 
       {activityParts.length > 0 && (
@@ -370,7 +403,7 @@ function SubagentActivityPanel({
       )}
 
       {childParts.length > 0 && (
-        <div className="space-y-1" data-testid="tool-call-children-artifact_manager">
+        <div className="space-y-1" data-testid={`tool-call-children-${toolName}`}>
           {childParts.map((childPart, childIndex) => (
             <ChatToolCallPart
               key={(childPart as any).toolCallId ?? childIndex}
@@ -397,9 +430,15 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const hasChildren = childParts.length > 0
-  const isSubagentCard = toolName === "artifact_manager" && !isNested
+  const isSubagentCard = toolName in SUBAGENT_TOOL_LABELS && !isNested
   const hasSubagentActivity = subagentEvents.length > 0
   const isErrored = part.state === "output-error"
+  const activeArtifactId = useAppStore((s) => s.activeArtifactId)
+  const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
+  const artifactId =
+    isSubagentCard && hasOutput && part.output != null && !isErrored
+      ? extractArtifactIdFromOutput(part.output)
+      : null
 
   // Scope activeMaterializationJob to THIS specific tool-call card via
   // toolCallId — without this, the progress block and Stop button would
@@ -431,7 +470,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
   // Also stay expanded when we have a failure card to show so the user can
   // see the error inline rather than having to expand a collapsed card.
   const autoExpanded =
-    (toolName === "artifact_manager" && (hasChildren || hasSubagentActivity || isLoading))
+    (toolName in SUBAGENT_TOOL_LABELS && (hasChildren || hasSubagentActivity || isLoading))
     || (isNested && (isLoading || isErrored))
     || (
       AUTO_EXPAND_TOOLS.has(toolName)
@@ -542,6 +581,15 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
           </button>
         )}
       </div>
+      {artifactId && (
+        <div className="border-t border-sky-100 px-3 py-2">
+          <ChatArtifactButton
+            artifactId={artifactId}
+            isActive={activeArtifactId === artifactId}
+            onOpen={openArtifact}
+          />
+        </div>
+      )}
       {expanded && (
         isSubagentCard
         ||
@@ -554,6 +602,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
         <div className="border-t px-3 py-2.5">
           {isSubagentCard ? (
             <SubagentActivityPanel
+              toolName={toolName}
               events={subagentEvents}
               childParts={childParts}
               isLoading={isLoading}

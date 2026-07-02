@@ -5,6 +5,7 @@ import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from apps.agents.subagents.events import SUBAGENT_TOOL_NAMES
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.stream import _redact_tool_input, _tool_content_to_str
 
@@ -79,7 +80,7 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                     tool_part["output"] = output_text
                 tool_part["state"] = "output-available" if tr else "input-available"
                 parts.append(tool_part)
-                if tc["name"] == "artifact_manager" and output_text:
+                if tc["name"] in SUBAGENT_TOOL_NAMES and output_text:
                     parts.extend(_subagent_trace_parts(output_text, parent_tool_call_id=tc["id"]))
 
             if parts:

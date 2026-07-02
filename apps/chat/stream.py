@@ -38,7 +38,10 @@ from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import INJECTED_TOOL_PARAMS
-from apps.agents.subagents.events import SUBAGENT_EVENT_QUEUE_CONFIG_KEY
+from apps.agents.subagents.events import (
+    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    SUBAGENT_TOOL_NAMES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -462,7 +465,7 @@ async def langgraph_to_ui_stream(
                         }
                     )
 
-                if tool_name == "artifact_manager" and pending_subagent_events:
+                if tool_name in SUBAGENT_TOOL_NAMES and pending_subagent_events:
                     for subagent_event in pending_subagent_events:
                         yield _sse(
                             _with_parent_tool_call_id(
