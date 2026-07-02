@@ -1,7 +1,6 @@
 """Tests for workspace management API RBAC invariants (Task 3.1–3.3)."""
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import Client
 
@@ -362,7 +361,7 @@ class TestMemberAdd:
 
         async def fake_refresh(target, providers):
             # simulate the resolver discovering the newly-granted access
-            await sync_to_async(TenantMembership.objects.create)(user=target, tenant=tenant)
+            await TenantMembership.objects.acreate(user=target, tenant=tenant)
             return True
 
         mocker.patch(

@@ -480,6 +480,8 @@ class WorkspaceMemberListView(APIView):
                     )
                 return Response({"error": msg}, status=status.HTTP_403_FORBIDDEN)
 
+        # authz-exempt: duplicate-membership check for the TARGET, not an access
+        # decision for the requester (whose access came via resolve_workspace above).
         if WorkspaceMembership.objects.filter(workspace=workspace, user=target).exists():
             return Response(
                 {"error": "User is already a member."},

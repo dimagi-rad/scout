@@ -69,7 +69,7 @@ async def test_multi_tenant_workspace_without_live_tenant_is_inaccessible():
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
     # no TenantMembership for either tenant
 
-    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
+    workspace, tm, _is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
     assert workspace is None  # multi-tenant hole closed
     assert tm is None
 
