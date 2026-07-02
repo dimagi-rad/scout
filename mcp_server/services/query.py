@@ -143,7 +143,13 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
         result = await _execute_async(ctx, sql_executed, ctx.max_query_timeout_seconds)
     except Exception as e:
         code, message = _classify_error(e)
-        logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
+        if code in (VALIDATION_ERROR, QUERY_TIMEOUT):
+            # Expected user/LLM query errors (e.g. unknown column, timeout) are
+            # returned to the caller; log as warnings without a traceback so they
+            # don't get escalated into Sentry error events.
+            logger.warning("Query error for tenant %s: %s", ctx.tenant_id, message)
+        else:
+            logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
         return error_response(code, message)
 
     if result["row_count"] == validator.max_limit:
