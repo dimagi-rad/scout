@@ -337,9 +337,10 @@ class TestMemberAdd:
         assert resp.json()["error"] == "No Scout user with that email."
 
     def test_user_without_shared_tenant_returns_403(self, client, user, workspace, db):
-        """Target user exists but has no TenantMembership on this workspace's tenants."""
+        """Target exists but has no shared tenant and no token to refresh with →
+        403 telling them to reconnect (the share-time refresh has no token to try)."""
         _outsider = User.objects.create_user(email="outsider@example.com", password="pass")
-        # Deliberately no TenantMembership (membership-on-tenant check should fail)
+        # Deliberately no TenantMembership and no SocialToken.
 
         client.force_login(user)
         resp = client.post(
@@ -348,7 +349,53 @@ class TestMemberAdd:
             content_type="application/json",
         )
         assert resp.status_code == 403
-        assert resp.json()["error"] == "User is not part of this workspace's tenants."
+        assert "sign into Scout again" in resp.json()["error"]
+
+    @pytest.mark.django_db(transaction=True)
+    def test_share_time_refresh_grants_access_then_adds(
+        self, client, user, workspace, tenant, mocker
+    ):
+        """Target was granted access upstream after last login: the share-time
+        refresh picks it up and the add succeeds without them reconnecting."""
+        User.objects.create_user(email="late@example.com", password="pass")
+
+        async def fake_refresh(target, providers):
+            # simulate the resolver discovering the newly-granted access
+            await TenantMembership.objects.acreate(user=target, tenant=tenant)
+            return True
+
+        mocker.patch(
+            "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
+        )
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "late@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201
+
+    def test_share_time_refresh_had_token_but_no_upstream_access(
+        self, client, user, workspace, mocker, db
+    ):
+        """Target had a token (refresh ran) but still lacks upstream access → 403
+        pointing at the source system, not 'reconnect'."""
+        User.objects.create_user(email="noaccess@example.com", password="pass")
+
+        async def fake_refresh(target, providers):
+            return True  # a token existed, but no new membership resulted
+
+        mocker.patch(
+            "apps.workspaces.api.workspace_views._arefresh_target_for_workspace", new=fake_refresh
+        )
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "noaccess@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 403
+        assert "source system" in resp.json()["error"]
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")

@@ -10,7 +10,7 @@ from django.utils import timezone
 from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import (
@@ -42,6 +42,7 @@ async def test_active_jobs_returns_pending_job_with_progress():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="s_t1",
@@ -376,6 +377,7 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_t1")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     tj = await ThreadJob.objects.acreate(
@@ -515,6 +517,7 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
         canonical_name="Connect Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ccc_999")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -573,6 +576,7 @@ async def test_active_jobs_passes_through_progress_unit():
         canonical_name="OCS Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ocs_unit")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -625,6 +629,7 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
         canonical_name="CommCare Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_cc_x")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(

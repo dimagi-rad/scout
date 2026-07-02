@@ -316,6 +316,7 @@ async def test_messages_view_404_for_foreign_owned_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=other, role=WorkspaceRole.READ_WRITE
     )
+    await TenantMembership.objects.acreate(user=other, tenant=tenant)  # pass the live-tenant gate
     owners_thread = await Thread.objects.acreate(workspace=ws, user=owner)
 
     client = AsyncClient()
@@ -340,6 +341,7 @@ async def test_messages_view_empty_for_nonexistent_thread():
     await WorkspaceMembership.objects.acreate(
         workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
     )
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # pass the live-tenant gate
 
     # A random UUID that has no Thread row yet.
     fresh_thread_id = "22222222-2222-2222-2222-222222222222"

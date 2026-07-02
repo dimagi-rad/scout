@@ -67,6 +67,22 @@ async def aget_social_token(user, provider: str) -> SocialToken | None:
     return await _social_token_qs(user, provider).afirst()
 
 
+async def aget_fresh_access_token(user, provider: str) -> str | None:
+    """Return a usable OAuth access token for *user*/*provider*, refreshing it if
+    near expiry, or None if the user has no usable token.
+
+    Unlike a raw token read, this refreshes an expired token — important for
+    server-side refresh on behalf of a user who hasn't logged in recently (their
+    access token is likely stale). Returns the same token value the materializer
+    would use for this user+provider.
+    """
+    token_obj = await _social_token_qs(user, provider).select_related("account", "app").afirst()
+    if token_obj is None:
+        return None
+    cred = await _aresolve_oauth_credential(token_obj, provider)
+    return cred["value"]
+
+
 def _oauth_team_mismatch(membership, token_obj) -> bool:
     """True when the chatbot's team is known and the live OAuth token is scoped elsewhere.
 

@@ -61,7 +61,9 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
                 external_id=desc.external_id,
                 defaults={"canonical_name": desc.canonical_name},
             )
-            tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+            # all_objects: re-adding an API key after its memberships were archived
+            # must reuse the tombstone, not create a duplicate (unique(user,tenant)).
+            tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)
             tm.connection = conn
             tm.team_slug = team_slug
             tm.team_name = team_name

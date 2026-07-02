@@ -525,10 +525,10 @@ def test_trigger_foreign_workspace_forbidden(api_client, user, tenant, tenant_me
 @pytest.mark.django_db
 def test_trigger_workspace_read_role_forbidden(api_client, read_user, tenant, workspace):
     """User with read-only workspace role cannot trigger a run with that workspace."""
-    from apps.users.models import TenantMembership
     from apps.workspaces.models import TenantSchema
 
-    TenantMembership.objects.create(user=read_user, tenant=tenant)
+    # read_user already has a live TenantMembership for `tenant` (via the fixture),
+    # so this exercises the role check, not the access gate.
     TenantSchema.objects.create(tenant=tenant, schema_name="test_schema", state="active")
 
     api_client.force_login(read_user)
