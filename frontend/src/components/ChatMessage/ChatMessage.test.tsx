@@ -154,6 +154,72 @@ describe("ChatMessage live tool cards (arch #246)", () => {
     expect(screen.queryByTestId("tool-call-artifact_write")).not.toBeInTheDocument()
   })
 
+  it("renders subagent child tool calls in emitted order with activity text", () => {
+    const msg = {
+      id: "m3-ordered",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-artifact_manager",
+          toolName: "artifact_manager",
+          toolCallId: "toolu_PARENT",
+          state: "output-available",
+          input: { task: "Create a dashboard" },
+          output: JSON.stringify({ status: "done", message: "Created dashboard" }),
+        },
+        {
+          type: "data-subagent-text",
+          id: "artifact_manager_text_before",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            text: "Before the dataset lookup.",
+          },
+        },
+        {
+          type: "data-subagent-tool-input",
+          id: "artifact_manager_tool_input",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            toolCallId: "artifact_manager_toolu_CHILD",
+            toolName: "describe_dataset",
+            input: { dataset: "visits" },
+          },
+        },
+        {
+          type: "data-subagent-tool-output",
+          id: "artifact_manager_tool_output",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            toolCallId: "artifact_manager_toolu_CHILD",
+            toolName: "describe_dataset",
+            output: JSON.stringify({ name: "visits" }),
+          },
+        },
+        {
+          type: "data-subagent-text",
+          id: "artifact_manager_text_after",
+          data: {
+            parentToolCallId: "toolu_PARENT",
+            subagentName: "artifact_manager",
+            text: "After the dataset lookup.",
+          },
+        },
+      ],
+    } as unknown as UIMessage
+
+    render(<ChatMessage message={msg} isActiveMessage={false} />)
+
+    const before = screen.getByText("Before the dataset lookup.")
+    const tool = screen.getByTestId("tool-call-describe_dataset")
+    const after = screen.getByText("After the dataset lookup.")
+
+    expect(before.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tool.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
   it("renders parent tool cards without child events", () => {
     const msg = liveMessage("artifact_manager", {
       status: "done",

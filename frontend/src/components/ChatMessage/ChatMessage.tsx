@@ -234,8 +234,36 @@ function getSubagentToolData(part: any) {
   }
 }
 
+interface SubagentActivityItem {
+  type: string
+  id?: string
+  parentToolCallId: string
+  subagentName?: string
+  phase?: string
+  message?: string
+  text?: string
+  artifactId?: string
+  artifactVersion?: unknown
+}
+
+interface ChatToolPartShape {
+  type: string
+  toolName?: string
+  toolCallId?: string
+  parentToolCallId?: string
+  subagentName?: string
+  state?: string
+  input?: unknown
+  output?: unknown
+  errorText?: string
+}
+
+type SubagentTimelineItem =
+  | { kind: "activity"; key: string; event: SubagentActivityItem }
+  | { kind: "tool"; key: string; part: ChatToolPartShape }
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getSubagentActivityData(part: any) {
+function getSubagentActivityData(part: any): SubagentActivityItem | null {
   if (
     part?.type !== "data-subagent-status"
     && part?.type !== "data-subagent-text"
@@ -303,8 +331,7 @@ function artifactManagerSummaryText(rawOutput: unknown): string | null {
 }
 
 interface ToolCallPartProps {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  part: any
+  part: ChatToolPartShape
   index: number
   isLatest: boolean
   isActiveMessage: boolean
@@ -313,19 +340,22 @@ interface ToolCallPartProps {
   activeMaterializationJob?: ActiveJob | null
   recentTermination?: RecentTermination | null
   onRetryDispatched?: () => void
-  childParts?: any[]
-  subagentEvents?: any[]
+  childParts?: ChatToolPartShape[]
+  subagentEvents?: SubagentActivityItem[]
+  subagentTimeline?: SubagentTimelineItem[]
   isNested?: boolean
 }
 
 interface SubagentActivityPanelProps {
   toolName: string
-  events: any[]
-  childParts: any[]
+  events: SubagentActivityItem[]
+  childParts: ChatToolPartShape[]
+  timelineItems: SubagentTimelineItem[]
   isLoading: boolean
   rawOutput: unknown
   workspaceId?: string
   threadId?: string
+  isActiveMessage: boolean
   onRetryDispatched?: () => void
 }
 
@@ -333,16 +363,56 @@ function SubagentActivityPanel({
   toolName,
   events,
   childParts,
+  timelineItems,
   isLoading,
   rawOutput,
   workspaceId,
   threadId,
+  isActiveMessage,
   onRetryDispatched,
 }: SubagentActivityPanelProps) {
   const summaryText = artifactManagerSummaryText(rawOutput)
   const latestStatus = [...events]
     .reverse()
     .find((event) => event.type === "data-subagent-status")
+  const hasTimelineTools = timelineItems.some((item) => item.kind === "tool")
+  const renderActivityItem = (event: SubagentActivityItem, eventIndex: number) => {
+    const text = event.text || event.message || event.phase || ""
+    if (!text) return null
+    const id = event.id ?? `subagent-${eventIndex}`
+    if (event.type === "data-subagent-reasoning") {
+      return (
+        <ChatReasoningPart
+          key={id}
+          part={{ id, type: "reasoning", text }}
+          index={eventIndex}
+          isLatest={isLoading && eventIndex === timelineItems.length - 1}
+          isActiveMessage={isActiveMessage}
+        />
+      )
+    }
+    const activityText = event.type === "data-subagent-error" ? `Error: ${text}` : text
+    return <ChatTextPart key={id} role="assistant" text={activityText} />
+  }
+  const renderTimelineItem = (item: SubagentTimelineItem, itemIndex: number) => {
+    if (item.kind === "activity") {
+      return renderActivityItem(item.event, itemIndex)
+    }
+    return (
+      <ChatToolCallPart
+        key={item.key}
+        part={item.part}
+        index={itemIndex}
+        isLatest={false}
+        isActiveMessage={false}
+        workspaceId={workspaceId}
+        threadId={threadId}
+        onRetryDispatched={onRetryDispatched}
+        isNested
+      />
+    )
+  }
+  const timelineContent = timelineItems.map(renderTimelineItem).filter(Boolean)
   const activityParts = events.flatMap((event, eventIndex) => {
     const text = event.text || event.message || event.phase || ""
     if (!text) return []
@@ -376,11 +446,21 @@ function SubagentActivityPanel({
         )}
       </div>
 
-      {activityParts.length === 0 && childParts.length === 0 && isLoading && (
+      {timelineContent.length === 0 && childParts.length === 0 && isLoading && (
         <ChatTextPart role="assistant" text={`Starting ${displayToolName(toolName)}...`} />
       )}
 
-      {activityParts.length > 0 && (
+      {timelineContent.length > 0 ? (
+        <div className="space-y-1" data-testid="subagent-activity-log">
+          {hasTimelineTools ? (
+            <div className="space-y-1" data-testid={`tool-call-children-${toolName}`}>
+              {timelineContent}
+            </div>
+          ) : (
+            timelineContent
+          )}
+        </div>
+      ) : activityParts.length > 0 ? (
         <div className="space-y-1" data-testid="subagent-activity-log">
           {activityParts.map((activityPart, activityIndex) => (
             activityPart.type === "reasoning" ? (
@@ -388,8 +468,8 @@ function SubagentActivityPanel({
                 key={activityPart.id}
                 part={activityPart}
                 index={activityIndex}
-                isLatest
-                isActiveMessage
+                isLatest={isLoading && activityIndex === activityParts.length - 1}
+                isActiveMessage={isActiveMessage}
               />
             ) : (
               <ChatTextPart
@@ -400,13 +480,11 @@ function SubagentActivityPanel({
             )
           ))}
         </div>
-      )}
-
-      {childParts.length > 0 && (
+      ) : childParts.length > 0 && (
         <div className="space-y-1" data-testid={`tool-call-children-${toolName}`}>
           {childParts.map((childPart, childIndex) => (
             <ChatToolCallPart
-              key={(childPart as any).toolCallId ?? childIndex}
+              key={childPart.toolCallId ?? childIndex}
               part={childPart}
               index={childIndex}
               isLatest={false}
@@ -425,8 +503,8 @@ function SubagentActivityPanel({
   )
 }
 
-export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched, childParts = [], subagentEvents = [], isNested = false }: ToolCallPartProps) {
-  const toolName = getToolName(part)
+export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, workspaceId, threadId, activeMaterializationJob, recentTermination, onRetryDispatched, childParts = [], subagentEvents = [], subagentTimeline = [], isNested = false }: ToolCallPartProps) {
+  const toolName = getToolName(part as Parameters<typeof getToolName>[0])
   const isLoading = part.state === "input-streaming" || part.state === "input-available"
   const hasOutput = part.state === "output-available" || part.state === "output-error"
   const hasChildren = childParts.length > 0
@@ -605,10 +683,12 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
               toolName={toolName}
               events={subagentEvents}
               childParts={childParts}
+              timelineItems={subagentTimeline}
               isLoading={isLoading}
               rawOutput={part.output}
               workspaceId={workspaceId}
               threadId={threadId}
+              isActiveMessage={isActiveMessage}
               onRetryDispatched={onRetryDispatched}
             />
           ) : hasChildren && (
@@ -618,7 +698,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
             >
               {childParts.map((childPart, childIndex) => (
                 <ChatToolCallPart
-                  key={(childPart as any).toolCallId ?? childIndex}
+                  key={childPart.toolCallId ?? childIndex}
                   part={childPart}
                   index={childIndex}
                   isLatest={false}
@@ -741,17 +821,30 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
   const isUser = message.role === "user"
   const activeArtifactId = useAppStore((s) => s.activeArtifactId)
   const openArtifact = useAppStore((s) => s.uiActions.openArtifact)
-  const childToolPartsByParent = new Map<string, any[]>()
-  const childToolPartsById = new Map<string, any>()
-  const subagentEventsByParent = new Map<string, any[]>()
+  const childToolPartsByParent = new Map<string, ChatToolPartShape[]>()
+  const childToolPartsById = new Map<string, ChatToolPartShape>()
+  const subagentEventsByParent = new Map<string, SubagentActivityItem[]>()
+  const subagentTimelineByParent = new Map<string, SubagentTimelineItem[]>()
+
+  const pushSubagentTimelineItem = (parentToolCallId: string, item: SubagentTimelineItem) => {
+    const timeline = subagentTimelineByParent.get(parentToolCallId) ?? []
+    timeline.push(item)
+    subagentTimelineByParent.set(parentToolCallId, timeline)
+  }
 
   for (const part of message.parts) {
     if (isToolUIPart(part)) {
-      const parentToolCallId = (part as any).parentToolCallId
+      const toolPart = part as ChatToolPartShape
+      const parentToolCallId = toolPart.parentToolCallId
       if (typeof parentToolCallId !== "string" || !parentToolCallId) continue
       const children = childToolPartsByParent.get(parentToolCallId) ?? []
-      children.push(part)
+      children.push(toolPart)
       childToolPartsByParent.set(parentToolCallId, children)
+      pushSubagentTimelineItem(parentToolCallId, {
+        kind: "tool",
+        key: toolPart.toolCallId ?? `${parentToolCallId}:${children.length - 1}`,
+        part: toolPart,
+      })
       continue
     }
 
@@ -762,6 +855,11 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       const events = subagentEventsByParent.get(activityData.parentToolCallId) ?? []
       events.push(activityData)
       subagentEventsByParent.set(activityData.parentToolCallId, events)
+      pushSubagentTimelineItem(activityData.parentToolCallId, {
+        kind: "activity",
+        key: activityData.id ?? `${activityData.parentToolCallId}:activity:${events.length - 1}`,
+        event: activityData,
+      })
       continue
     }
     const child =
@@ -791,6 +889,11 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
       const children = childToolPartsByParent.get(subagentData.parentToolCallId) ?? []
       children.push(child)
       childToolPartsByParent.set(subagentData.parentToolCallId, children)
+      pushSubagentTimelineItem(subagentData.parentToolCallId, {
+        kind: "tool",
+        key: subagentData.toolCallId,
+        part: child,
+      })
     }
   }
 
@@ -807,7 +910,8 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
           }
 
           if (isToolUIPart(part)) {
-            const parentToolCallId = (part as any).parentToolCallId
+            const toolPart = part as ChatToolPartShape
+            const parentToolCallId = toolPart.parentToolCallId
             if (typeof parentToolCallId === "string" && parentToolCallId) {
               return null
             }
@@ -826,13 +930,12 @@ export function ChatMessage({ message, isActiveMessage, workspaceId, threadId, a
               }
             }
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const toolCallId = (part as any).toolCallId
+            const toolCallId = toolPart.toolCallId
             const recentTermination =
               toolCallId && recentTerminationsByToolCallId
                 ? recentTerminationsByToolCallId[toolCallId] ?? null
                 : null
-            return <ChatToolCallPart key={i} part={part} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} />
+            return <ChatToolCallPart key={i} part={toolPart} index={i} isLatest={i === message.parts.length - 1} isActiveMessage={isActiveMessage} workspaceId={workspaceId} threadId={threadId} activeMaterializationJob={activeMaterializationJob} recentTermination={recentTermination} onRetryDispatched={onRetryDispatched} childParts={toolCallId ? childToolPartsByParent.get(toolCallId) ?? [] : []} subagentEvents={toolCallId ? subagentEventsByParent.get(toolCallId) ?? [] : []} subagentTimeline={toolCallId ? subagentTimelineByParent.get(toolCallId) ?? [] : []} />
           }
 
           return null
