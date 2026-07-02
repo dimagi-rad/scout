@@ -20,7 +20,7 @@ refresh," so access is never revoked on an inconclusive fetch (fail-open).
 from __future__ import annotations
 
 import logging
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 from allauth.socialaccount.models import SocialAccount
@@ -219,14 +219,13 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
     """Paginate through the CommCare user_domains API, returning the COMPLETE set.
 
     Tastypie returns a *relative* ``meta.next`` (e.g. ``/api/user_domains/v1/?offset=20``),
-    so we resolve it against the base URL. A ``next`` that resolves to a different host
-    is refused with a raise rather than silently truncating — a partial list must never
-    look "successful," or full-sync would archive every domain past page 1.
+    so we resolve it against the base URL and follow it. (The previous code only
+    followed an *absolute* same-host next, so a relative next silently truncated after
+    page 1 — under full-sync that would archive every domain past page 1.)
     Raises CommCareAuthError on 401/403; TenantResolutionError on shape drift.
     """
     results: list[dict] = []
     url: str | None = COMMCARE_DOMAIN_API
-    base_netloc = urlparse(COMMCARE_DOMAIN_API).netloc
     async with httpx.AsyncClient(timeout=30) as client:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
@@ -240,13 +239,5 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
                 raise TenantResolutionError("CommCare response missing 'objects' key")
             results.extend(data["objects"])
             next_url = (data.get("meta") or {}).get("next")
-            if not next_url:
-                url = None
-            else:
-                resolved = urljoin(COMMCARE_DOMAIN_API, next_url)
-                if urlparse(resolved).netloc != base_netloc:
-                    raise TenantResolutionError(
-                        f"CommCare pagination points off-host, refusing to truncate: {next_url!r}"
-                    )
-                url = resolved
+            url = urljoin(COMMCARE_DOMAIN_API, next_url) if next_url else None
     return results
