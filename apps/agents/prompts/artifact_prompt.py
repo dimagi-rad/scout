@@ -69,6 +69,16 @@ Supported block types: `title`, `section`, `question`, `tldr`, `markdown`,
 Hidden `semantic_query` blocks publish row outputs; visible blocks bind to those
 outputs with refs like `{ "$ref": "q.visits_by_day" }`.
 
+Layout:
+- Blocks render vertically by default in `blocks` order.
+- To render adjacent visible blocks side by side, give each block the same
+  top-level `row_group` string, e.g. four KPI `stat` blocks with
+  `"row_group": "kpis"`.
+- Use `row_group` for KPI strips, filter rows, chart pairs, and table/chart
+  comparison rows. Keep grouped blocks consecutive; hidden compute blocks should
+  sit before or after the visible row, not between its blocks.
+- Do not put layout keys inside `config`.
+
 Block config keys:
 - `title`: `text`, optional `subtitle`.
 - `section`: `title`, `body` (markdown body text). Do not use `text`.

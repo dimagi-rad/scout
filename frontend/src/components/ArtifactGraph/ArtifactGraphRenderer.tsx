@@ -25,10 +25,7 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
     [workspaceId],
   )
   const engine = useStoryEngine(registry, ctx, doc)
-  const visibleGroups = useMemo(
-    () => groupVisibleBlocks(doc.blocks.filter((block) => !block.hidden)),
-    [doc.blocks],
-  )
+  const visibleGroups = useMemo(() => groupVisibleBlocks(doc.blocks), [doc.blocks])
 
   if (!engine) {
     return null
@@ -44,16 +41,31 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
           </div>
         )}
         <div className="space-y-4">
-          {visibleGroups.map((group, index) => (
-            <div
-              key={`${group.key}-${index}`}
-              className={group.blocks.length > 1 ? "grid gap-4 md:grid-cols-2" : undefined}
-            >
-              {group.blocks.map((block) => (
-                <RenderedBlock key={block.id} block={block} engine={engine} registry={registry} />
-              ))}
-            </div>
-          ))}
+          {visibleGroups.map((group, index) =>
+            group.blocks.length === 1 ? (
+              <RenderedBlock
+                key={group.blocks[0].id}
+                block={group.blocks[0]}
+                engine={engine}
+                registry={registry}
+              />
+            ) : (
+              <div
+                key={`${group.key}-${index}`}
+                className="grid gap-4"
+                data-block-row-group={group.key}
+                style={{
+                  gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${
+                    group.blocks.length >= 3 ? "200px" : "300px"
+                  }), 1fr))`,
+                }}
+              >
+                {group.blocks.map((block) => (
+                  <RenderedBlock key={block.id} block={block} engine={engine} registry={registry} />
+                ))}
+              </div>
+            ),
+          )}
         </div>
       </div>
     </div>
@@ -95,14 +107,21 @@ function RenderedBlock({
 
 function groupVisibleBlocks(blocks: StoryBlock[]) {
   const groups: Array<{ key: string; blocks: StoryBlock[] }> = []
+  let currentGroup: string | null = null
+
   for (const block of blocks) {
-    const key = block.row_group || block.id
+    if (block.hidden) {
+      currentGroup = null
+      continue
+    }
+    const key = block.row_group ?? block.id
     const last = groups[groups.length - 1]
-    if (block.row_group && last?.key === block.row_group) {
+    if (block.row_group && block.row_group === currentGroup && last?.key === block.row_group) {
       last.blocks.push(block)
     } else {
       groups.push({ key, blocks: [block] })
     }
+    currentGroup = block.row_group ?? null
   }
   return groups
 }

@@ -1,6 +1,6 @@
 # Artifact types
 
-Scout supports five artifact types, each suited to different visualization and reporting needs.
+Scout supports several artifact types, each suited to different visualization and reporting needs.
 
 ## React
 
@@ -62,6 +62,17 @@ SVG graphics rendered inline. Best for diagrams and simple illustrations.
 - Entity relationship diagrams
 - Flowcharts
 - Simple data graphics
+
+## Story
+
+**Type identifier:** `story`
+
+Semantic-query-backed analysis stories rendered from `data.story_doc`. A story is an ordered list of typed blocks
+such as `title`, `section`, `date_filter`, `semantic_query`, `graph`, `table`, and `stat`.
+
+Blocks render vertically by default. Consecutive visible blocks with the same top-level `row_group` render side by
+side in a responsive row; use this for KPI strips, chart pairs, filter rows, and comparison sections. Keep hidden
+compute blocks outside the visible row group.
 
 ## Versioning
 
