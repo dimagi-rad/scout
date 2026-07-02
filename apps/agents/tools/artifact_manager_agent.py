@@ -349,7 +349,7 @@ async def _forward_nested_event(
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
     message_buffers: dict[tuple[str, str], str],
-    trace: "_SubagentTraceRecorder",
+    trace: _SubagentTraceRecorder,
 ) -> None:
     event_type = event.get("event")
     if event_type == "on_tool_start":
@@ -390,7 +390,7 @@ async def _forward_nested_tool_start(
     parent_tool_call_id: str,
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
-    trace: "_SubagentTraceRecorder",
+    trace: _SubagentTraceRecorder,
 ) -> None:
     from apps.chat.stream import _redact_tool_input
 
@@ -431,7 +431,7 @@ async def _forward_nested_tool_end(
     parent_tool_call_id: str,
     run_to_tool_call_id: dict[str, str],
     pending_tool_starts: dict[str, dict[str, Any]],
-    trace: "_SubagentTraceRecorder",
+    trace: _SubagentTraceRecorder,
 ) -> None:
     from apps.chat.stream import _tool_content_to_str, _truncate_tool_output
 
@@ -481,7 +481,7 @@ async def _forward_nested_chat_stream(
     event: dict[str, Any],
     parent_tool_call_id: str,
     message_buffers: dict[tuple[str, str], str],
-    trace: "_SubagentTraceRecorder",
+    trace: _SubagentTraceRecorder,
 ) -> None:
     chunk = event.get("data", {}).get("chunk")
     if not chunk or not hasattr(chunk, "content") or not chunk.content:

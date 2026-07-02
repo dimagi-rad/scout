@@ -39,6 +39,7 @@ from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.subagents.events import (
     SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    SUBAGENT_TOOL_NAMES,
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
@@ -55,6 +56,8 @@ from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceViewSchema,
 )
 from mcp_server.pipeline_registry import get_registry
@@ -88,7 +91,7 @@ MCP_TOOL_NAMES = frozenset(
     }
 )
 
-LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager"})
+LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 
 # MCP tools the server advertises but that must NEVER be exposed to the agent.
 #
@@ -604,7 +607,7 @@ def _make_injecting_tool_node(
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
                     extra = {"tool_call_id": tc_id}
-                    if tc["name"] == "artifact_manager":
+                    if tc["name"] in SUBAGENT_TOOL_NAMES:
                         extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
                     tc = {**tc, "args": {**tc["args"], **extra}}
                 modified_calls.append(tc)
@@ -656,6 +659,18 @@ async def build_agent_graph(
     """
     logger.info("Building agent graph for workspace %s (interactive=%s)", workspace.id, interactive)
 
+    # Same policy as the canvas REST endpoints: only members above the read
+    # role can stage/commit canvas changes, so read-only members never get the
+    # canvas_manager tool (the tool closures re-check as the hard boundary).
+    canvas_write = bool(
+        interactive
+        and conversation_id
+        and user is not None
+        and await WorkspaceMembership.objects.filter(workspace=workspace, user=user)
+        .exclude(role=WorkspaceRole.READ)
+        .aexists()
+    )
+
     # --- Build tools ---
     tools = _build_tools(
         workspace,
@@ -664,6 +679,7 @@ async def build_agent_graph(
         conversation_id=conversation_id,
         interactive=interactive,
         job_id=job_id,
+        canvas_write=canvas_write,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -690,7 +706,9 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(workspace, user, interactive=interactive)
+    system_prompt = await _build_system_prompt(
+        workspace, user, interactive=interactive, canvas_write=canvas_write
+    )
     logger.debug(
         "System prompt assembled: %d characters for workspace %s",
         len(system_prompt),
@@ -840,6 +858,7 @@ def _build_tools(
     conversation_id: str | None = None,
     interactive: bool = True,
     job_id: int | None = None,
+    canvas_write: bool = False,
 ) -> list:
     """
     Build the tool list for the agent.
@@ -878,6 +897,8 @@ def _build_tools(
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
     from apps.agents.tools.artifact_manager_agent import create_artifact_manager_tool
+    from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
+    from apps.agents.tools.canvas_tool import create_canvas_read_tool
 
     tools.append(create_save_learning_tool(workspace, user))
     tools.append(
@@ -888,6 +909,21 @@ def _build_tools(
             conversation_id=conversation_id,
         )
     )
+    if interactive and conversation_id:
+        # The canvas is thread-bound; headless (recipe) runs have no thread.
+        # The parent keeps a read-only canvas_read for cheap draft questions;
+        # all canvas writes are delegated to the Canvas Manager subagent,
+        # which read-only workspace members do not get at all.
+        tools.append(create_canvas_read_tool(workspace, user, conversation_id))
+        if canvas_write:
+            tools.append(
+                create_canvas_manager_tool(
+                    workspace,
+                    user,
+                    mcp_tools or [],
+                    conversation_id=conversation_id,
+                )
+            )
     tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
     if not interactive:
@@ -895,7 +931,9 @@ def _build_tools(
     return tools
 
 
-async def _build_system_prompt(workspace: Workspace, user, interactive: bool = True) -> str:
+async def _build_system_prompt(
+    workspace: Workspace, user, interactive: bool = True, canvas_write: bool = False
+) -> str:
     """
     Assemble the complete system prompt for a workspace.
 
@@ -951,6 +989,30 @@ When results are truncated, suggest adding filters or using aggregations to redu
 
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
         sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
+
+    if interactive and canvas_write:
+        sections.append("""
+## Semantic Canvas (dataset editing)
+
+This conversation has a canvas — a draft changeset over the workspace's
+datasets, shown to the user in the side panel. When the user asks to edit a
+dataset's label/description, add measures or dimensions, link datasets, or
+create a CTE/SQL-derived dataset, delegate the whole job to the
+`canvas_manager` tool with a complete task description (datasets, field names
+and source columns, relationship endpoints, SQL, and whether to commit). Use
+`canvas_read` yourself only to answer questions about pending draft changes.
+Draft changes become queryable only after the canvas is committed.
+Autogenerated fields can be curated (label/description) but never removed.
+""")
+    elif interactive:
+        sections.append("""
+## Semantic Canvas (read-only)
+
+This conversation has a canvas showing draft dataset changes in the side
+panel. Use `canvas_read` to answer questions about it. This user's workspace
+role is read-only: you cannot stage or save dataset changes for them — if they
+ask for edits, explain that a read-write workspace role is required.
+""")
 
     result = "\n".join(sections)
 

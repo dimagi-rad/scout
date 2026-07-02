@@ -13,6 +13,12 @@ from typing import Any
 
 SUBAGENT_EVENT_QUEUE_CONFIG_KEY = "subagent_event_queue"
 
+# Parent-facing subagent tools. The graph injects the event queue into these
+# calls, the SSE stream flushes their buffered child events, and the message
+# converter rehydrates their persisted traces. Keep in sync with the frontend
+# SUBAGENT_TOOL_LABELS map in ChatMessage.tsx.
+SUBAGENT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
+
 _current_event_queue: ContextVar[asyncio.Queue | None] = ContextVar(
     "scout_subagent_event_queue",
     default=None,
