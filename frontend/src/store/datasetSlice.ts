@@ -21,6 +21,7 @@ export interface SemanticRelationship {
   to_dataset: string
   relationship_type: string
   join_expression: string
+  direction?: "outgoing" | "incoming"
 }
 
 export interface SemanticDataset {

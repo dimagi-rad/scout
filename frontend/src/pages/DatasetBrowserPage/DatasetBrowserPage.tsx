@@ -20,7 +20,21 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import type { SemanticDataset, SemanticField } from "@/store/datasetSlice"
+import { isCreatedDataset, isCreatedField } from "./datasetMeta"
 import { filterDatasets } from "./datasetSearch"
+
+function CreatedBadge({ testId }: { testId?: string }) {
+  return (
+    <Badge
+      variant="outline"
+      className="border-sky-200 bg-sky-50 text-sky-800"
+      title="Created through the canvas"
+      data-testid={testId}
+    >
+      Created
+    </Badge>
+  )
+}
 
 export function DatasetBrowserPage() {
   const catalog = useAppStore((s) => s.datasetCatalog)
@@ -168,7 +182,12 @@ export function DatasetBrowserPage() {
               >
                 <Table2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{dataset.label || dataset.name}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate font-medium">{dataset.label || dataset.name}</span>
+                    {isCreatedDataset(dataset) && (
+                      <CreatedBadge testId={`dataset-created-badge-${dataset.name}`} />
+                    )}
+                  </span>
                   <span className="block truncate text-xs text-muted-foreground">
                     {dataset.measures.length} measures ·{" "}
                     {dataset.dimensions.length + dataset.time_dimensions.length} dimensions
@@ -231,6 +250,14 @@ export function DatasetBrowserPage() {
             <DatasetDetail
               dataset={visibleDataset}
               error={selectedDatasetStatus === "error" ? selectedDatasetError : null}
+              onOpenDataset={(name) => {
+                const target = catalog?.datasets.find((entry) => entry.name === name)
+                if (target) {
+                  selectDataset(target)
+                } else {
+                  void fetchDataset(name)
+                }
+              }}
             />
           ) : (
             <CenteredState
@@ -371,9 +398,11 @@ function DatasetPicker({
 function DatasetDetail({
   dataset,
   error,
+  onOpenDataset,
 }: {
   dataset: SemanticDataset
   error: string | null
+  onOpenDataset: (name: string) => void
 }) {
   const displayName = dataset.label || dataset.name
   const showTableName = dataset.table_name && dataset.table_name !== dataset.name
@@ -385,6 +414,9 @@ function DatasetDetail({
           <h2 className="min-w-0 break-words text-xl font-semibold sm:text-2xl">
             {displayName}
           </h2>
+          {isCreatedDataset(dataset) && (
+            <CreatedBadge testId={`dataset-detail-created-badge-${dataset.name}`} />
+          )}
         </div>
         {error && (
           <p className="mt-2 max-w-3xl text-sm text-destructive">
@@ -398,6 +430,11 @@ function DatasetDetail({
           {showTableName && (
             <Badge variant="secondary" className="max-w-full truncate">
               Table {dataset.table_name}
+            </Badge>
+          )}
+          {dataset.primary_key && (
+            <Badge variant="secondary" data-testid="dataset-primary-key-badge">
+              PK {dataset.primary_key}
             </Badge>
           )}
           {dataset.row_count != null && (
@@ -427,38 +464,39 @@ function DatasetDetail({
 
         <aside className="space-y-4">
           <div className="rounded-md border p-4">
-            <h3 className="text-sm font-medium">Query Surface</h3>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Use these member names with `semantic_query`.
-            </p>
-            <div className="mt-3 space-y-2 text-xs">
-              <div>
-                <span className="font-medium">Default count</span>
-                <code className="mt-1 block rounded bg-muted px-2 py-1">{dataset.name}.count</code>
-              </div>
-              {dataset.time_dimensions[0] && (
-                <div>
-                  <span className="font-medium">Primary time dimension</span>
-                  <code className="mt-1 block rounded bg-muted px-2 py-1">
-                    {dataset.time_dimensions[0].member}
-                  </code>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="rounded-md border p-4">
             <h3 className="text-sm font-medium">Relationships</h3>
             {dataset.relationships.length === 0 ? (
               <p className="mt-2 text-sm text-muted-foreground">No relationships defined yet.</p>
             ) : (
-              <div className="mt-3 space-y-2">
-                {dataset.relationships.map((relationship) => (
-                  <div key={relationship.id} className="text-sm">
-                    <div className="font-medium">{relationship.name}</div>
-                    <div className="text-muted-foreground">{relationship.relationship_type}</div>
-                  </div>
-                ))}
+              <div className="mt-3 space-y-3" data-testid="dataset-relationships">
+                {dataset.relationships.map((relationship) => {
+                  const outgoing = relationship.direction !== "incoming"
+                  const other = outgoing ? relationship.to_dataset : relationship.from_dataset
+                  return (
+                    <div key={`${relationship.id}-${relationship.direction}`} className="text-sm">
+                      <div className="flex min-w-0 items-center gap-1.5 font-medium">
+                        <span className="text-muted-foreground">{outgoing ? "→" : "←"}</span>
+                        <button
+                          type="button"
+                          className="truncate text-left text-primary hover:underline"
+                          onClick={() => onOpenDataset(other)}
+                          data-testid={`relationship-target-${other}`}
+                        >
+                          {other}
+                        </button>
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {relationship.relationship_type}
+                        {outgoing ? "" : " (referenced by)"}
+                      </div>
+                      {relationship.join_expression && (
+                        <code className="mt-1 block truncate rounded bg-muted px-2 py-1 text-[11px]">
+                          {relationship.join_expression}
+                        </code>
+                      )}
+                    </div>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -504,7 +542,12 @@ function FieldSection({
               fields.map((field) => (
                 <TableRow key={field.id}>
                   <TableCell>
-                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{field.member}</code>
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{field.member}</code>
+                      {isCreatedField(field) && (
+                        <CreatedBadge testId={`field-created-badge-${field.name}`} />
+                      )}
+                    </span>
                     <div className="mt-1 text-sm font-medium">{field.label}</div>
                   </TableCell>
                   <TableCell>
