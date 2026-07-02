@@ -252,8 +252,8 @@ function buildNode(node: RechartsNode, state: { rows: Row[]; seriesIndex: number
     props[name] = resolveProp(value)
   }
   const defaulted = applyDefaults(node.type, props, seriesIndex)
-  if (DATA_INJECT_TYPES.has(node.type) && defaulted.data === undefined) {
-    defaulted.data = state.rows
+  if (DATA_INJECT_TYPES.has(node.type)) {
+    defaulted.data = resolveDataProp(node.type, defaulted.data, state.rows)
   }
   if (key !== undefined) {
     defaulted.key = key
@@ -321,6 +321,20 @@ function resolveProp(value: unknown): unknown {
     return (input: unknown) => formatValue(input, format)
   }
   return value
+}
+
+function resolveDataProp(type: string, value: unknown, rows: Row[]): unknown {
+  if (value === undefined || isRefValue(value)) {
+    return rows
+  }
+  if (Array.isArray(value)) {
+    return value
+  }
+  throw new Error(`Recharts ${type} props.data must be an array; omit props.data to use block rows`)
+}
+
+function isRefValue(value: unknown): boolean {
+  return isRecord(value) && typeof value.$ref === "string"
 }
 
 function isGraphSeries(value: GraphSeries | undefined): value is GraphSeries {

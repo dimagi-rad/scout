@@ -78,6 +78,39 @@ CONFIG_KEYS = {
     "stat": {"title", "label", "value_path", "value_key", "format", "delta_path"},
 }
 
+RECHARTS_COMPONENT_TYPES = {
+    "Area",
+    "AreaChart",
+    "Bar",
+    "BarChart",
+    "CartesianGrid",
+    "Cell",
+    "ComposedChart",
+    "Legend",
+    "Line",
+    "LineChart",
+    "Pie",
+    "PieChart",
+    "ReferenceLine",
+    "Scatter",
+    "ScatterChart",
+    "Tooltip",
+    "XAxis",
+    "YAxis",
+}
+
+RECHARTS_DATA_TYPES = {
+    "AreaChart",
+    "BarChart",
+    "ComposedChart",
+    "LineChart",
+    "Pie",
+    "PieChart",
+    "ScatterChart",
+}
+
+RECHARTS_RESULT_KEY_PROPS = {"dataKey", "nameKey", "xAxisKey", "yAxisKey"}
+
 
 class GraphDocError(ValueError):
     """Raised when an atomic graph doc edit is invalid."""
@@ -461,6 +494,99 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 block_id=block_id,
                 path="config.query",
                 require_time_dimension=_has_input_ref(block, "date_range"),
+            )
+        )
+    if block_type == "graph" and "recharts" in config:
+        diagnostics.extend(
+            _recharts_diagnostics(
+                config.get("recharts"),
+                block_id=block_id,
+                path="config.recharts",
+            )
+        )
+    return diagnostics
+
+
+def _recharts_diagnostics(
+    node: Any,
+    *,
+    block_id: str,
+    path: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(node, dict):
+        return [
+            problem(
+                f"{path} must be an object",
+                block_id=block_id,
+                code="recharts_shape",
+            )
+        ]
+
+    diagnostics: list[dict[str, Any]] = []
+    node_type = node.get("type")
+    if not isinstance(node_type, str) or not node_type:
+        diagnostics.append(
+            problem(
+                f"{path}.type must be a non-empty string",
+                block_id=block_id,
+                code="recharts_type",
+            )
+        )
+    elif node_type not in RECHARTS_COMPONENT_TYPES:
+        diagnostics.append(
+            problem(
+                f'Unsupported Recharts component "{node_type}"',
+                block_id=block_id,
+                code="recharts_type",
+            )
+        )
+
+    props = node.get("props", {})
+    if props is not None and not isinstance(props, dict):
+        diagnostics.append(
+            problem(
+                f"{path}.props must be an object",
+                block_id=block_id,
+                code="recharts_props",
+            )
+        )
+    elif isinstance(props, dict):
+        if node_type in RECHARTS_DATA_TYPES and "data" in props:
+            diagnostics.append(
+                problem(
+                    f"{path}.props.data is not supported; bind graph inputs.data and omit props.data",
+                    block_id=block_id,
+                    code="recharts_data_prop",
+                )
+            )
+        for prop_name in RECHARTS_RESULT_KEY_PROPS:
+            if prop_name in props and not isinstance(props[prop_name], str):
+                diagnostics.append(
+                    problem(
+                        f"{path}.props.{prop_name} must be a string",
+                        block_id=block_id,
+                        code="recharts_key_prop",
+                    )
+                )
+
+    children = node.get("children", [])
+    if children is None:
+        return diagnostics
+    if not isinstance(children, list):
+        diagnostics.append(
+            problem(
+                f"{path}.children must be an array",
+                block_id=block_id,
+                code="recharts_children",
+            )
+        )
+        return diagnostics
+    for index, child in enumerate(children):
+        diagnostics.extend(
+            _recharts_diagnostics(
+                child,
+                block_id=block_id,
+                path=f"{path}.children[{index}]",
             )
         )
     return diagnostics

@@ -105,6 +105,49 @@ describe("ArtifactGraphRenderer", () => {
     )
   })
 
+  it("uses block rows when legacy Recharts props.data contains a ref", async () => {
+    const legacyArtifact = artifact()
+    legacyArtifact.data.story_doc = {
+      schema_version: 1,
+      blocks: [
+        {
+          id: "pie",
+          type: "graph",
+          inputs: {
+            data: {
+              value: [
+                { status: "Approved", visits_count: 12 },
+                { status: "Pending", visits_count: 3 },
+              ],
+            },
+          },
+          config: {
+            title: "Visit status",
+            recharts: {
+              type: "PieChart",
+              children: [
+                {
+                  type: "Pie",
+                  props: {
+                    data: { $ref: "q.status" },
+                    dataKey: "visits_count",
+                    nameKey: "status",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    }
+
+    const { container } = render(<ArtifactGraphRenderer artifact={legacyArtifact} workspaceId="workspace-1" />)
+
+    await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
+    expect(screen.queryByText(/Chart config error/)).not.toBeInTheDocument()
+    expect(mockedPost).not.toHaveBeenCalled()
+  })
+
   it("lays adjacent row_group blocks out as a responsive row", () => {
     const kpiArtifact = artifact()
     kpiArtifact.data.story_doc = {

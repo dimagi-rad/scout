@@ -145,6 +145,31 @@ def test_graph_doc_allows_recharts_graph_config_keys():
     assert "unknown_config_key" not in codes
 
 
+def test_graph_doc_rejects_recharts_data_prop_refs():
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {
+        "type": "PieChart",
+        "children": [
+            {
+                "type": "Pie",
+                "props": {
+                    "data": {"$ref": "q.visits_by_day"},
+                    "dataKey": "visits_count",
+                    "nameKey": "date",
+                },
+            }
+        ],
+    }
+
+    diagnostics = validate_doc(doc)
+
+    assert {
+        item.get("block_id")
+        for item in diagnostics
+        if item.get("code") == "recharts_data_prop"
+    } == {"chart"}
+
+
 def test_graph_doc_passes_cube_filter_operators_to_runtime():
     doc = graph_doc()
     query = doc["blocks"][1]["config"]["queries"]["visits_by_day"]
