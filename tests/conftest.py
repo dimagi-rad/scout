@@ -48,8 +48,6 @@ def tenant_membership(db, user, tenant):
     Idempotent so it can coexist with the ``workspace`` fixture, which also gives the
     user a live TenantMembership for the same tenant.
     """
-    from apps.users.models import TenantMembership
-
     tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
     return tm
 
@@ -88,7 +86,6 @@ def workspace(db, user, tenant):
     auto_create_workspace_on_membership signal (which would spawn a second,
     auto-created workspace and break count/listing assertions).
     """
-    from apps.users.models import TenantMembership
     from apps.workspaces.models import (
         Workspace,
         WorkspaceMembership,
@@ -108,7 +105,6 @@ def workspace(db, user, tenant):
 @pytest.fixture
 def read_user(db, workspace, tenant):
     User = get_user_model()
-    from apps.users.models import TenantMembership
     from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="reader@example.com", password="pass")
@@ -122,7 +118,6 @@ def read_user(db, workspace, tenant):
 @pytest.fixture
 def write_user(db, workspace, tenant):
     User = get_user_model()
-    from apps.users.models import TenantMembership
     from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="writer@example.com", password="pass")
