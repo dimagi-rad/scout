@@ -14,7 +14,7 @@ from django.db import close_old_connections
 
 from apps.semantic.models import SemanticDataset, SemanticField
 from apps.semantic.services.catalog import SemanticCatalogUnavailable, get_active_semantic_model
-from apps.semantic.services.cube_client import CubeClient, CubeConfigurationError
+from apps.semantic.services.cube_client import CubeClient, CubeConfigurationError, CubeQueryError
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
     build_cube_security_context,
@@ -24,19 +24,6 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import CONNECTION_ERROR, VALIDATION_ERROR, error_response
 
 MAX_SEMANTIC_LIMIT = 500
-SUPPORTED_FILTERS = {
-    "equals",
-    "notEquals",
-    "contains",
-    "notContains",
-    "gt",
-    "gte",
-    "lt",
-    "lte",
-    "inDateRange",
-    "set",
-    "notSet",
-}
 SUPPORTED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
 
@@ -93,6 +80,8 @@ async def run_semantic_query(
         )
     except CubeConfigurationError as exc:
         return error_response(VALIDATION_ERROR, str(exc))
+    except CubeQueryError as exc:
+        return error_response(VALIDATION_ERROR, f"Cube query execution failed: {exc}")
     except Exception as exc:
         return error_response(CONNECTION_ERROR, f"Cube query execution failed: {exc}")
 
@@ -240,10 +229,6 @@ def _cube_filter(member: ResolvedMember, filter_spec: dict[str, Any]) -> dict[st
     }
     if operator not in {"set", "notSet"}:
         value = filter_spec.get("value")
-        if operator == "inDateRange" and (
-            not isinstance(value, list | tuple) or len(value) != 2
-        ):
-            raise SemanticQueryError("inDateRange requires value [start, end].")
         payload["values"] = value if isinstance(value, list) else [value]
     return payload
 
@@ -312,9 +297,6 @@ def _resolve_filter(model, filter_spec: dict[str, Any]) -> tuple[ResolvedMember,
             SemanticField.FieldType.TIME_DIMENSION,
         },
     )
-    operator = filter_spec.get("operator", "equals")
-    if operator not in SUPPORTED_FILTERS:
-        raise SemanticQueryError(f"Unsupported filter operator '{operator}'.")
     return member, filter_spec
 
 

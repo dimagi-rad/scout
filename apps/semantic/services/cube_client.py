@@ -26,6 +26,10 @@ class CubeConfigurationError(RuntimeError):
     """Raised when Cube is not configured for live query execution."""
 
 
+class CubeQueryError(RuntimeError):
+    """Raised when Cube accepts the request but rejects the query payload."""
+
+
 class CubeClient:
     """Small REST client for Cube Core."""
 
@@ -63,6 +67,14 @@ class CubeClient:
         async with httpx.AsyncClient(timeout=30.0) as client:
             while True:
                 response = await client.post(url, json={"query": cube_query}, headers=headers)
+                if response.is_error:
+                    try:
+                        error_payload = response.json()
+                    except ValueError:
+                        error_payload = {}
+                    error = error_payload.get("error")
+                    if error:
+                        raise CubeQueryError(str(error))
                 response.raise_for_status()
                 payload = response.json()
                 error = payload.get("error")
@@ -75,7 +87,7 @@ class CubeClient:
                     await asyncio.sleep(CONTINUE_WAIT_POLL_DELAY_SECONDS)
                     continue
                 if error:
-                    raise RuntimeError(str(error))
+                    raise CubeQueryError(str(error))
                 break
         data = payload.get("data") or []
         if not isinstance(data, list):

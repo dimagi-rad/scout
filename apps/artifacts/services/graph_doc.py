@@ -49,20 +49,6 @@ RAW_QUERY_KEYS = {
     "timezone",
 }
 
-ALLOWED_FILTER_OPERATORS = {
-    "equals",
-    "notEquals",
-    "contains",
-    "notContains",
-    "gt",
-    "gte",
-    "lt",
-    "lte",
-    "inDateRange",
-    "set",
-    "notSet",
-}
-
 ALLOWED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 
 CONFIG_KEYS = {
@@ -717,9 +703,6 @@ def _filter_diagnostics(
             continue
         if not isinstance(item.get("field"), str) or not item.get("field"):
             diagnostics.append(problem(f"{path}.filters[{index}] needs field", block_id=block_id, code="query_filter_field"))
-        operator = item.get("operator", "equals")
-        if operator not in ALLOWED_FILTER_OPERATORS:
-            diagnostics.append(problem(f"{path}.filters[{index}] has unsupported operator", block_id=block_id, code="query_filter_operator"))
         if "member" in item:
             diagnostics.append(problem(f"{path}.filters[{index}] uses member; use field", block_id=block_id, code="query_filter_member_key"))
     return diagnostics

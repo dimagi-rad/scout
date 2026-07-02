@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from apps.semantic.services import cube_client as cube_client_module
-from apps.semantic.services.cube_client import CubeClient
+from apps.semantic.services.cube_client import CubeClient, CubeQueryError
 
 
 def _patched_async_client(monkeypatch, handler):
@@ -76,8 +76,23 @@ async def test_execute_query_raises_on_real_cube_error(monkeypatch):
     _patched_async_client(monkeypatch, handler)
     client = CubeClient(base_url="http://cube.test", api_secret="secret")
 
-    with pytest.raises(RuntimeError, match="Member not found"):
+    with pytest.raises(CubeQueryError, match="Member not found"):
         await client.execute_query(
             {"measures": ["visits.bogus"]},
+            security_context={"workspaceId": "w1"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_query_raises_cube_query_error_from_http_error_payload(monkeypatch):
+    def handler(request):
+        return httpx.Response(400, json={"error": "Unsupported filter operator 'afterDate'."})
+
+    _patched_async_client(monkeypatch, handler)
+    client = CubeClient(base_url="http://cube.test", api_secret="secret")
+
+    with pytest.raises(CubeQueryError, match="Unsupported filter operator"):
+        await client.execute_query(
+            {"measures": ["visits.count"]},
             security_context={"workspaceId": "w1"},
         )

@@ -145,6 +145,22 @@ def test_graph_doc_allows_recharts_graph_config_keys():
     assert "unknown_config_key" not in codes
 
 
+def test_graph_doc_passes_cube_filter_operators_to_runtime():
+    doc = graph_doc()
+    query = doc["blocks"][1]["config"]["queries"]["visits_by_day"]
+    query["filters"] = [
+        {
+            "field": "visits.visit_date",
+            "operator": "afterDate",
+            "value": "2026-06-01",
+        }
+    ]
+
+    codes = {item.get("code") for item in validate_doc(doc)}
+
+    assert "query_filter_operator" not in codes
+
+
 def test_apply_ops_rejects_introduced_diagnostics():
     with pytest.raises(GraphDocError, match="introduced diagnostics"):
         apply_ops(

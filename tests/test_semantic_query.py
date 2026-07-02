@@ -118,6 +118,32 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
     }
 
 
+def test_compile_passes_cube_filter_operators_through(monkeypatch, workspace, semantic_model):
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "filters": [
+                {
+                    "field": "visits.visit_date",
+                    "operator": "afterDate",
+                    "value": "2026-06-01",
+                }
+            ],
+        },
+    )
+
+    assert compiled["cube_query"]["filters"] == [
+        {
+            "member": "visits.visit_date",
+            "operator": "afterDate",
+            "values": ["2026-06-01"],
+        }
+    ]
+
+
 def test_compile_time_granularity_does_not_duplicate_params(
     monkeypatch, workspace, semantic_model
 ):
@@ -568,6 +594,38 @@ async def _fake_workspace_context(workspace_id):
         schema_name="tenant_schema",
         connection_params={},
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_semantic_query_surfaces_cube_query_errors_as_validation(
+    monkeypatch, workspace, semantic_model
+):
+    class RejectingCubeClient:
+        async def execute_query(self, cube_query, *, security_context):
+            raise query_service.CubeQueryError("Unsupported filter operator 'afterDate'.")
+
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(query_service, "CubeClient", RejectingCubeClient)
+    monkeypatch.setattr(query_service, "load_workspace_context", _fake_workspace_context)
+
+    result = await query_service.run_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "filters": [
+                {
+                    "field": "visits.visit_date",
+                    "operator": "afterDate",
+                    "value": "2026-06-01",
+                }
+            ],
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error"]["code"] == "VALIDATION_ERROR"
+    assert "Unsupported filter operator 'afterDate'" in result["error"]["message"]
 
 
 def test_failed_build_keeps_last_known_good_readable(
