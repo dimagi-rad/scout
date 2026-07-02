@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { fireEvent, render, screen } from "@testing-library/react"
 import type { UIMessage } from "ai"
 import { ChatMessage } from "./ChatMessage"
+import { useAppStore } from "@/store/store"
 
 // A live tool part as produced by the SSE stream: `output` is a JSON STRING
 // (apps/chat/stream.py emits the MCP envelope as compact JSON). The rich card
@@ -162,6 +163,23 @@ describe("ChatMessage live tool cards (arch #246)", () => {
 
     expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
     expect(screen.queryByText("nested")).not.toBeInTheDocument()
+  })
+
+  it("shows a view artifact button for artifact manager output", () => {
+    const artifactId = "22222222-2222-2222-2222-222222222222"
+    useAppStore.setState({ activeArtifactId: null })
+    const msg = liveMessage("artifact_manager", {
+      status: "done",
+      artifact_id: artifactId,
+      artifact_version: 1,
+      message: "Created dashboard",
+    })
+
+    render(<ChatMessage message={msg} isActiveMessage={false} />)
+
+    fireEvent.click(screen.getByText("View Artifact"))
+
+    expect(useAppStore.getState().activeArtifactId).toBe(artifactId)
   })
 
   it("shows loading feedback for an artifact manager subagent with no child events yet", () => {

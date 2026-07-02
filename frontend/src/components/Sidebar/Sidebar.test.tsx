@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { Thread } from "@/store/uiSlice"
 import { Sidebar } from "./Sidebar"
 
 const mocks = vi.hoisted(() => {
@@ -16,8 +17,8 @@ const mocks = vi.hoisted(() => {
       activeDomainId: "workspace-1",
       domains: [{ id: "workspace-1", name: "Test Workspace" }],
       threadId: null,
-      threads: [],
-      threadsStatus: "success",
+      threads: [] as Thread[],
+      threadsStatus: "loaded",
       domainActions: { fetchDomains },
       authActions: { logout },
       uiActions: { fetchThreads, newThread, selectThread },
@@ -56,6 +57,9 @@ describe("Sidebar hover behavior", () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.state.threadId = null
+    mocks.state.threads = []
+    mocks.state.threadsStatus = "loaded"
     originalHasFocus = document.hasFocus
     originalMatches = Element.prototype.matches
     originalRequestAnimationFrame = window.requestAnimationFrame
@@ -121,5 +125,49 @@ describe("Sidebar hover behavior", () => {
     await waitFor(() => {
       expect(shell).toHaveAttribute("data-expanded", "true")
     })
+  })
+
+  it("uses the old history preview unless a custom title exists", () => {
+    mocks.state.threads = [
+      {
+        id: "thread-preview",
+        title: "Untitled",
+        history_title: "Build an artifact from example queries",
+        title_is_custom: false,
+        created_at: "2026-07-01T12:00:00Z",
+        updated_at: "2026-07-01T12:00:00Z",
+        is_shared: false,
+        is_public: false,
+        share_token: null,
+        last_viewed_at: null,
+      },
+      {
+        id: "thread-title",
+        title: "Quarterly review",
+        history_title: "Old prompt text",
+        title_is_custom: true,
+        created_at: "2026-07-01T12:00:00Z",
+        updated_at: "2026-07-01T12:00:00Z",
+        is_shared: false,
+        is_public: false,
+        share_token: null,
+        last_viewed_at: null,
+      },
+    ]
+
+    renderSidebar()
+
+    expect(screen.getByTestId("sidebar-thread-thread-preview")).toHaveTextContent(
+      "Build an artifact from example queries",
+    )
+    expect(screen.getByTestId("sidebar-thread-thread-preview")).not.toHaveTextContent(
+      "Untitled",
+    )
+    expect(screen.getByTestId("sidebar-thread-thread-title")).toHaveTextContent(
+      "Quarterly review",
+    )
+    expect(screen.getByTestId("sidebar-thread-thread-title")).not.toHaveTextContent(
+      "Old prompt text",
+    )
   })
 })

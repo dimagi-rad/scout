@@ -42,7 +42,7 @@ describe("ChatThreadHeader", () => {
     expect(screen.getByText("Untitled")).toHaveClass("text-muted-foreground")
   })
 
-  it("exposes files and canvas controls", () => {
+  it("exposes artifacts and canvas controls", () => {
     const onOpenFiles = vi.fn()
     const onOpenCanvas = vi.fn()
     render(
@@ -57,7 +57,7 @@ describe("ChatThreadHeader", () => {
       />,
     )
 
-    fireEvent.click(screen.getByRole("button", { name: "Files" }))
+    fireEvent.click(screen.getByRole("button", { name: "Artifacts" }))
     fireEvent.click(screen.getByRole("button", { name: "Canvas" }))
 
     expect(onOpenFiles).toHaveBeenCalledOnce()

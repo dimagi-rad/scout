@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Check, FileText, Loader2, PanelsTopLeft, Pencil } from "lucide-react"
+import { Check, LayoutDashboard, Loader2, PanelsTopLeft, Pencil } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
@@ -131,11 +131,11 @@ export function ChatThreadHeader({
           variant={panelOpen && panelMode === "files" ? "secondary" : "ghost"}
           size="icon-sm"
           onClick={onOpenFiles}
-          title="Files"
-          aria-label="Files"
+          title="Artifacts"
+          aria-label="Artifacts"
           className={cn(panelOpen && panelMode === "files" && "bg-accent")}
         >
-          <FileText className="h-4 w-4" />
+          <LayoutDashboard className="h-4 w-4" />
         </Button>
         <Button
           type="button"

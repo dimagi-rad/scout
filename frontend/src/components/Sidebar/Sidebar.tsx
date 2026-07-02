@@ -274,7 +274,7 @@ export function Sidebar() {
               </div>
             )}
             {threads.map((thread) => {
-              const historyTitle = thread.history_title?.trim() || thread.title
+              const historyTitle = sidebarThreadTitle(thread)
               const job = jobsByThreadId[thread.id]
               const lastUpdated = new Date(thread.updated_at)
               const baseline = thread.last_viewed_at
@@ -375,4 +375,13 @@ export function Sidebar() {
       </aside>
     </div>
   )
+}
+
+function sidebarThreadTitle(thread: {
+  title: string
+  history_title?: string
+  title_is_custom: boolean
+}): string {
+  if (thread.title_is_custom) return thread.title.trim() || "Untitled"
+  return thread.history_title?.trim() || "Untitled"
 }

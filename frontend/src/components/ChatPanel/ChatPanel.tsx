@@ -104,7 +104,7 @@ export function ChatPanel() {
     } catch (loadError) {
       setThreadArtifactsStatus("error")
       setThreadArtifactsError(
-        loadError instanceof Error ? loadError.message : "Failed to load files",
+        loadError instanceof Error ? loadError.message : "Failed to load artifacts",
       )
     }
   }, [activeDomainId, threadId])

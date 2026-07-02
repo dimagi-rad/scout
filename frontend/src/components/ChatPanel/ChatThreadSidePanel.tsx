@@ -1,5 +1,15 @@
 import type { ReactNode } from "react"
-import { FileText, Loader2, PanelsTopLeft, RefreshCw, X } from "lucide-react"
+import {
+  ChevronRight,
+  FileBarChart,
+  FileText,
+  LayoutDashboard,
+  Loader2,
+  PanelsTopLeft,
+  RefreshCw,
+  X,
+  type LucideIcon,
+} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -56,12 +66,12 @@ export function ChatThreadSidePanel({
         <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-3">
           <div className="flex min-w-0 items-center gap-2">
             {mode === "files" ? (
-              <FileText className="h-4 w-4 text-muted-foreground" />
+              <LayoutDashboard className="h-4 w-4 text-muted-foreground" />
             ) : (
               <PanelsTopLeft className="h-4 w-4 text-muted-foreground" />
             )}
             <h2 className="truncate text-sm font-semibold">
-              {mode === "files" ? "Files" : "Canvas"}
+              {mode === "files" ? "Artifacts" : "Canvas"}
             </h2>
             {mode === "files" && artifacts.length > 0 && (
               <Badge variant="secondary">{artifacts.length}</Badge>
@@ -75,7 +85,7 @@ export function ChatThreadSidePanel({
                 size="icon-xs"
                 onClick={onRefreshFiles}
                 disabled={filesStatus === "loading"}
-                aria-label="Refresh files"
+                aria-label="Refresh artifacts"
               >
                 <RefreshCw className={cn("h-3.5 w-3.5", filesStatus === "loading" && "animate-spin")} />
               </Button>
@@ -119,7 +129,7 @@ function ThreadFilesList({
     return (
       <PanelState
         icon={<Loader2 className="h-5 w-5 animate-spin" />}
-        title="Loading files"
+        title="Loading artifacts"
       />
     )
   }
@@ -127,9 +137,9 @@ function ThreadFilesList({
   if (status === "error") {
     return (
       <PanelState
-        icon={<FileText className="h-5 w-5" />}
-        title="Files unavailable"
-        body={error ?? "Could not load this thread's files."}
+        icon={<LayoutDashboard className="h-5 w-5" />}
+        title="Artifacts unavailable"
+        body={error ?? "Could not load this thread's artifacts."}
         action={<Button size="sm" onClick={onRefresh}>Try Again</Button>}
       />
     )
@@ -138,8 +148,8 @@ function ThreadFilesList({
   if (artifacts.length === 0) {
     return (
       <PanelState
-        icon={<FileText className="h-5 w-5" />}
-        title="No files"
+        icon={<LayoutDashboard className="h-5 w-5" />}
+        title="No artifacts"
         body="Artifacts created or referenced in this thread will appear here."
       />
     )
@@ -147,34 +157,49 @@ function ThreadFilesList({
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="divide-y">
+      <div className="space-y-1 p-2">
         {artifacts.map((artifact) => (
-          <button
+          <ArtifactListItem
             key={artifact.id}
-            type="button"
-            onClick={() => onOpenArtifact(artifact.id)}
-            className="block w-full px-3 py-3 text-left hover:bg-accent"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{artifact.title || "Untitled"}</div>
-                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                  <span>{artifact.artifact_type}</span>
-                  <span>v{artifact.version}</span>
-                  <span>{sourceLabel(artifact.source)}</span>
-                </div>
-              </div>
-              <FileText className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            </div>
-            {artifact.description && (
-              <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">
-                {artifact.description}
-              </p>
-            )}
-          </button>
+            artifact={artifact}
+            onOpen={() => onOpenArtifact(artifact.id)}
+          />
         ))}
       </div>
     </div>
+  )
+}
+
+function ArtifactListItem({
+  artifact,
+  onOpen,
+}: {
+  artifact: ThreadArtifactSummary
+  onOpen: () => void
+}) {
+  const Icon = artifactIcon(artifact.artifact_type)
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group flex w-full items-start gap-3 rounded-md px-2.5 py-2.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35"
+    >
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground transition-colors group-hover:border-primary/30 group-hover:text-primary">
+        <Icon className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-foreground">
+          {artifact.title || "Untitled"}
+        </span>
+        {artifact.description && (
+          <span className="mt-0.5 block line-clamp-2 text-xs leading-5 text-muted-foreground">
+            {artifact.description}
+          </span>
+        )}
+      </span>
+      <ChevronRight className="mt-2 h-4 w-4 shrink-0 text-muted-foreground/60 opacity-0 transition-opacity group-hover:opacity-100" />
+    </button>
   )
 }
 
@@ -201,9 +226,8 @@ function PanelState({
   )
 }
 
-function sourceLabel(source: ThreadArtifactSummary["source"]): string {
-  if (source === "created") return "Created"
-  if (source === "updated") return "Updated"
-  if (source === "attached") return "Attached"
-  return "Mentioned"
+function artifactIcon(type: string): LucideIcon {
+  if (type === "story" || type === "plotly") return FileBarChart
+  if (type === "react" || type === "html" || type === "svg") return PanelsTopLeft
+  return FileText
 }
