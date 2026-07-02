@@ -793,6 +793,7 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
     )
+    await TenantMembership.objects.acreate(user=other_user, tenant=tenant)  # peer's live access
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_xuser_cancel",
@@ -870,6 +871,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
         user=other_user,
         role=WorkspaceRole.READ_WRITE,
     )
+    await TenantMembership.objects.acreate(user=other_user, tenant=tenant)  # peer's live access
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_orphan_skip_other",

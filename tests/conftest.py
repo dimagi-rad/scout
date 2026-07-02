@@ -43,10 +43,15 @@ def tenant(db):
 
 @pytest.fixture
 def tenant_membership(db, user, tenant):
-    """Create a TenantMembership (signal auto-creates a Workspace)."""
+    """Create a TenantMembership (signal auto-creates a Workspace on first create).
+
+    Idempotent so it can coexist with the ``workspace`` fixture, which also gives the
+    user a live TenantMembership for the same tenant.
+    """
     from apps.users.models import TenantMembership
 
-    return TenantMembership.objects.create(user=user, tenant=tenant)
+    tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+    return tm
 
 
 @pytest.fixture
@@ -76,7 +81,14 @@ def other_user(db):
 
 @pytest.fixture
 def workspace(db, user, tenant):
-    """Create a test Workspace with WorkspaceTenant and WorkspaceMembership."""
+    """Create a test Workspace with WorkspaceTenant, WorkspaceMembership, and the
+    user's live TenantMembership — workspace access now requires a live tenant.
+
+    The TenantMembership is bulk_created so it does NOT fire the
+    auto_create_workspace_on_membership signal (which would spawn a second,
+    auto-created workspace and break count/listing assertions).
+    """
+    from apps.users.models import TenantMembership
     from apps.workspaces.models import (
         Workspace,
         WorkspaceMembership,
@@ -87,24 +99,35 @@ def workspace(db, user, tenant):
     ws = Workspace.objects.create(name=tenant.canonical_name, created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    TenantMembership.objects.bulk_create(
+        [TenantMembership(user=user, tenant=tenant)], ignore_conflicts=True
+    )
     return ws
 
 
 @pytest.fixture
-def read_user(db, workspace):
+def read_user(db, workspace, tenant):
     User = get_user_model()
+    from apps.users.models import TenantMembership
     from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="reader@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ)
+    TenantMembership.objects.bulk_create(
+        [TenantMembership(user=u, tenant=tenant)], ignore_conflicts=True
+    )
     return u
 
 
 @pytest.fixture
-def write_user(db, workspace):
+def write_user(db, workspace, tenant):
     User = get_user_model()
+    from apps.users.models import TenantMembership
     from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
     u = User.objects.create_user(email="writer@example.com", password="pass")
     WorkspaceMembership.objects.create(workspace=workspace, user=u, role=WorkspaceRole.READ_WRITE)
+    TenantMembership.objects.bulk_create(
+        [TenantMembership(user=u, tenant=tenant)], ignore_conflicts=True
+    )
     return u

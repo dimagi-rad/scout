@@ -10,7 +10,8 @@ from apps.users.decorators import (  # noqa: F401 — re-exported for backwards 
     get_user_if_authenticated,
     login_required_json,
 )
-from apps.workspaces.models import WorkspaceMembership
+from apps.users.models import TenantMembership
+from apps.workspaces.access import aresolve_workspace_access
 
 logger = logging.getLogger(__name__)
 
@@ -94,33 +95,27 @@ async def repair_dangling_tool_calls(agent, config) -> list[ToolMessage]:
 async def _resolve_workspace_and_membership(user, workspace_id):
     """Resolve workspace access for a user.
 
-    Returns (workspace, tenant_membership, is_multi_tenant):
-    - (None, None, False): workspace not found or user lacks WorkspaceMembership
-    - (workspace, None, True): multi-tenant workspace; WorkspaceMembership is sufficient
-    - (workspace, None, False): single-tenant workspace but user lacks TenantMembership
-    - (workspace, tm, False): single-tenant workspace with a valid TenantMembership
-    """
-    try:
-        wm = await WorkspaceMembership.objects.select_related("workspace").aget(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return None, None, False
+    Access (WorkspaceMembership AND a live tenant) is decided by the single
+    authorizer; this only computes the tenant_membership / multi-tenant flags the
+    chat callers need on top of that.
 
-    workspace = wm.workspace
+    Returns (workspace, tenant_membership, is_multi_tenant):
+    - (None, None, False): no access (not a member, or no live tenant)
+    - (workspace, None, True): multi-tenant workspace (access already verified)
+    - (workspace, tm, False): single-tenant workspace with the live TenantMembership
+    """
+    workspace, _wm = await aresolve_workspace_access(user, workspace_id)
+    if workspace is None:
+        return None, None, False
 
     is_multi_tenant = await workspace.workspace_tenants.acount() > 1
     if is_multi_tenant:
+        # The authorizer already confirmed the user shares a live tenant of this
+        # workspace, so multi-tenant access is no longer WorkspaceMembership-only.
         return workspace, None, True
 
     tenant = await workspace.tenants.afirst()
     if tenant is None:
         return workspace, None, False
-
-    from apps.users.models import TenantMembership
-
-    try:
-        tm = await TenantMembership.objects.aget(user=user, tenant=tenant)
-    except TenantMembership.DoesNotExist:
-        return workspace, None, False
+    tm = await TenantMembership.objects.filter(user=user, tenant=tenant).afirst()  # live-only
     return workspace, tm, False

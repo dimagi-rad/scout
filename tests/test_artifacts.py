@@ -15,7 +15,7 @@ from django.test import AsyncClient, Client
 import apps.artifacts.views as artifact_views
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
@@ -670,6 +670,8 @@ class TestArtifactQueryDataRouting:
                 provider="commcare", external_id=ext, canonical_name=ext
             )
             await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+        # user needs a live TenantMembership for one tenant to pass the access gate
+        await TenantMembership.objects.acreate(user=user, tenant=t)
         art = await Artifact.objects.acreate(
             workspace=ws,
             created_by=user,
