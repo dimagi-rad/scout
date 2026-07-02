@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import json
-
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.semantic.models import SemanticCanvas, SemanticDataset
+from apps.chat.models import Thread
+from apps.semantic.canvas import (
+    apply_operations,
+    canvas_projection,
+    commit_canvas,
+    resolve_thread_canvas,
+)
+from apps.semantic.models import SemanticDataset
 from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
     get_active_semantic_model,
@@ -70,102 +75,71 @@ class SemanticQueryView(APIView):
         return Response(result)
 
 
-class SemanticCanvasView(APIView):
+def _resolve_thread_canvas(request, workspace_id, thread_id, *, write: bool):
+    """Shared auth + resolution for the thread canvas endpoints."""
+    workspace, membership, err = resolve_workspace(request, workspace_id)
+    if err:
+        return None, err
+    if write and membership.role == WorkspaceRole.READ:
+        return None, Response(
+            {"error": "Read-write or manage role required to edit the canvas."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+    thread = Thread.objects.filter(id=thread_id).first()
+    if thread is not None and (
+        thread.workspace_id != workspace.id or thread.user_id != request.user.id
+    ):
+        return None, Response({"error": "Thread not found."}, status=status.HTTP_404_NOT_FOUND)
+    if thread is None:
+        # Frontend-generated thread UUIDs may reach the canvas before the
+        # first chat message creates the Thread row; create the shell.
+        thread = Thread.objects.create(id=thread_id, workspace=workspace, user=request.user)
+    try:
+        canvas = resolve_thread_canvas(workspace, thread, request.user)
+    except SemanticCatalogUnavailable as exc:
+        return None, Response(
+            {"error": str(exc), "schema_status": exc.schema_status},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return canvas, None
+
+
+class ThreadCanvasView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get(self, request, workspace_id):
-        workspace, _membership, err = resolve_workspace(request, workspace_id)
+    def get(self, request, workspace_id, thread_id):
+        canvas, err = _resolve_thread_canvas(request, workspace_id, thread_id, write=False)
         if err:
             return err
-        try:
-            model = get_active_semantic_model(workspace)
-        except SemanticCatalogUnavailable as exc:
-            return Response(
-                {"error": str(exc), "schema_status": exc.schema_status},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        canvas = (
-            SemanticCanvas.objects.filter(
-                workspace=workspace,
-                semantic_model=model,
-                status=SemanticCanvas.Status.OPEN,
-            )
-            .order_by("-updated_at")
-            .first()
-        )
-        if canvas is None:
-            canvas = SemanticCanvas.objects.create(
-                workspace=workspace,
-                semantic_model=model,
-                created_by=request.user,
-            )
-        return Response(_serialize_canvas(canvas, model))
+        return Response(canvas_projection(canvas))
 
-    def post(self, request, workspace_id):
-        workspace, membership, err = resolve_workspace(request, workspace_id)
+
+class ThreadCanvasApplyView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, workspace_id, thread_id):
+        canvas, err = _resolve_thread_canvas(request, workspace_id, thread_id, write=True)
         if err:
             return err
-        if membership.role == WorkspaceRole.READ:
+        operations = (request.data or {}).get("operations")
+        result = apply_operations(canvas, operations, request.user)
+        if "errors" in result:
+            # Top-level "error" so the frontend ApiError surfaces the message.
+            first = result["errors"][0]
             return Response(
-                {"error": "Read-write or manage role required to edit the semantic canvas."},
-                status=status.HTTP_403_FORBIDDEN,
+                {**result, "error": first.get("message", "Invalid canvas operation.")},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        try:
-            model = get_active_semantic_model(workspace)
-        except SemanticCatalogUnavailable as exc:
-            return Response(
-                {"error": str(exc), "schema_status": exc.schema_status},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        canvas = (
-            SemanticCanvas.objects.filter(
-                workspace=workspace,
-                semantic_model=model,
-                status=SemanticCanvas.Status.OPEN,
-            )
-            .order_by("-updated_at")
-            .first()
-        )
-        if canvas is None:
-            canvas = SemanticCanvas(
-                workspace=workspace,
-                semantic_model=model,
-                created_by=request.user,
-            )
-        canvas.changes = request.data.get("changes", canvas.changes)
-        canvas.diagnostics = _diagnose_canvas_changes(canvas.changes)
-        canvas.save()
-        return Response(_serialize_canvas(canvas, model))
+        return Response(canvas_projection(canvas))
 
 
-def _serialize_canvas(canvas: SemanticCanvas, model) -> dict:
-    return {
-        "id": str(canvas.id),
-        "status": canvas.status,
-        "changes": canvas.changes,
-        "diagnostics": canvas.diagnostics,
-        "catalog": serialize_catalog(model),
-        "updated_at": canvas.updated_at.isoformat(),
-    }
+class ThreadCanvasCommitView(APIView):
+    permission_classes = [IsAuthenticated]
 
-
-def _diagnose_canvas_changes(changes) -> list[dict]:
-    if not isinstance(changes, dict):
-        return [
-            {
-                "severity": "error",
-                "code": "invalid_canvas_changes",
-                "message": "Canvas changes must be an object.",
-            }
-        ]
-    try:
-        json.dumps(changes)
-    except TypeError as exc:
-        return [
-            {
-                "severity": "error",
-                "code": "invalid_canvas_changes",
-                "message": str(exc),
-            }
-        ]
-    return []
+    def post(self, request, workspace_id, thread_id):
+        canvas, err = _resolve_thread_canvas(request, workspace_id, thread_id, write=True)
+        if err:
+            return err
+        report = commit_canvas(canvas, request.user)
+        report["projection"] = canvas_projection(canvas)
+        return Response(report)

@@ -109,6 +109,20 @@ def _is_time(data_type: str) -> bool:
     return lowered in _TIME_TYPES or "timestamp" in lowered
 
 
+def _fallback_primary_key(table_type: str, columns: list[dict[str, Any]]) -> str:
+    """Assume an ``id`` column keys a base table whose DDL declared no PK.
+
+    Cube requires primary keys on joinable cubes. Views are excluded: a
+    multi-tenant view unions per-tenant surrogate ids that can collide, so a
+    view-level ``id`` is not a safe key.
+    """
+    if table_type != "table":
+        return ""
+    if any(column.get("name") == "id" for column in columns):
+        return "id"
+    return ""
+
+
 def _tenant_metadata_for_schema(schema_name: str):
     ts = TenantSchema.objects.filter(schema_name=schema_name).first()
     if ts is None:
@@ -198,15 +212,17 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
             tenant_metadata,
             pipeline_config,
         )
+        columns = (detail or {}).get("columns", [])
         physical_tables.append(
             PhysicalTable(
                 name=table_name,
                 type=entry.get("type", "table"),
                 description=(detail or {}).get("description") or entry.get("description", ""),
-                columns=(detail or {}).get("columns", []),
+                columns=columns,
                 materialized_row_count=entry.get("materialized_row_count"),
                 materialized_at=entry.get("materialized_at"),
-                primary_key=primary_keys.get(table_name, ""),
+                primary_key=primary_keys.get(table_name, "")
+                or _fallback_primary_key(entry.get("type", "table"), columns),
             )
         )
     return schema_name, physical_tables
@@ -229,6 +245,31 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
         ) from exc
 
 
+def _apply_curation(existing, defaults: dict[str, Any]) -> dict[str, Any]:
+    """Respect curated keys and sticky metadata when refreshing an existing row.
+
+    Canvas commits record user-curated keys in ``metadata.curated_fields``; a
+    catalog refresh must not overwrite those values, and must carry the
+    curation marker (and the canvas ``source`` marker) into the replacement
+    metadata — otherwise the next materialization silently undoes the edits.
+    """
+    if existing is None:
+        return defaults
+    metadata = existing.metadata or {}
+    curated = set(metadata.get("curated_fields", []))
+    for key in curated:
+        if key in defaults:
+            defaults[key] = getattr(existing, key, defaults[key])
+    if "metadata" in defaults:
+        new_metadata = dict(defaults["metadata"])
+        if curated:
+            new_metadata["curated_fields"] = sorted(curated)
+        if metadata.get("source"):
+            new_metadata["source"] = metadata["source"]
+        defaults["metadata"] = new_metadata
+    return defaults
+
+
 def ensure_semantic_model(workspace) -> SemanticModel:
     """Create or refresh the default semantic catalog from active physical tables."""
     schema_name, tables = load_physical_tables(workspace)
@@ -247,10 +288,12 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                 workspace=workspace,
                 table_name=table.name,
             ).first()
-            dataset, _ = SemanticDataset.objects.update_or_create(
-                workspace=workspace,
-                name=dataset_name,
-                defaults={
+            existing_dataset = SemanticDataset.objects.filter(
+                workspace=workspace, name=dataset_name
+            ).first()
+            defaults = _apply_curation(
+                existing_dataset,
+                {
                     "semantic_model": model,
                     "label": _humanize_name(table.name),
                     "description": (
@@ -269,6 +312,11 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                         "row_count_verified": False,
                     },
                 },
+            )
+            dataset, _ = SemanticDataset.objects.update_or_create(
+                workspace=workspace,
+                name=dataset_name,
+                defaults=defaults,
             )
             existing_physical_dataset_ids.add(str(dataset.id))
             _sync_fields(dataset, table.columns, annotation)
@@ -352,10 +400,12 @@ def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> 
             )
             continue
 
-        dataset, _ = SemanticDataset.objects.update_or_create(
-            workspace=workspace,
-            name=custom.name,
-            defaults={
+        existing_custom = SemanticDataset.objects.filter(
+            workspace=workspace, name=custom.name
+        ).first()
+        defaults = _apply_curation(
+            existing_custom,
+            {
                 "semantic_model": model,
                 "label": custom.label or _humanize_name(custom.name),
                 "description": custom.description,
@@ -371,6 +421,11 @@ def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> 
                     "row_count_verified": False,
                 },
             },
+        )
+        dataset, _ = SemanticDataset.objects.update_or_create(
+            workspace=workspace,
+            name=custom.name,
+            defaults=defaults,
         )
         _sync_fields(dataset, columns, None)
         CustomDataset.objects.filter(id=custom.id).update(diagnostics=[])
@@ -475,11 +530,21 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
 def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annotation) -> None:
     column_notes = annotation.column_notes if annotation else {}
     active_names: set[str] = set()
+    existing_by_name = {field.name: field for field in dataset.fields.all()}
 
-    count_field, _ = SemanticField.objects.update_or_create(
-        dataset=dataset,
-        name="count",
-        defaults={
+    def upsert_field(field_name: str, defaults: dict[str, Any]):
+        curated_defaults = _apply_curation(existing_by_name.get(field_name), defaults)
+        field, _ = SemanticField.objects.update_or_create(
+            dataset=dataset,
+            name=field_name,
+            defaults=curated_defaults,
+        )
+        active_names.add(field_name)
+        return field
+
+    upsert_field(
+        "count",
+        {
             "label": "Count",
             "description": f"Number of rows in {_humanize_name(dataset.table_name)}.",
             "field_type": SemanticField.FieldType.MEASURE,
@@ -490,7 +555,6 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
             "metadata": {"generated": True},
         },
     )
-    active_names.add(count_field.name)
 
     for column in columns:
         column_name = column.get("name", "")
@@ -504,10 +568,9 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
             if _is_time(data_type)
             else SemanticField.FieldType.DIMENSION
         )
-        SemanticField.objects.update_or_create(
-            dataset=dataset,
-            name=field_name,
-            defaults={
+        upsert_field(
+            field_name,
+            {
                 "label": _humanize_name(column_name),
                 "description": description,
                 "field_type": field_type,
@@ -522,18 +585,15 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                 },
             },
         )
-        active_names.add(field_name)
 
         if _is_numeric(data_type) and not _is_identifier_column(column_name, dataset):
             for measure_type, prefix, label_prefix in (
                 (SemanticField.MeasureType.SUM, "sum", "Total"),
                 (SemanticField.MeasureType.AVG, "avg", "Average"),
             ):
-                measure_name = semantic_name(f"{prefix}_{column_name}")
-                SemanticField.objects.update_or_create(
-                    dataset=dataset,
-                    name=measure_name,
-                    defaults={
+                upsert_field(
+                    semantic_name(f"{prefix}_{column_name}"),
+                    {
                         "label": f"{label_prefix} {_humanize_name(column_name)}",
                         "description": "",
                         "field_type": SemanticField.FieldType.MEASURE,
@@ -544,14 +604,26 @@ def _sync_fields(dataset: SemanticDataset, columns: list[dict[str, Any]], annota
                         "metadata": {"source_column": column_name, "generated": True},
                     },
                 )
-                active_names.add(measure_name)
 
-    SemanticField.objects.filter(dataset=dataset).exclude(name__in=active_names).update(
-        is_visible=False
-    )
+    # Canvas-created fields are user-authored, not column-derived: they never
+    # appear in active_names and must not be hidden by the refresh.
+    SemanticField.objects.filter(dataset=dataset).exclude(name__in=active_names).exclude(
+        metadata__source="canvas"
+    ).update(is_visible=False)
 
 
 def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
+    # One relationship fetch for the whole catalog, bucketed by endpoint, so a
+    # dataset lists links in BOTH directions (raw_users must show the five
+    # datasets pointing at it, not "no relationships").
+    outgoing_by_dataset: dict[Any, list[SemanticRelationship]] = {}
+    incoming_by_dataset: dict[Any, list[SemanticRelationship]] = {}
+    for relationship in SemanticRelationship.objects.filter(
+        workspace=model.workspace
+    ).select_related("from_dataset", "to_dataset"):
+        outgoing_by_dataset.setdefault(relationship.from_dataset_id, []).append(relationship)
+        incoming_by_dataset.setdefault(relationship.to_dataset_id, []).append(relationship)
+
     datasets = []
     for dataset in (
         model.datasets.filter(is_visible=True)
@@ -575,11 +647,11 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
             if f.field_type == SemanticField.FieldType.MEASURE
         ]
         relationships = [
-            serialize_relationship(r)
-            for r in SemanticRelationship.objects.filter(
-                workspace=model.workspace,
-                from_dataset=dataset,
-            ).select_related("to_dataset")
+            {**serialize_relationship(r), "direction": "outgoing"}
+            for r in outgoing_by_dataset.get(dataset.id, [])
+        ] + [
+            {**serialize_relationship(r), "direction": "incoming"}
+            for r in incoming_by_dataset.get(dataset.id, [])
         ]
         datasets.append(
             {

@@ -161,6 +161,9 @@ async def _live_tables_in_schema(schema_name: str) -> set[str]:
 async def pipeline_table_primary_keys(ctx: QueryContext) -> dict[str, str]:
     """Map table name -> single-column primary key for the context schema.
 
+    Reads pg_catalog rather than information_schema: queries run under the
+    workspace's SELECT-only readonly role, and information_schema constraint
+    views hide constraints on tables the current role merely SELECTs from.
     Composite primary keys are omitted (a single CharField holds the semantic
     dataset's primary key, and Cube's per-cube primary key wants one member).
     Views (multi-tenant view schemas) have no PK constraints and yield nothing.
@@ -169,13 +172,13 @@ async def pipeline_table_primary_keys(ctx: QueryContext) -> dict[str, str]:
     try:
         result = await _execute_async_parameterized(
             ctx,
-            "SELECT kcu.table_name, kcu.column_name "
-            "FROM information_schema.table_constraints tc "
-            "JOIN information_schema.key_column_usage kcu "
-            "ON kcu.constraint_name = tc.constraint_name "
-            "AND kcu.table_schema = tc.table_schema "
-            "WHERE tc.table_schema = %s AND tc.constraint_type = 'PRIMARY KEY' "
-            "ORDER BY kcu.table_name, kcu.ordinal_position",
+            "SELECT c.relname, a.attname "
+            "FROM pg_index i "
+            "JOIN pg_class c ON c.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey) "
+            "WHERE i.indisprimary AND n.nspname = %s "
+            "ORDER BY c.relname, array_position(i.indkey, a.attnum)",
             (ctx.schema_name,),
             ctx.max_query_timeout_seconds,
         )

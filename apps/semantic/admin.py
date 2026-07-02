@@ -4,6 +4,7 @@ from .models import (
     CubeSchema,
     CustomDataset,
     SemanticCanvas,
+    SemanticCanvasChange,
     SemanticDataset,
     SemanticField,
     SemanticModel,
@@ -86,6 +87,14 @@ class CubeSchemaAdmin(admin.ModelAdmin):
 
 @admin.register(SemanticCanvas)
 class SemanticCanvasAdmin(admin.ModelAdmin):
-    list_display = ("id", "workspace", "status", "created_by", "updated_at")
+    list_display = ("id", "thread", "workspace", "status", "committed_at", "updated_at")
     list_filter = ("status", "workspace")
-    raw_id_fields = ("workspace", "semantic_model", "created_by")
+    raw_id_fields = ("thread", "workspace", "semantic_model", "created_by")
+
+
+@admin.register(SemanticCanvasChange)
+class SemanticCanvasChangeAdmin(admin.ModelAdmin):
+    list_display = ("canvas", "object_type", "object_uuid", "change_type", "updated_at")
+    list_filter = ("object_type", "change_type")
+    raw_id_fields = ("canvas",)
+    readonly_fields = ("created_at", "updated_at")

@@ -300,14 +300,23 @@ class CubeSchema(models.Model):
 
 
 class SemanticCanvas(models.Model):
-    """Lightweight draft canvas for semantic-model changes."""
+    """Thread-bound changeset over the workspace's persisted semantic model.
+
+    The canvas stores no object copies — only membership and pending deltas
+    (see SemanticCanvasChange). Rendered objects, diffs, and validation state
+    are derived on read by overlaying deltas onto the persisted rows.
+    """
 
     class Status(models.TextChoices):
         OPEN = "open", "Open"
-        COMMITTED = "committed", "Committed"
         DISCARDED = "discarded", "Discarded"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    thread = models.OneToOneField(
+        "chat.Thread",
+        on_delete=models.CASCADE,
+        related_name="semantic_canvas",
+    )
     workspace = models.ForeignKey(
         "workspaces.Workspace",
         on_delete=models.CASCADE,
@@ -319,8 +328,6 @@ class SemanticCanvas(models.Model):
         related_name="canvases",
     )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.OPEN)
-    changes = models.JSONField(default=dict, blank=True)
-    diagnostics = models.JSONField(default=list, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -340,3 +347,53 @@ class SemanticCanvas(models.Model):
 
     def __str__(self) -> str:
         return f"{self.workspace} canvas {self.id}"
+
+
+class SemanticCanvasChange(models.Model):
+    """One row per (canvas, object): membership plus the pending delta.
+
+    Derived states (never stored): create -> "new"; update with empty fields
+    -> "unchanged" (membership row); update with a delta -> "edited"; delete
+    -> "deleted"; a pending update/delete whose base_fingerprint no longer
+    matches the persisted row's updated_at -> "conflict".
+    """
+
+    class ObjectType(models.TextChoices):
+        DATASET = "dataset", "Dataset"
+        FIELD = "field", "Field"
+        RELATIONSHIP = "relationship", "Relationship"
+        CUSTOM_DATASET = "custom_dataset", "Custom dataset"
+
+    class ChangeType(models.TextChoices):
+        CREATE = "create", "Create"
+        UPDATE = "update", "Update"
+        DELETE = "delete", "Delete"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    canvas = models.ForeignKey(
+        SemanticCanvas,
+        on_delete=models.CASCADE,
+        related_name="changes",
+    )
+    object_type = models.CharField(max_length=30, choices=ObjectType.choices)
+    object_uuid = models.UUIDField()
+    change_type = models.CharField(max_length=20, choices=ChangeType.choices)
+    fields = models.JSONField(default=dict, blank=True)
+    base_fingerprint = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["canvas", "object_uuid"],
+                name="one_canvas_change_per_object",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["canvas", "object_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.change_type} {self.object_type}/{self.object_uuid}"

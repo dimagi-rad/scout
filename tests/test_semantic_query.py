@@ -292,6 +292,8 @@ def test_generate_cube_schema_from_semantic_model(semantic_model):
     assert cube["name"] == "visits"
     # Unqualified on purpose: the schema resolves via per-query search_path.
     assert cube["sql_table"] == '"raw_visits"'
+    # Cube's YAML compiler coerces '' to null and rejects it; omit when empty.
+    assert "description" not in cube
     assert {"name": "count", "type": "count"} in cube["measures"]
     assert {
         "name": "username",
@@ -510,6 +512,42 @@ def test_ensure_semantic_model_builds_relationships_from_pipeline(monkeypatch, w
             "sql": "{raw_visits.username} = {raw_users.username}",
         }
     ]
+
+    # Both endpoints surface the link in the catalog, direction-tagged.
+    catalog = catalog_service.serialize_catalog(model)
+    visits_entry = next(d for d in catalog["datasets"] if d["name"] == "raw_visits")
+    users_entry = next(d for d in catalog["datasets"] if d["name"] == "raw_users")
+    assert visits_entry["relationships"][0]["direction"] == "outgoing"
+    assert users_entry["relationships"][0]["direction"] == "incoming"
+    assert users_entry["relationships"][0]["from_dataset"] == "raw_visits"
+
+
+def test_generate_cube_schema_skips_joins_without_primary_key(monkeypatch, workspace):
+    tables = [
+        PhysicalTable(
+            name="raw_visits",
+            type="table",
+            description="Visits",
+            columns=[{"name": "username", "type": "text"}],
+            # No primary key detected: Cube refuses joins on PK-less cubes.
+        ),
+        PhysicalTable(
+            name="raw_users",
+            type="table",
+            description="Users",
+            columns=[{"name": "username", "type": "text"}],
+            primary_key="username",
+        ),
+    ]
+    monkeypatch.setattr(
+        catalog_service, "load_physical_tables", lambda _workspace: ("tenant_schema", tables)
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([_VISITS_TO_USERS]))
+    model = catalog_service.ensure_semantic_model(workspace)
+
+    assert SemanticRelationship.objects.filter(workspace=workspace).exists()
+    cube = next(c for c in generate_cube_schema(model)["cubes"] if c["name"] == "raw_visits")
+    assert "joins" not in cube
 
 
 def test_relationship_sync_drops_stale_generated_rows(monkeypatch, workspace):

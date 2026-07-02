@@ -17,6 +17,11 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
     )
     joins_by_dataset: dict[str, list[dict[str, Any]]] = {}
     for relationship in relationships:
+        # Cube refuses to compile a cube that defines a join but no primary
+        # key; skipping the join keeps the rest of the schema buildable while
+        # the relationship stays visible in the catalog.
+        if not relationship.from_dataset.primary_key:
+            continue
         joins_by_dataset.setdefault(relationship.from_dataset.name, []).append(
             {
                 "name": relationship.to_dataset.name,
@@ -41,10 +46,13 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
         ]
         cube: dict[str, Any] = {
             "name": dataset.name,
-            "description": dataset.description,
             "dimensions": dimensions,
             "measures": measures,
         }
+        # Cube's YAML compiler coerces '' to null and then rejects it
+        # ("description must be a string"), so empty descriptions are omitted.
+        if dataset.description:
+            cube["description"] = dataset.description
         if dataset.source_kind == dataset.SourceKind.CUSTOM:
             cube_sql = dataset.metadata.get("cube_sql") or dataset.metadata.get("sql")
             if not cube_sql:
