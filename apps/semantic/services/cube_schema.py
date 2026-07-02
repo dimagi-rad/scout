@@ -56,7 +56,8 @@ def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = No
     """
     try:
         close_old_connections()
-        model = model or ensure_semantic_model(workspace)
+        if model is None:
+            return _build_and_promote_refreshed_model(workspace)
         try:
             return _build_validate_and_promote(workspace, model)
         except Exception as exc:
@@ -64,6 +65,46 @@ def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = No
             raise
     finally:
         close_old_connections()
+
+
+def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
+    """Refresh physical datasets and promote them atomically when possible.
+
+    Materialization rebuilds the physical semantic catalog from newly loaded
+    tables before compiling Cube YAML. If compilation/validation fails and a
+    previous ACTIVE Cube schema exists, keep the whole previous semantic surface
+    queryable by rolling back the in-place dataset/field refresh.
+    """
+    existing_model = SemanticModel.objects.filter(workspace=workspace).first()
+    has_active = bool(
+        existing_model
+        and CubeSchema.objects.filter(
+            workspace=workspace,
+            semantic_model=existing_model,
+            status=CubeSchema.Status.ACTIVE,
+        ).exists()
+    )
+
+    if not has_active:
+        model = ensure_semantic_model(workspace)
+        try:
+            return _build_validate_and_promote(workspace, model)
+        except Exception as exc:
+            _record_build_failure(workspace, model, exc)
+            raise
+
+    try:
+        with transaction.atomic():
+            model = ensure_semantic_model(workspace)
+            return _build_validate_and_promote(workspace, model)
+    except Exception as exc:
+        # The atomic block rolled back the attempted catalog refresh, so record
+        # the failure on the last-known-good model rather than the rolled-back
+        # in-memory instance.
+        fallback_model = SemanticModel.objects.filter(workspace=workspace).first()
+        if fallback_model is not None:
+            _record_build_failure(workspace, fallback_model, exc)
+        raise
 
 
 def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
@@ -119,18 +160,27 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
         _set_last_build(model, ok=True, content_hash=content_hash)
         model.save(update_fields=["status", "diagnostics", "metadata", "updated_at"])
 
-    try:
-        ctx = async_to_sync(load_workspace_context)(str(workspace.id))
-        async_to_sync(CubeClient().invalidate_schema_cache)(
-            security_context=build_cube_security_context(
-                workspace,
-                model,
-                cube_schema,
-                ctx,
+    def invalidate_cube_schema_cache() -> None:
+        try:
+            ctx = async_to_sync(load_workspace_context)(str(workspace.id))
+            async_to_sync(CubeClient().invalidate_schema_cache)(
+                security_context=build_cube_security_context(
+                    workspace,
+                    model,
+                    cube_schema,
+                    ctx,
+                )
             )
-        )
+        except Exception:
+            logger.exception("Failed to invalidate Cube schema cache for workspace %s", workspace.id)
+
+    try:
+        transaction.on_commit(invalidate_cube_schema_cache)
     except Exception:
-        logger.exception("Failed to invalidate Cube schema cache for workspace %s", workspace.id)
+        logger.exception(
+            "Failed to register Cube schema cache invalidation for workspace %s",
+            workspace.id,
+        )
 
     return cube_schema
 
@@ -154,8 +204,7 @@ def _record_build_failure(workspace, model: SemanticModel, exc: Exception) -> No
         ).exists()
         _set_last_build(model, ok=False, error=str(exc))
         model.diagnostics = [{"level": "error", "message": str(exc)[:500]}]
-        if not has_active:
-            model.status = SemanticModel.Status.ERROR
+        model.status = SemanticModel.Status.ACTIVE if has_active else SemanticModel.Status.ERROR
         model.save(update_fields=["status", "diagnostics", "metadata", "updated_at"])
     except Exception:
         logger.exception(

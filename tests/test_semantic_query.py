@@ -757,6 +757,46 @@ def test_failed_build_keeps_last_known_good_readable(
     assert CubeSchema.objects.filter(workspace=workspace, status=CubeSchema.Status.ERROR).exists()
 
 
+def test_failed_refreshed_build_keeps_previous_catalog_readable(
+    monkeypatch, workspace, semantic_model, no_close_old_connections
+):
+    semantic_model.status = SemanticModel.Status.ERROR
+    semantic_model.save(update_fields=["status"])
+    monkeypatch.setattr(cube_schema_service, "CubeClient", _FailingValidatorClient)
+    monkeypatch.setattr(
+        catalog_service,
+        "load_physical_tables",
+        lambda _workspace: (
+            "tenant_schema",
+            [
+                PhysicalTable(
+                    name="raw_new",
+                    type="table",
+                    description="New data",
+                    columns=[{"name": "id", "type": "bigint"}],
+                    primary_key="id",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(catalog_service, "get_registry", lambda: _fake_registry([]))
+
+    with pytest.raises(CubeSchemaBuildError):
+        cube_schema_service.build_and_promote_cube_schema(workspace)
+
+    semantic_model.refresh_from_db()
+    assert semantic_model.status == SemanticModel.Status.ACTIVE
+    assert semantic_model.metadata["last_build"]["ok"] is False
+    assert catalog_service.get_active_semantic_model(workspace).id == semantic_model.id
+
+    visits = SemanticDataset.objects.get(workspace=workspace, name="visits")
+    assert visits.is_visible is True
+    assert not SemanticDataset.objects.filter(workspace=workspace, name="raw_new").exists()
+
+    active = CubeSchema.objects.get(workspace=workspace, status=CubeSchema.Status.ACTIVE)
+    assert active.content_hash == "testhash"
+
+
 def test_failed_build_without_active_schema_marks_model_error(
     monkeypatch, workspace, semantic_model, no_close_old_connections
 ):
