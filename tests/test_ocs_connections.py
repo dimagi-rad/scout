@@ -367,7 +367,7 @@ async def test_remove_connection_archives_memberships(user):
     resp = await client.delete(f"/api/auth/connections/{conn.id}/")
     assert resp.status_code == 200
 
-    tm = await TenantMembership.objects.aget(id=tm.id)
+    tm = await TenantMembership.all_objects.aget(id=tm.id)  # archived: hidden by default manager
     assert tm.archived_at is not None
     assert tm.connection_id is None
     assert not await TenantConnection.objects.filter(id=conn.id).aexists()
@@ -472,8 +472,8 @@ async def test_readd_unarchives_and_second_key_is_isolated(user, mocker):
     ).status_code == 201
     conn_a = await TenantConnection.objects.aget(user=user, credential_type="api_key")
     await client.delete(f"/api/auth/connections/{conn_a.id}/")
-    tm = await TenantMembership.objects.aget(user=user, tenant__external_id="exp-1")
-    assert tm.archived_at is not None
+    tm = await TenantMembership.all_objects.aget(user=user, tenant__external_id="exp-1")
+    assert tm.archived_at is not None  # archived: hidden by default manager
 
     # Re-add the same chatbot's key → un-archives and re-links.
     assert (

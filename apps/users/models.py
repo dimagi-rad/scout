@@ -190,6 +190,24 @@ class TenantConnection(models.Model):
         return f"{self.user_id}:{self.provider}:{self.credential_type}"
 
 
+class LiveTenantMembershipManager(models.Manager):
+    """Default manager: hides archived (upstream-revoked) memberships.
+
+    An archived TenantMembership is a *tombstone* for access that Connect/HQ/OCS
+    revoked — not a soft-deleted record a human can restore. Every access read must
+    therefore be blind to it by default, so this manager filters ``archived_at``
+    out. The unfiltered ``all_objects`` manager is the deliberate escape hatch for
+    the few places that need tombstones: the resolver's un-archive-on-re-grant step,
+    the merge service, admin, and connection management. ``Meta.base_manager_name``
+    points at ``all_objects`` so cascade deletion still collects archived rows;
+    reverse managers (``conn.memberships`` etc.) inherit THIS class, so any of them
+    that must see tombstones use ``all_objects`` explicitly.
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(archived_at__isnull=True)
+
+
 class TenantMembership(models.Model):
     """Links a user to a verified Tenant."""
 
@@ -220,9 +238,17 @@ class TenantMembership(models.Model):
     archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # ``objects`` (default) is live-only so access reads can never see a revoked
+    # tombstone. ``all_objects`` is the escape hatch for writes/merges/resolution.
+    objects = LiveTenantMembershipManager()
+    # ruff reads the team_slug/team_name @property accessors below as "fields" and
+    # wants them before this manager; they legitimately live after Meta.
+    all_objects = models.Manager()  # noqa: DJ012
+
     class Meta:
         unique_together = [["user", "tenant"]]
         ordering = ["-last_selected_at", "tenant__canonical_name"]
+        base_manager_name = "all_objects"
 
     def __str__(self):
         return f"TenantMembership({self.user_id} - {self.tenant_id})"
