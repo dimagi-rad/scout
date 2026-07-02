@@ -1,177 +1,163 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import type { ReactNode } from "react"
+import { useParams } from "react-router-dom"
 import {
-  Check,
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
+  Code2,
   Database,
+  Link2,
   Loader2,
+  MessageSquare,
   RefreshCw,
   RotateCcw,
   Save,
   Sigma,
+  X,
 } from "lucide-react"
-import { api } from "@/api/client"
+import { ApiError } from "@/api/client"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
-import type { SemanticDataset, SemanticField } from "@/store/datasetSlice"
 import {
-  applyCanvasChanges,
-  collectCanvasDiffs,
-  emptyCanvasChanges,
-  hasCanvasChanges,
-  normalizeCanvasChanges,
-  revertDatasetPatch,
-  revertFieldPatch,
-  updateDatasetPatch,
-  updateFieldPatch,
-  type CanvasDiff,
-  type DatasetEditableKey,
-  type FieldEditableKey,
-  type SemanticCanvasChanges,
-  type SemanticCanvasResponse,
-} from "./canvasChanges"
+  applyCanvasOps,
+  commitCanvas,
+  fetchCanvas,
+  formatDiffValue,
+  groupByDataset,
+  pendingObjects,
+  STATE_BADGES,
+  type CanvasDatasetGroup,
+  type CanvasObjectEntry,
+  type CanvasOp,
+  type CanvasProjection,
+} from "./canvasApi"
+
+const POLL_INTERVAL_MS = 15_000
 
 interface ChatCanvasPanelProps {
   workspaceId: string
+  threadId?: string
   className?: string
 }
 
 type LoadStatus = "idle" | "loading" | "loaded" | "error"
-type SaveStatus = "idle" | "saving" | "saved" | "error"
 
-const EMPTY_DATASETS: SemanticDataset[] = []
+export function ChatCanvasPanel({ workspaceId, threadId, className }: ChatCanvasPanelProps) {
+  const params = useParams<{ threadId?: string }>()
+  const activeThreadId = threadId ?? params.threadId ?? null
 
-export function ChatCanvasPanel({ workspaceId, className }: ChatCanvasPanelProps) {
-  const [status, setStatus] = useState<LoadStatus>("loading")
+  const [status, setStatus] = useState<LoadStatus>("idle")
   const [error, setError] = useState<string | null>(null)
-  const [canvas, setCanvas] = useState<SemanticCanvasResponse | null>(null)
-  const [changes, setChanges] = useState<SemanticCanvasChanges>(emptyCanvasChanges)
-  const [requestedDatasetId, setRequestedDatasetId] = useState<string | null>(null)
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle")
+  const [projection, setProjection] = useState<CanvasProjection | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
-  const loadCanvas = useCallback(async () => {
-    setStatus("loading")
-    setError(null)
-    try {
-      const response = await api.get<SemanticCanvasResponse>(
-        `/api/workspaces/${workspaceId}/semantic-canvas/`
-      )
-      setCanvas(response)
-      setChanges(normalizeCanvasChanges(response.changes))
-      setStatus("loaded")
-    } catch (loadError) {
-      setStatus("error")
-      setError(loadError instanceof Error ? loadError.message : "Failed to load canvas")
-    }
-  }, [workspaceId])
-
-  useEffect(() => {
-    let cancelled = false
-
-    api.get<SemanticCanvasResponse>(`/api/workspaces/${workspaceId}/semantic-canvas/`)
-      .then((response) => {
-        if (cancelled) return
-        setCanvas(response)
-        setChanges(normalizeCanvasChanges(response.changes))
-        setStatus("loaded")
-      })
-      .catch((loadError: unknown) => {
-        if (cancelled) return
-        setStatus("error")
-        setError(loadError instanceof Error ? loadError.message : "Failed to load canvas")
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [workspaceId])
-
-  const catalog = canvas?.catalog ?? null
-  const datasets = catalog?.datasets ?? EMPTY_DATASETS
-  const selectedDatasetId =
-    requestedDatasetId && datasets.some((dataset) => dataset.id === requestedDatasetId)
-      ? requestedDatasetId
-      : datasets[0]?.id ?? null
-
-  const remoteChanges = useMemo(() => normalizeCanvasChanges(canvas?.changes), [canvas?.changes])
-  const dirty = JSON.stringify(remoteChanges) !== JSON.stringify(changes)
-  const diffs = useMemo(() => collectCanvasDiffs(catalog, changes), [catalog, changes])
-
-  const selectedBaseDataset = useMemo(
-    () => datasets.find((dataset) => dataset.id === selectedDatasetId) ?? null,
-    [datasets, selectedDatasetId]
-  )
-  const selectedDataset = useMemo(
-    () => (selectedBaseDataset ? applyCanvasChanges(selectedBaseDataset, changes) : null),
-    [changes, selectedBaseDataset]
-  )
-
-  const saveChanges = useCallback(
-    async (nextChanges: SemanticCanvasChanges) => {
-      setSaveStatus("saving")
-      setError(null)
+  const loadCanvas = useCallback(
+    async (silent = false) => {
+      if (!activeThreadId) return
+      if (!silent) setStatus("loading")
       try {
-        const response = await api.post<SemanticCanvasResponse>(
-          `/api/workspaces/${workspaceId}/semantic-canvas/`,
-          { changes: nextChanges }
-        )
-        setCanvas(response)
-        setChanges(normalizeCanvasChanges(response.changes))
-        setSaveStatus("saved")
-      } catch (saveError) {
-        setSaveStatus("error")
-        setError(saveError instanceof Error ? saveError.message : "Failed to save canvas")
+        const next = await fetchCanvas(workspaceId, activeThreadId)
+        setProjection(next)
+        setStatus("loaded")
+        setError(null)
+      } catch (loadError) {
+        if (!silent) {
+          setStatus("error")
+          setError(loadError instanceof Error ? loadError.message : "Failed to load canvas")
+        }
       }
     },
-    [workspaceId]
+    [workspaceId, activeThreadId],
   )
 
-  const stageDatasetValue = (key: DatasetEditableKey, value: string) => {
-    if (!selectedBaseDataset) return
-    setChanges((current) =>
-      updateDatasetPatch(
-        current,
-        selectedBaseDataset.id,
-        key,
-        value,
-        selectedBaseDataset[key] ?? ""
-      )
-    )
-    setSaveStatus("idle")
-  }
+  useEffect(() => {
+    setProjection(null)
+    setNotice(null)
+    if (!activeThreadId) {
+      setStatus("idle")
+      return
+    }
+    void loadCanvas()
+    // Agent edits land server-side mid-conversation; poll to keep the panel live.
+    const timer = window.setInterval(() => void loadCanvas(true), POLL_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [workspaceId, activeThreadId, loadCanvas])
 
-  const stageFieldValue = (field: SemanticField, key: FieldEditableKey, value: string) => {
-    if (!selectedBaseDataset) return
-    setChanges((current) =>
-      updateFieldPatch(current, selectedBaseDataset.id, field.id, key, value, field[key] ?? "")
+  const runOps = useCallback(
+    async (operations: CanvasOp[]): Promise<boolean> => {
+      if (!activeThreadId) return false
+      setBusy(true)
+      setNotice(null)
+      try {
+        const next = await applyCanvasOps(workspaceId, activeThreadId, operations)
+        setProjection(next)
+        setError(null)
+        return true
+      } catch (applyError) {
+        setError(applyError instanceof ApiError ? applyError.message : "Canvas change failed")
+        return false
+      } finally {
+        setBusy(false)
+      }
+    },
+    [workspaceId, activeThreadId],
+  )
+
+  const handleCommit = useCallback(async () => {
+    if (!activeThreadId) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const report = await commitCanvas(workspaceId, activeThreadId)
+      if (report.projection) setProjection(report.projection)
+      if (report.blocked) {
+        setError("Save blocked — fix the problems listed below first.")
+      } else if (report.conflicts.length > 0) {
+        setError("Save skipped: another change landed underneath your edits. Revert to refresh.")
+      } else {
+        setError(null)
+        const saved = report.committed.length
+        const cube = report.cube_schema
+        setNotice(
+          cube && !cube.ok
+            ? `Saved ${saved} change(s), but the query model rebuild failed: ${cube.error ?? "unknown error"}`
+            : `Saved ${saved} change(s) to the semantic model.`,
+        )
+      }
+    } catch (commitError) {
+      setError(commitError instanceof Error ? commitError.message : "Canvas save failed")
+    } finally {
+      setBusy(false)
+    }
+  }, [workspaceId, activeThreadId])
+
+  const pendingCount = useMemo(() => pendingObjects(projection).length, [projection])
+  const groups = useMemo(() => groupByDataset(projection), [projection])
+  const diagnostics = projection?.diagnostics ?? []
+
+  if (!activeThreadId) {
+    return (
+      <PanelShell className={className}>
+        <PanelState
+          icon={<MessageSquare className="h-5 w-5" />}
+          title="No conversation yet"
+          body="Start a conversation to draft changes to this workspace's datasets."
+        />
+      </PanelShell>
     )
-    setSaveStatus("idle")
   }
 
   return (
-    <div className={cn("flex h-full min-h-0 flex-col bg-background", className)}>
-      <div className="flex h-12 items-center justify-between gap-3 border-b px-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Database className="h-4 w-4 text-muted-foreground" />
-            <h2 className="truncate text-sm font-semibold">Canvas</h2>
-            {diffs.length > 0 && <Badge variant="secondary">{diffs.length}</Badge>}
-          </div>
-          <p className="truncate text-xs text-muted-foreground">
-            {catalog ? `${datasets.length} datasets` : "Semantic model"}
-          </p>
-        </div>
+    <PanelShell className={className}>
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b px-3 py-2">
+        <p className="truncate text-xs text-muted-foreground" data-testid="canvas-pending-count">
+          {pendingCount > 0
+            ? `${pendingCount} pending change${pendingCount === 1 ? "" : "s"}`
+            : "No pending changes"}
+        </p>
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
@@ -179,193 +165,193 @@ export function ChatCanvasPanel({ workspaceId, className }: ChatCanvasPanelProps
             onClick={() => void loadCanvas()}
             disabled={status === "loading"}
             aria-label="Refresh canvas"
+            data-testid="canvas-refresh-button"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", status === "loading" && "animate-spin")} />
           </Button>
           <Button
-            variant="outline"
             size="xs"
-            onClick={() => void saveChanges(emptyCanvasChanges())}
-            disabled={!hasCanvasChanges(changes) || saveStatus === "saving"}
+            onClick={() => void handleCommit()}
+            disabled={busy || !projection?.can_commit}
+            data-testid="canvas-commit-button"
           >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Clear
-          </Button>
-          <Button
-            size="xs"
-            onClick={() => void saveChanges(changes)}
-            disabled={!dirty || saveStatus === "saving"}
-          >
-            {saveStatus === "saving" ? (
+            {busy ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <Save className="h-3.5 w-3.5" />
             )}
-            Save
+            Save all
           </Button>
         </div>
       </div>
 
-      {status === "loading" && !canvas ? (
+      {status === "loading" && !projection ? (
         <PanelState icon={<Loader2 className="h-5 w-5 animate-spin" />} title="Loading canvas" />
-      ) : status === "error" ? (
+      ) : status === "error" && !projection ? (
         <PanelState
           icon={<CircleAlert className="h-5 w-5" />}
           title="Canvas unavailable"
-          body={error ?? "Could not load the semantic canvas."}
-          action={<Button size="sm" onClick={() => void loadCanvas()}>Try Again</Button>}
+          body={error ?? "Could not load the canvas."}
+          action={
+            <Button size="sm" onClick={() => void loadCanvas()}>
+              Try Again
+            </Button>
+          }
         />
-      ) : datasets.length === 0 ? (
+      ) : groups.length === 0 ? (
         <PanelState
           icon={<Database className="h-5 w-5" />}
-          title="No datasets"
-          body="Load workspace data from chat before editing the semantic model."
+          title="Nothing on the canvas"
+          body="Ask the agent to edit datasets, add measures, link datasets, or build a SQL dataset — drafts will appear here for review."
         />
       ) : (
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="space-y-4 p-3">
-            <StatusRow saveStatus={saveStatus} dirty={dirty} error={error} />
-
-            <div className="space-y-1.5">
-              <Label className="text-xs text-muted-foreground">Dataset</Label>
-              <Select value={selectedDatasetId ?? undefined} onValueChange={setRequestedDatasetId}>
-                <SelectTrigger className="h-8 w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {datasets.map((dataset) => (
-                    <SelectItem key={dataset.id} value={dataset.id}>
-                      {applyCanvasChanges(dataset, changes).label || dataset.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-                <PendingChanges diffs={diffs} onSelectDataset={setRequestedDatasetId} />
-
-            {selectedBaseDataset && selectedDataset && (
-              <>
-                <DatasetEditor
-                  baseDataset={selectedBaseDataset}
-                  dataset={selectedDataset}
-                  onChange={stageDatasetValue}
-                  onRevert={() => {
-                    setChanges((current) => revertDatasetPatch(current, selectedBaseDataset.id))
-                    setSaveStatus("idle")
-                  }}
-                />
-                <FieldsEditor
-                  title="Measures"
-                  icon={<Sigma className="h-4 w-4" />}
-                  baseDataset={selectedBaseDataset}
-                  baseFields={selectedBaseDataset.measures}
-                  fields={selectedDataset.measures}
-                  onChange={stageFieldValue}
-                  onRevert={(fieldId) => {
-                    setChanges((current) =>
-                      revertFieldPatch(current, selectedBaseDataset.id, fieldId)
-                    )
-                    setSaveStatus("idle")
-                  }}
-                />
-                <FieldsEditor
-                  title="Dimensions"
-                  icon={<Database className="h-4 w-4" />}
-                  baseDataset={selectedBaseDataset}
-                  baseFields={[
-                    ...selectedBaseDataset.time_dimensions,
-                    ...selectedBaseDataset.dimensions,
-                  ]}
-                  fields={[...selectedDataset.time_dimensions, ...selectedDataset.dimensions]}
-                  onChange={stageFieldValue}
-                  onRevert={(fieldId) => {
-                    setChanges((current) =>
-                      revertFieldPatch(current, selectedBaseDataset.id, fieldId)
-                    )
-                    setSaveStatus("idle")
-                  }}
-                />
-              </>
+          <div className="space-y-3 p-3">
+            {error && (
+              <div
+                className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
+                data-testid="canvas-error"
+              >
+                {error}
+              </div>
             )}
+            {notice && (
+              <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                {notice}
+              </div>
+            )}
+
+            {diagnostics.length > 0 && <ProblemsPanel diagnostics={diagnostics} />}
+
+            <div className="space-y-2">
+              {groups.map((group) => (
+                <DatasetGroupCard key={group.name} group={group} busy={busy} onOps={runOps} />
+              ))}
+            </div>
           </div>
         </div>
       )}
-    </div>
+    </PanelShell>
   )
 }
 
-function StatusRow({
-  saveStatus,
-  dirty,
-  error,
-}: {
-  saveStatus: SaveStatus
-  dirty: boolean
-  error: string | null
-}) {
-  if (saveStatus === "error") {
-    return (
-      <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-        {error ?? "Canvas save failed."}
-      </div>
-    )
-  }
-  if (saveStatus === "saved" && !dirty) {
-    return (
-      <div className="flex items-center gap-2 rounded-md border px-3 py-2 text-xs text-muted-foreground">
-        <Check className="h-3.5 w-3.5" />
-        Saved
-      </div>
-    )
-  }
-  if (dirty) {
-    return (
-      <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-        Unsaved canvas changes
-      </div>
-    )
-  }
-  return null
+function PanelShell({ className, children }: { className?: string; children: ReactNode }) {
+  return (
+    <div className={cn("flex h-full min-h-0 flex-col bg-background", className)}>{children}</div>
+  )
 }
 
-function PendingChanges({
-  diffs,
-  onSelectDataset,
-}: {
-  diffs: CanvasDiff[]
-  onSelectDataset: (datasetId: string) => void
-}) {
+function ProblemsPanel({ diagnostics }: { diagnostics: CanvasProjection["diagnostics"] }) {
   return (
-    <section className="rounded-md border">
-      <div className="flex items-center justify-between border-b px-3 py-2">
-        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          Pending
+    <section
+      className="rounded-md border border-destructive/30"
+      data-testid="canvas-problems-panel"
+    >
+      <div className="flex items-center gap-2 border-b border-destructive/20 bg-destructive/5 px-3 py-2">
+        <CircleAlert className="h-4 w-4 text-destructive" />
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-destructive">
+          Problems
         </h3>
-        <Badge variant="secondary">{diffs.length}</Badge>
+        <Badge variant="secondary">{diagnostics.length}</Badge>
       </div>
-      {diffs.length === 0 ? (
-        <div className="px-3 py-4 text-sm text-muted-foreground">
-          No pending edits.
-        </div>
-      ) : (
-        <div className="max-h-52 overflow-y-auto divide-y">
-          {diffs.map((diff) => (
-            <button
-              key={diff.id}
-              type="button"
-              onClick={() => onSelectDataset(diff.datasetId)}
-              className="block w-full px-3 py-2 text-left hover:bg-accent"
-            >
-              <div className="truncate text-sm font-medium">{diff.targetLabel}</div>
-              <div className="text-xs text-muted-foreground">
-                {diff.targetType}.{diff.property}
-              </div>
-              <div className="mt-1 grid grid-cols-[2rem_minmax(0,1fr)] gap-2 text-xs">
-                <span className="text-muted-foreground">To</span>
-                <span className="truncate font-medium">{diff.to}</span>
-              </div>
-            </button>
+      <div className="divide-y">
+        {diagnostics.map((diagnostic, index) => (
+          <div key={`${diagnostic.object_uuid}-${diagnostic.code}-${index}`} className="px-3 py-2">
+            <div className="text-xs font-medium">
+              {diagnostic.object}
+              {diagnostic.path ? `/${diagnostic.path}` : ""}
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground">{diagnostic.message}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function DatasetGroupCard({
+  group,
+  busy,
+  onOps,
+}: {
+  group: CanvasDatasetGroup
+  busy: boolean
+  onOps: (ops: CanvasOp[]) => Promise<boolean>
+}) {
+  const [expanded, setExpanded] = useState(group.pendingCount > 0)
+  const badge = STATE_BADGES[group.state]
+  const dataset = group.dataset
+  const hasDetail =
+    group.fields.length > 0
+    || group.relationships.length > 0
+    || (dataset != null && Object.keys(dataset.diff).length > 0)
+
+  return (
+    <section className="rounded-md border" data-testid={`canvas-dataset-${group.name}`}>
+      <div className="flex items-start justify-between gap-2 px-3 py-2">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-start gap-2 text-left"
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {hasDetail ? (
+            expanded ? (
+              <ChevronDown className="mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="mt-1 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            )
+          ) : (
+            <span className="w-3.5 shrink-0" />
+          )}
+          <span className="min-w-0">
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
+              {group.isCte ? (
+                <Code2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <Database className="h-4 w-4 shrink-0 text-muted-foreground" />
+              )}
+              <span className="truncate text-sm font-medium">{group.label}</span>
+              <Badge className={cn("border", badge.className)} variant="outline">
+                {badge.label}
+              </Badge>
+            </span>
+            <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+              {group.summary}
+            </span>
+          </span>
+        </button>
+        {dataset && (
+          <EntryActions entry={dataset} busy={busy} onOps={onOps} showRevert={dataset.state !== "unchanged"} />
+        )}
+      </div>
+
+      {expanded && hasDetail && (
+        <div className="border-t bg-muted/30">
+          {dataset && Object.keys(dataset.diff).length > 0 && (
+            <DiffLines entry={dataset} className="border-b px-3 py-2" />
+          )}
+          {dataset?.object_type === "custom_dataset" && <CteDraftDetail entry={dataset} />}
+          {group.fields.map((entry) => (
+            <ChildRow
+              key={entry.object_uuid}
+              entry={entry}
+              icon={<Sigma className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+              title={entry.label || entry.name}
+              detail={fieldDetail(entry)}
+              busy={busy}
+              onOps={onOps}
+            />
+          ))}
+          {group.relationships.map((entry) => (
+            <ChildRow
+              key={entry.object_uuid}
+              entry={entry}
+              icon={<Link2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+              title={`→ ${relationshipTarget(entry)}`}
+              detail={relationshipDetail(entry)}
+              busy={busy}
+              onOps={onOps}
+            />
           ))}
         </div>
       )}
@@ -373,212 +359,169 @@ function PendingChanges({
   )
 }
 
-function DatasetEditor({
-  baseDataset,
-  dataset,
-  onChange,
-  onRevert,
-}: {
-  baseDataset: SemanticDataset
-  dataset: SemanticDataset
-  onChange: (key: DatasetEditableKey, value: string) => void
-  onRevert: () => void
-}) {
-  const hasChanges =
-    baseDataset.name !== dataset.name ||
-    baseDataset.label !== dataset.label ||
-    baseDataset.description !== dataset.description
-
-  return (
-    <section className="rounded-md border">
-      <SectionHeader title="Dataset" count={hasChanges ? 1 : 0} onRevert={onRevert} />
-      <div className="space-y-3 p-3">
-        <TextControl
-          label="Name"
-          value={dataset.name}
-          originalValue={baseDataset.name}
-          onChange={(value) => onChange("name", slugValue(value))}
-        />
-        <TextControl
-          label="Label"
-          value={dataset.label}
-          originalValue={baseDataset.label}
-          onChange={(value) => onChange("label", value)}
-        />
-        <TextAreaControl
-          label="Description"
-          value={dataset.description}
-          originalValue={baseDataset.description}
-          onChange={(value) => onChange("description", value)}
-        />
-      </div>
-    </section>
-  )
-}
-
-function FieldsEditor({
-  title,
+function ChildRow({
+  entry,
   icon,
-  baseDataset,
-  baseFields,
-  fields,
-  onChange,
-  onRevert,
+  title,
+  detail,
+  busy,
+  onOps,
 }: {
-  title: string
+  entry: CanvasObjectEntry
   icon: ReactNode
-  baseDataset: SemanticDataset
-  baseFields: SemanticField[]
-  fields: SemanticField[]
-  onChange: (field: SemanticField, key: FieldEditableKey, value: string) => void
-  onRevert: (fieldId: string) => void
+  title: string
+  detail: string
+  busy: boolean
+  onOps: (ops: CanvasOp[]) => Promise<boolean>
 }) {
-  const fieldsById = useMemo(
-    () => Object.fromEntries(fields.map((field) => [field.id, field])),
-    [fields]
-  )
-
+  const badge = STATE_BADGES[entry.state]
+  const showDiff = entry.state === "edited" && Object.keys(entry.diff).length > 0
   return (
-    <section className="rounded-md border">
-      <div className="flex items-center gap-2 border-b px-3 py-2">
-        {icon}
-        <h3 className="text-sm font-semibold">{title}</h3>
-        <Badge variant="secondary">{baseFields.length}</Badge>
+    <div
+      className="border-b px-3 py-2 last:border-b-0"
+      data-testid={`canvas-child-${entry.name}`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-1 items-start gap-2 pl-5">
+          <span className="mt-0.5">{icon}</span>
+          <span className="min-w-0">
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
+              <code className="truncate rounded bg-muted px-1.5 py-0.5 text-xs">{title}</code>
+              {entry.state !== "unchanged" && (
+                <Badge className={cn("border", badge.className)} variant="outline">
+                  {badge.label}
+                </Badge>
+              )}
+            </span>
+            {detail && (
+              <span className="mt-0.5 block truncate text-xs text-muted-foreground">{detail}</span>
+            )}
+          </span>
+        </div>
+        <EntryActions entry={entry} busy={busy} onOps={onOps} showRevert={entry.state !== "unchanged"} />
       </div>
-      {baseFields.length === 0 ? (
-        <div className="px-3 py-4 text-sm text-muted-foreground">
-          No {title.toLowerCase()} defined.
-        </div>
-      ) : (
-        <div className="divide-y">
-          {baseFields.map((baseField) => {
-            const field = fieldsById[baseField.id] ?? baseField
-            const hasChanges =
-              baseField.name !== field.name ||
-              baseField.label !== field.label ||
-              baseField.description !== field.description
-
-            return (
-              <div key={baseField.id} className={cn("space-y-2 p-3", hasChanges && "bg-amber-50")}>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <code className="truncate rounded bg-muted px-1.5 py-0.5 text-xs">
-                        {baseDataset.name}.{baseField.name}
-                      </code>
-                      {hasChanges && <Badge variant="secondary">Edited</Badge>}
-                    </div>
-                    <p className="mt-1 truncate text-xs text-muted-foreground">
-                      Preview: {field.member}
-                    </p>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    onClick={() => onRevert(baseField.id)}
-                    disabled={!hasChanges}
-                    aria-label={`Revert ${baseField.name}`}
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                  </Button>
-                </div>
-                <div className="grid grid-cols-[8rem_minmax(0,1fr)] gap-2">
-                  <TextControl
-                    label="Name"
-                    value={field.name}
-                    originalValue={baseField.name}
-                    onChange={(value) => onChange(baseField, "name", slugValue(value))}
-                  />
-                  <TextControl
-                    label="Label"
-                    value={field.label}
-                    originalValue={baseField.label}
-                    onChange={(value) => onChange(baseField, "label", value)}
-                  />
-                </div>
-                <TextAreaControl
-                  label="Description"
-                  value={field.description}
-                  originalValue={baseField.description}
-                  onChange={(value) => onChange(baseField, "description", value)}
-                />
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </section>
+      {showDiff && <DiffLines entry={entry} className="mt-1 pl-10" />}
+    </div>
   )
 }
 
-function SectionHeader({
-  title,
-  count,
-  onRevert,
+function EntryActions({
+  entry,
+  busy,
+  onOps,
+  showRevert,
 }: {
-  title: string
-  count: number
-  onRevert: () => void
+  entry: CanvasObjectEntry
+  busy: boolean
+  onOps: (ops: CanvasOp[]) => Promise<boolean>
+  showRevert: boolean
 }) {
+  const objectRef = `${entry.object_type}/${entry.object_uuid}`
   return (
-    <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-      <div className="flex items-center gap-2">
-        <h3 className="text-sm font-semibold">{title}</h3>
-        {count > 0 && <Badge variant="secondary">{count}</Badge>}
-      </div>
-      <Button variant="ghost" size="icon-xs" onClick={onRevert} disabled={count === 0}>
-        <RotateCcw className="h-3.5 w-3.5" />
+    <div className="flex shrink-0 items-center gap-1">
+      {showRevert && (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          onClick={() => void onOps([{ op: "revert_object", object: objectRef }])}
+          disabled={busy}
+          aria-label={`Revert ${entry.name}`}
+          data-testid={`canvas-revert-${entry.name}`}
+        >
+          <RotateCcw className="h-3.5 w-3.5" />
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        onClick={() => void onOps([{ op: "remove_from_canvas", object: objectRef }])}
+        disabled={busy}
+        aria-label={`Remove ${entry.name} from canvas`}
+        data-testid={`canvas-remove-${entry.name}`}
+      >
+        <X className="h-3.5 w-3.5" />
       </Button>
     </div>
   )
 }
 
-function TextControl({
-  label,
-  value,
-  originalValue,
-  onChange,
-}: {
-  label: string
-  value: string
-  originalValue: string
-  onChange: (value: string) => void
-}) {
-  const changed = value !== originalValue
+function DiffLines({ entry, className }: { entry: CanvasObjectEntry; className?: string }) {
+  const showFrom = entry.change_type !== "create"
   return (
-    <div className="space-y-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <Input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className={cn("h-8", changed && "border-amber-400 bg-amber-50")}
-      />
+    <div className={cn("space-y-1", className)}>
+      {Object.entries(entry.diff).map(([key, delta]) => (
+        <div key={key} className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-2 text-xs">
+          <span className="truncate font-medium">{key}</span>
+          <span className="min-w-0">
+            {showFrom && (
+              <span className="text-muted-foreground line-through">
+                {formatDiffValue(delta.from)}
+              </span>
+            )}{" "}
+            <span className="font-medium text-foreground">{formatDiffValue(delta.to)}</span>
+          </span>
+        </div>
+      ))}
     </div>
   )
 }
 
-function TextAreaControl({
-  label,
-  value,
-  originalValue,
-  onChange,
-}: {
-  label: string
-  value: string
-  originalValue: string
-  onChange: (value: string) => void
-}) {
-  const changed = value !== originalValue
+function CteDraftDetail({ entry }: { entry: CanvasObjectEntry }) {
+  const sql = typeof entry.fields.definition_sql === "string" ? entry.fields.definition_sql : ""
+  const columns = Array.isArray(entry.fields.columns) ? entry.fields.columns : []
   return (
-    <div className="space-y-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <Textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className={cn("min-h-14 resize-y", changed && "border-amber-400 bg-amber-50")}
-      />
+    <div className="border-b px-3 py-2">
+      {sql && (
+        <pre className="max-h-36 overflow-y-auto whitespace-pre-wrap rounded bg-muted px-2 py-1.5 font-mono text-[11px] leading-4 text-muted-foreground">
+          {sql}
+        </pre>
+      )}
+      {columns.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {columns.map((column) => {
+            const name = typeof column === "object" && column !== null ? (column as { name?: string }).name : String(column)
+            return (
+              <Badge key={String(name)} variant="secondary" className="font-mono text-[10px]">
+                {String(name)}
+              </Badge>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
+}
+
+function fieldDetail(entry: CanvasObjectEntry): string {
+  if (entry.state === "edited") {
+    return `${Object.keys(entry.diff).sort().join(", ")} changed`
+  }
+  const fields = entry.fields
+  const fieldType = typeof fields.field_type === "string" ? fields.field_type : ""
+  const measureType = typeof fields.measure_type === "string" ? fields.measure_type : ""
+  const expression = typeof fields.expression === "string" ? fields.expression : ""
+  if (fieldType === "measure") {
+    return measureType === "count" ? "count of rows" : `${measureType} of ${expression}`
+  }
+  if (fieldType) {
+    return `${fieldType.replace("_", " ")} on ${expression}`
+  }
+  return ""
+}
+
+function relationshipTarget(entry: CanvasObjectEntry): string {
+  const draft = entry.fields.to_dataset
+  if (typeof draft === "string" && draft) return draft
+  const base = entry.base.to_dataset
+  if (typeof base === "string" && base) return base
+  return entry.name
+}
+
+function relationshipDetail(entry: CanvasObjectEntry): string {
+  const source = entry.change_type === "create" ? entry.fields : entry.base
+  const type = typeof source.relationship_type === "string" ? source.relationship_type : ""
+  const fromField = typeof source.from_field === "string" ? source.from_field : ""
+  return [type, fromField && `via ${fromField}`].filter(Boolean).join(" · ")
 }
 
 function PanelState({
@@ -602,12 +545,4 @@ function PanelState({
       </div>
     </div>
   )
-}
-
-function slugValue(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "")
 }
