@@ -40,9 +40,7 @@ async def cancel_thread_job(thread_job: ThreadJob) -> int:
     ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=now)
 
     try:
-        await app.job_manager.cancel_job_by_id_async(
-            thread_job.procrastinate_job_id, abort=True
-        )
+        await app.job_manager.cancel_job_by_id_async(thread_job.procrastinate_job_id, abort=True)
     except Exception:
         logger.warning(
             "Failed to abort procrastinate job %s",

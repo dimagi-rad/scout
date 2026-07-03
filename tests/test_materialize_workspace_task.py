@@ -941,9 +941,7 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_legacy_cancel_does_not_cancel_own_run_in_sibling_workspace(
-    workspace, user, tenant
-):
+async def test_legacy_cancel_does_not_cancel_own_run_in_sibling_workspace(workspace, user, tenant):
     """arch #255, 07#1: tenant schemas are shared across workspaces, so a run the
     SAME user started from a sibling workspace B (sharing the tenant) shows up in
     workspace A's active-run query. Cancelling from A must NOT cancel B's
