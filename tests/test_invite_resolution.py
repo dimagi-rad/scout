@@ -18,7 +18,6 @@ from apps.workspaces.models import (
     WorkspaceInviteStatus,
     WorkspaceMembership,
     WorkspaceRole,
-    WorkspaceTenant,
 )
 
 User = get_user_model()
