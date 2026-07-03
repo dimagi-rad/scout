@@ -139,7 +139,7 @@ def test_purge_drops_and_deletes_view_schemas(tenant_schema, view_schema):
     ):
         call_command("purge_synced_data", confirm=True)
 
-    mock_view_teardown.assert_called_once()
+    mock_view_teardown.assert_any_call(view_schema)
     assert WorkspaceViewSchema.objects.count() == 0
     assert TenantSchema.objects.count() == 0
 

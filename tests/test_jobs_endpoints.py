@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
+from procrastinate.contrib.django.procrastinate_app import FutureApp
 from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
@@ -943,8 +944,6 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
 def test_jobs_cancel_app_binding_is_live_not_a_blueprint():
     """The abort binding must resolve to a real App exposing a usable
     job_manager — not procrastinate's not-ready FutureApp blueprint."""
-    from procrastinate.contrib.django.procrastinate_app import FutureApp
-
     assert not isinstance(jobs_cancel.app, FutureApp)
     job_manager = jobs_cancel.app.job_manager
     assert hasattr(job_manager, "cancel_job_by_id_async")

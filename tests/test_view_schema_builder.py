@@ -1,8 +1,10 @@
 import os
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from psycopg import sql as psycopg_sql
 
 from apps.users.models import Tenant
@@ -795,10 +797,6 @@ def test_build_view_schema_reactivating_expired_row_resets_ttl(workspace, tenant
     """arch #255, 03#2: rebuilding a row resurrected from EXPIRED must reset
     last_accessed_at, or expire_inactive_schemas flips the freshly-rebuilt schema
     straight back to TEARDOWN on its next tick."""
-    from datetime import timedelta
-
-    from django.utils import timezone
-
     mock_cursor = MagicMock()
     mock_cursor.fetchall.return_value = []
     mock_conn = MagicMock()
