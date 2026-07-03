@@ -4,7 +4,14 @@ import pytest
 from django.core.management import call_command
 
 from apps.users.models import TenantMembership, User
-from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema, Workspace
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantMetadata,
+    TenantSchema,
+    Workspace,
+    WorkspaceViewSchema,
+)
 
 
 @pytest.fixture
@@ -108,6 +115,33 @@ def test_purge_clears_data_dictionary(workspace):
     assert workspace.data_dictionary is None
     assert workspace.data_dictionary_generated_at is None
     assert Workspace.objects.filter(id=workspace.id).exists()  # workspace preserved
+
+
+@pytest.fixture
+def view_schema(workspace):
+    return WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_deadbeefdeadbeef",
+        state=SchemaState.ACTIVE,
+    )
+
+
+@pytest.mark.django_db
+def test_purge_drops_and_deletes_view_schemas(tenant_schema, view_schema):
+    """arch #255, 09#4: --confirm must drop the ws_* physical view schemas and
+    delete the WorkspaceViewSchema rows — not orphan them over hollow schemas."""
+    with (
+        patch("apps.workspaces.management.commands.purge_synced_data.SchemaManager.teardown"),
+        patch(
+            "apps.workspaces.management.commands.purge_synced_data."
+            "SchemaManager.teardown_view_schema"
+        ) as mock_view_teardown,
+    ):
+        call_command("purge_synced_data", confirm=True)
+
+    mock_view_teardown.assert_called_once()
+    assert WorkspaceViewSchema.objects.count() == 0
+    assert TenantSchema.objects.count() == 0
 
 
 @pytest.mark.django_db
