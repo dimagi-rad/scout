@@ -232,6 +232,16 @@ Resources:
       SecurityGroupIds:
         - !Ref EC2SecurityGroup
       IamInstanceProfile: !Ref EC2InstanceProfile
+      # Require IMDSv2: a metadata GET only succeeds after a PUT obtains a session
+      # token, so a GET-only app-layer SSRF (e.g. a loader following a server-
+      # supplied next URL) can't reach 169.254.169.254/.../iam/security-credentials
+      # to steal the scout-ec2-role credentials (arch 10#8). HopLimit 1 keeps IMDS
+      # off Docker bridge networks; the awslogs log driver reads IMDS from the host
+      # daemon (hop 0), so container logging is unaffected.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
