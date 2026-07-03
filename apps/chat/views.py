@@ -26,7 +26,7 @@ from apps.chat.helpers import (
     async_login_required,
     repair_dangling_tool_calls,
 )
-from apps.chat.models import Thread
+from apps.chat.models import Thread, ThreadJob
 from apps.chat.rate_limiting import chat_rate_limit
 from apps.chat.stream import langgraph_to_ui_stream
 from apps.workspaces.services.workspace_service import touch_workspace_schemas
@@ -133,6 +133,29 @@ async def chat_view(request):
             workspace.pk,
         )
         return JsonResponse({"error": "Thread not found"}, status=404)
+
+    # Don't stream a live turn while a background resume is mid-ainvoke against
+    # this thread's checkpoint: two concurrent writers to one LangGraph thread can
+    # interleave or drop superstep state, and there is no CAS at this seam. A
+    # materialization ThreadJob is RUNNING only while its resume ainvoke is in
+    # flight, so a RUNNING job here means a resume is writing — ask the user to
+    # retry in a moment (arch #255, 06#9). (The reverse guard — a resume detecting
+    # an in-flight live turn — needs a live-turn marker that does not exist yet;
+    # tracked as follow-up.)
+    resume_in_flight = await ThreadJob.objects.filter(
+        thread_id=thread_id,
+        state=ThreadJob.State.RUNNING,
+    ).aexists()
+    if resume_in_flight:
+        return JsonResponse(
+            {
+                "error": (
+                    "A background response is still being generated for this "
+                    "conversation. Please retry in a moment."
+                )
+            },
+            status=409,
+        )
 
     try:
         await _upsert_thread(
