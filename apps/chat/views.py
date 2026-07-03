@@ -142,10 +142,16 @@ async def chat_view(request):
     # retry in a moment (arch #255, 06#9). (The reverse guard — a resume detecting
     # an in-flight live turn — needs a live-turn marker that does not exist yet;
     # tracked as follow-up.)
-    resume_in_flight = await ThreadJob.objects.filter(
-        thread_id=thread_id,
-        state=ThreadJob.State.RUNNING,
-    ).aexists()
+    # existing_thread is None for a not-yet-created or non-UUID thread_id (the
+    # lookup above tolerates both); scope the RUNNING-job check to the resolved
+    # thread so a client-supplied non-UUID id can't raise on the UUID FK.
+    resume_in_flight = (
+        existing_thread is not None
+        and await ThreadJob.objects.filter(
+            thread=existing_thread,
+            state=ThreadJob.State.RUNNING,
+        ).aexists()
+    )
     if resume_in_flight:
         return JsonResponse(
             {
