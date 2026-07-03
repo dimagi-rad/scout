@@ -32,7 +32,6 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
 
 from apps.chat.models import Thread, ThreadJob
 from apps.transformations.services.lineage import aget_lineage_chain
@@ -48,6 +47,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import materialize_workspace
+from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
@@ -707,7 +707,7 @@ async def run_materialization(
         except Exception:
             logger.exception("Failed to create ThreadJob; rolling back dispatch")
             with contextlib.suppress(Exception):
-                await _procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+                await procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
             tc["result"] = error_response(INTERNAL_ERROR, "Failed to track job")
             return tc["result"]
 

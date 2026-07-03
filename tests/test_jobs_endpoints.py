@@ -396,7 +396,7 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
     client = AsyncClient()
     await client.alogin(email="a@b.c", password="x")
 
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 200
@@ -487,7 +487,7 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
         state=ThreadJob.State.COMPLETED,  # Already terminal — resume just finished
     )
     # Call cancel_thread_job directly to exercise the race window
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         await cancel_thread_job(tj)
 
@@ -925,25 +925,28 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
 
 
 # ---------------------------------------------------------------------------
-# 12#0 item 2: exercise the REAL current_app binding in cancel_thread_job
+# 12#0 item 2 / arch #255 02#5: exercise the REAL app binding in cancel_thread_job
 #
-# The other cancel tests patch apps.workspaces.api.jobs_cancel.current_app,
-# replacing the module-level import-time binding. That masks the risk the
-# finding names: jobs_cancel does `from ...procrastinate_app import current_app`
-# (a surviving sibling of the binding that broke the worker-side janitor before
-# it moved to the ORM). If that binding ever resolved to procrastinate's
-# FutureApp blueprint, `current_app.job_manager` would raise AttributeError and
-# the abort would be silently swallowed by cancel_thread_job's try/except.
+# The other cancel tests patch apps.workspaces.api.jobs_cancel.app, replacing the
+# module-level binding. That masks the risk the finding names: jobs_cancel used to
+# do `from ...procrastinate_app import current_app` (the import-time FutureApp
+# binding that broke the worker-side janitor before it moved to the ORM). It now
+# imports the lazy `app` (ProxyApp) from config.procrastinate, which resolves the
+# job_manager after AppConfig.ready — so an import-order regression can no longer
+# silently disable the abort. This test locks that in.
 #
 # These tests leave the binding intact and patch the abort at the JobManager
 # CLASS level, so the real binding must resolve for the abort to fire.
 # ---------------------------------------------------------------------------
 
 
-def test_jobs_cancel_current_app_binding_is_live_not_a_blueprint():
-    """The surviving-sibling binding must resolve to a real App exposing a
-    usable job_manager — not procrastinate's not-ready FutureApp blueprint."""
-    job_manager = jobs_cancel.current_app.job_manager
+def test_jobs_cancel_app_binding_is_live_not_a_blueprint():
+    """The abort binding must resolve to a real App exposing a usable
+    job_manager — not procrastinate's not-ready FutureApp blueprint."""
+    from procrastinate.contrib.django.procrastinate_app import FutureApp
+
+    assert not isinstance(jobs_cancel.app, FutureApp)
+    job_manager = jobs_cancel.app.job_manager
     assert hasattr(job_manager, "cancel_job_by_id_async")
 
 

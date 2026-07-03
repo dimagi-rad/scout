@@ -6,7 +6,6 @@ import logging
 from datetime import UTC, datetime
 
 from django.http import JsonResponse
-from procrastinate.contrib.django.procrastinate_app import current_app
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.decorators import async_login_required
@@ -14,6 +13,7 @@ from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
+from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def materialization_cancel_view(request, workspace_id):
         total += orphan_cancelled
         for procrastinate_job_id in orphan_job_ids:
             try:
-                await current_app.job_manager.cancel_job_by_id_async(
+                await app.job_manager.cancel_job_by_id_async(
                     procrastinate_job_id,
                     abort=True,
                 )
@@ -178,7 +178,7 @@ async def materialization_retry_view(request, workspace_id):
         logger.exception("materialization_retry_view: failed to create ThreadJob")
         # Best-effort: cancel the dispatched job so we don't leak background work.
         with contextlib.suppress(Exception):
-            await current_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+            await app.job_manager.cancel_job_by_id_async(job_id, abort=True)
         return JsonResponse({"error": "Failed to track retry job"}, status=500)
 
     return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
