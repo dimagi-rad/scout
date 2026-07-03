@@ -134,3 +134,43 @@ def test_deploy_role_can_still_read_the_rds_master_secret():
         "(!GetAtt RDSInstance.MasterUserSecret.SecretArn) or resolve-database-url.sh "
         "can no longer build DATABASE_URL and the deploy breaks."
     )
+
+
+def _resources_of_type(cfn_type: str) -> dict:
+    return {name: r for name, r in _resources().items() if r.get("Type") == cfn_type}
+
+
+def test_every_alarm_notifies_the_alert_topic():
+    """The #257 detection layer only helps if every alarm reaches an operator.
+
+    A CloudWatch alarm with no AlarmActions pointing at the SNS AlertTopic fires
+    silently — exactly the 2026-06-09 blind spot #257 exists to close.
+    """
+    alarms = _resources_of_type("AWS::CloudWatch::Alarm")
+    assert alarms, "expected CloudWatch alarms in the stack (arch #257 detection layer)"
+    unwired = [
+        name
+        for name, alarm in alarms.items()
+        if "AlertTopic" not in (alarm["Properties"].get("AlarmActions") or [])
+    ]
+    assert not unwired, f"CloudWatch alarms not wired to the SNS AlertTopic (arch #257): {unwired}"
+
+
+def test_every_error_metric_has_an_alarm():
+    """Every ``*ErrorCount`` metric filter must have an alarm consuming it.
+
+    An error metric with no alarm is computed but watched by nothing — the cost
+    of the metric with none of the signal (arch #257).
+    """
+    alarmed = {
+        alarm["Properties"]["MetricName"]
+        for alarm in _resources_of_type("AWS::CloudWatch::Alarm").values()
+    }
+    error_metrics = {
+        transform["MetricName"]
+        for mf in _resources_of_type("AWS::Logs::MetricFilter").values()
+        for transform in mf["Properties"]["MetricTransformations"]
+        if transform["MetricName"].endswith("ErrorCount")
+    }
+    orphans = sorted(error_metrics - alarmed)
+    assert not orphans, f"error metric(s) with no alarm consuming them (arch #257): {orphans}"

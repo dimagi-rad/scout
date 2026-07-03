@@ -654,6 +654,24 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlertTopic]
 
+  # The MCP container has its own error metric filter; alarm on it too so a
+  # failing tool/SQL path (which the API may swallow into a chat error) still
+  # pages, matching the API/worker error alarms above.
+  McpErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-mcp-errors
+      AlarmDescription: MCP container is logging ERRORs at an elevated rate.
+      Namespace: Scout/App
+      MetricName: McpErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
   # Mass schema-drop: more than 5 DROP SCHEMA CASCADE in 15 min is a teardown
   # storm worth a human look (the 2026-06-10 incident dropped data-bearing
   # schemas in a tight loop).
