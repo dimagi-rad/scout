@@ -53,7 +53,7 @@ Parameters:
       Email address that receives CloudWatch alarm notifications (subscription
       must be confirmed via the email AWS sends). Leave blank to skip the
       subscription (alarms still fire to the SNS topic).
-    Default: ''
+    Default: 'ocs-devops@dimagi.com'
 
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
