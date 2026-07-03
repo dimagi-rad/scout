@@ -39,13 +39,48 @@ export interface WorkspaceDetail {
   updated_at: string
 }
 
+export type WorkspaceRole = "read" | "read_write" | "manage"
+
 export interface WorkspaceMember {
   id: string       // backend returns str(m.id)
   user_id: string  // backend returns str(m.user.id)
   email: string
   name: string
-  role: "read" | "read_write" | "manage"
+  role: WorkspaceRole
   created_at: string
+}
+
+export type WorkspaceInviteStatus =
+  | "pending"
+  | "awaiting_access"
+  | "accepted"
+  | "revoked"
+  | "expired"
+
+export interface WorkspaceInvite {
+  id: string
+  email: string
+  role: WorkspaceRole
+  status: WorkspaceInviteStatus
+  created_at: string
+}
+
+export interface MembersResponse {
+  members: WorkspaceMember[]
+  invites: WorkspaceInvite[]
+}
+
+// POST /members/ resolves to a real member OR a pending/awaiting invite; the
+// `result` discriminator tells the UI which row/message to render.
+export type AddMemberResult =
+  | ({ result: "member" } & WorkspaceMember)
+  | ({ result: "invite_pending" | "invite_awaiting_access" } & WorkspaceInvite)
+
+// GET /api/invites/ — the signed-in user's own awaiting_access invites.
+export interface AwaitingInvite {
+  id: string
+  workspace_name: string
+  message: string
 }
 
 export interface WorkspaceTenant {
@@ -121,18 +156,18 @@ export const workspaceApi = {
     api.delete<void>(`/api/workspaces/${workspaceId}/`),
 
   getMembers: (workspaceId: string) =>
-    api.get<WorkspaceMember[]>(`/api/workspaces/${workspaceId}/members/`),
+    api.get<MembersResponse>(`/api/workspaces/${workspaceId}/members/`),
 
   addMember: (
     workspaceId: string,
-    body: { email: string; role: WorkspaceMember["role"] },
+    body: { email: string; role: WorkspaceRole },
   ) =>
-    api.post<WorkspaceMember>(
+    api.post<AddMemberResult>(
       `/api/workspaces/${workspaceId}/members/`,
       body,
     ),
 
-  updateMember: (workspaceId: string, membershipId: string, role: WorkspaceMember["role"]) =>
+  updateMember: (workspaceId: string, membershipId: string, role: WorkspaceRole) =>
     api.patch<{ id: string; role: string }>(
       `/api/workspaces/${workspaceId}/members/${membershipId}/`,
       { role },
@@ -140,6 +175,17 @@ export const workspaceApi = {
 
   removeMember: (workspaceId: string, membershipId: string) =>
     api.delete<void>(`/api/workspaces/${workspaceId}/members/${membershipId}/`),
+
+  updateInviteRole: (workspaceId: string, inviteId: string, role: WorkspaceRole) =>
+    api.patch<WorkspaceInvite>(
+      `/api/workspaces/${workspaceId}/invites/${inviteId}/`,
+      { role },
+    ),
+
+  revokeInvite: (workspaceId: string, inviteId: string) =>
+    api.delete<void>(`/api/workspaces/${workspaceId}/invites/${inviteId}/`),
+
+  getMyInvites: () => api.get<AwaitingInvite[]>("/api/invites/"),
 
   getTenants: (workspaceId: string) =>
     api.get<WorkspaceTenant[]>(`/api/workspaces/${workspaceId}/tenants/`),
