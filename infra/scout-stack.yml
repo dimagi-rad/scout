@@ -53,7 +53,7 @@ Parameters:
       Email address that receives CloudWatch alarm notifications (subscription
       must be confirmed via the email AWS sends). Leave blank to skip the
       subscription (alarms still fire to the SNS topic).
-    Default: ''
+    Default: 'ocs-devops@dimagi.com'
 
 Conditions:
   HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, '']]
@@ -232,6 +232,16 @@ Resources:
       SecurityGroupIds:
         - !Ref EC2SecurityGroup
       IamInstanceProfile: !Ref EC2InstanceProfile
+      # Require IMDSv2: a metadata GET only succeeds after a PUT obtains a session
+      # token, so a GET-only app-layer SSRF (e.g. a loader following a server-
+      # supplied next URL) can't reach 169.254.169.254/.../iam/security-credentials
+      # to steal the scout-ec2-role credentials (arch 10#8). HopLimit 1 keeps IMDS
+      # off Docker bridge networks; the awslogs log driver reads IMDS from the host
+      # daemon (hop 0), so container logging is unaffected.
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+        HttpPutResponseHopLimit: 1
       BlockDeviceMappings:
         - DeviceName: /dev/sda1
           Ebs:
@@ -472,20 +482,34 @@ Resources:
                   - !GetAtt ECRApi.Arn
                   - !GetAtt ECRMcp.Arn
                   - !GetAtt ECRFrontend.Arn
+              # Secrets the deploy actually reads: the scout-db master secret by
+              # its exact ARN (NOT rds!*, which would match every RDS master
+              # password in the account — arch 10#9), plus the scout-namespaced
+              # prefixes kamal fetches by name. GetSecretValue also covers the RDS
+              # secret because resolve-database-url.sh reads it directly.
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
                 Resource:
+                  - !GetAtt RDSInstance.MasterUserSecret.SecretArn
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:scout/*'
-                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:rds!*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:SCOUT_*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:COMMCARE_*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:CONNECT_*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:OCS_*'
+              # `kamal secrets fetch` calls BatchGetSecretValue with an explicit
+              # --secret-id-list, so per-secret authorization against these
+              # prefixes is enough — no need for the account-wide Resource '*'
+              # this replaces (arch 10#9). The RDS secret is read via
+              # GetSecretValue above, not batched, so it is not listed here.
               - Effect: Allow
                 Action:
                   - secretsmanager:BatchGetSecretValue
-                Resource: '*'
+                Resource:
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:SCOUT_*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:COMMCARE_*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:CONNECT_*'
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:OCS_*'
 
   # ── Observability / detection layer (arch #257, finding 08#7) ────
   # The stack previously created log groups but NOTHING converted a dead
@@ -622,6 +646,24 @@ Resources:
       AlarmDescription: API container is logging ERRORs at an elevated rate.
       Namespace: Scout/App
       MetricName: ApiErrorCount
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+
+  # The MCP container has its own error metric filter; alarm on it too so a
+  # failing tool/SQL path (which the API may swallow into a chat error) still
+  # pages, matching the API/worker error alarms above.
+  McpErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: scout-mcp-errors
+      AlarmDescription: MCP container is logging ERRORs at an elevated rate.
+      Namespace: Scout/App
+      MetricName: McpErrorCount
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
