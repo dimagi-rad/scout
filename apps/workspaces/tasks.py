@@ -702,9 +702,12 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
-        # build_view_schema already saves state=FAILED before re-raising;
-        # no need to write it again here (doing so risks overwriting a
-        # concurrent state transition, e.g. TEARDOWN set by expire_inactive_schemas).
+        # build_view_schema owns the WorkspaceViewSchema state: it creates/resets
+        # the row before validating, then marks it FAILED (with last_error) on any
+        # failure — including the early "no tenants / tenant has no active schema"
+        # checks (arch #255, 03#2). So we must NOT re-write state here: doing so
+        # risks clobbering a concurrent transition (e.g. TEARDOWN set by
+        # expire_inactive_schemas).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
         return {"error": "Failed to build view schema"}
 
