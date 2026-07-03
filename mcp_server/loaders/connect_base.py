@@ -18,6 +18,7 @@ from mcp_server.loaders._http import (
     RETRY_STATUS_FORCELIST,
     RETRY_TOTAL,
     build_retry,
+    get_with_auth_refresh,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,9 @@ class ConnectBaseLoader:
             except ImportError:
                 base_url = self.DEFAULT_BASE_URL
         self.base_url = base_url.rstrip("/")
+        # A mid-run token refresher (OAuth only); None for API keys (arch #252,
+        # finding 14#3).
+        self._refresh = credential.get("refresh")
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
         adapter = HTTPAdapter(max_retries=build_retry())
@@ -117,7 +121,9 @@ class ConnectBaseLoader:
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising ConnectAuthError on 401/403."""
-        resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        resp = get_with_auth_refresh(
+            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+        )
         if resp.status_code in (401, 403):
             raise ConnectAuthError(
                 f"Connect auth failed for opportunity {self.opportunity_id}: "
@@ -178,8 +184,13 @@ class ConnectBaseLoader:
             # the redirect and preserves the Authorization header on
             # same-host upgrades. See test_follows_http_to_https_redirect
             # _on_next_url for the regression pin.
-            resp = self._session.get(
-                url, params=request_params, headers=headers, timeout=HTTP_TIMEOUT
+            resp = get_with_auth_refresh(
+                self._session,
+                url,
+                refresh=self._refresh,
+                params=request_params,
+                headers=headers,
+                timeout=HTTP_TIMEOUT,
             )
             if resp.status_code in (401, 403):
                 raise ConnectAuthError(

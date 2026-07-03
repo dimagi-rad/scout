@@ -102,3 +102,62 @@ class TestCredentialResolverTokenRefresh:
         ):
             with pytest.raises(CredentialResolutionError):
                 await _aresolve_oauth_credential(mock_token, "commcare")
+
+    @pytest.mark.asyncio
+    async def test_valid_oauth_credential_carries_refresh_callable(self):
+        """A refreshable OAuth credential exposes a ``refresh`` callable so
+        loaders can renew the token mid-run (arch #252, finding 14#3)."""
+        from apps.users.services.credential_resolver import _aresolve_oauth_credential
+
+        mock_token = MagicMock()
+        mock_token.token = "valid"
+        mock_token.token_secret = "refresh-token"
+        mock_token.app = MagicMock()
+        mock_token.expires_at = timezone.now() + timedelta(hours=1)
+
+        with patch(
+            "apps.users.services.credential_resolver.token_needs_refresh", return_value=False
+        ):
+            result = await _aresolve_oauth_credential(mock_token, "commcare")
+        assert result["value"] == "valid"
+        assert callable(result["refresh"])
+
+
+class TestSyncTokenRefresh:
+    def test_refresh_oauth_token_sync_updates_and_persists(self):
+        from apps.users.services.token_refresh import refresh_oauth_token_sync
+
+        social_token = MagicMock()
+        social_token.token_secret = "old-refresh"
+        social_token.app.client_id = "cid"
+        social_token.app.secret = "secret"
+
+        response = MagicMock()
+        response.json.return_value = {
+            "access_token": "brand-new",
+            "refresh_token": "rotated-refresh",
+            "expires_in": 900,
+        }
+        with patch(
+            "apps.users.services.token_refresh.requests.post", return_value=response
+        ) as mock_post:
+            new = refresh_oauth_token_sync(social_token, "https://token/")
+
+        assert new == "brand-new"
+        assert social_token.token == "brand-new"
+        assert social_token.token_secret == "rotated-refresh"
+        social_token.save.assert_called_once()
+        mock_post.assert_called_once()
+
+    def test_refresh_oauth_token_sync_raises_on_http_error(self):
+        from apps.users.services.token_refresh import (
+            TokenRefreshError,
+            refresh_oauth_token_sync,
+        )
+
+        social_token = MagicMock()
+        response = MagicMock()
+        response.raise_for_status.side_effect = RuntimeError("500")
+        with patch("apps.users.services.token_refresh.requests.post", return_value=response):
+            with pytest.raises(TokenRefreshError):
+                refresh_oauth_token_sync(social_token, "https://token/")

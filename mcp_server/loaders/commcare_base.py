@@ -13,7 +13,7 @@ from urllib.parse import urljoin
 import requests
 from requests.adapters import HTTPAdapter
 
-from mcp_server.loaders._http import build_retry
+from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ class CommCareBaseLoader:
 
     def __init__(self, domain: str, credential: dict[str, str]) -> None:
         self.domain = domain
+        # A mid-run token refresher (OAuth only); None for API keys, which never
+        # expire mid-run (arch #252, finding 14#3).
+        self._refresh = credential.get("refresh")
         self._session = requests.Session()
         self._session.headers.update(build_auth_header(credential))
         adapter = HTTPAdapter(max_retries=build_retry())
@@ -82,7 +85,9 @@ class CommCareBaseLoader:
         (bounded, capped Retry-After); a surviving non-2xx becomes a typed
         error rather than a bare ``requests.HTTPError``.
         """
-        resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        resp = get_with_auth_refresh(
+            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+        )
         if resp.status_code in (401, 403):
             raise CommCareAuthError(
                 f"CommCare authentication failed for domain {self.domain} "

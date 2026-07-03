@@ -9,7 +9,7 @@ import requests
 from django.conf import settings
 from requests.adapters import HTTPAdapter
 
-from mcp_server.loaders._http import build_retry
+from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,9 @@ class OCSBaseLoader:
         if base_url is None:
             base_url = getattr(settings, "OCS_URL", self.DEFAULT_BASE_URL)
         self.base_url = base_url.rstrip("/")
+        # A mid-run token refresher (OAuth only); None for API keys (arch #252,
+        # finding 14#3).
+        self._refresh = credential.get("refresh")
         self._session = requests.Session()
         if credential.get("type") == "api_key":
             self._session.headers.update({"X-api-key": credential["value"]})
@@ -70,7 +73,9 @@ class OCSBaseLoader:
         Transient 5xx/429 responses are retried by the session adapter; a
         surviving non-2xx becomes a typed error rather than a bare HTTPError.
         """
-        resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        resp = get_with_auth_refresh(
+            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+        )
         if resp.status_code in (401, 403):
             raise OCSAuthError(
                 f"OCS authentication failed for experiment {self.experiment_id} "

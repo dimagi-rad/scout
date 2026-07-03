@@ -7,7 +7,13 @@ throttles without pinning the sole materialization worker thread (arch #252).
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+
+import requests
 from urllib3.util.retry import Retry
+
+logger = logging.getLogger(__name__)
 
 # urllib3 honours a server ``Retry-After`` header verbatim when
 # ``respect_retry_after_header=True`` — with NO upper bound (``backoff_max``
@@ -54,3 +60,37 @@ def build_retry() -> Retry:
         respect_retry_after_header=True,
         raise_on_status=False,
     )
+
+
+# Returns a fresh OAuth access token (or None when no refresh is possible).
+TokenRefresher = Callable[[], "str | None"]
+
+
+def get_with_auth_refresh(
+    session: requests.Session,
+    url: str,
+    *,
+    refresh: TokenRefresher | None = None,
+    **kwargs,
+) -> requests.Response:
+    """GET ``url`` and, on a 401, refresh the OAuth token once and retry.
+
+    ``refresh`` (when provided) mints a fresh access token — the mid-run
+    reactive refresh that lets a load outlive a short-lived OAuth token
+    (arch #252, finding 14#3). It is consulted only on a 401 (an expiry
+    signal); a 403 is a permission error left to the caller. On refresh
+    failure the original 401 response is returned so the caller raises its
+    provider ``AuthError`` (fail closed — never a stale retry).
+    """
+    resp = session.get(url, **kwargs)
+    if resp.status_code != 401 or refresh is None:
+        return resp
+    try:
+        new_token = refresh()
+    except Exception:
+        logger.warning("Mid-run token refresh failed; surfacing auth error", exc_info=True)
+        return resp
+    if not new_token:
+        return resp
+    session.headers["Authorization"] = f"Bearer {new_token}"
+    return session.get(url, **kwargs)

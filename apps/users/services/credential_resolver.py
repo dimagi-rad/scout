@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from allauth.socialaccount.models import SocialToken
 
@@ -12,6 +13,7 @@ from apps.users.services.token_refresh import (
     TokenRefreshError,
     get_token_url,
     refresh_oauth_token,
+    refresh_oauth_token_sync,
     token_needs_refresh,
 )
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
@@ -163,6 +165,22 @@ async def aresolve_credential(membership) -> dict | None:
     return await _aresolve_oauth_credential(token_obj, conn.provider)
 
 
+def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
+    """Return a sync callable a loader invokes on a mid-run 401 to mint a fresh
+    access token (arch #252, finding 14#3).
+
+    It runs on the materialization worker thread (``asyncio.to_thread``), so it
+    uses the blocking refresh + sync-ORM persistence. It closes over the same
+    ``token_obj`` the proactive refresh mutated, so a second mid-run refresh
+    reuses the rotated refresh token.
+    """
+
+    def _refresh() -> str:
+        return refresh_oauth_token_sync(token_obj, token_url)
+
+    return _refresh
+
+
 async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     """Build an OAuth credential dict, refreshing the token if near expiry.
 
@@ -172,17 +190,25 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     authenticated request 401s, and no 401 downstream maps to actionable
     re-authentication guidance — so we surface "reconnect your account" up front
     instead of a doomed run (arch #252, finding 14#4).
+
+    When a refresh is possible the credential carries a ``refresh`` callable so
+    loaders can renew the token mid-run and survive a token whose lifetime is
+    shorter than the run — CommCare's 15-min OAuth TTL (finding 14#3).
     """
     token_url = get_token_url(provider)
     can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
 
+    token_value = token_obj.token
     if token_needs_refresh(token_obj.expires_at):
         if not can_refresh:
             raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
         try:
-            return {"type": "oauth", "value": await refresh_oauth_token(token_obj, token_url)}
+            token_value = await refresh_oauth_token(token_obj, token_url)
         except TokenRefreshError as e:
             logger.warning("Token refresh failed for provider %s; failing closed", provider)
             raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider)) from e
 
-    return {"type": "oauth", "value": token_obj.token}
+    cred: dict = {"type": "oauth", "value": token_value}
+    if can_refresh:
+        cred["refresh"] = _make_token_refresher(token_obj, token_url)
+    return cred
