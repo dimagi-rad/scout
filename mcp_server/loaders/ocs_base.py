@@ -7,6 +7,9 @@ from collections.abc import Iterator
 
 import requests
 from django.conf import settings
+from requests.adapters import HTTPAdapter
+
+from mcp_server.loaders._http import build_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,16 @@ OCS_MAX_PAGE_SIZE = 1500
 
 class OCSAuthError(Exception):
     """Raised when OCS returns a 401 or 403 response."""
+
+
+class OCSExportError(Exception):
+    """Raised on unrecoverable OCS export failures.
+
+    Covers invalid JSON, a missing ``results`` key, and non-2xx responses that
+    survive the retry policy. Mirrors ConnectExportError so a malformed
+    response fails loudly instead of yielding a silently-empty page
+    (arch #252, finding 03#6).
+    """
 
 
 class OCSBaseLoader:
@@ -47,15 +60,37 @@ class OCSBaseLoader:
             self._session.headers.update({"X-api-key": credential["value"]})
         else:
             self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
+        adapter = HTTPAdapter(max_retries=build_retry())
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
+        """GET a URL, raising on auth failure or an unrecoverable status.
+
+        Transient 5xx/429 responses are retried by the session adapter; a
+        surviving non-2xx becomes a typed error rather than a bare HTTPError.
+        """
         resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)
         if resp.status_code in (401, 403):
             raise OCSAuthError(
-                f"OCS auth failed for experiment {self.experiment_id}: HTTP {resp.status_code}"
+                f"OCS authentication failed for experiment {self.experiment_id} "
+                f"(HTTP {resp.status_code}). Your Open Chat Studio sign-in has likely "
+                f"expired or been revoked — please reconnect your account and retry."
             )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise OCSExportError(
+                f"OCS export request failed for experiment {self.experiment_id}: "
+                f"HTTP {resp.status_code} for {url}"
+            )
         return resp
+
+    def _get_json(self, url: str, params: dict | None = None) -> dict:
+        """GET a URL and parse JSON, raising OCSExportError on invalid JSON."""
+        resp = self._get(url, params=params)
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise OCSExportError(f"OCS API returned invalid JSON for {url}: {e}") from e
 
     def _paginate(
         self, url: str, params: dict | None = None
@@ -71,14 +106,12 @@ class OCSBaseLoader:
         current_params: dict | None = params
         first_page = True
         while current_url:
-            resp = self._session.get(current_url, params=current_params, timeout=HTTP_TIMEOUT)
-            if resp.status_code in (401, 403):
-                raise OCSAuthError(
-                    f"OCS auth failed for experiment {self.experiment_id}: HTTP {resp.status_code}"
-                )
-            resp.raise_for_status()
-            payload = resp.json()
-            page = payload.get("results", [])
+            payload = self._get_json(current_url, params=current_params)
+            if "results" not in payload:
+                # A missing ``results`` key means the envelope changed — fail
+                # rather than yielding a silently-empty page (finding 03#6).
+                raise OCSExportError(f"OCS API response missing 'results' key for {current_url}")
+            page = payload["results"]
             if first_page:
                 total = payload.get("count")
                 if not isinstance(total, int):
