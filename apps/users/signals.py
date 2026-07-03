@@ -24,6 +24,10 @@ from apps.workspaces.models import (
     WorkspaceInviteStatus,
     WorkspaceMembership,
 )
+from apps.workspaces.services.invite_notifications import (
+    notify_awaiting_access,
+    notify_invite_accepted,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -190,9 +194,11 @@ def resolve_pending_invites_on_login(user):
             invite.save(
                 update_fields=["status", "resolved_at", "resolved_membership", "updated_at"]
             )
+            notify_invite_accepted(invite, user)
         elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
             invite.status = WorkspaceInviteStatus.AWAITING_ACCESS
             invite.save(update_fields=["status", "updated_at"])
+            notify_awaiting_access(invite, user)
 
 
 def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):

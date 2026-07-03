@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -35,6 +36,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
     default_invite_expiry,
+)
+from apps.workspaces.services.invite_notifications import (
+    describe_workspace_sources,
+    notify_awaiting_access,
+    send_pending_invite_email,
 )
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -508,6 +514,7 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.PENDING
             )
+            send_pending_invite_email(invite)
             return Response(
                 _serialize_invite(invite, result="invite_pending"),
                 status=status.HTTP_201_CREATED,
@@ -529,6 +536,10 @@ class WorkspaceMemberListView(APIView):
             invite = _upsert_invite(
                 workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
             )
+            # The invitee already has a Scout account, so they never get the
+            # pending-invite email; tell them directly they need upstream access.
+            # The manager just performed this action, so don't email them.
+            notify_awaiting_access(invite, target, notify_manager=False)
             return Response(
                 _serialize_invite(invite, result="invite_awaiting_access"),
                 status=status.HTTP_201_CREATED,
@@ -686,6 +697,47 @@ class WorkspaceInviteDetailView(APIView):
         invite.status = WorkspaceInviteStatus.REVOKED
         invite.save(update_fields=["status", "updated_at"])
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MyInvitesView(APIView):
+    """GET /api/invites/ — the signed-in user's awaiting_access invites.
+
+    Feeds the in-app 'you're invited but need upstream access' banner. Matched on
+    the user's VERIFIED emails (same rule as the login resolver) so the message
+    can't be surfaced against an unverified address.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        emails = {
+            e.lower()
+            for e in EmailAddress.objects.filter(
+                user=request.user, verified=True
+            ).values_list("email", flat=True)
+        }
+        if request.user.email:
+            emails.add(request.user.email.lower())
+
+        invites = WorkspaceInvite.objects.filter(
+            email__in=emails,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+            expires_at__gt=timezone.now(),
+        ).select_related("workspace")
+        return Response(
+            [
+                {
+                    "id": str(i.id),
+                    "workspace_name": i.workspace.name,
+                    "message": (
+                        f"You were invited to '{i.workspace.name}' but don't yet have access to "
+                        f"{describe_workspace_sources(i.workspace)}. Ask to be added there — it "
+                        f"unlocks automatically once you do."
+                    ),
+                }
+                for i in invites
+            ]
+        )
 
 
 class WorkspaceTenantView(APIView):
