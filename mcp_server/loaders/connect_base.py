@@ -13,7 +13,12 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from mcp_server.loaders._http import (
+    RETRY_STATUS_FORCELIST,
+    RETRY_TOTAL,
+    build_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +32,6 @@ HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 # `/export/opp_org_program_list/` used by ConnectMetadataLoader — are
 # unaffected.
 EXPORT_ACCEPT_HEADER = "application/json; version=2.0"
-
-# Bounded retry policy for transient upstream failures. backoff_factor=2.0
-# yields waits of 0s, 2s, 4s, 8s between the 4 total attempts (~14s worst case).
-# raise_on_status=False lets us inspect the final response (headers, status)
-# so we can surface upstream Sentry trace IDs rather than just propagating
-# the raw requests.HTTPError.
-RETRY_TOTAL = 3
-RETRY_STATUS_FORCELIST = (500, 502, 503, 504, 408, 429)
 
 
 def _extract_last_id(url: str, params: dict | None) -> int | None:
@@ -56,17 +53,6 @@ def _extract_last_id(url: str, params: dict | None) -> int | None:
         return int(values[0])
     except (TypeError, ValueError):
         return None
-
-
-def _build_retry() -> Retry:
-    return Retry(
-        total=RETRY_TOTAL,
-        backoff_factor=2.0,
-        status_forcelist=list(RETRY_STATUS_FORCELIST),
-        allowed_methods=["GET"],
-        respect_retry_after_header=True,
-        raise_on_status=False,
-    )
 
 
 class ConnectAuthError(Exception):
@@ -125,7 +111,7 @@ class ConnectBaseLoader:
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({"Authorization": f"Bearer {credential['value']}"})
-        adapter = HTTPAdapter(max_retries=_build_retry())
+        adapter = HTTPAdapter(max_retries=build_retry())
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
 
