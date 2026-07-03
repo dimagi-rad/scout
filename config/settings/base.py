@@ -210,7 +210,15 @@ LOGOUT_REDIRECT_URL = "/"
 # EMAIL_HOST/EMAIL_PORT/... vars) to stand up real transactional email — see the
 # DEFAULT_FROM_EMAIL note below.
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
-DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="webmaster@localhost")
+EMAIL_TIMEOUT = 5
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="Scout <noreply@scout.dimagi.com>")
+SERVER_EMAIL = env("SERVER_EMAIL", default=DEFAULT_FROM_EMAIL)
+EMAIL_SUBJECT_PREFIX = env("EMAIL_SUBJECT_PREFIX", default="[Scout] ")
+
+# Public base URL of the Scout SPA. Emails are sent from the Procrastinate worker
+# (no request context), so absolute deep-links can't use request.build_absolute_uri;
+# they build off this instead. Defaults to the Vite dev server.
+SCOUT_BASE_URL = env("SCOUT_BASE_URL", default="http://localhost:5173")
 
 # Client IDs/secrets configured via Django admin at /admin/socialaccount/socialapp/
 SOCIALACCOUNT_PROVIDERS = {

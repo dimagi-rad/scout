@@ -16,6 +16,8 @@ dependencies = [
     "django-allauth>=65.0",
     "PyJWT[crypto]>=2.0",
     "cryptography>=42.0",
+    # Transactional email via Amazon SES in prod (console backend in dev); pulls boto3.
+    "django-anymail[amazon-ses]>=11.0",
     # LangGraph / LangChain
     "langgraph>=0.2",
     "langchain-anthropic>=0.2",
