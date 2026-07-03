@@ -567,3 +567,75 @@ class TestMemberListWithInvites:
         invite_emails = {i["email"] for i in body["invites"]}
         assert invite_emails == {"pending@example.com"}
         assert body["invites"][0]["status"] == WorkspaceInviteStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Invite detail: revoke + role change
+# ---------------------------------------------------------------------------
+
+
+class TestInviteDetail:
+    def _make_invite(self, workspace, email="pending@example.com", role=WorkspaceRole.READ):
+        return WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email=email,
+            role=role,
+            status=WorkspaceInviteStatus.PENDING,
+        )
+
+    def test_manager_can_revoke_invite(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 204
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.REVOKED
+
+    def test_manager_can_change_invite_role(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        invite.refresh_from_db()
+        assert invite.role == WorkspaceRole.MANAGE
+
+    def test_invalid_role_returns_400(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": "admin"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+
+    def test_non_manager_cannot_revoke(self, client, workspace, tenant, db):
+        reader = User.objects.create_user(email="reader2@example.com", password="pass")
+        TenantMembership.objects.create(user=reader, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=reader, role=WorkspaceRole.READ
+        )
+        invite = self._make_invite(workspace)
+        client.force_login(reader)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 403
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.PENDING
+
+    def test_revoke_unknown_invite_returns_404(self, client, user, workspace):
+        import uuid
+
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{uuid.uuid4()}/")
+        assert resp.status_code == 404
+
+    def test_cannot_touch_invite_of_other_workspace(self, client, user, workspace, db):
+        other_ws = Workspace.objects.create(name="Other")
+        invite = self._make_invite(other_ws)
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 404

@@ -639,6 +639,55 @@ class WorkspaceMemberDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class WorkspaceInviteDetailView(APIView):
+    """
+    PATCH  /api/workspaces/<workspace_id>/invites/<invite_id>/ — change invite role (manage only).
+    DELETE /api/workspaces/<workspace_id>/invites/<invite_id>/ — revoke invite (manage only).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_manager_context(self, request, workspace_id, invite_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return None, None, err
+        if membership.role != WorkspaceRole.MANAGE:
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "Only managers can manage invites."},
+                    status=status.HTTP_403_FORBIDDEN,
+                ),
+            )
+        try:
+            invite = WorkspaceInvite.objects.get(id=invite_id, workspace=workspace)
+        except WorkspaceInvite.DoesNotExist:
+            return None, None, Response(
+                {"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        return workspace, invite, None
+
+    def patch(self, request, workspace_id, invite_id):
+        _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
+        if err:
+            return err
+        new_role = request.data.get("role")
+        if new_role not in WorkspaceRole.values:
+            return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+        invite.role = new_role
+        invite.save(update_fields=["role", "updated_at"])
+        return Response(_serialize_invite(invite))
+
+    def delete(self, request, workspace_id, invite_id):
+        _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
+        if err:
+            return err
+        invite.status = WorkspaceInviteStatus.REVOKED
+        invite.save(update_fields=["status", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class WorkspaceTenantView(APIView):
     """
     POST   /api/workspaces/<workspace_id>/tenants/         — add tenant (manage only)

@@ -12,6 +12,7 @@ from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
 from apps.workspaces.api.workspace_views import (
     WorkspaceDetailView,
+    WorkspaceInviteDetailView,
     WorkspaceListView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListView,
@@ -69,6 +70,11 @@ workspace_urlpatterns = [
         "members/<int:membership_id>/",
         WorkspaceMemberDetailView.as_view(),
         name="workspace_member_detail",
+    ),
+    path(
+        "invites/<uuid:invite_id>/",
+        WorkspaceInviteDetailView.as_view(),
+        name="workspace_invite_detail",
     ),
     path("tenants/", WorkspaceTenantView.as_view(), name="workspace_tenants"),
     path("tenants/<uuid:wt_id>/", WorkspaceTenantView.as_view(), name="workspace_tenant_detail"),
