@@ -11,6 +11,9 @@ import logging
 from urllib.parse import urljoin
 
 import requests
+from requests.adapters import HTTPAdapter
+
+from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,17 @@ HTTP_TIMEOUT: tuple[int, int] = (10, 120)
 
 class CommCareAuthError(Exception):
     """Raised when CommCare returns a 401 or 403 response."""
+
+
+class CommCareExportError(Exception):
+    """Raised on unrecoverable CommCare export failures.
+
+    Covers malformed responses (invalid JSON, a missing page-collection key)
+    and non-2xx responses that survive the retry policy. CommCare HQ actively
+    rate-limits its APIs (HTTP 429 + Retry-After by design), so a bare
+    ``raise_for_status`` with no retry turned an expected throttle into a run
+    failure (arch #252, findings 12#4/03#6).
+    """
 
 
 def build_auth_header(credential: dict[str, str]) -> dict[str, str]:
@@ -43,8 +57,14 @@ class CommCareBaseLoader:
 
     def __init__(self, domain: str, credential: dict[str, str]) -> None:
         self.domain = domain
+        # A mid-run token refresher (OAuth only); None for API keys, which never
+        # expire mid-run (arch #252, finding 14#3).
+        self._refresh = credential.get("refresh")
         self._session = requests.Session()
         self._session.headers.update(build_auth_header(credential))
+        adapter = HTTPAdapter(max_retries=build_retry())
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     def _resolve_next_url(self, base_url: str, next_url: str | None) -> str | None:
         """Resolve a potentially-relative ``next`` URL from a CommCare API response.
@@ -59,11 +79,32 @@ class CommCareBaseLoader:
         return urljoin(base_url, next_url)
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
-        """GET a URL, raising CommCareAuthError on 401/403."""
-        resp = self._session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        """GET a URL, raising on auth failure or an unrecoverable status.
+
+        Transient 5xx/429 responses are retried by the session adapter
+        (bounded, capped Retry-After); a surviving non-2xx becomes a typed
+        error rather than a bare ``requests.HTTPError``.
+        """
+        resp = get_with_auth_refresh(
+            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+        )
         if resp.status_code in (401, 403):
             raise CommCareAuthError(
-                f"CommCare auth failed for domain {self.domain}: HTTP {resp.status_code}"
+                f"CommCare authentication failed for domain {self.domain} "
+                f"(HTTP {resp.status_code}). Your CommCare sign-in has likely expired "
+                f"or been revoked — please reconnect your CommCare account and retry."
             )
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise CommCareExportError(
+                f"CommCare export request failed for domain {self.domain}: "
+                f"HTTP {resp.status_code} for {url}"
+            )
         return resp
+
+    def _get_json(self, url: str, params: dict | None = None) -> dict:
+        """GET a URL and parse JSON, raising CommCareExportError on invalid JSON."""
+        resp = self._get(url, params=params)
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise CommCareExportError(f"CommCare API returned invalid JSON for {url}: {e}") from e

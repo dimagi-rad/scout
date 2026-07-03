@@ -5,9 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
-from mcp_server.loaders.ocs_base import OCSAuthError
+from mcp_server.loaders.ocs_base import OCSAuthError, OCSExportError
 from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
 from mcp_server.loaders.ocs_messages import OCSMessageLoader
 from mcp_server.loaders.ocs_participants import OCSParticipantLoader
@@ -304,24 +303,23 @@ def test_experiment_loader_raises_auth_error_on_403():
 
 
 def test_experiment_loader_raises_on_server_error():
-    """A 5xx (no retry policy in OCS) propagates via raise_for_status rather
-    than being swallowed into an empty page."""
+    """A 5xx that survives the retry policy surfaces as a typed OCSExportError
+    rather than being swallowed into an empty page (arch #252, finding 03#6)."""
     loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     resp = MagicMock(status_code=500)
-    resp.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
     with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(requests.HTTPError):
+        with pytest.raises(OCSExportError):
             list(loader.load_pages())
 
 
 def test_experiment_loader_raises_on_malformed_json():
-    """A 200 with a non-JSON body must raise (ValueError from .json()), not
-    yield a partial/empty row set."""
+    """A 200 with a non-JSON body must raise OCSExportError (wrapping the
+    ValueError from .json()), not yield a partial/empty row set."""
     loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     resp = MagicMock(status_code=200)
     resp.json.side_effect = ValueError("No JSON object could be decoded")
     with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(ValueError):
+        with pytest.raises(OCSExportError):
             list(loader.load_pages())
 
 
@@ -375,9 +373,7 @@ def test_participant_loader_yields_first_page_count():
     page = MagicMock(status_code=200)
     page.json.return_value = {
         "count": 42,
-        "results": [
-            {"id": "p1", "identifier": "part1", "name": "John", "platform": "api"}
-        ],
+        "results": [{"id": "p1", "identifier": "part1", "name": "John", "platform": "api"}],
         "next": None,
     }
     with patch.object(loader._session, "get", return_value=page):

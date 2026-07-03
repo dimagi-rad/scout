@@ -15,8 +15,7 @@ class OCSExperimentLoader(OCSBaseLoader):
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/experiments/{self.experiment_id}/"
-        resp = self._get(url)
-        data = resp.json()
+        data = self._get_json(url)
         row = {
             "experiment_id": str(data.get("id") or self.experiment_id),
             "name": data.get("name") or "",

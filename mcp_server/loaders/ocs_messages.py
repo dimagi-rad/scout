@@ -48,8 +48,10 @@ class OCSMessageLoader(OCSBaseLoader):
         total_messages = 0
         for session_id in session_ids:
             detail_url = f"{self.base_url}/api/sessions/{session_id}/"
-            detail_resp = self._get(detail_url)
-            messages = detail_resp.json().get("messages") or []
+            # A session with no messages legitimately omits/empties the key, so
+            # a missing ``messages`` is treated as empty (not an error) — but the
+            # JSON parse itself is validated via _get_json (finding 03#6).
+            messages = self._get_json(detail_url).get("messages") or []
             rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
             total_messages += len(rows)
             yield rows, total_sessions
