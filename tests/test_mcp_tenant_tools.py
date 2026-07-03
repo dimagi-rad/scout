@@ -12,8 +12,10 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 
+from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -877,6 +879,9 @@ class TestCancelMaterialization:
         mock_run.id = uuid.UUID(run_id)
         mock_run.state = "loading"
         mock_run.result = {}
+        # No procrastinate job here — the abort / ThreadJob flip is exercised in a
+        # dedicated real-models test below (arch #255, 01#1).
+        mock_run.procrastinate_job_id = None
         # Real model path: TenantSchema.tenant -> Tenant.external_id (12#0 item 3).
         mock_run.tenant_schema.tenant.external_id = "dimagi"
         mock_run.tenant_schema.schema_name = "dimagi"
@@ -946,6 +951,53 @@ class TestCancelMaterialization:
 
         assert result["success"] is False
         assert "not in progress" in result["error"]["message"].lower()
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_cancel_materialization_aborts_job_and_flips_threadjob():
+    """arch #255, 01#1: a mid-load MCP cancel must not only write CANCELLED but
+    also abort the procrastinate job and flip the owning chat ThreadJob, so the
+    load actually unwinds and the chat spinner clears (matching the HTTP cancel
+    path). Before the fix it left the job running and the ThreadJob active."""
+    from mcp_server.server import cancel_materialization
+
+    User = get_user_model()
+    user = await User.objects.acreate_user(email="mcpcancel@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-mcpcancel", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id="mcpc", provider="commcare", canonical_name="MCPC"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="s_mcpc", state=SchemaState.ACTIVE
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=990011,
+        tool_call_id="tc-mcpc",
+        state=ThreadJob.State.PENDING,
+    )
+    run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=990011,
+    )
+
+    abort = AsyncMock(return_value=None)
+    with patch("mcp_server.server.procrastinate_app") as mock_app:
+        mock_app.job_manager.cancel_job_by_id_async = abort
+        result = await cancel_materialization(run_id=str(run.id), workspace_id=str(ws.id))
+
+    assert result["success"] is True
+    abort.assert_awaited_once_with(990011, abort=True)
+    await run.arefresh_from_db()
+    assert run.state == MaterializationRun.RunState.CANCELLED
+    await tj.arefresh_from_db()
+    assert tj.state == ThreadJob.State.CANCELLED
+    assert tj.completed_at is not None
 
 
 # ---------------------------------------------------------------------------

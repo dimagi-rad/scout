@@ -523,6 +523,22 @@ async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
         run.result = {**(run.result or {}), "cancelled": True}
         await run.asave(update_fields=["state", "completed_at", "result"])
 
+        # The DB flip above is the authoritative stop signal (the worker's per-page
+        # progress checkpoint reads state==CANCELLED and rolls back the in-flight
+        # source), but on its own it left the procrastinate job running to the next
+        # await and the chat ThreadJob spinning. Mirror the HTTP cancel path
+        # (jobs_cancel.cancel_thread_job): abort the job and flip its ThreadJob so
+        # a mid-load MCP cancel actually unwinds end-to-end (arch #255, 01#1).
+        if run.procrastinate_job_id is not None:
+            with contextlib.suppress(Exception):
+                await procrastinate_app.job_manager.cancel_job_by_id_async(
+                    run.procrastinate_job_id, abort=True
+                )
+            await ThreadJob.objects.filter(
+                procrastinate_job_id=run.procrastinate_job_id,
+                state__in=list(ThreadJob.ACTIVE_STATES),
+            ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=datetime.now(UTC))
+
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
         logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
