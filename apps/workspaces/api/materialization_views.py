@@ -46,18 +46,27 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
-    # Scope to thread__user so a member can't cancel another member's chat-driven
-    # materialization (which would inject a "cancelled" resume into their thread).
+    # Tenant schemas are SHARED across workspaces, so ``active_runs`` (selected by
+    # this workspace's tenants) also contains runs a sibling workspace started for
+    # the same tenant. Scope to thread__user AND thread__workspace so cancelling
+    # here only cancels runs driven from THIS workspace — never a sibling's run of
+    # a shared tenant (which would inject a "cancelled" resume into their thread —
+    # arch #255, 07#1).
     tjs = [
         tj
         async for tj in ThreadJob.objects.filter(
             procrastinate_job_id__in=job_ids,
             state__in=list(ThreadJob.ACTIVE_STATES),
             thread__user=user,
+            thread__workspace=workspace,
         )
     ]
-    # ALL ThreadJobs (any user) — distinguishes truly-orphan runs (no ThreadJob,
-    # e.g. /refresh/ path) from another user's runs, which we must NOT cancel.
+    # ALL ThreadJobs (any user/workspace) — distinguishes truly-orphan runs (no
+    # ThreadJob, e.g. /refresh/ path) from another user's/workspace's runs, which
+    # we must NOT cancel. The orphan fallback below stays workspace-agnostic on
+    # purpose: an orphan run has no ThreadJob, so cancelling it injects no
+    # "cancelled" resume into any thread — the cross-workspace harm the finding
+    # names is entirely on the tracked path above, now scoped by thread__workspace.
     all_tracked_job_ids = {
         pid
         async for pid in ThreadJob.objects.filter(
@@ -71,7 +80,8 @@ async def materialization_cancel_view(request, workspace_id):
         total += await cancel_thread_job(tj)
         tracked_job_ids.add(tj.procrastinate_job_id)
 
-    # Only truly-orphan runs (no ThreadJob anywhere); other users' runs are skipped.
+    # Only truly-orphan runs (no ThreadJob anywhere); other users'/workspaces'
+    # tracked runs are skipped.
     orphan_job_ids = job_ids - all_tracked_job_ids
     if orphan_job_ids:
         logger.info(

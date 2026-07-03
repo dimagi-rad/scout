@@ -514,7 +514,7 @@ async def test_cancel_endpoint_marks_runs_cancelled(workspace, user, tenant):
     client = AsyncClient()
     await client.alogin(email=user.email, password="testpass123")
 
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
 
@@ -751,8 +751,8 @@ async def test_legacy_cancel_handles_mixed_tracked_and_orphan_runs(workspace, us
     await client.alogin(email=user.email, password="testpass123")
 
     with (
-        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
-        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+        patch("apps.workspaces.api.jobs_cancel.app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.app") as mock_orphan_app,
     ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
@@ -819,8 +819,8 @@ async def test_legacy_cancel_does_not_cancel_other_users_threadjob(
     client = AsyncClient()
     await client.alogin(email=other_user.email, password="otherpass123")
     with (
-        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
-        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+        patch("apps.workspaces.api.jobs_cancel.app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.app") as mock_orphan_app,
     ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
@@ -906,8 +906,8 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
     client = AsyncClient()
     await client.alogin(email=other_user.email, password="otherpass123")
     with (
-        patch("apps.workspaces.api.jobs_cancel.current_app") as mock_tracked_app,
-        patch("apps.workspaces.api.materialization_views.current_app") as mock_orphan_app,
+        patch("apps.workspaces.api.jobs_cancel.app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.app") as mock_orphan_app,
     ):
         mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
         mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
@@ -934,6 +934,59 @@ async def test_legacy_cancel_orphan_path_skips_other_users_runs(
         1002,
         abort=True,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_cancel_does_not_cancel_own_run_in_sibling_workspace(
+    workspace, user, tenant
+):
+    """arch #255, 07#1: tenant schemas are shared across workspaces, so a run the
+    SAME user started from a sibling workspace B (sharing the tenant) shows up in
+    workspace A's active-run query. Cancelling from A must NOT cancel B's
+    chat-driven run — doing so injects a "cancelled" resume into B's thread. The
+    thread__workspace filter on the tracked-cancel path prevents it."""
+    sibling_ws = await Workspace.objects.acreate(name="sibling-ws", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=sibling_ws, tenant=tenant)
+
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="test_sibling_cancel", state=SchemaState.ACTIVE
+    )
+    # A run driven from the sibling workspace B's chat (owned by the same user).
+    b_run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+        procrastinate_job_id=888,
+    )
+    b_thread = await Thread.objects.acreate(workspace=sibling_ws, user=user)
+    b_tj = await ThreadJob.objects.acreate(
+        thread=b_thread,
+        job_type="materialization",
+        procrastinate_job_id=888,
+        tool_call_id="tc-sibling",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    client = AsyncClient()
+    await client.alogin(email=user.email, password="testpass123")
+    with (
+        patch("apps.workspaces.api.jobs_cancel.app") as mock_tracked_app,
+        patch("apps.workspaces.api.materialization_views.app") as mock_orphan_app,
+    ):
+        mock_tracked_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        mock_orphan_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=1)
+        # Cancel from workspace A (the `workspace` fixture), not the sibling.
+        resp = await client.post(f"/api/workspaces/{workspace.id}/materialization/cancel/")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "no_active_run"
+    # B's run + ThreadJob are untouched — no cross-workspace cancel.
+    await b_run.arefresh_from_db()
+    assert b_run.state == MaterializationRun.RunState.LOADING
+    await b_tj.arefresh_from_db()
+    assert b_tj.state == ThreadJob.State.RUNNING
+    mock_orphan_app.job_manager.cancel_job_by_id_async.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
