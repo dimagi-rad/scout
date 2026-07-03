@@ -14,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 _checkpointer = None
 _pool = None
-# Serializes initialization so two concurrent cold-start requests can't interleave
-# (the second used to close the first's half-open pool, failing its setup — arch
-# #255, 08#1).
+# Serialize init so concurrent cold starts don't race the half-open pool (arch #255 08#1).
 _init_lock = asyncio.Lock()
 
 
@@ -40,21 +38,14 @@ async def ensure_checkpointer(*, force_new: bool = False):
         try:
             database_url = get_database_url()
 
-            # Reuse the existing pool if it is still open. force_new rebuilds the
-            # (cheap, stateless) saver but MUST NOT close a pool that other
-            # in-flight chat streams are borrowing from for checkpoint writes —
-            # closing it turned one request's transient error into a failure for
-            # every concurrent conversation in this worker (arch #255, 08#1). The
-            # borrow-time health check below recycles individually-dead
-            # connections, so a full pool rebuild is rarely needed anyway.
+            # force_new rebuilds only the stateless saver; it must NOT close a pool
+            # other in-flight streams are still borrowing for writes (arch #255 08#1).
             if not _pool_is_usable(_pool):
                 _pool = AsyncConnectionPool(
                     conninfo=database_url,
                     max_size=20,
                     open=False,
-                    # Health-check each connection on checkout so a dead pooled
-                    # connection (after a DB blip) is recycled instead of handed
-                    # out mid-write.
+                    # Recycle a dead pooled connection on checkout, not mid-write (arch #255 08#1).
                     check=AsyncConnectionPool.check_connection,
                     kwargs={
                         "autocommit": True,

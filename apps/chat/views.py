@@ -134,17 +134,9 @@ async def chat_view(request):
         )
         return JsonResponse({"error": "Thread not found"}, status=404)
 
-    # Don't stream a live turn while a background resume is mid-ainvoke against
-    # this thread's checkpoint: two concurrent writers to one LangGraph thread can
-    # interleave or drop superstep state, and there is no CAS at this seam. A
-    # materialization ThreadJob is RUNNING only while its resume ainvoke is in
-    # flight, so a RUNNING job here means a resume is writing — ask the user to
-    # retry in a moment (arch #255, 06#9). (The reverse guard — a resume detecting
-    # an in-flight live turn — needs a live-turn marker that does not exist yet;
-    # tracked as follow-up.)
-    # existing_thread is None for a not-yet-created or non-UUID thread_id (the
-    # lookup above tolerates both); scope the RUNNING-job check to the resolved
-    # thread so a client-supplied non-UUID id can't raise on the UUID FK.
+    # A RUNNING resume job means a resume ainvoke is writing this thread's checkpoint;
+    # a concurrent live turn is a second unsynchronized writer (no CAS), so reject it.
+    # Scope to existing_thread so a non-UUID id can't raise on the FK (arch #255 06#9).
     resume_in_flight = (
         existing_thread is not None
         and await ThreadJob.objects.filter(

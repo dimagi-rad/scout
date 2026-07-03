@@ -208,11 +208,8 @@ async def langgraph_to_ui_stream(
         deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
 
         while True:
-            # Bound the wait for the NEXT event, not just the gap between events:
-            # a stalled LLM/tool call that emits nothing would otherwise never
-            # reach the deadline check (it fires only after an event arrives), so
-            # the 5-min cap could be blown wide open and the response hang until
-            # the client disconnects (arch #255, 02#8).
+            # Bound the wait for the NEXT event: a silent stall (nothing emitted)
+            # would otherwise never reach the deadline check (arch #255 02#8).
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
@@ -473,10 +470,8 @@ async def langgraph_to_ui_stream(
                 }
             )
     finally:
-        # Close the underlying event generator on every exit (timeout, error, or
-        # normal break) so a stalled/abandoned ainvoke — and the Anthropic call
-        # behind it — is cancelled promptly instead of running (and billing) until
-        # GC finalizes the orphaned generator (arch #255, 02#8).
+        # Close the generator on every exit so an abandoned ainvoke (and its
+        # Anthropic call) is cancelled, not left running until GC (arch #255 02#8).
         with contextlib.suppress(Exception):
             await event_stream.aclose()
 

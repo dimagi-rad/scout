@@ -354,18 +354,9 @@ async def materialize_workspace_core(
 
     all_succeeded = all(r.get("success") for r in tenant_results)
 
-    # Multi-tenant workspaces query through a WorkspaceViewSchema UNION ALL over
-    # the namespaced views. Any tenant that ran its pipeline DROP-CASCADEd those
-    # views, so a partial/cancelled run leaves them missing — the workspace's OWN
-    # view schema stayed ACTIVE-but-empty and the resume told the agent "answer
-    # what you can" over cascade-dropped views (arch #255, 03#1; the sibling +
-    # teardown paths were fixed by #227-#230, this same-workspace path was missed).
-    #
-    # So (re)build unconditionally for multi-tenant, not just on full success —
-    # *before* the resume fires. build_view_schema is idempotent: it rebuilds over
-    # whatever tenants are ACTIVE (honest partial) or, if a tenant has no active
-    # schema, marks the row FAILED so the resume reports the truth instead of
-    # serving broken views.
+    # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
+    # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
+    # unconditionally (not only on full success) before the resume fires (arch #255 03#1).
     view_schema_outcome: dict | None = None
     workspace_tenant_count = await workspace.workspace_tenants.acount()
     if workspace_tenant_count > 1:
@@ -710,12 +701,9 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
-        # build_view_schema owns the WorkspaceViewSchema state: it creates/resets
-        # the row before validating, then marks it FAILED (with last_error) on any
-        # failure — including the early "no tenants / tenant has no active schema"
-        # checks (arch #255, 03#2). So we must NOT re-write state here: doing so
-        # risks clobbering a concurrent transition (e.g. TEARDOWN set by
-        # expire_inactive_schemas).
+        # build_view_schema owns the row state (marks it FAILED on any failure), so
+        # don't re-write state here and risk clobbering a concurrent transition —
+        # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
         return {"error": "Failed to build view schema"}
 
@@ -960,11 +948,8 @@ async def _procrastinate_job_status(job_id: int) -> str | None:
         return None
 
 
-# Explicit procrastinate-status allowlists so an unknown/future status can never
-# fall through into an "act" branch (arch #255, 10#0). Raw strings because we read
-# the status column directly via the ORM (see _procrastinate_job_status).
-# "aborting" is transitional (an abort was requested but the worker hasn't acked) —
-# treat it as in-flight, not terminal.
+# Explicit status allowlists so an unknown/future procrastinate status can't fall
+# into an "act" branch; "aborting" is transitional, so treat it as in-flight (arch #255 10#0).
 _PROCRASTINATE_INFLIGHT_STATUSES = frozenset({"todo", "doing", "aborting"})
 _PROCRASTINATE_FAILED_STATUSES = frozenset({"failed", "aborted", "cancelled"})
 _PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
@@ -1087,14 +1072,10 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     return {"flipped": flipped}
 
 
-# A worker that dies hard (SIGKILL after a deploy stop-timeout, OOM, host crash)
-# leaves its procrastinate job 'doing' forever and any MaterializationRun it was
-# writing stuck in an ACTIVE state. Nothing else reconciles it: the ThreadJob
-# janitor iterates ThreadJobs only and returns None for a 'doing' zombie job, and
-# /refresh/-driven runs have no ThreadJob at all. So the UI banner freezes, the
-# resume/status path keeps reporting a live load, and the zombie row is miscounted
-# as active by the cancel endpoint. Detect the dead worker via procrastinate's
-# heartbeat-based stalled-job query and fail the run truthfully (arch #255, 03#9).
+# A hard worker death (SIGKILL/OOM/host crash) leaves the procrastinate job 'doing'
+# and its MaterializationRun stuck ACTIVE, and the ThreadJob janitor can't see it
+# (None for a zombie job; /refresh/ runs have no ThreadJob). Detect it via
+# procrastinate's heartbeat stalled-job query and fail the run truthfully (arch #255 03#9).
 MATERIALIZATION_STALLED_HEARTBEAT_SECONDS = 300
 
 # Terminal procrastinate statuses for a materialization job: the job is finished,

@@ -283,10 +283,8 @@ class SchemaManager:
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
-        # Create/reset the row FIRST so an early validation failure (no tenants, or
-        # a tenant with no ACTIVE schema — the partial-materialization case) marks
-        # it FAILED with a reason instead of raising before the row exists and
-        # leaving a resurrected row parked in PROVISIONING (arch #255, 03#1/03#2).
+        # Create/reset the row FIRST so an early validation failure marks it FAILED
+        # instead of leaving a resurrected row in PROVISIONING (arch #255 03#1/03#2).
         view_schema_name = self._view_schema_name(workspace.id)
         vs, _ = WorkspaceViewSchema.objects.get_or_create(
             workspace=workspace,
@@ -463,10 +461,8 @@ class SchemaManager:
             if not conn.closed:
                 conn.close()
 
-        # Reset the inactivity TTL on (re)build: a row resurrected from EXPIRED
-        # keeps its >24h-old last_accessed_at, so without this expire_inactive_schemas
-        # would flip the freshly-rebuilt schema straight back to TEARDOWN on its next
-        # tick — the 2026-06-10 incident-b class, view-schema edition (arch #255, 03#2).
+        # Reset the TTL on (re)build: a row resurrected from EXPIRED keeps its stale
+        # last_accessed_at and expire_inactive_schemas would re-tear-down it (arch #255 03#2).
         vs.state = SchemaState.ACTIVE
         vs.last_error = ""
         vs.last_accessed_at = timezone.now()

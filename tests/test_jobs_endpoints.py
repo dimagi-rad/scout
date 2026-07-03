@@ -928,13 +928,8 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
 # ---------------------------------------------------------------------------
 # 12#0 item 2 / arch #255 02#5: exercise the REAL app binding in cancel_thread_job
 #
-# The other cancel tests patch apps.workspaces.api.jobs_cancel.app, replacing the
-# module-level binding. That masks the risk the finding names: jobs_cancel used to
-# do `from ...procrastinate_app import current_app` (the import-time FutureApp
-# binding that broke the worker-side janitor before it moved to the ORM). It now
-# imports the lazy `app` (ProxyApp) from config.procrastinate, which resolves the
-# job_manager after AppConfig.ready — so an import-order regression can no longer
-# silently disable the abort. This test locks that in.
+# jobs_cancel now imports the lazy ProxyApp (not an import-time FutureApp binding),
+# so an import-order regression can't silently disable the abort (arch #255 02#5).
 #
 # These tests leave the binding intact and patch the abort at the JobManager
 # CLASS level, so the real binding must resolve for the abort to fire.

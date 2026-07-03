@@ -490,11 +490,9 @@ def run_pipeline(
             "Run %s state changed externally (cancelled?); preserving current DB state", run.id
         )
 
-    # Start the inactivity TTL from completion, not from the provision-time
-    # snapshot this in-memory instance captured at run start: an H-hour load would
-    # otherwise persist a last_accessed_at that is H hours old, rewinding the 24h
-    # TTL clock by the full run duration — re-opening the 2026-06-10 "janitor drops
-    # a fresh schema" class for long loads plus quiet users (arch #255, 04#0).
+    # Start the TTL from completion, not the provision-time snapshot this instance
+    # captured at run start — else an H-hour load rewinds the 24h clock by H hours
+    # (arch #255 04#0).
     tenant_schema.state = "active"
     tenant_schema.last_accessed_at = timezone.now()
     tenant_schema.save(update_fields=["state", "last_accessed_at"])

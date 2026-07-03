@@ -46,12 +46,9 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
-    # Tenant schemas are SHARED across workspaces, so ``active_runs`` (selected by
-    # this workspace's tenants) also contains runs a sibling workspace started for
-    # the same tenant. Scope to thread__user AND thread__workspace so cancelling
-    # here only cancels runs driven from THIS workspace — never a sibling's run of
-    # a shared tenant (which would inject a "cancelled" resume into their thread —
-    # arch #255, 07#1).
+    # Tenant schemas are shared across workspaces, so scope to thread__user AND
+    # thread__workspace — else we cancel a sibling workspace's run of the same
+    # tenant and inject a "cancelled" resume into its thread (arch #255 07#1).
     tjs = [
         tj
         async for tj in ThreadJob.objects.filter(
@@ -61,12 +58,9 @@ async def materialization_cancel_view(request, workspace_id):
             thread__workspace=workspace,
         )
     ]
-    # ALL ThreadJobs (any user/workspace) — distinguishes truly-orphan runs (no
-    # ThreadJob, e.g. /refresh/ path) from another user's/workspace's runs, which
-    # we must NOT cancel. The orphan fallback below stays workspace-agnostic on
-    # purpose: an orphan run has no ThreadJob, so cancelling it injects no
-    # "cancelled" resume into any thread — the cross-workspace harm the finding
-    # names is entirely on the tracked path above, now scoped by thread__workspace.
+    # Match ALL ThreadJobs to tell truly-orphan runs (no ThreadJob, e.g. /refresh/)
+    # from other users'/workspaces' runs. The orphan fallback stays workspace-agnostic
+    # on purpose: an orphan has no ThreadJob, so cancelling injects no resume (arch #255 07#1).
     all_tracked_job_ids = {
         pid
         async for pid in ThreadJob.objects.filter(
