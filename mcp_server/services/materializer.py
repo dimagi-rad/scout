@@ -490,7 +490,11 @@ def run_pipeline(
             "Run %s state changed externally (cancelled?); preserving current DB state", run.id
         )
 
+    # Start the TTL from completion, not the provision-time snapshot this instance
+    # captured at run start — else an H-hour load rewinds the 24h clock by H hours
+    # (arch #255 04#0).
     tenant_schema.state = "active"
+    tenant_schema.last_accessed_at = timezone.now()
     tenant_schema.save(update_fields=["state", "last_accessed_at"])
 
     total_rows = sum(s.get("rows", 0) for s in source_results.values())

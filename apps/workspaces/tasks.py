@@ -376,13 +376,12 @@ async def materialize_workspace_core(
 
     all_succeeded = all(r.get("success") for r in tenant_results)
 
-    # Multi-tenant workspaces query through a WorkspaceViewSchema UNION ALL that
-    # requires every tenant ACTIVE, so build only after the loop succeeds — and
-    # *before* the resume task fires, so the agent's first list_tables sees the
-    # namespaced view instead of "No active view schema for workspace".
+    # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
+    # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
+    # unconditionally (not only on full success) before the resume fires (arch #255 03#1).
     view_schema_outcome: dict | None = None
     workspace_tenant_count = await workspace.workspace_tenants.acount()
-    if workspace_tenant_count > 1 and all_succeeded:
+    if workspace_tenant_count > 1:
         try:
             await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
             view_schema_outcome = {"ok": True, "error": None}
@@ -724,9 +723,9 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     try:
         vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
-        # build_view_schema already saves state=FAILED before re-raising;
-        # no need to write it again here (doing so risks overwriting a
-        # concurrent state transition, e.g. TEARDOWN set by expire_inactive_schemas).
+        # build_view_schema owns the row state (marks it FAILED on any failure), so
+        # don't re-write state here and risk clobbering a concurrent transition —
+        # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
         return {"error": "Failed to build view schema"}
 
@@ -971,6 +970,13 @@ async def _procrastinate_job_status(job_id: int) -> str | None:
         return None
 
 
+# Explicit status allowlists so an unknown/future procrastinate status can't fall
+# into an "act" branch; "aborting" is transitional, so treat it as in-flight (arch #255 10#0).
+_PROCRASTINATE_INFLIGHT_STATUSES = frozenset({"todo", "doing", "aborting"})
+_PROCRASTINATE_FAILED_STATUSES = frozenset({"failed", "aborted", "cancelled"})
+_PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
+
+
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     """Reconcile one stale active ThreadJob against its procrastinate job.
 
@@ -988,7 +994,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     status = await _procrastinate_job_status(tj.procrastinate_job_id)
     if status is None:
         return None
-    if status in {"todo", "doing"}:
+    if status in _PROCRASTINATE_INFLIGHT_STATUSES:
         return None
     if tj.state == ThreadJob.State.RUNNING:
         # A resume task claimed it. Measure staleness from the RESUME phase so we
@@ -1018,9 +1024,10 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         )
         await _persist_synthetic_failure_message(tj, RESUME_STUCK_RUNNING_MESSAGE)
         return "failed"
-    if status in {"failed", "aborted"}:
-        # The task itself raised — no result for a resume to narrate, so flip
-        # straight to FAILED instead of deferring a resume with nothing to say.
+    if status in _PROCRASTINATE_FAILED_STATUSES:
+        # The task itself failed/was aborted/cancelled — no result for a resume to
+        # narrate, so flip straight to FAILED instead of deferring a resume with
+        # nothing to say.
         summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
         updated = await ThreadJob.objects.filter(
             id=tj.id,
@@ -1040,7 +1047,17 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         )
         await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
         return "failed"
-    # PENDING job whose materialization finished but was never claimed — safe to
+    if status != _PROCRASTINATE_SUCCEEDED_STATUS:
+        # Unknown/future procrastinate status: never fall into the resume act
+        # branch on a status we don't understand — leave the row for the next tick
+        # (arch #255, 10#0).
+        logger.warning(
+            "Reconcile: unrecognized procrastinate status %r for job %s; skipping",
+            status,
+            tj.procrastinate_job_id,
+        )
+        return None
+    # PENDING job whose materialization SUCCEEDED but was never claimed — safe to
     # defer a fresh resume; the resume task flips the state.
     try:
         await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
@@ -1075,6 +1092,162 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
         if action in {"failed", "resumed"}:
             flipped += 1
     return {"flipped": flipped}
+
+
+# A hard worker death (SIGKILL/OOM/host crash) leaves the procrastinate job 'doing'
+# and its MaterializationRun stuck ACTIVE, and the ThreadJob janitor can't see it
+# (None for a zombie job; /refresh/ runs have no ThreadJob). Detect it via
+# procrastinate's heartbeat stalled-job query and fail the run truthfully (arch #255 03#9).
+MATERIALIZATION_STALLED_HEARTBEAT_SECONDS = 300
+
+# Terminal procrastinate statuses for a materialization job: the job is finished,
+# so a MaterializationRun still ACTIVE is a zombie the worker never closed out.
+_MATERIALIZATION_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "aborted", "cancelled"})
+
+
+async def _stalled_procrastinate_job_ids() -> set[int]:
+    """Best-effort set of procrastinate job ids whose worker heartbeat is stale.
+
+    Wrapped: if the heartbeat query is unavailable (older schema, connector blip)
+    we degrade to the job-status signal alone rather than failing the whole tick.
+    """
+    try:
+        stalled = await app.job_manager.get_stalled_jobs(
+            seconds_since_heartbeat=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "reconcile_materialization: get_stalled_jobs failed; relying on the "
+            "job-status signal only this tick",
+            exc_info=True,
+        )
+        return set()
+    return {j.id for j in stalled if j.id is not None}
+
+
+async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) -> None:
+    """Fail any active ThreadJob(s) owning a dead materialization job, with a
+    truthful summary + synthetic chat message so the UI spinner clears.
+
+    The ThreadJob janitor can't do this for a hard worker death: it returns None
+    for a 'doing' zombie job (correct per-tick, permanent for zombies).
+    """
+    summary = (
+        await _build_failure_summary_for_job(procrastinate_job_id) or MATERIALIZATION_FAILED_MESSAGE
+    )
+    async for tj in ThreadJob.objects.select_related("thread__workspace", "thread__user").filter(
+        procrastinate_job_id=procrastinate_job_id,
+        state__in=list(ThreadJob.ACTIVE_STATES),
+    ):
+        updated = await ThreadJob.objects.filter(
+            id=tj.id,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            error_summary=summary,
+        )
+        if updated:
+            await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+
+
+async def _fail_zombie_materialization_run(run: MaterializationRun, reason: str) -> bool:
+    """CAS-flip an ACTIVE MaterializationRun to FAILED and fail its ThreadJob(s).
+
+    Returns True if this call performed the flip (False if another writer got
+    there first). Truthful: records the reason in result so the resume/aggregate
+    path narrates a real failure instead of a silent "still loading".
+    """
+    now = timezone.now()
+    result = run.result if isinstance(run.result, dict) else {}
+    updated = await MaterializationRun.objects.filter(
+        id=run.id,
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ).aupdate(
+        state=MaterializationRun.RunState.FAILED,
+        completed_at=now,
+        result={**result, "error": reason, "reconciled_stale": True},
+    )
+    if not updated:
+        return False
+    logger.warning(
+        "reconcile_materialization: MaterializationRun %s (tenant_schema %s) flipped to "
+        "FAILED — %s",
+        run.id,
+        run.tenant_schema_id,
+        reason,
+    )
+    if run.procrastinate_job_id is not None:
+        await _fail_thread_jobs_for_dead_materialization(run.procrastinate_job_id)
+    return True
+
+
+@app.periodic(cron="*/15 * * * *")
+@task
+async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
+    """Fail MaterializationRuns stuck in an ACTIVE state after a hard worker death.
+
+    A run is a zombie when its procrastinate job is stalled (worker heartbeat gone)
+    or already terminal while the run row never reached a terminal state. A run
+    whose job is still legitimately in flight (live heartbeat, todo/doing) or whose
+    status can't be read this tick is left untouched.
+    """
+    stalled_ids = await _stalled_procrastinate_job_ids()
+    failed = 0
+    async for run in MaterializationRun.objects.filter(
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ):
+        job_id = run.procrastinate_job_id
+        if job_id is None:
+            continue
+        status = await _procrastinate_job_status(job_id)
+        if status is None:
+            # Transient read failure — can't tell, so don't touch it this tick.
+            continue
+        is_stalled = job_id in stalled_ids
+        is_terminal = status in _MATERIALIZATION_TERMINAL_STATUSES
+        if not (is_stalled or is_terminal):
+            continue
+        reason = (
+            "The materialization worker stopped responding before the run finished "
+            "(stalled or crashed)."
+            if is_stalled
+            else f"The materialization job ended ({status}) without recording a terminal run state."
+        )
+        if await _fail_zombie_materialization_run(run, reason):
+            failed += 1
+    return {"failed": failed}
+
+
+# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
+# jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
+# for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
+JOB_RETENTION_HOURS = 24 * 7
+
+
+@app.periodic(cron="17 3 * * *")
+@task
+async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
+    """Delete old finalized procrastinate jobs (and their events) so the queue
+    tables don't grow without bound.
+
+    Only 'succeeded' jobs are pruned (delete_old_jobs' default — failed/cancelled/
+    aborted are retained): the reconciler treats an unknown job id as "can't tell,
+    don't touch", so pruning a job still referenced by an active ThreadJob/
+    MaterializationRun would strand it. The 7-day horizon is far longer than the
+    15-minute stale-job janitor's window, so any active row referencing a succeeded
+    job has long since been reconciled before its job becomes prunable (arch #255,
+    10#0, reconciler↔retention coupling).
+    """
+    try:
+        await app.job_manager.delete_old_jobs(nb_hours=JOB_RETENTION_HOURS)
+    except Exception:
+        logger.warning("prune_old_procrastinate_jobs: delete_old_jobs failed", exc_info=True)
+        return {"pruned": False}
+    logger.info(
+        "prune_old_procrastinate_jobs: pruned succeeded jobs older than %sh", JOB_RETENTION_HOURS
+    )
+    return {"pruned": True}
 
 
 async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:

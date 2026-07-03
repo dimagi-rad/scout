@@ -283,26 +283,9 @@ class SchemaManager:
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
-        tenants = list(workspace.tenants.all())
-        if not tenants:
-            raise ValueError(f"Workspace {workspace.id} has no tenants")
-
-        active_schemas = {
-            ts.tenant_id: ts
-            for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
-        }
-        tenant_schemas: list[tuple[str, Tenant]] = []  # (schema_name, tenant)
-        for tenant in tenants:
-            ts = active_schemas.get(tenant.id)
-            if ts is None:
-                raise ValueError(
-                    f"Tenant '{tenant.external_id}' has no active schema. "
-                    "Run a data refresh for this tenant before building the view schema."
-                )
-            tenant_schemas.append((ts.schema_name, tenant))
-
+        # Create/reset the row FIRST so an early validation failure marks it FAILED
+        # instead of leaving a resurrected row in PROVISIONING (arch #255 03#1/03#2).
         view_schema_name = self._view_schema_name(workspace.id)
-
         vs, _ = WorkspaceViewSchema.objects.get_or_create(
             workspace=workspace,
             defaults={"schema_name": view_schema_name, "state": SchemaState.PROVISIONING},
@@ -311,6 +294,30 @@ class SchemaManager:
             vs.schema_name = view_schema_name
         vs.state = SchemaState.PROVISIONING
         vs.save(update_fields=["schema_name", "state"])
+
+        try:
+            tenants = list(workspace.tenants.all())
+            if not tenants:
+                raise ValueError(f"Workspace {workspace.id} has no tenants")
+
+            active_schemas = {
+                ts.tenant_id: ts
+                for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
+            }
+            tenant_schemas: list[tuple[str, Tenant]] = []  # (schema_name, tenant)
+            for tenant in tenants:
+                ts = active_schemas.get(tenant.id)
+                if ts is None:
+                    raise ValueError(
+                        f"Tenant '{tenant.external_id}' has no active schema. "
+                        "Run a data refresh for this tenant before building the view schema."
+                    )
+                tenant_schemas.append((ts.schema_name, tenant))
+        except ValueError as exc:
+            vs.state = SchemaState.FAILED
+            vs.last_error = str(exc)[:500]
+            vs.save(update_fields=["state", "last_error"])
+            raise
 
         conn = get_managed_db_connection()
         try:
@@ -454,9 +461,12 @@ class SchemaManager:
             if not conn.closed:
                 conn.close()
 
+        # Reset the TTL on (re)build: a row resurrected from EXPIRED keeps its stale
+        # last_accessed_at and expire_inactive_schemas would re-tear-down it (arch #255 03#2).
         vs.state = SchemaState.ACTIVE
         vs.last_error = ""
-        vs.save(update_fields=["state", "last_error"])
+        vs.last_accessed_at = timezone.now()
+        vs.save(update_fields=["state", "last_error", "last_accessed_at"])
 
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",

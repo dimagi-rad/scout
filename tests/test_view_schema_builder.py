@@ -1,8 +1,10 @@
 import os
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from psycopg import sql as psycopg_sql
 
 from apps.users.models import Tenant
@@ -788,6 +790,57 @@ def test_build_view_schema_records_last_error_on_failure(workspace, tenant):
     finally:
         ts.delete()
         WorkspaceViewSchema.objects.filter(workspace=workspace).delete()
+
+
+@pytest.mark.django_db
+def test_build_view_schema_reactivating_expired_row_resets_ttl(workspace, tenant):
+    """arch #255, 03#2: rebuilding a row resurrected from EXPIRED must reset
+    last_accessed_at, or expire_inactive_schemas flips the freshly-rebuilt schema
+    straight back to TEARDOWN on its next tick."""
+    mock_cursor = MagicMock()
+    mock_cursor.fetchall.return_value = []
+    mock_conn = MagicMock()
+    mock_conn.closed = False
+    mock_conn.cursor.return_value = mock_cursor
+
+    ts = TenantSchema.objects.create(
+        tenant=tenant, schema_name="test_domain_expired", state=SchemaState.ACTIVE
+    )
+    stale = timezone.now() - timedelta(days=3)
+    WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_expired_row",
+        state=SchemaState.EXPIRED,
+        last_accessed_at=stale,
+    )
+    try:
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            vs = SchemaManager().build_view_schema(workspace)
+        assert vs.state == SchemaState.ACTIVE
+        vs.refresh_from_db()
+        assert vs.last_accessed_at > stale
+        assert timezone.now() - vs.last_accessed_at < timedelta(seconds=30)
+    finally:
+        ts.delete()
+        WorkspaceViewSchema.objects.filter(workspace=workspace).delete()
+
+
+@pytest.mark.django_db
+def test_build_view_schema_missing_active_schema_marks_row_failed(workspace, tenant):
+    """arch #255, 03#1/03#2: when a tenant has no ACTIVE schema (e.g. a partial
+    multi-tenant materialization), the build must mark the row FAILED with a
+    reason rather than raising before the row exists and parking it."""
+    # tenant has no ACTIVE TenantSchema at all → early validation failure.
+    with pytest.raises(ValueError, match="no active schema"):
+        SchemaManager().build_view_schema(workspace)
+
+    vs = WorkspaceViewSchema.objects.get(workspace=workspace)
+    assert vs.state == SchemaState.FAILED
+    assert "no active schema" in vs.last_error
+    WorkspaceViewSchema.objects.filter(workspace=workspace).delete()
 
 
 def _role_grant_schemas(cursor, role_name: str) -> set[str]:

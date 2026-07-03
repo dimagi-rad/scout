@@ -32,7 +32,6 @@ from django.conf import settings
 from django.core.exceptions import ValidationError as _ValidationError
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
 
 from apps.chat.models import Thread, ThreadJob
 from apps.transformations.services.lineage import aget_lineage_chain
@@ -48,6 +47,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import materialize_workspace
+from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
@@ -523,6 +523,19 @@ async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
         run.result = {**(run.result or {}), "cancelled": True}
         await run.asave(update_fields=["state", "completed_at", "result"])
 
+        # The DB flip above is the stop signal, but alone it left the procrastinate
+        # job running and the ThreadJob spinning. Mirror the HTTP cancel path: abort
+        # the job and flip its ThreadJob so a mid-load cancel unwinds (arch #255 01#1).
+        if run.procrastinate_job_id is not None:
+            with contextlib.suppress(Exception):
+                await procrastinate_app.job_manager.cancel_job_by_id_async(
+                    run.procrastinate_job_id, abort=True
+                )
+            await ThreadJob.objects.filter(
+                procrastinate_job_id=run.procrastinate_job_id,
+                state__in=list(ThreadJob.ACTIVE_STATES),
+            ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=datetime.now(UTC))
+
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
         logger.info("Cancelled run %s for tenant %s (was: %s)", run_id, tenant_id, previous_state)
@@ -707,7 +720,7 @@ async def run_materialization(
         except Exception:
             logger.exception("Failed to create ThreadJob; rolling back dispatch")
             with contextlib.suppress(Exception):
-                await _procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+                await procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
             tc["result"] = error_response(INTERNAL_ERROR, "Failed to track job")
             return tc["result"]
 

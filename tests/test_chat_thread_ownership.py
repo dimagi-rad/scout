@@ -10,7 +10,7 @@ from django.contrib.auth import get_user_model
 from django.db import OperationalError
 from django.test import AsyncClient
 
-from apps.chat.models import Thread
+from apps.chat.models import Thread, ThreadJob
 from apps.chat.views import _upsert_thread
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
@@ -77,6 +77,51 @@ async def test_chat_rejects_foreign_thread_id():
     # Specifically, if it reaches the ownership check, it should be 404
     if resp.status_code == 404:
         assert b"Thread not found" in resp.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_chat_rejects_turn_while_resume_running_on_same_thread():
+    """arch #255, 06#9: a live chat turn must not stream while a background resume
+    is mid-ainvoke against the same thread's checkpoint (two concurrent writers to
+    one LangGraph thread can interleave superstep state). A RUNNING materialization
+    ThreadJob signals the in-flight resume, so the turn is rejected with 409."""
+    user = await User.objects.acreate_user(email="resume-race@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-resume-race", created_by=user)
+    tenant = await Tenant.objects.acreate(
+        external_id="t-rr", provider="commcare", canonical_name="RR Tenant"
+    )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await WorkspaceMembership.objects.acreate(
+        workspace=ws, user=user, role=WorkspaceRole.READ_WRITE
+    )
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=660091,
+        tool_call_id="tc-rr",
+        state=ThreadJob.State.RUNNING,
+    )
+
+    # Plain client: @csrf_protect is bypassed when the client does not enforce
+    # CSRF, keeping this test focused on the 06#9 concurrency guard.
+    client = AsyncClient()
+    await client.alogin(email="resume-race@b.c", password="x")
+    resp = await client.post(
+        "/api/chat/",
+        data=json.dumps(
+            {
+                "messages": [{"role": "user", "content": "follow-up while resume runs"}],
+                "workspaceId": str(ws.id),
+                "threadId": str(thread.id),
+            }
+        ),
+        content_type="application/json",
+    )
+    assert resp.status_code == 409
+    assert b"background response" in resp.content.lower()
 
 
 @pytest.mark.asyncio

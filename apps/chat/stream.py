@@ -25,6 +25,7 @@ Chunk types used:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -207,12 +208,19 @@ async def langgraph_to_ui_stream(
         deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
 
         while True:
-            if asyncio.get_event_loop().time() > deadline:
+            # Bound the wait for the NEXT event: a silent stall (nothing emitted)
+            # would otherwise never reach the deadline check (arch #255 02#8).
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
                 raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
             try:
-                event = await event_stream.__anext__()
+                event = await asyncio.wait_for(event_stream.__anext__(), timeout=remaining)
             except StopAsyncIteration:
                 break
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout"
+                ) from exc
 
             event_type = event.get("event")
 
@@ -461,6 +469,11 @@ async def langgraph_to_ui_stream(
                     "errorText": f"An error occurred while processing your request. Ref: {ref}",
                 }
             )
+    finally:
+        # Close the generator on every exit so an abandoned ainvoke (and its
+        # Anthropic call) is cancelled, not left running until GC (arch #255 02#8).
+        with contextlib.suppress(Exception):
+            await event_stream.aclose()
 
     if reasoning_started:
         yield _sse({"type": "reasoning-end", "id": reasoning_id})

@@ -8,10 +8,9 @@ BEFORE procrastinate abort) stays correct.
 import logging
 from datetime import UTC, datetime
 
-from procrastinate.contrib.django.procrastinate_app import current_app
-
 from apps.chat.models import ThreadJob
 from apps.workspaces.models import MaterializationRun
+from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +40,7 @@ async def cancel_thread_job(thread_job: ThreadJob) -> int:
     ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=now)
 
     try:
-        await current_app.job_manager.cancel_job_by_id_async(
-            thread_job.procrastinate_job_id, abort=True
-        )
+        await app.job_manager.cancel_job_by_id_async(thread_job.procrastinate_job_id, abort=True)
     except Exception:
         logger.warning(
             "Failed to abort procrastinate job %s",

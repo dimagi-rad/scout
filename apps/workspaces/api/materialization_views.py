@@ -6,7 +6,6 @@ import logging
 from datetime import UTC, datetime
 
 from django.http import JsonResponse
-from procrastinate.contrib.django.procrastinate_app import current_app
 
 from apps.chat.models import Thread, ThreadJob
 from apps.users.decorators import async_login_required
@@ -14,6 +13,7 @@ from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import MaterializationRun
 from apps.workspaces.tasks import materialize_workspace
 from apps.workspaces.workspace_resolver import aresolve_workspace
+from config.procrastinate import app
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +46,21 @@ async def materialization_cancel_view(request, workspace_id):
         return JsonResponse({"status": "no_active_run", "runs_cancelled": 0})
 
     job_ids = {r.procrastinate_job_id for r in active_runs if r.procrastinate_job_id is not None}
-    # Scope to thread__user so a member can't cancel another member's chat-driven
-    # materialization (which would inject a "cancelled" resume into their thread).
+    # Tenant schemas are shared across workspaces, so scope to thread__user AND
+    # thread__workspace — else we cancel a sibling workspace's run of the same
+    # tenant and inject a "cancelled" resume into its thread (arch #255 07#1).
     tjs = [
         tj
         async for tj in ThreadJob.objects.filter(
             procrastinate_job_id__in=job_ids,
             state__in=list(ThreadJob.ACTIVE_STATES),
             thread__user=user,
+            thread__workspace=workspace,
         )
     ]
-    # ALL ThreadJobs (any user) — distinguishes truly-orphan runs (no ThreadJob,
-    # e.g. /refresh/ path) from another user's runs, which we must NOT cancel.
+    # Match ALL ThreadJobs to tell truly-orphan runs (no ThreadJob, e.g. /refresh/)
+    # from other users'/workspaces' runs. The orphan fallback stays workspace-agnostic
+    # on purpose: an orphan has no ThreadJob, so cancelling injects no resume (arch #255 07#1).
     all_tracked_job_ids = {
         pid
         async for pid in ThreadJob.objects.filter(
@@ -71,7 +74,8 @@ async def materialization_cancel_view(request, workspace_id):
         total += await cancel_thread_job(tj)
         tracked_job_ids.add(tj.procrastinate_job_id)
 
-    # Only truly-orphan runs (no ThreadJob anywhere); other users' runs are skipped.
+    # Only truly-orphan runs (no ThreadJob anywhere); other users'/workspaces'
+    # tracked runs are skipped.
     orphan_job_ids = job_ids - all_tracked_job_ids
     if orphan_job_ids:
         logger.info(
@@ -87,7 +91,7 @@ async def materialization_cancel_view(request, workspace_id):
         total += orphan_cancelled
         for procrastinate_job_id in orphan_job_ids:
             try:
-                await current_app.job_manager.cancel_job_by_id_async(
+                await app.job_manager.cancel_job_by_id_async(
                     procrastinate_job_id,
                     abort=True,
                 )
@@ -178,7 +182,7 @@ async def materialization_retry_view(request, workspace_id):
         logger.exception("materialization_retry_view: failed to create ThreadJob")
         # Best-effort: cancel the dispatched job so we don't leak background work.
         with contextlib.suppress(Exception):
-            await current_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+            await app.job_manager.cancel_job_by_id_async(job_id, abort=True)
         return JsonResponse({"error": "Failed to track retry job"}, status=500)
 
     return JsonResponse({"status": "started", "thread_job_id": str(tj.id)})
