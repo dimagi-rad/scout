@@ -67,6 +67,25 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
+# Substrings that mark a per-source failure as an expired/revoked-credential
+# problem so the user is told to reconnect rather than just "check the
+# connection" (arch #252, finding 14#4). Loader auth errors carry both the
+# class-name suffix and the actionable "reconnect your ... account" guidance;
+# an HTTP 401 anywhere on the seam is the underlying signal.
+_AUTH_FAILURE_MARKERS = ("AuthError", "reconnect your", "HTTP 401")
+_REAUTH_GUIDANCE = (
+    "This looks like an expired or revoked sign-in — reconnect the affected "
+    "account (Settings → Connections) and re-run materialization."
+)
+
+
+def _looks_like_auth_failure(error: str | None) -> bool:
+    """True when a per-source error string reads as a credential/401 failure."""
+    if not error:
+        return False
+    return any(marker in error for marker in _AUTH_FAILURE_MARKERS)
+
+
 def _no_pipeline_error(registry, provider: str) -> str:
     """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
 
@@ -138,7 +157,10 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         # No per-source detail (failure before any source ran) — surface run state.
         states = sorted({r.state for r in runs})
         return f"Materialization {'/'.join(states)}."
-    return ". ".join(parts) + "."
+    summary = ". ".join(parts) + "."
+    if any(_looks_like_auth_failure(err) for _, err in failed_sources):
+        summary += " " + _REAUTH_GUIDANCE
+    return summary
 
 
 @task
@@ -1274,6 +1296,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
+    auth_failure = any(
+        _looks_like_auth_failure(str(src.get("error")))
+        for tenant in summary
+        for src in (tenant.get("sources") or {}).values()
+    )
+    reauth_line = (
+        f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
+        f"user explicitly to reconnect the affected account."
+        if auth_failure
+        else ""
+    )
 
     workspace = tj.thread.workspace
     user = tj.thread.user
@@ -1341,7 +1374,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"failed or skipped. A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
-            f"as if it were complete. Per-tenant: {summary}"
+            f"as if it were complete.{reauth_line} Per-tenant: {summary}"
         )
     elif status == "failed":
         body = (
@@ -1352,7 +1385,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"that the data load failed (this is commonly caused by expired or "
             f"revoked credentials), summarize the per-source errors below, and "
             f"suggest checking the workspace's connection before retrying. Do NOT "
-            f"silently re-run materialization. Per-tenant: {summary}"
+            f"silently re-run materialization.{reauth_line} Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (

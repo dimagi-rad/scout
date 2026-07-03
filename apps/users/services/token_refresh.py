@@ -1,7 +1,12 @@
 """OAuth token refresh service.
 
-Handles refreshing expired OAuth tokens for CommCare providers.
-Called proactively (before token expires) and reactively (after 401).
+Handles refreshing expired OAuth tokens for the OAuth providers.
+
+``refresh_oauth_token`` (async) is the proactive path: the credential resolver
+renews a near-expiry token at task start, and ``providers_view`` renews on poll.
+There is no reactive (post-401) refresh on the credential seam today — a loader
+401 raises a provider ``AuthError`` that no handler maps back to refresh-and-retry
+(arch #252, finding 14#4).
 """
 
 from __future__ import annotations

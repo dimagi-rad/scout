@@ -18,6 +18,23 @@ from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
 logger = logging.getLogger(__name__)
 
+_PROVIDER_LABELS = {
+    "commcare": "CommCare",
+    "commcare_connect": "CommCare Connect",
+    "ocs": "Open Chat Studio",
+}
+
+
+def _reauth_message(provider: str) -> str:
+    """User-facing 'reconnect your account' guidance for an expired token."""
+    label = _PROVIDER_LABELS.get(provider)
+    who = f"Your {label} sign-in" if label else "Your sign-in"
+    what = f"reconnect your {label} account" if label else "reconnect your account"
+    return (
+        f"{who} has expired or been revoked and could not be renewed "
+        f"automatically. Please {what} and retry."
+    )
+
 
 class CredentialResolutionError(Exception):
     """Raised when a credential exists but cannot be used for a *known,
@@ -79,7 +96,13 @@ async def aget_fresh_access_token(user, provider: str) -> str | None:
     token_obj = await _social_token_qs(user, provider).select_related("account", "app").afirst()
     if token_obj is None:
         return None
-    cred = await _aresolve_oauth_credential(token_obj, provider)
+    try:
+        cred = await _aresolve_oauth_credential(token_obj, provider)
+    except CredentialResolutionError:
+        # A refresh failure means no usable token. Callers of this helper only
+        # want a live token (e.g. share-time tenant-access refresh) and treat
+        # None as "skip"; surface None rather than raising into them.
+        return None
     return cred["value"]
 
 
@@ -141,17 +164,25 @@ async def aresolve_credential(membership) -> dict | None:
 
 
 async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
-    """Build an OAuth credential dict, refreshing the token if near expiry."""
-    token_value = token_obj.token
+    """Build an OAuth credential dict, refreshing the token if near expiry.
+
+    Fails closed (raises ``CredentialResolutionError`` with ``AUTH_TOKEN_EXPIRED``)
+    when the token is at/near expiry and cannot be renewed. Serving a known-stale
+    token only provisions a schema and burns the discover phase before the first
+    authenticated request 401s, and no 401 downstream maps to actionable
+    re-authentication guidance — so we surface "reconnect your account" up front
+    instead of a doomed run (arch #252, finding 14#4).
+    """
+    token_url = get_token_url(provider)
+    can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
 
     if token_needs_refresh(token_obj.expires_at):
-        token_url = get_token_url(provider)
-        if token_url and token_obj.token_secret:
-            try:
-                token_value = await refresh_oauth_token(token_obj, token_url)
-            except TokenRefreshError:
-                logger.warning(
-                    "Token refresh failed for provider %s, using existing token", provider
-                )
+        if not can_refresh:
+            raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
+        try:
+            return {"type": "oauth", "value": await refresh_oauth_token(token_obj, token_url)}
+        except TokenRefreshError as e:
+            logger.warning("Token refresh failed for provider %s; failing closed", provider)
+            raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider)) from e
 
-    return {"type": "oauth", "value": token_value}
+    return {"type": "oauth", "value": token_obj.token}

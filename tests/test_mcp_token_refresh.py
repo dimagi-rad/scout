@@ -56,12 +56,18 @@ class TestCredentialResolverTokenRefresh:
             assert result["value"] == "still-valid-token"
 
     @pytest.mark.asyncio
-    async def test_refresh_failure_returns_original_token(self):
-        from apps.users.services.credential_resolver import _aresolve_oauth_credential
+    async def test_refresh_failure_fails_closed(self):
+        """arch #252 (14#4): a refresh failure at/near expiry must fail closed
+        with actionable reconnect guidance, not fall back to a stale token."""
+        from apps.users.services.credential_resolver import (
+            CredentialResolutionError,
+            _aresolve_oauth_credential,
+        )
         from apps.users.services.token_refresh import TokenRefreshError
+        from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
         mock_token = MagicMock()
-        mock_token.token = "maybe-still-works"
+        mock_token.token = "known-stale-token"
         mock_token.expires_at = timezone.now() - timedelta(minutes=1)
 
         with (
@@ -71,6 +77,28 @@ class TestCredentialResolverTokenRefresh:
                 new_callable=AsyncMock,
                 side_effect=TokenRefreshError("fail"),
             ),
+            pytest.raises(CredentialResolutionError) as exc,
         ):
-            result = await _aresolve_oauth_credential(mock_token, "commcare")
-            assert result["value"] == "maybe-still-works"
+            await _aresolve_oauth_credential(mock_token, "commcare")
+        assert exc.value.code == AUTH_TOKEN_EXPIRED
+        assert "reconnect" in exc.value.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_near_expiry_with_no_refresh_capability_fails_closed(self):
+        """No refresh token / no token URL and the token is near expiry: fail
+        closed rather than provisioning a doomed run (arch #252, 14#4)."""
+        from apps.users.services.credential_resolver import (
+            CredentialResolutionError,
+            _aresolve_oauth_credential,
+        )
+
+        mock_token = MagicMock()
+        mock_token.token = "near-expiry"
+        mock_token.token_secret = ""  # no refresh token
+        mock_token.expires_at = timezone.now() - timedelta(minutes=1)
+
+        with patch(
+            "apps.users.services.credential_resolver.token_needs_refresh", return_value=True
+        ):
+            with pytest.raises(CredentialResolutionError):
+                await _aresolve_oauth_credential(mock_token, "commcare")
