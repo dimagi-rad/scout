@@ -354,13 +354,21 @@ async def materialize_workspace_core(
 
     all_succeeded = all(r.get("success") for r in tenant_results)
 
-    # Multi-tenant workspaces query through a WorkspaceViewSchema UNION ALL that
-    # requires every tenant ACTIVE, so build only after the loop succeeds — and
-    # *before* the resume task fires, so the agent's first list_tables sees the
-    # namespaced view instead of "No active view schema for workspace".
+    # Multi-tenant workspaces query through a WorkspaceViewSchema UNION ALL over
+    # the namespaced views. Any tenant that ran its pipeline DROP-CASCADEd those
+    # views, so a partial/cancelled run leaves them missing — the workspace's OWN
+    # view schema stayed ACTIVE-but-empty and the resume told the agent "answer
+    # what you can" over cascade-dropped views (arch #255, 03#1; the sibling +
+    # teardown paths were fixed by #227-#230, this same-workspace path was missed).
+    #
+    # So (re)build unconditionally for multi-tenant, not just on full success —
+    # *before* the resume fires. build_view_schema is idempotent: it rebuilds over
+    # whatever tenants are ACTIVE (honest partial) or, if a tenant has no active
+    # schema, marks the row FAILED so the resume reports the truth instead of
+    # serving broken views.
     view_schema_outcome: dict | None = None
     workspace_tenant_count = await workspace.workspace_tenants.acount()
-    if workspace_tenant_count > 1 and all_succeeded:
+    if workspace_tenant_count > 1:
         try:
             await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
             view_schema_outcome = {"ok": True, "error": None}

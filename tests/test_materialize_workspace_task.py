@@ -218,12 +218,15 @@ async def test_materialize_workspace_skips_view_rebuild_for_single_tenant(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_materialize_workspace_skips_view_rebuild_when_any_tenant_failed(
+async def test_materialize_workspace_reconciles_view_schema_when_any_tenant_failed(
     multi_tenant_workspace, tenant_membership_obj, context_with_job_id
 ):
-    """When even one tenant pipeline fails, the view rebuild would itself
-    fail (it requires every tenant to have an ACTIVE schema), so we skip
-    it rather than burning a noisy traceback."""
+    """arch #255, 03#1: when even one tenant pipeline fails, the tenant DROP
+    already cascade-dropped the workspace's own namespaced views, so the view
+    schema MUST be reconciled (rebuilt over surviving tenants, or marked FAILED)
+    rather than left ACTIVE-but-broken while the resume says "answer what you
+    can". build_view_schema is idempotent and owns the FAILED marking, so it is
+    always invoked for a multi-tenant workspace."""
     mock_manager = MagicMock()
 
     with (
@@ -244,7 +247,7 @@ async def test_materialize_workspace_skips_view_rebuild_when_any_tenant_failed(
         )
 
     assert result["all_succeeded"] is False
-    mock_manager.build_view_schema.assert_not_called()
+    mock_manager.build_view_schema.assert_called_once_with(multi_tenant_workspace)
 
 
 @pytest.mark.asyncio
