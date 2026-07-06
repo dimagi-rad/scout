@@ -128,9 +128,7 @@ function isArtifactToolPart(part: any): boolean {
   if (name in SUBAGENT_TOOL_LABELS) return false
   if (name === "create_artifact" || name === "update_artifact") return true
   if (part.state === "output-available" && part.output != null) {
-    const output = part.output
-    if (typeof output === "string") return output.includes("artifact_id")
-    if (typeof output === "object" && "artifact_id" in output) return true
+    return extractArtifactIdFromOutput(part.output) != null
   }
   return false
 }
@@ -162,12 +160,6 @@ function extractArtifactIdFromOutput(rawOutput: unknown): string | null {
     ) {
       return output.artifact.id
     }
-  }
-  if (typeof output === "string") {
-    const match = output.match(
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
-    )
-    return match ? match[0] : null
   }
   return null
 }

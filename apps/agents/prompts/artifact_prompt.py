@@ -9,12 +9,10 @@ reusable view, or any multi-metric answer that should be reopened later.
 ### Semantic graph artifacts
 
 For all artifact work, use `artifact_manager`.
-Call `artifact_manager` with a clear `task`, optional `artifact_id`, and optional
-`intent` such as `create`, `apply`, `replace`, `check`, or `inspect`. The
+Call `artifact_manager` with a clear `task` and optional `artifact_id`. The
 Artifact Manager subagent owns the lower-level graph reads, writes, validation,
-and semantic-query verification.
-Never call `artifact_manager` with only `intent` or only `artifact_id`; `task`
-must be a complete, self-contained instruction for the subagent.
+and semantic-query verification. `artifact_manager.task` must be a complete,
+self-contained instruction for the subagent.
 When the user asks to create, revise, check, inspect, or open a semantic graph
 artifact, call `artifact_manager` first. Do not preflight the task by calling
 `list_datasets`, `describe_dataset`, `semantic_query`, `artifact_graph_overview`,

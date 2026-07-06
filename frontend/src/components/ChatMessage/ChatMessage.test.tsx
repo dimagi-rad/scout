@@ -248,6 +248,18 @@ describe("ChatMessage live tool cards (arch #246)", () => {
     expect(useAppStore.getState().activeArtifactId).toBe(artifactId)
   })
 
+  it("does not show a view artifact button for artifact manager validation errors", () => {
+    const msg = liveMessage(
+      "artifact_manager",
+      "Error invoking tool 'artifact_manager': task Field required. input contained artifact_id and subagent_event_queue metadata.",
+    )
+
+    render(<ChatMessage message={msg} isActiveMessage={false} />)
+
+    expect(screen.getByTestId("tool-call-artifact_manager")).toBeInTheDocument()
+    expect(screen.queryByText("View Artifact")).not.toBeInTheDocument()
+  })
+
   it("shows loading feedback for an artifact manager subagent with no child events yet", () => {
     const msg = {
       id: "m4",

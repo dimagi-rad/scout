@@ -50,6 +50,11 @@ NESTED_RECURSION_LIMIT = 50
 NESTED_MAX_TOKENS = 8192
 SUBAGENT_TRACE_MAX_EVENTS = 200
 SUBAGENT_MESSAGE_MAX_CHARS = 40_000
+ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE = (
+    "artifact_manager requires a non-empty task. Retry the same tool call with "
+    "a complete, self-contained `task` string. Do not call artifact_manager "
+    "with only `intent` or only `artifact_id`."
+)
 
 
 class ArtifactManagerInput(BaseModel):
@@ -62,10 +67,6 @@ class ArtifactManagerInput(BaseModel):
         )
     )
     artifact_id: str | None = Field(default=None, description="Existing artifact id, if any.")
-    intent: str | None = Field(
-        default=None,
-        description="Optional terse intent label such as create, apply, replace, check, or inspect.",
-    )
     # Injected by the parent graph. Hidden from the model-facing schema in
     # apps.agents.graph.base._llm_tool_schemas.
     tool_call_id: str | None = None
@@ -158,7 +159,6 @@ def create_artifact_manager_tool(
     async def artifact_manager(
         task: str,
         artifact_id: str | None = None,
-        intent: str | None = None,
         tool_call_id: str | None = None,
         subagent_event_queue: Any | None = None,
     ) -> dict[str, Any]:
@@ -186,13 +186,10 @@ def create_artifact_manager_tool(
                     trace,
                     messages,
                     final_text,
-                    (
-                        "artifact_manager requires a non-empty task. Call it again "
-                        "with a complete, self-contained artifact task description."
-                    ),
+                    ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
                 )
             graph = _build_artifact_manager_graph(workspace, user, mcp_tools, conversation_id)
-            prompt = _format_artifact_manager_task(task, artifact_id, intent)
+            prompt = _format_artifact_manager_task(task, artifact_id)
             input_state = {
                 "messages": [HumanMessage(content=prompt)],
                 "workspace_id": str(workspace.id),
@@ -277,6 +274,7 @@ def create_artifact_manager_tool(
         finally:
             reset_subagent_event_queue(queue_token)
 
+    artifact_manager.handle_validation_error = ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE
     artifact_manager.name = "artifact_manager"
     return artifact_manager
 
@@ -284,13 +282,10 @@ def create_artifact_manager_tool(
 def _format_artifact_manager_task(
     task: str,
     artifact_id: str | None,
-    intent: str | None,
 ) -> str:
     lines = [f"Task: {task.strip()}"]
     if artifact_id:
         lines.append(f"Artifact id: {artifact_id}")
-    if intent:
-        lines.append(f"Intent: {intent}")
     return "\n".join(lines)
 
 

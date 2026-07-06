@@ -100,6 +100,7 @@ class TestTeardownSchemaUnbound:
 
         assert "task" in props
         assert "task" in required
+        assert "intent" not in props
         assert "tool_call_id" not in props
         assert "subagent_event_queue" not in props
         assert "tool_call_id" not in required

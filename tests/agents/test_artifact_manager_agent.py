@@ -7,6 +7,7 @@ from langgraph.errors import GraphRecursionError
 
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
+    ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE,
     _forward_nested_event,
     _SubagentTraceRecorder,
     _summarize_result,
@@ -274,6 +275,22 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_artifact_manager_missing_task_returns_clean_validation_error():
+    tool = create_artifact_manager_tool(
+        SimpleNamespace(id="workspace-1"),
+        SimpleNamespace(id="user-1"),
+        [],
+        conversation_id="thread-1",
+    )
+
+    result = await tool.ainvoke({"intent": "create"})
+
+    assert result == ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE
+    assert "ValidationError" not in result
+    assert "subagent_event_queue" not in result
+
+
+@pytest.mark.asyncio
 async def test_artifact_manager_blank_task_returns_structured_failure(monkeypatch):
     def fail_if_graph_is_built(*args, **kwargs):
         raise AssertionError("missing task should fail before building the subagent graph")
@@ -293,7 +310,6 @@ async def test_artifact_manager_blank_task_returns_structured_failure(monkeypatc
     result = await tool.ainvoke(
         {
             "task": "   ",
-            "intent": "create",
             "tool_call_id": "toolu_PARENT",
             "subagent_event_queue": queue,
         }
@@ -305,6 +321,7 @@ async def test_artifact_manager_blank_task_returns_structured_failure(monkeypatc
 
     assert result["status"] == "error"
     assert "non-empty task" in result["message"]
+    assert result["message"] == ARTIFACT_MANAGER_TASK_REQUIRED_MESSAGE
     assert "subagent_event_queue" not in result["message"]
     assert "Field required" not in result["message"]
     assert [item["event"]["type"] for item in queued] == [
