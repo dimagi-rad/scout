@@ -17,26 +17,45 @@ export function formatValue(value: unknown, format?: string): string {
 
   const numberValue = numeric(value)
   if (numberValue !== null) {
-    if (format === "currency") {
+    const namedFormat = parseNamedFormat(format)
+    if (namedFormat.kind === "currency") {
       return new Intl.NumberFormat(undefined, {
         style: "currency",
         currency: "USD",
-        maximumFractionDigits: numberValue % 1 === 0 ? 0 : 2,
+        minimumFractionDigits: namedFormat.decimals,
+        maximumFractionDigits: namedFormat.decimals ?? (numberValue % 1 === 0 ? 0 : 2),
       }).format(numberValue)
     }
-    if (format === "percent") {
+    if (namedFormat.kind === "accounting") {
+      return new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: "USD",
+        currencySign: "accounting",
+        minimumFractionDigits: namedFormat.decimals,
+        maximumFractionDigits: namedFormat.decimals ?? 2,
+      }).format(numberValue)
+    }
+    if (namedFormat.kind === "percent") {
       return new Intl.NumberFormat(undefined, {
         style: "percent",
-        maximumFractionDigits: 1,
+        minimumFractionDigits: namedFormat.decimals,
+        maximumFractionDigits: namedFormat.decimals ?? 1,
       }).format(numberValue)
     }
-    if (format === "compact") {
+    if (namedFormat.kind === "compact" || namedFormat.kind === "abbr") {
       return new Intl.NumberFormat(undefined, {
         notation: "compact",
-        maximumFractionDigits: 1,
+        minimumFractionDigits: namedFormat.decimals,
+        maximumFractionDigits: namedFormat.decimals ?? 1,
       }).format(numberValue)
     }
-    return new Intl.NumberFormat().format(numberValue)
+    if (namedFormat.kind === "number") {
+      return new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: namedFormat.decimals,
+        maximumFractionDigits: namedFormat.decimals,
+      }).format(numberValue)
+    }
+    return new Intl.NumberFormat(undefined).format(numberValue)
   }
 
   return String(value)
@@ -76,4 +95,11 @@ function parseIsoDateLocal(value: string): Date {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+function parseNamedFormat(format?: string): { kind?: string; decimals?: number } {
+  const match = format?.match(/^(number|percent|currency|compact|abbr|accounting)(?:_(\d+))?$/)
+  if (!match) return {}
+  const decimals = match[2] === undefined ? undefined : Number.parseInt(match[2], 10)
+  return { kind: match[1], decimals: Number.isFinite(decimals) ? decimals : undefined }
 }

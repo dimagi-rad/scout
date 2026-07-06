@@ -145,6 +145,32 @@ def test_compile_passes_cube_filter_operators_through(monkeypatch, workspace, se
     ]
 
 
+def test_compile_accepts_values_filter_alias(monkeypatch, workspace, semantic_model):
+    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+
+    compiled = query_service._compile_semantic_query(
+        workspace,
+        {
+            "measures": ["visits.count"],
+            "filters": [
+                {
+                    "field": "visits.visit_date",
+                    "operator": "inDateRange",
+                    "values": ["2026-06-01", "2026-06-30"],
+                }
+            ],
+        },
+    )
+
+    assert compiled["cube_query"]["filters"] == [
+        {
+            "member": "visits.visit_date",
+            "operator": "inDateRange",
+            "values": ["2026-06-01", "2026-06-30"],
+        }
+    ]
+
+
 def test_compile_time_granularity_does_not_duplicate_params(
     monkeypatch, workspace, semantic_model
 ):

@@ -228,7 +228,7 @@ def _cube_filter(member: ResolvedMember, filter_spec: dict[str, Any]) -> dict[st
         "operator": operator,
     }
     if operator not in {"set", "notSet"}:
-        value = filter_spec.get("value")
+        value = filter_spec.get("value") if "value" in filter_spec else filter_spec.get("values")
         payload["values"] = value if isinstance(value, list) else [value]
     return payload
 

@@ -3,11 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.errors import GraphRecursionError
 
 from apps.agents.subagents.events import reset_subagent_event_queue, set_subagent_event_queue
 from apps.agents.tools.artifact_manager_agent import (
-    _SubagentTraceRecorder,
     _forward_nested_event,
+    _SubagentTraceRecorder,
     _summarize_result,
     create_artifact_manager_tool,
 )
@@ -269,4 +270,69 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
     assert any(
         event["type"] == "data-subagent-tool-output"
         for event in result["subagent_trace"]["events"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_artifact_manager_returns_failed_result_on_recursion_limit(monkeypatch):
+    class FakeGraph:
+        async def astream_events(self, input_state, config, version):
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-write",
+                "name": "artifact_write",
+                "data": {
+                    "output": ToolMessage(
+                        content=json.dumps(
+                            {
+                                "status": "created",
+                                "artifact": {"id": "artifact-1", "version": 1},
+                                "diagnostics": [],
+                            }
+                        ),
+                        tool_call_id="toolu_CHILD",
+                        name="artifact_write",
+                    )
+                },
+            }
+            raise GraphRecursionError(
+                "Recursion limit of 50 reached without hitting a stop condition"
+            )
+
+    monkeypatch.setattr(
+        "apps.agents.tools.artifact_manager_agent._build_artifact_manager_graph",
+        lambda *args, **kwargs: FakeGraph(),
+    )
+
+    queue = __import__("asyncio").Queue()
+    tool = create_artifact_manager_tool(
+        SimpleNamespace(id="workspace-1"),
+        SimpleNamespace(id="user-1"),
+        [],
+        conversation_id="thread-1",
+    )
+    result = await tool.ainvoke(
+        {
+            "task": "create",
+            "tool_call_id": "toolu_PARENT",
+            "subagent_event_queue": queue,
+        }
+    )
+
+    queued = []
+    while not queue.empty():
+        queued.append(await queue.get())
+
+    assert result["status"] == "error"
+    assert result["artifact_id"] == "artifact-1"
+    assert result["artifact_version"] == 1
+    assert "Recursion limit of 50" in result["message"]
+    assert any(
+        event["type"] == "data-subagent-error"
+        for event in result["subagent_trace"]["events"]
+    )
+    assert any(
+        item["event"]["type"] == "data-subagent-status"
+        and item["event"]["data"]["phase"] == "failed"
+        for item in queued
     )

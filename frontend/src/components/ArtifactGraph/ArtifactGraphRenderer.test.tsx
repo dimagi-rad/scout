@@ -64,7 +64,7 @@ function artifact(): ArtifactDetail {
             id: "stat",
             type: "stat",
             inputs: { current: { $ref: "q.visits_by_day" } },
-            config: { label: "Total visits", value_key: "visits_count" },
+            config: { label: "Total visits", value_key: "visits_count", value_path: "visits_count" },
           },
         ],
       },
@@ -180,7 +180,7 @@ describe("ArtifactGraphRenderer", () => {
           type: "stat",
           row_group: "kpis",
           inputs: { current: { value: [{ value: 361 }] } },
-          config: { label: "Total payment accrued", value_key: "value", format: "currency" },
+          config: { label: "Total payment accrued", value_key: "value", format: "currency_2" },
         },
       ],
     }
@@ -194,6 +194,7 @@ describe("ArtifactGraphRenderer", () => {
       gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))",
     })
     expect(statBlocks).toHaveLength(4)
+    expect(screen.getByText("$361.00")).toBeInTheDocument()
     expect(mockedPost).not.toHaveBeenCalled()
   })
 

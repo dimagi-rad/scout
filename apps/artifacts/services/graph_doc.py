@@ -169,6 +169,10 @@ def validate_doc(doc: Any) -> list[dict[str, Any]]:
     blocks = doc.get("blocks")
     if not isinstance(blocks, list):
         return [problem("Graph doc must contain a blocks array", code="doc_shape")]
+    if not blocks:
+        diagnostics.append(
+            problem("Graph doc must contain at least one block", code="doc_empty_blocks")
+        )
 
     block_map: dict[str, dict[str, Any]] = {}
     outputs: dict[str, dict[str, str]] = {}

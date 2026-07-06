@@ -83,6 +83,12 @@ def graph_doc():
     }
 
 
+def test_graph_doc_rejects_empty_blocks():
+    diagnostics = validate_doc({"schema_version": 1, "blocks": []})
+
+    assert {item.get("code") for item in diagnostics} == {"doc_empty_blocks"}
+
+
 def test_graph_doc_rejects_raw_query_keys_and_missing_time_dimension():
     doc = {
         "schema_version": 1,
@@ -295,6 +301,36 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
     )
     assert rejected["status"] == "error"
     assert "artifact_manager" in rejected["message"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_graph_manager_rejects_missing_or_empty_story_doc(workspace, member_user):
+    graph_tool = next(
+        item for item in create_artifact_graph_tools(workspace, member_user, "thread") if item.name == "artifact_write"
+    )
+
+    missing = await graph_tool.ainvoke(
+        {
+            "action": "create",
+            "title": "Missing doc",
+            "run_check": False,
+        }
+    )
+    empty = await graph_tool.ainvoke(
+        {
+            "action": "create",
+            "title": "Empty doc",
+            "story_doc": {"schema_version": 1, "blocks": []},
+            "run_check": False,
+        }
+    )
+
+    assert missing["status"] == "error"
+    assert missing["message"] == "story_doc is required for create."
+    assert empty["status"] == "error"
+    assert {item.get("code") for item in empty["diagnostics"]} == {"doc_empty_blocks"}
+    assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
 
 
 @pytest.mark.django_db(transaction=True)

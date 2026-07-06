@@ -289,12 +289,16 @@ function TableComponent({ block, config, engine }: BlockComponentProps) {
 function StatComponent({ block, config, engine }: BlockComponentProps) {
   const inputs = useBlockInputs(engine, block)
   const rows = Array.isArray(inputs.values.current) ? inputs.values.current.filter(isRecord) : EMPTY_ROWS
-  const key = stringValue(config.value_key) ?? pathKey(stringValue(config.value_path)) ?? firstNumericKey(rows[0])
-  const selected = stringValue(config.value_path)
-    ? selectPath(inputs.values.current, stringValue(config.value_path))
-    : key
-      ? rows[0]?.[key]
-      : undefined
+  const valueKey = stringValue(config.value_key)
+  const valuePath = stringValue(config.value_path)
+  const key = valueKey ?? pathKey(valuePath) ?? firstNumericKey(rows[0])
+  const selected = valueKey
+    ? rows[0]?.[valueKey]
+    : valuePath
+      ? selectPath(inputs.values.current, valuePath)
+      : key
+        ? rows[0]?.[key]
+        : undefined
 
   return (
     <div data-block-type="stat" className="space-y-1 border-y border-border py-4">

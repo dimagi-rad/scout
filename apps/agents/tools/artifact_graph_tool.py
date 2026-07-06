@@ -215,7 +215,9 @@ async def _create_graph_artifact(
     clean_title = (title or "").strip()
     if not clean_title:
         return {"status": "error", "message": "title is required for create."}
-    doc = normalize_doc(story_doc or {}, name=clean_title)
+    if story_doc is None:
+        return {"status": "error", "message": "story_doc is required for create."}
+    doc = normalize_doc(story_doc, name=clean_title)
     diagnostics = validate_doc(doc)
     if diagnostics_have_errors(diagnostics):
         return {"status": "error", "message": "Graph doc has validation errors.", "diagnostics": diagnostics}

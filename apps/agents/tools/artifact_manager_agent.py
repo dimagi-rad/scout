@@ -18,6 +18,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
@@ -45,8 +46,8 @@ NESTED_MCP_TOOL_NAMES = frozenset(
         "semantic_query",
     }
 )
-NESTED_RECURSION_LIMIT = 18
-NESTED_MAX_TOKENS = 4096
+NESTED_RECURSION_LIMIT = 50
+NESTED_MAX_TOKENS = 8192
 SUBAGENT_TRACE_MAX_EVENTS = 200
 SUBAGENT_MESSAGE_MAX_CHARS = 40_000
 
@@ -121,6 +122,9 @@ How to build data-backed blocks:
   `time_dimension`.
 - Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
+- When adding `date_filter` or `period_selector` controls, choose defaults that
+  cover rows you have verified. For demo/library artifacts, prefer
+  `last_90_days` unless you have confirmed `last_30_days` returns data.
 
 Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
@@ -197,28 +201,59 @@ def create_artifact_manager_tool(
                     message_buffers,
                     trace,
                 )
+                if event.get("event") == "on_tool_end":
+                    tool_output = event.get("data", {}).get("output")
+                    if isinstance(tool_output, ToolMessage):
+                        messages.append(tool_output)
                 output = event.get("data", {}).get("output")
                 if event.get("event") == "on_chain_end" and isinstance(output, dict):
                     maybe_messages = output.get("messages")
                     if isinstance(maybe_messages, list):
                         messages = maybe_messages
+            if messages:
+                final_text = _extract_final_text(messages)
+            result = _summarize_result(messages, final_text)
+            await _emit_subagent_event(
+                _subagent_status_event(
+                    parent_tool_call_id,
+                    phase="completed",
+                    message="Artifact Manager completed.",
+                    artifact_id=result.get("artifact_id"),
+                    artifact_version=result.get("artifact_version"),
+                ),
+                trace,
+            )
+            result["subagent_trace"] = trace.to_dict()
+            return result
+        except GraphRecursionError as exc:
+            logger.warning(
+                "Artifact Manager recursion limit reached for workspace %s conversation %s",
+                workspace.id,
+                conversation_id,
+                exc_info=True,
+            )
+            return await _artifact_manager_failure_result(
+                parent_tool_call_id,
+                trace,
+                messages,
+                final_text,
+                _recursion_failure_message(exc),
+            )
+        except Exception as exc:
+            logger.exception(
+                "Artifact Manager failed for workspace %s conversation %s",
+                workspace.id,
+                conversation_id,
+            )
+            return await _artifact_manager_failure_result(
+                parent_tool_call_id,
+                trace,
+                messages,
+                final_text,
+                _generic_failure_message(exc),
+            )
         finally:
             reset_subagent_event_queue(queue_token)
-        if messages:
-            final_text = _extract_final_text(messages)
-        result = _summarize_result(messages, final_text)
-        await _emit_subagent_event(
-            _subagent_status_event(
-                parent_tool_call_id,
-                phase="completed",
-                message="Artifact Manager completed.",
-                artifact_id=result.get("artifact_id"),
-                artifact_version=result.get("artifact_version"),
-            ),
-            trace,
-        )
-        result["subagent_trace"] = trace.to_dict()
-        return result
 
     artifact_manager.name = "artifact_manager"
     return artifact_manager
@@ -235,6 +270,69 @@ def _format_artifact_manager_task(
     if intent:
         lines.append(f"Intent: {intent}")
     return "\n".join(lines)
+
+
+async def _artifact_manager_failure_result(
+    parent_tool_call_id: str,
+    trace: _SubagentTraceRecorder,
+    messages: list[Any],
+    final_text: str,
+    message: str,
+) -> dict[str, Any]:
+    if messages and not final_text:
+        final_text = _extract_final_text(messages)
+    result = _summarize_result(messages, final_text)
+    result["status"] = "error"
+    result["message"] = message[:1200]
+    await _emit_subagent_event(
+        _subagent_error_event(parent_tool_call_id, result["message"]),
+        trace,
+    )
+    await _emit_subagent_event(
+        _subagent_status_event(
+            parent_tool_call_id,
+            phase="failed",
+            message=result["message"],
+            artifact_id=result.get("artifact_id"),
+            artifact_version=result.get("artifact_version"),
+        ),
+        trace,
+    )
+    result["subagent_trace"] = trace.to_dict()
+    return result
+
+
+def _recursion_failure_message(exc: BaseException) -> str:
+    detail = _exception_detail(exc)
+    if detail:
+        return f"Artifact Manager stopped before completion: {detail}"
+    return "Artifact Manager stopped before completion: recursion limit reached."
+
+
+def _generic_failure_message(exc: BaseException) -> str:
+    detail = _exception_detail(exc)
+    if detail:
+        return f"Artifact Manager failed before completion: {detail}"
+    return f"Artifact Manager failed before completion: {exc.__class__.__name__}"
+
+
+def _exception_detail(exc: BaseException) -> str:
+    text = str(exc).strip()
+    if not text:
+        text = exc.__class__.__name__
+    return text[:600]
+
+
+def _subagent_error_event(parent_tool_call_id: str, message: str) -> dict[str, Any]:
+    return {
+        "type": "data-subagent-error",
+        "id": f"{SUBAGENT_NAME}:{parent_tool_call_id}:error",
+        "data": {
+            "parentToolCallId": parent_tool_call_id,
+            "subagentName": SUBAGENT_NAME,
+            "message": message,
+        },
+    }
 
 
 def _build_artifact_manager_graph(
