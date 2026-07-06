@@ -38,6 +38,7 @@ from apps.semantic.canvas.objects import (
     DATASET_EDITABLE_KEYS,
     FIELD_CURATION_KEYS,
     FIELD_DRAFT_KEYS,
+    FIELD_MEASURE_OPTION_KEYS,
     FIELD_METADATA_KEYS,
     FIELD_TYPES,
     MEASURE_TYPES,
@@ -203,9 +204,13 @@ def _op_set(canvas, model, index, raw_op, user) -> dict[str, Any]:
         )
     object_type, ref, key = parts
     value = raw_op.get("value")
-    if value is not None and not isinstance(value, str):
+    if object_type == "field":
+        key = _normalize_field_key(key)
+    accepts_structured_value = object_type == "field" and key in FIELD_MEASURE_OPTION_KEYS
+    if value is not None and not isinstance(value, str) and not accepts_structured_value:
         raise CanvasOperationError(index, "INVALID_VALUE", f"'{key}' must be a string.")
-    value = value or ""
+    if value is None:
+        value = [] if accepts_structured_value and key == "filters" else ""
 
     draft = _find_draft(canvas, object_type, ref)
     if draft is not None:
@@ -432,6 +437,8 @@ def _find_change(canvas, model, index, object_type: str, ref: str) -> SemanticCa
 
 
 def _set_on_draft(index: int, draft: SemanticCanvasChange, key: str, value: str) -> None:
+    if draft.object_type == ObjectType.FIELD:
+        key = _normalize_field_key(key)
     allowed = {
         ObjectType.FIELD: FIELD_DRAFT_KEYS,
         ObjectType.RELATIONSHIP: RELATIONSHIP_DRAFT_KEYS,
@@ -487,7 +494,10 @@ def _stage_update(canvas, object_type, obj, key: str, value: str) -> None:
 
 def _editable_base_value(obj, key: str) -> str:
     if key in FIELD_METADATA_KEYS:
-        return str((getattr(obj, "metadata", None) or {}).get(key) or "")
+        metadata = getattr(obj, "metadata", None) or {}
+        if key == "filters":
+            return metadata.get(key) or []
+        return str(metadata.get(key) or "")
     return str(getattr(obj, key, "") or "")
 
 
@@ -505,6 +515,7 @@ def _stage_delete(canvas, object_type, obj) -> None:
 
 
 def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, Any]:
+    value = _normalized_field_draft_value(index, value)
     unknown = set(value) - FIELD_DRAFT_KEYS - {"dataset"}
     if unknown:
         raise CanvasOperationError(
@@ -533,6 +544,8 @@ def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, 
         raise CanvasOperationError(
             index, "INVALID_MEASURE_TYPE", "measure_type only applies to measures."
         )
+    if field_type != "measure":
+        _reject_measure_options_on_non_measure(index, value)
     return {
         "dataset_uuid": str(dataset.id),
         "dataset_name": dataset.name,
@@ -545,6 +558,8 @@ def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, 
         "data_type": str(value.get("data_type") or ""),
         "format": _normalize_field_edit(index, "format", str(value.get("format") or "")),
         "currency": _normalize_field_edit(index, "currency", str(value.get("currency") or "")),
+        "filters": _normalize_field_edit(index, "filters", value.get("filters") or []),
+        "cube_sql": _normalize_field_edit(index, "cube_sql", str(value.get("cube_sql") or "")),
     }
 
 
@@ -553,10 +568,104 @@ _DECIMAL_ALIAS_RE = re.compile(r"^decimal_(\d+)$")
 
 
 def _normalize_field_edit(index: int, key: str, value: str) -> str:
+    key = _normalize_field_key(key)
     if key == "format":
         return _normalize_display_format(index, value)
     if key == "currency":
         return _normalize_currency(index, value)
+    if key == "filters":
+        return _normalize_measure_filters(index, value)
+    if key == "cube_sql":
+        return _normalize_cube_sql(index, value)
+    return value
+
+
+def _normalize_field_key(key: str) -> str:
+    lowered = str(key or "").strip().lower()
+    if lowered in {"sql", "measure_sql"}:
+        return "cube_sql"
+    if lowered in {"filter", "measure_filter", "measure_filters"}:
+        return "filters"
+    return lowered or str(key or "")
+
+
+def _normalized_field_draft_value(index: int, value: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    aliases = {
+        "sql": "cube_sql",
+        "measure_sql": "cube_sql",
+        "filter": "filters",
+        "measure_filter": "filters",
+        "measure_filters": "filters",
+    }
+    for raw_key, raw_value in value.items():
+        key = aliases.get(str(raw_key), str(raw_key))
+        if key in normalized and normalized[key] != raw_value:
+            raise CanvasOperationError(
+                index,
+                "INVALID_VALUE",
+                f"Field option '{raw_key}' conflicts with another value for '{key}'.",
+            )
+        normalized[key] = raw_value
+    return normalized
+
+
+def _reject_measure_options_on_non_measure(index: int, value: dict[str, Any]) -> None:
+    used = [key for key in FIELD_MEASURE_OPTION_KEYS if value.get(key)]
+    if used:
+        raise CanvasOperationError(
+            index,
+            "INVALID_FIELD_OPTION",
+            f"{', '.join(sorted(used))} only applies to measures.",
+        )
+
+
+def _normalize_measure_filters(index: int, value: Any) -> list[dict[str, str]]:
+    if value in (None, ""):
+        return []
+    raw_filters = value if isinstance(value, list) else [value]
+    normalized: list[dict[str, str]] = []
+    for filter_index, item in enumerate(raw_filters):
+        if isinstance(item, str):
+            sql = item.strip()
+            extra = {}
+        elif isinstance(item, dict):
+            extra = {str(key): val for key, val in item.items() if key != "sql"}
+            sql = str(item.get("sql") or "").strip()
+        else:
+            raise CanvasOperationError(
+                index,
+                "INVALID_MEASURE_FILTER",
+                f"filters[{filter_index}] must be a SQL string or an object with sql.",
+            )
+        if extra:
+            raise CanvasOperationError(
+                index,
+                "INVALID_MEASURE_FILTER",
+                f"filters[{filter_index}] only supports the Cube 'sql' key.",
+            )
+        if not sql:
+            raise CanvasOperationError(
+                index, "INVALID_MEASURE_FILTER", f"filters[{filter_index}] needs sql."
+            )
+        if len(sql) > 1000:
+            raise CanvasOperationError(
+                index,
+                "INVALID_MEASURE_FILTER",
+                f"filters[{filter_index}].sql must be 1000 characters or fewer.",
+            )
+        normalized.append({"sql": sql})
+    return normalized
+
+
+def _normalize_cube_sql(index: int, value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    if len(value) > 1000:
+        raise CanvasOperationError(
+            index, "INVALID_CUBE_SQL", "cube_sql must be 1000 characters or fewer."
+        )
     return value
 
 

@@ -99,6 +99,8 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
     measure_type = fields.get("measure_type", "")
     if measure_type == "count":
         return out
+    if fields.get("cube_sql"):
+        return out
     columns = dataset_column_names(dataset)
     if not expression:
         out.append(

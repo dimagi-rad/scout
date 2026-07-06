@@ -114,12 +114,32 @@ def _cube_measure(field: SemanticField) -> dict[str, Any]:
         "name": field.name,
         "type": "number" if measure_type == SemanticField.MeasureType.NUMBER else measure_type,
     }
-    if measure_type != SemanticField.MeasureType.COUNT:
+    metadata = field.metadata or {}
+    cube_sql = metadata.get("cube_sql")
+    if isinstance(cube_sql, str) and cube_sql.strip():
+        payload["sql"] = cube_sql.strip()
+    elif measure_type != SemanticField.MeasureType.COUNT:
         payload["sql"] = _cube_sql(field.expression)
+    filters = _cube_measure_filters(metadata.get("filters"))
+    if filters:
+        payload["filters"] = filters
     if field.description:
         payload["description"] = field.description
     _apply_display_metadata(payload, field)
     return payload
+
+
+def _cube_measure_filters(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    filters: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        sql = item.get("sql")
+        if isinstance(sql, str) and sql.strip():
+            filters.append({"sql": sql.strip()})
+    return filters
 
 
 def _apply_display_metadata(payload: dict[str, Any], field: SemanticField) -> None:

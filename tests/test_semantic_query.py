@@ -378,6 +378,14 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     assert custom_dataset.fields.filter(name="username", is_visible=True).exists()
     assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
 
+    catalog = catalog_service.serialize_catalog(model)
+    custom_entry = next(dataset for dataset in catalog["datasets"] if dataset["name"] == "visit_users")
+    physical_entry = next(dataset for dataset in catalog["datasets"] if dataset["name"] == "raw_visits")
+    assert custom_entry["source_kind"] == SemanticDataset.SourceKind.CUSTOM
+    assert custom_entry["definition_sql"] == "select username from raw_visits"
+    assert physical_entry["source_kind"] == SemanticDataset.SourceKind.PHYSICAL
+    assert physical_entry["definition_sql"] == ""
+
 
 def test_invalid_custom_dataset_is_hidden_without_removing_physical(monkeypatch, workspace):
     monkeypatch.setattr(

@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
-import { Check, ChevronDown, Database, RefreshCw, Search, Sigma, Table2, X } from "lucide-react"
+import { Check, ChevronDown, Code2, Database, RefreshCw, Search, Sigma, Table2, X } from "lucide-react"
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
+import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism"
+import { format as formatSql } from "sql-formatter"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -437,6 +440,7 @@ function DatasetDetail({
 }) {
   const displayName = dataset.label || dataset.name
   const showTableName = dataset.table_name && dataset.table_name !== dataset.name
+  const customSql = isCreatedDataset(dataset) ? dataset.definition_sql : ""
 
   return (
     <div className="mx-auto w-full max-w-7xl min-w-0 p-4 sm:p-6 lg:p-8">
@@ -480,6 +484,7 @@ function DatasetDetail({
       </div>
 
       <div className="min-w-0 space-y-8">
+        {customSql.trim() && <CustomSqlSection sql={customSql} />}
         <RelationshipsSection
           relationships={dataset.relationships}
           onOpenDataset={onOpenDataset}
@@ -497,6 +502,64 @@ function DatasetDetail({
       </div>
     </div>
   )
+}
+
+function CustomSqlSection({ sql }: { sql: string }) {
+  const formattedSql = useMemo(() => formatDatasetSql(sql), [sql])
+
+  return (
+    <section className="min-w-0">
+      <div className="mb-3 flex items-center gap-2">
+        <Code2 className="h-4 w-4" />
+        <h3 className="text-sm font-semibold">SQL</h3>
+      </div>
+      <div
+        className="overflow-hidden rounded-md border bg-background"
+        data-testid="custom-dataset-sql"
+      >
+        <SyntaxHighlighter
+          language="sql"
+          style={oneLight}
+          showLineNumbers
+          wrapLongLines
+          customStyle={{
+            margin: 0,
+            maxHeight: "26rem",
+            overflow: "auto",
+            background: "transparent",
+            fontSize: "0.75rem",
+            lineHeight: "1.25rem",
+          }}
+          codeTagProps={{
+            style: {
+              fontFamily:
+                'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+            },
+          }}
+          lineNumberStyle={{
+            minWidth: "2.75em",
+            paddingRight: "1em",
+            color: "var(--muted-foreground)",
+            textAlign: "right",
+            userSelect: "none",
+          }}
+        >
+          {formattedSql}
+        </SyntaxHighlighter>
+      </div>
+    </section>
+  )
+}
+
+function formatDatasetSql(sql: string): string {
+  try {
+    return formatSql(sql, {
+      language: "postgresql",
+      keywordCase: "upper",
+    })
+  } catch {
+    return sql
+  }
 }
 
 function RelationshipsSection({
@@ -573,18 +636,19 @@ function FieldSection({
         <Badge variant="secondary">{fields.length}</Badge>
       </div>
       <div className="overflow-x-auto rounded-md border">
-        <Table className="min-w-[56rem]">
+        <Table className="min-w-[64rem]">
           <TableHeader>
             <TableRow>
-              <TableHead className="w-[44%]">Member</TableHead>
+              <TableHead className="w-[36%]">Member</TableHead>
               <TableHead className="w-[14%]">Type</TableHead>
+              <TableHead className="w-[18%]">Value format</TableHead>
               <TableHead>Description</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {fields.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={3} className="py-8 text-center text-sm text-muted-foreground">
+                <TableCell colSpan={4} className="py-8 text-center text-sm text-muted-foreground">
                   No {title.toLowerCase()} defined.
                 </TableCell>
               </TableRow>
@@ -605,6 +669,9 @@ function FieldSection({
                       {field.measure_type || field.data_type || field.type}
                     </Badge>
                   </TableCell>
+                  <TableCell>
+                    <ValueFormatBadge field={field} />
+                  </TableCell>
                   <TableCell className="text-sm text-muted-foreground">
                     {field.description || "—"}
                   </TableCell>
@@ -616,6 +683,24 @@ function FieldSection({
       </div>
     </section>
   )
+}
+
+function ValueFormatBadge({ field }: { field: SemanticField }) {
+  const label = fieldValueFormatLabel(field)
+  if (!label) {
+    return <span className="text-sm text-muted-foreground">—</span>
+  }
+  return (
+    <Badge variant="secondary" className="max-w-full font-mono text-[11px]">
+      <span className="truncate">{label}</span>
+    </Badge>
+  )
+}
+
+function fieldValueFormatLabel(field: SemanticField): string {
+  const format = typeof field.metadata?.format === "string" ? field.metadata.format : ""
+  const currency = typeof field.metadata?.currency === "string" ? field.metadata.currency : ""
+  return [format, currency].filter(Boolean).join(" · ")
 }
 
 function CenteredState({

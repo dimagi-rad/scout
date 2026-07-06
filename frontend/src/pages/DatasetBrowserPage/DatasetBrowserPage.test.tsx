@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 
 import { api } from "@/api/client"
-import type { SemanticDataset } from "@/store/datasetSlice"
+import type { SemanticDataset, SemanticField } from "@/store/datasetSlice"
 import { useAppStore } from "@/store/store"
 import { DatasetBrowserPage } from "./DatasetBrowserPage"
 
@@ -16,6 +16,8 @@ function dataset(overrides: Partial<SemanticDataset>): SemanticDataset {
     name: "raw_visits",
     label: "Raw Visits",
     description: "Visit records",
+    source_kind: "physical",
+    definition_sql: "",
     schema_name: "tenant_schema",
     table_name: "raw_visits",
     primary_key: "id",
@@ -25,6 +27,21 @@ function dataset(overrides: Partial<SemanticDataset>): SemanticDataset {
     time_dimensions: [],
     measures: [],
     relationships: [],
+    metadata: {},
+    ...overrides,
+  }
+}
+
+function field(overrides: Partial<SemanticField>): SemanticField {
+  return {
+    id: "field-1",
+    name: "count",
+    member: "raw_visits.count",
+    label: "Count",
+    description: "",
+    type: "measure",
+    data_type: "integer",
+    measure_type: "count",
     metadata: {},
     ...overrides,
   }
@@ -42,6 +59,17 @@ const rawPayments = dataset({
   label: "Raw Payments",
   description: "Payment events",
   table_name: "raw_payments",
+})
+
+const visitStats = dataset({
+  id: "visit-stats",
+  name: "visit_stats",
+  label: "Visit Stats",
+  description: "Visit rollup",
+  source_kind: "custom",
+  definition_sql: "select username, count(*) as visit_count\nfrom raw_visits\ngroup by username",
+  table_name: "visit_stats",
+  metadata: { source_type: "custom" },
 })
 
 function catalog() {
@@ -133,5 +161,64 @@ describe("DatasetBrowserPage routing", () => {
     expect(await screen.findByText("Fetched payment detail")).toBeInTheDocument()
     expect(screen.getByTestId("location")).toHaveTextContent("/datasets/raw_payments")
     expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WORKSPACE_ID}/datasets/raw_payments/`)
+  })
+
+  it("shows SQL for custom datasets from the catalog response", async () => {
+    vi.spyOn(api, "get").mockImplementation(async (url: string) => {
+      if (url === `/api/workspaces/${WORKSPACE_ID}/datasets/`) {
+        return { ...catalog(), datasets: [visitStats, rawVisits] } as never
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    renderDatasetPage("/datasets")
+
+    expect(await screen.findByText("SQL")).toBeInTheDocument()
+    const sqlBlock = screen.getByTestId("custom-dataset-sql")
+    expect(sqlBlock).toHaveTextContent("SELECT")
+    expect(sqlBlock).toHaveTextContent("count(*) AS visit_count")
+    expect(sqlBlock).toHaveTextContent("FROM")
+    expect(sqlBlock).toHaveTextContent("raw_visits")
+    expect(sqlBlock).toHaveTextContent("GROUP BY")
+  })
+
+  it("shows value formats for fields", async () => {
+    const formattedVisits = dataset({
+      ...rawVisits,
+      measures: [
+        field({
+          id: "total-amount",
+          name: "sum_amount",
+          member: "raw_visits.sum_amount",
+          label: "Total Amount",
+          measure_type: "sum",
+          metadata: { format: "currency_2", currency: "USD" },
+        }),
+      ],
+      dimensions: [
+        field({
+          id: "completion-rate",
+          name: "completion_rate",
+          member: "raw_visits.completion_rate",
+          label: "Completion Rate",
+          type: "dimension",
+          data_type: "numeric",
+          measure_type: "",
+          metadata: { format: "percent_1" },
+        }),
+      ],
+    })
+    vi.spyOn(api, "get").mockImplementation(async (url: string) => {
+      if (url === `/api/workspaces/${WORKSPACE_ID}/datasets/`) {
+        return { ...catalog(), datasets: [formattedVisits] } as never
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    renderDatasetPage("/datasets")
+
+    expect(await screen.findAllByText("Value format")).toHaveLength(2)
+    expect(screen.getByText("currency_2 · USD")).toBeInTheDocument()
+    expect(screen.getByText("percent_1")).toBeInTheDocument()
   })
 })

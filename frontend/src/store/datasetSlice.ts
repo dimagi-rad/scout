@@ -29,6 +29,8 @@ export interface SemanticDataset {
   name: string
   label: string
   description: string
+  source_kind: "physical" | "custom"
+  definition_sql: string
   schema_name: string
   table_name: string
   primary_key: string

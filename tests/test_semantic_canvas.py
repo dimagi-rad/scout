@@ -179,6 +179,146 @@ def test_canvas_curates_field_display_metadata(canvas, semantic_model, monkeypat
     assert amount_dimension["currency"] == "USD"
 
 
+def test_created_measure_supports_count_distinct(canvas, semantic_model, monkeypatch, user):
+    monkeypatch.setattr(
+        canvas_commit_module, "build_and_promote_cube_schema", lambda ws, model: None
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "distinct_workers",
+                    "field_type": "measure",
+                    "measure_type": "count_distinct",
+                    "expression": "username",
+                },
+            }
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    assert result["diagnostics"] == []
+
+    report = commit_canvas(canvas, user)
+    assert report["blocked"] is False
+
+    field = _visits(semantic_model).fields.get(name="distinct_workers")
+    assert field.measure_type == "count_distinct"
+
+    cube = next(c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits")
+    measure = next(m for m in cube["measures"] if m["name"] == "distinct_workers")
+    assert measure == {
+        "name": "distinct_workers",
+        "type": "count_distinct",
+        "sql": '{CUBE}."username"',
+    }
+
+
+def test_created_measure_supports_cube_filters(canvas, semantic_model, monkeypatch, user):
+    monkeypatch.setattr(
+        canvas_commit_module, "build_and_promote_cube_schema", lambda ws, model: None
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "paid_visit_count",
+                    "field_type": "measure",
+                    "measure_type": "count",
+                    "filter": {"sql": '{CUBE}."amount" > 0'},
+                },
+            }
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    assert result["diagnostics"] == []
+
+    report = commit_canvas(canvas, user)
+    assert report["blocked"] is False
+
+    field = _visits(semantic_model).fields.get(name="paid_visit_count")
+    assert field.metadata["filters"] == [{"sql": '{CUBE}."amount" > 0'}]
+
+    cube = next(c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits")
+    measure = next(m for m in cube["measures"] if m["name"] == "paid_visit_count")
+    assert measure == {
+        "name": "paid_visit_count",
+        "type": "count",
+        "filters": [{"sql": '{CUBE}."amount" > 0'}],
+    }
+
+
+def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, monkeypatch, user):
+    monkeypatch.setattr(
+        canvas_commit_module, "build_and_promote_cube_schema", lambda ws, model: None
+    )
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "amount_per_visit",
+                    "field_type": "measure",
+                    "measure_type": "number",
+                    "sql": "{count} / NULLIF({count}, 0)",
+                    "format": "currency_2",
+                    "currency": "usd",
+                },
+            }
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    assert result["diagnostics"] == []
+
+    report = commit_canvas(canvas, user)
+    assert report["blocked"] is False
+
+    field = _visits(semantic_model).fields.get(name="amount_per_visit")
+    assert field.expression == ""
+    assert field.metadata["cube_sql"] == "{count} / NULLIF({count}, 0)"
+
+    cube = next(c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits")
+    measure = next(m for m in cube["measures"] if m["name"] == "amount_per_visit")
+    assert measure == {
+        "name": "amount_per_visit",
+        "type": "number",
+        "sql": "{count} / NULLIF({count}, 0)",
+        "format": "currency_2",
+        "currency": "USD",
+    }
+
+
+def test_measure_options_are_structural_for_generated_fields(canvas, semantic_model):
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.count/filters",
+                "value": [{"sql": '{CUBE}."amount" > 0'}],
+            }
+        ],
+    )
+
+    assert result["errors"][0]["code"] == "PROTECTED_FIELD"
+
+
 def test_created_measure_validates_expression_column(canvas):
     result = apply_operations(
         canvas,

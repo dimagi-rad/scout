@@ -7,6 +7,8 @@ const makeDataset = (overrides: Partial<SemanticDataset>): SemanticDataset => ({
   name: "raw_assessments",
   label: "Raw Assessments",
   description: "Assessment results",
+  source_kind: "physical",
+  definition_sql: "",
   schema_name: "public",
   table_name: "raw_assessments",
   primary_key: "id",

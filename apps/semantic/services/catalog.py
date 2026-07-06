@@ -735,6 +735,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
     datasets = []
     for dataset in (
         model.datasets.filter(is_visible=True)
+        .select_related("custom_dataset")
         .prefetch_related("fields")
         .order_by("name")
     ):
@@ -767,6 +768,13 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
                 "name": dataset.name,
                 "label": dataset.label or dataset.name,
                 "description": dataset.description,
+                "source_kind": dataset.source_kind,
+                "definition_sql": (
+                    dataset.custom_dataset.definition_sql
+                    if dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
+                    and dataset.custom_dataset_id
+                    else ""
+                ),
                 "schema_name": dataset.schema_name,
                 "table_name": dataset.table_name,
                 "primary_key": dataset.primary_key,
