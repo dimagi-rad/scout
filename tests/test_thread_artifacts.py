@@ -140,6 +140,49 @@ async def test_thread_artifacts_endpoint_backfills_saved_tool_artifact_reference
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_thread_artifacts_endpoint_collapses_artifact_versions(workspace, user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Artifact versions",
+    )
+    artifact_v1 = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=user,
+        title="Verified visits",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id=str(thread.id),
+        data={"story_doc": {"version": 1, "blocks": [{"id": "a", "type": "markdown"}]}},
+    )
+    artifact_v2 = await sync_to_async(artifact_v1.create_new_version, thread_sensitive=True)(
+        data={"story_doc": {"version": 1, "blocks": [{"id": "b", "type": "markdown"}]}},
+    )
+    await link_artifact_to_thread(
+        artifact_v1,
+        str(thread.id),
+        workspace,
+        source=ThreadArtifact.Source.CREATED,
+    )
+    await link_artifact_to_thread(
+        artifact_v2,
+        str(thread.id),
+        workspace,
+        source=ThreadArtifact.Source.UPDATED,
+    )
+
+    client = await _auth_client(user)
+    response = await client.get(f"/api/workspaces/{workspace.id}/threads/{thread.id}/artifacts/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [(item["id"], item["version"], item["source"]) for item in payload["results"]] == [
+        (str(artifact_v2.id), 2, "updated")
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_thread_title_patch_creates_untitled_thread_row(workspace, user):
     thread_id = uuid4()
     client = await _auth_client(user)

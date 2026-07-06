@@ -8,6 +8,7 @@ from django.http import JsonResponse
 
 from apps.chat.artifact_links import (
     backfill_thread_artifact_links,
+    latest_version_links,
     serialize_thread_artifact_link,
 )
 from apps.chat.checkpointer import ensure_checkpointer
@@ -139,10 +140,11 @@ async def _get_thread_artifacts(thread_id):
         return []
     await backfill_thread_artifact_links(thread)
     queryset = (
-        ThreadArtifact.objects.filter(thread=thread)
+        ThreadArtifact.objects.filter(thread=thread, artifact__is_deleted=False)
         .select_related("artifact")
         .order_by("artifact__created_at")
     )
+    links = [link async for link in queryset]
     return [
         {
             "id": str(link.artifact.id),
@@ -152,7 +154,7 @@ async def _get_thread_artifacts(thread_id):
             "data": link.artifact.data,
             "version": link.artifact.version,
         }
-        async for link in queryset
+        for link in latest_version_links(links)
     ]
 
 
@@ -311,12 +313,13 @@ async def thread_artifacts_view(request, workspace_id, thread_id):
 
     await backfill_thread_artifact_links(thread)
     queryset = (
-        ThreadArtifact.objects.filter(thread=thread)
+        ThreadArtifact.objects.filter(thread=thread, artifact__is_deleted=False)
         .select_related("artifact")
         .order_by("-last_seen_at")
     )
+    links = [link async for link in queryset]
     return JsonResponse(
-        {"results": [serialize_thread_artifact_link(link) async for link in queryset]}
+        {"results": [serialize_thread_artifact_link(link) for link in latest_version_links(links)]}
     )
 
 

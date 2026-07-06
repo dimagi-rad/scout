@@ -234,13 +234,15 @@ async def _create_graph_artifact(
         source_queries=[],
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(artifact)
-    await link_artifact_to_thread(
-        artifact,
-        conversation_id,
-        workspace,
-        source=ThreadArtifact.Source.CREATED,
-    )
-    return await _write_result("created", artifact, diagnostics, run_check, user)
+    result = await _write_result("created", artifact, diagnostics, run_check, user)
+    if result["status"] == "created":
+        await link_artifact_to_thread(
+            artifact,
+            conversation_id,
+            workspace,
+            source=ThreadArtifact.Source.CREATED,
+        )
+    return result
 
 
 async def _replace_graph_artifact(
@@ -274,13 +276,15 @@ async def _replace_graph_artifact(
         conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
-    await link_artifact_to_thread(
-        new_artifact,
-        conversation_id or new_artifact.conversation_id,
-        workspace,
-        source=ThreadArtifact.Source.UPDATED,
-    )
-    return await _write_result("replaced", new_artifact, diagnostics, run_check, user, original)
+    result = await _write_result("replaced", new_artifact, diagnostics, run_check, user, original)
+    if result["status"] == "replaced":
+        await link_artifact_to_thread(
+            new_artifact,
+            conversation_id or new_artifact.conversation_id,
+            workspace,
+            source=ThreadArtifact.Source.UPDATED,
+        )
+    return result
 
 
 async def _apply_graph_ops(
@@ -313,13 +317,15 @@ async def _apply_graph_ops(
         conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
-    await link_artifact_to_thread(
-        new_artifact,
-        conversation_id or new_artifact.conversation_id,
-        workspace,
-        source=ThreadArtifact.Source.UPDATED,
-    )
-    return await _write_result("updated", new_artifact, diagnostics, run_check, user, original)
+    result = await _write_result("updated", new_artifact, diagnostics, run_check, user, original)
+    if result["status"] == "updated":
+        await link_artifact_to_thread(
+            new_artifact,
+            conversation_id or new_artifact.conversation_id,
+            workspace,
+            source=ThreadArtifact.Source.UPDATED,
+        )
+    return result
 
 
 async def _write_result(
@@ -333,6 +339,18 @@ async def _write_result(
     runtime = None
     if run_check and artifact.workspace_id:
         runtime = await check_graph_artifact(artifact, user_id=str(user.id) if user else "")
+    if runtime and runtime.get("success") is False:
+        await ThreadArtifact.objects.filter(artifact=artifact).adelete()
+        await sync_to_async(artifact.soft_delete, thread_sensitive=True)(user)
+        return {
+            "status": "error",
+            "message": "Graph artifact failed runtime validation and was not published.",
+            "artifact": _artifact_summary(artifact),
+            "previous_artifact_id": str(previous.id) if previous else None,
+            "diagnostics": diagnostics,
+            "manifest": _manifest_summary(artifact.semantic_query_manifest or {}),
+            "runtime": runtime,
+        }
     return {
         "status": status,
         "artifact": _artifact_summary(artifact),

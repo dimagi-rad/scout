@@ -103,7 +103,8 @@ Block types and config keys:
   query publishes rows as `<block_id>.<query_name>`.
 - `graph`: `config.title`, `config.chart_type`, `config.x_key`,
   `config.y_key`, `config.series`, `config.data_label`, `config.query`,
-  `config.transform`. Bind data with `inputs.data.$ref`.
+  `config.stacked`, `config.y_format`, `config.height`. Bind data with
+  `inputs.data.$ref`.
 - `table`: `config.title`, `config.columns`, `config.query`. Bind data with
   `inputs.data.$ref`.
 - `stat`: `config.title`, `config.label`, `config.value_path`,
@@ -122,6 +123,9 @@ How to build data-backed blocks:
   `time_dimension`.
 - Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
+- Graph artifacts do not support transform/bucketing config. If a derived
+  category is needed, query or create a real semantic field/dataset for it, or
+  chart the produced category directly and explain the mapping in markdown.
 - When adding `date_filter` or `period_selector` controls, choose defaults that
   cover rows you have verified. For demo/library artifacts, prefer
   `last_90_days` unless you have confirmed `last_30_days` returns data.

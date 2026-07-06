@@ -90,7 +90,7 @@ Block config keys:
 - `period_selector`: `label`, `default_range`, `default_comparison`.
 - `semantic_query`: `queries`, optional `compare`.
 - `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
-  `data_label`, `query`, `transform`, `stacked`, `y_format`, `height`,
+  `data_label`, `query`, `stacked`, `y_format`, `height`,
   or `recharts` for an explicit Recharts element tree. Compact graph configs
   render through Recharts; use `recharts` when the chart needs composition
   beyond the compact `line`, `bar`, `area`, or `pie` presets.
@@ -109,6 +109,9 @@ Rules:
 - A query bound to `date_range` or `compare` must include `time_dimension`.
 - Time-bucketed rows expose the bucket as `date`; member result keys are
   snake_case, e.g. `visits.count` becomes `visits_count`.
+- Graph artifacts do not support transform/bucketing config. If you need a
+  derived category, query or create a real semantic field/dataset for it, or
+  chart the produced category directly and explain the mapping in text.
 - Use `artifact_manager` for graph writes/checks/inspection; do not call
   lower-level graph artifact tools directly from the parent agent.
 

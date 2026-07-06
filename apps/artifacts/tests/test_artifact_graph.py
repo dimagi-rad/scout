@@ -11,6 +11,7 @@ from apps.artifacts.models import Artifact, ArtifactSemanticQuery, ArtifactType
 from apps.artifacts.services.graph_doc import GraphDocError, apply_ops, validate_doc
 from apps.artifacts.services.graph_manifest import sync_artifact_semantic_query_manifest
 from apps.artifacts.services.graph_runtime import check_graph_artifact
+from apps.chat.models import Thread, ThreadArtifact
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
 
@@ -192,6 +193,26 @@ def test_graph_doc_passes_cube_filter_operators_to_runtime():
     assert "query_filter_operator" not in codes
 
 
+def test_graph_doc_rejects_missing_bound_result_key():
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["x_key"] = "verification"
+    doc["blocks"][2]["config"]["transform"] = {
+        "type": "bucket",
+        "source_key": "visits_status",
+        "target_key": "verification",
+    }
+
+    diagnostics = validate_doc(doc)
+
+    assert {
+        (item.get("severity"), item.get("code"))
+        for item in diagnostics
+    } >= {
+        ("error", "missing_result_key:verification"),
+        ("error", "unknown_config_key"),
+    }
+
+
 def test_apply_ops_rejects_introduced_diagnostics():
     with pytest.raises(GraphDocError, match="introduced diagnostics"):
         apply_ops(
@@ -331,6 +352,50 @@ async def test_graph_manager_rejects_missing_or_empty_story_doc(workspace, membe
     assert empty["status"] == "error"
     assert {item.get("code") for item in empty["diagnostics"]} == {"doc_empty_blocks"}
     assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, member_user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=member_user,
+        title="Runtime invalid artifact",
+    )
+    graph_tool = next(
+        item for item in create_artifact_graph_tools(workspace, member_user, str(thread.id)) if item.name == "artifact_write"
+    )
+
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(
+            return_value={
+                "success": False,
+                "diagnostics": [
+                    {
+                        "severity": "error",
+                        "message": "Data key missing",
+                        "code": "missing_result_key:value",
+                    }
+                ],
+                "summary": "0/1 queries ok",
+            }
+        ),
+    ):
+        result = await graph_tool.ainvoke(
+            {
+                "action": "create",
+                "title": "Runtime invalid",
+                "story_doc": graph_doc(),
+                "run_check": True,
+            }
+        )
+
+    assert result["status"] == "error"
+    assert "not published" in result["message"]
+    assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
+    assert await Artifact.all_objects.filter(artifact_type=ArtifactType.STORY, is_deleted=True).acount() == 1
+    assert await ThreadArtifact.objects.filter(thread=thread).acount() == 0
 
 
 @pytest.mark.django_db(transaction=True)

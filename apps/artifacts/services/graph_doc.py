@@ -69,7 +69,6 @@ CONFIG_KEYS = {
         "data_label",
         "recharts",
         "query",
-        "transform",
         "stacked",
         "y_format",
         "height",
@@ -766,7 +765,6 @@ def _key_contract_warnings(block_map: dict[str, dict[str, Any]]) -> list[dict[st
                         f'Data key "{key}" is not produced by the bound query',
                         block_id=block["id"],
                         code=f"missing_result_key:{key}",
-                        severity="warning",
                     )
                 )
     return diagnostics

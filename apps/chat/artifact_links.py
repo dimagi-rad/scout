@@ -215,3 +215,50 @@ def serialize_thread_artifact_link(link: ThreadArtifact) -> dict:
         "linked_at": link.created_at.isoformat(),
         "last_seen_at": link.last_seen_at.isoformat(),
     }
+
+
+def latest_version_links(links: list[ThreadArtifact]) -> list[ThreadArtifact]:
+    """Return one visible link per artifact version chain.
+
+    Artifact versions are separate rows so history can be preserved, but thread
+    attachment surfaces should act like a file list: an updated artifact
+    replaces the prior visible version instead of appearing as a second file.
+    """
+
+    artifacts_by_id = {link.artifact_id: link.artifact for link in links}
+    latest_by_root: dict[str, ThreadArtifact] = {}
+
+    for link in links:
+        artifact = link.artifact
+        if getattr(artifact, "is_deleted", False):
+            continue
+        root_id = _version_root_id(artifact, artifacts_by_id)
+        current = latest_by_root.get(root_id)
+        if current is None or _version_sort_key(link) > _version_sort_key(current):
+            latest_by_root[root_id] = link
+
+    return sorted(
+        latest_by_root.values(),
+        key=lambda link: (link.last_seen_at, link.artifact.updated_at, link.artifact.created_at),
+        reverse=True,
+    )
+
+
+def _version_root_id(artifact: Artifact, artifacts_by_id: dict[Any, Artifact]) -> str:
+    seen: set[Any] = set()
+    current = artifact
+    while current.parent_artifact_id:
+        parent_id = current.parent_artifact_id
+        if parent_id in seen:
+            break
+        seen.add(parent_id)
+        parent = artifacts_by_id.get(parent_id)
+        if parent is None:
+            return str(parent_id)
+        current = parent
+    return str(current.id)
+
+
+def _version_sort_key(link: ThreadArtifact) -> tuple[int, Any, Any]:
+    artifact = link.artifact
+    return (artifact.version or 1, artifact.updated_at, link.last_seen_at)
