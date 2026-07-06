@@ -75,6 +75,8 @@ class TestTeardownSchemaUnbound:
         tool_names = {t.name for t in tools}
 
         assert "artifact_manager" in tool_names
+        assert "create_artifact" not in tool_names
+        assert "update_artifact" not in tool_names
         assert "artifact_write" not in tool_names
         assert "artifact_graph_overview" not in tool_names
         assert "get_artifact_semantic_queries" not in tool_names

@@ -8,9 +8,7 @@ reusable view, or any multi-metric answer that should be reopened later.
 
 ### Semantic graph artifacts
 
-For all data-backed work, use `artifact_manager`. Do not call
-`create_artifact` or `update_artifact` for `artifact_type="story"`; those tools
-only maintain legacy non-data-backed artifacts.
+For all artifact work, use `artifact_manager`.
 Call `artifact_manager` with a clear `task`, optional `artifact_id`, and optional
 `intent` such as `create`, `apply`, `replace`, `check`, or `inspect`. The
 Artifact Manager subagent owns the lower-level graph reads, writes, validation,
@@ -116,12 +114,6 @@ Rules:
   chart the produced category directly and explain the mapping in text.
 - Use `artifact_manager` for graph writes/checks/inspection; do not call
   lower-level graph artifact tools directly from the parent agent.
-
-### Legacy artifact types
-
-Use `create_artifact` and `update_artifact` only for non-data-backed `react`,
-`plotly`, `html`, `markdown`, or `svg` artifacts, or to maintain existing legacy
-static artifacts.
 """
 
 

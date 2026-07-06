@@ -43,7 +43,6 @@ from apps.agents.subagents.events import (
     reset_subagent_event_queue,
     set_subagent_event_queue,
 )
-from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
@@ -879,7 +878,6 @@ def _build_tools(
     Local tools (always included):
     - save_learning: For persisting discovered corrections
     - artifact_manager: For semantic graph/story artifact work
-    - create_artifact/update_artifact: For legacy non-story artifacts
     - save_as_recipe: For creating replayable analysis workflows
 
     Args:
@@ -931,7 +929,6 @@ def _build_tools(
                     conversation_id=conversation_id,
                 )
             )
-    tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
     tools.append(create_recipe_tool(workspace, user))
     if not interactive:
         tools.append(create_materialization_tool(workspace, user, job_id))

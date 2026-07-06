@@ -162,8 +162,9 @@ class RecipeRunner:
         """Extract artifact IDs from tool results in the response."""
         artifact_ids = []
 
+        artifact_tools = {"artifact_manager", "create_artifact", "update_artifact"}
         for msg in messages:
-            if isinstance(msg, ToolMessage) and msg.name in ("create_artifact", "update_artifact"):
+            if isinstance(msg, ToolMessage) and msg.name in artifact_tools:
                 try:
                     content = msg.content
                     if isinstance(content, str):

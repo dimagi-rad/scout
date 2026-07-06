@@ -15,6 +15,23 @@ _checkpointer = None
 _pool = None
 
 
+def _get_pool_config() -> tuple[int, int, int]:
+    min_size = settings.LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE
+    max_size = settings.LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE
+    open_timeout = settings.LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S
+
+    if min_size < 0:
+        raise ValueError("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE must be >= 0")
+    if max_size < 1:
+        raise ValueError("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE must be >= 1")
+    if min_size > max_size:
+        raise ValueError("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE must be <= LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE")
+    if open_timeout < 1:
+        raise ValueError("LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S must be >= 1")
+
+    return min_size, max_size, open_timeout
+
+
 async def ensure_checkpointer(*, force_new: bool = False):
     global _checkpointer, _pool
     if _checkpointer is not None and not force_new:
@@ -22,24 +39,30 @@ async def ensure_checkpointer(*, force_new: bool = False):
 
     try:
         database_url = get_database_url()
+        min_size, max_size, open_timeout = _get_pool_config()
 
         if _pool is not None:
             await _pool.close()
 
         _pool = AsyncConnectionPool(
             conninfo=database_url,
-            max_size=20,
+            min_size=min_size,
+            max_size=max_size,
             open=False,
             kwargs={
                 "autocommit": True,
                 "prepare_threshold": 0,
             },
         )
-        await _pool.open(wait=True, timeout=10)
+        await _pool.open(wait=True, timeout=open_timeout)
 
         _checkpointer = AsyncPostgresSaver(_pool)
         await _checkpointer.setup()
-        logger.info("PostgreSQL checkpointer initialized")
+        logger.info(
+            "PostgreSQL checkpointer initialized (pool min=%s max=%s)",
+            min_size,
+            max_size,
+        )
     except Exception as e:
         if settings.DEBUG:
             logger.warning(

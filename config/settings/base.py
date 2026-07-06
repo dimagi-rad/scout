@@ -329,6 +329,16 @@ DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
 # a forever-spinner. Override per-test to exercise the timeout path.
 AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=120)
 
+# LangGraph checkpoint persistence uses a psycopg pool per Python process.
+# Keep these settings explicit because worker/process fan-out multiplies the
+# effective Postgres connection ceiling.
+LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE", default=1)
+LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE", default=20)
+LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S = env.int(
+    "LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S",
+    default=10,
+)
+
 # Langfuse observability (optional)
 LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
 LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")

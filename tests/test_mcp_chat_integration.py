@@ -374,7 +374,9 @@ class TestAgentGraphAssembly:
         assert "semantic_query" in tool_names
         # Local tools should also be present
         assert "save_learning" in tool_names
-        assert "create_artifact" in tool_names
+        assert "artifact_manager" in tool_names
+        assert "create_artifact" not in tool_names
+        assert "update_artifact" not in tool_names
 
     def test_empty_mcp_tools_only_local(self, user, workspace):
         """With empty MCP tools, only local tools should be present."""
@@ -385,7 +387,9 @@ class TestAgentGraphAssembly:
 
         # Only local tools
         assert "save_learning" in tool_names
-        assert "create_artifact" in tool_names
+        assert "artifact_manager" in tool_names
+        assert "create_artifact" not in tool_names
+        assert "update_artifact" not in tool_names
         # No MCP tools
         assert "semantic_query" not in tool_names
         assert "list_tables" not in tool_names
