@@ -24,18 +24,26 @@ import {
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
 import type { SemanticDataset, SemanticField } from "@/store/datasetSlice"
-import { isCreatedDataset, isCreatedField } from "./datasetMeta"
+import { isCustomDataset, isCustomField } from "./datasetMeta"
 import { filterDatasets } from "./datasetSearch"
 
-function CreatedBadge({ testId }: { testId?: string }) {
+function CustomBadge({
+  children,
+  testId,
+  title,
+}: {
+  children: ReactNode
+  testId?: string
+  title: string
+}) {
   return (
     <Badge
       variant="outline"
       className="border-sky-200 bg-sky-50 text-sky-800"
-      title="Created through the canvas"
+      title={title}
       data-testid={testId}
     >
-      Created
+      {children}
     </Badge>
   )
 }
@@ -211,8 +219,13 @@ export function DatasetBrowserPage() {
                 <span className="min-w-0 flex-1">
                   <span className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate font-medium">{dataset.label || dataset.name}</span>
-                    {isCreatedDataset(dataset) && (
-                      <CreatedBadge testId={`dataset-created-badge-${dataset.name}`} />
+                    {isCustomDataset(dataset) && (
+                      <CustomBadge
+                        title="Custom SQL dataset"
+                        testId={`dataset-custom-badge-${dataset.name}`}
+                      >
+                        Custom
+                      </CustomBadge>
                     )}
                   </span>
                   <span className="block truncate text-xs text-muted-foreground">
@@ -440,7 +453,8 @@ function DatasetDetail({
 }) {
   const displayName = dataset.label || dataset.name
   const showTableName = dataset.table_name && dataset.table_name !== dataset.name
-  const customSql = isCreatedDataset(dataset) ? dataset.definition_sql : ""
+  const customDataset = isCustomDataset(dataset)
+  const customSql = customDataset ? dataset.definition_sql : ""
 
   return (
     <div className="mx-auto w-full max-w-7xl min-w-0 p-4 sm:p-6 lg:p-8">
@@ -449,8 +463,13 @@ function DatasetDetail({
           <h2 className="min-w-0 break-words text-xl font-semibold sm:text-2xl">
             {displayName}
           </h2>
-          {isCreatedDataset(dataset) && (
-            <CreatedBadge testId={`dataset-detail-created-badge-${dataset.name}`} />
+          {customDataset && (
+            <CustomBadge
+              title="Custom SQL dataset"
+              testId={`dataset-detail-custom-badge-${dataset.name}`}
+            >
+              Custom dataset
+            </CustomBadge>
           )}
         </div>
         {error && (
@@ -493,11 +512,13 @@ function DatasetDetail({
           title="Measures"
           icon={<Sigma className="h-4 w-4" />}
           fields={dataset.measures}
+          datasetIsCustom={customDataset}
         />
         <FieldSection
           title="Dimensions"
           icon={<Database className="h-4 w-4" />}
           fields={[...dataset.time_dimensions, ...dataset.dimensions]}
+          datasetIsCustom={customDataset}
         />
       </div>
     </div>
@@ -623,10 +644,12 @@ function FieldSection({
   title,
   icon,
   fields,
+  datasetIsCustom,
 }: {
   title: string
   icon: ReactNode
   fields: SemanticField[]
+  datasetIsCustom: boolean
 }) {
   return (
     <section className="min-w-0">
@@ -636,13 +659,13 @@ function FieldSection({
         <Badge variant="secondary">{fields.length}</Badge>
       </div>
       <div className="overflow-x-auto rounded-md border">
-        <Table className="min-w-[64rem]">
+        <Table className="min-w-[64rem] table-fixed">
           <TableHeader>
             <TableRow>
               <TableHead className="w-[36%]">Member</TableHead>
               <TableHead className="w-[14%]">Type</TableHead>
               <TableHead className="w-[18%]">Value format</TableHead>
-              <TableHead>Description</TableHead>
+              <TableHead className="w-[32%]">Description</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -658,8 +681,13 @@ function FieldSection({
                   <TableCell>
                     <span className="flex min-w-0 flex-wrap items-center gap-1.5">
                       <code className="max-w-full truncate rounded bg-muted px-1.5 py-0.5 text-xs">{field.member}</code>
-                      {isCreatedField(field) && (
-                        <CreatedBadge testId={`field-created-badge-${field.name}`} />
+                      {!datasetIsCustom && isCustomField(field) && (
+                        <CustomBadge
+                          title="Custom field added to a stock dataset"
+                          testId={`field-custom-badge-${field.name}`}
+                        >
+                          {customFieldBadgeLabel(field)}
+                        </CustomBadge>
                       )}
                     </span>
                     <div className="mt-1 text-sm font-medium">{field.label}</div>
@@ -672,7 +700,7 @@ function FieldSection({
                   <TableCell>
                     <ValueFormatBadge field={field} />
                   </TableCell>
-                  <TableCell className="text-sm text-muted-foreground">
+                  <TableCell className="whitespace-pre-wrap break-words text-sm leading-5 text-muted-foreground">
                     {field.description || "—"}
                   </TableCell>
                 </TableRow>
@@ -683,6 +711,11 @@ function FieldSection({
       </div>
     </section>
   )
+}
+
+function customFieldBadgeLabel(field: SemanticField): string {
+  if (field.type === "measure") return "Custom measure"
+  return "Custom dimension"
 }
 
 function ValueFormatBadge({ field }: { field: SemanticField }) {
