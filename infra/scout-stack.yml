@@ -221,6 +221,18 @@ Resources:
                   - !Sub '${McpLogGroup.Arn}:*'
                   - !Sub '${WorkerLogGroup.Arn}:*'
                   - !Sub '${FrontendLogGroup.Arn}:*'
+        # Transactional email (workspace invites) via Amazon SES using the
+        # instance role — no access keys. The API builds the message; the
+        # Procrastinate worker actually sends it. Both run on this instance.
+        - PolicyName: scout-ses-send
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
 
   EC2Instance:
     Type: AWS::EC2::Instance

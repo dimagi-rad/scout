@@ -33,6 +33,10 @@ env:
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
     # Langfuse host for resume-task agent traces (keys come via secrets below).
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    # Base URL for the invite sign-in links built in the send_email task.
+    SCOUT_BASE_URL: "https://scout.dimagi.com"
+    # From-address for the send_email task; matches the verified SES domain.
+    DEFAULT_FROM_EMAIL: "Scout <noreply@dimagi.com>"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL

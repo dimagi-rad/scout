@@ -34,6 +34,12 @@ env:
     DJANGO_SETTINGS_MODULE: config.settings.production
     DJANGO_ALLOWED_HOSTS: "scout.dimagi.com"
     CSRF_TRUSTED_ORIGINS: "https://scout.dimagi.com"
+    # Base URL for links in transactional email (workspace invite sign-in
+    # links). Default is localhost — must be the public host in prod.
+    SCOUT_BASE_URL: "https://scout.dimagi.com"
+    # Send from the exact verified SES domain identity (dimagi.com), not the
+    # scout.dimagi.com subdomain, for guaranteed DKIM/DMARC alignment.
+    DEFAULT_FROM_EMAIL: "Scout <noreply@dimagi.com>"
     SECURE_SSL_REDIRECT: "False"
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
