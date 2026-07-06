@@ -96,10 +96,14 @@ class TestTeardownSchemaUnbound:
             and item["function"]["name"] == "artifact_manager"
         )
         props = artifact_schema["function"]["parameters"]["properties"]
+        required = artifact_schema["function"]["parameters"]["required"]
 
         assert "task" in props
+        assert "task" in required
         assert "tool_call_id" not in props
         assert "subagent_event_queue" not in props
+        assert "tool_call_id" not in required
+        assert "subagent_event_queue" not in required
 
 
 class TestHeadlessMode:

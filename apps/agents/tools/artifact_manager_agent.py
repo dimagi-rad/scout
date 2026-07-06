@@ -54,7 +54,7 @@ SUBAGENT_MESSAGE_MAX_CHARS = 40_000
 
 class ArtifactManagerInput(BaseModel):
     task: str = Field(
-        default="",
+        min_length=1,
         description=(
             "Required specific artifact task to perform: create, revise, inspect, or "
             "check a semantic story artifact. Do not call artifact_manager without "
@@ -156,7 +156,7 @@ def create_artifact_manager_tool(
 
     @tool(args_schema=ArtifactManagerInput)
     async def artifact_manager(
-        task: str = "",
+        task: str,
         artifact_id: str | None = None,
         intent: str | None = None,
         tool_call_id: str | None = None,

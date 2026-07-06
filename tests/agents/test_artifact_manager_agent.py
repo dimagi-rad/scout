@@ -274,7 +274,7 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_artifact_manager_missing_task_returns_structured_failure(monkeypatch):
+async def test_artifact_manager_blank_task_returns_structured_failure(monkeypatch):
     def fail_if_graph_is_built(*args, **kwargs):
         raise AssertionError("missing task should fail before building the subagent graph")
 
@@ -292,6 +292,7 @@ async def test_artifact_manager_missing_task_returns_structured_failure(monkeypa
     )
     result = await tool.ainvoke(
         {
+            "task": "   ",
             "intent": "create",
             "tool_call_id": "toolu_PARENT",
             "subagent_event_queue": queue,
