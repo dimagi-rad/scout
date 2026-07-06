@@ -18,7 +18,11 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
-from apps.semantic.canvas.objects import FIELD_METADATA_KEYS
+from apps.semantic.canvas.objects import (
+    FIELD_METADATA_KEYS,
+    is_canvas_created,
+    is_custom_dataset_field,
+)
 from apps.semantic.canvas.service import ChangeType, ObjectType, base_and_state
 from apps.semantic.models import (
     CustomDataset,
@@ -193,9 +197,25 @@ def _commit_delete(canvas, model, workspace, change) -> str:
         obj.delete()
         if custom is not None:
             custom.delete()
+    elif (
+        change.object_type == ObjectType.FIELD
+        and is_custom_dataset_field(obj)
+        and not is_canvas_created(obj)
+    ):
+        _hide_custom_dataset_field(obj)
     else:
         obj.delete()
     return name
+
+
+def _hide_custom_dataset_field(field: SemanticField) -> None:
+    metadata = dict(field.metadata or {})
+    curated = set(metadata.get("curated_fields", []))
+    curated.add("is_visible")
+    metadata["curated_fields"] = sorted(curated)
+    field.metadata = metadata
+    field.is_visible = False
+    field.save(update_fields=["is_visible", "metadata", "updated_at"])
 
 
 def _commit_create(canvas, model, workspace, change, user):

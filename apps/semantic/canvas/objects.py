@@ -8,7 +8,10 @@ The canvas edits four object kinds. Policy summary (the user-facing contract):
   (built by ``ensure_semantic_model``) accept label/description/format/currency
   curation but can never be deleted or structurally changed. Canvas-created
   fields (``metadata.source == "canvas"``) are fully editable and deletable,
-  including Cube measure options such as filters and calculated SQL.
+  including Cube measure options such as filters and calculated SQL. Fields on
+  custom SQL datasets are also deletable because the whole dataset is
+  user-authored; deletes hide generated custom fields persistently instead of
+  letting the next refresh recreate them.
 - ``relationship``: new links between datasets can be created; pipeline-derived
   relationships (``metadata.generated``) are protected.
 - ``custom_dataset``: a CTE/SQL-defined dataset draft; commits into a
@@ -86,6 +89,10 @@ class ObjectResolutionError(ValueError):
 def is_canvas_created(obj) -> bool:
     metadata = getattr(obj, "metadata", None) or {}
     return metadata.get("source") == CANVAS_SOURCE
+
+
+def is_custom_dataset_field(field: SemanticField) -> bool:
+    return field.dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
 
 
 def is_generated_relationship(relationship: SemanticRelationship) -> bool:

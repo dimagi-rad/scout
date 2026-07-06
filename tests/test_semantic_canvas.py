@@ -497,6 +497,75 @@ def test_custom_dataset_draft_and_commit(canvas, semantic_model, workspace, monk
     assert cube["sql"] == dataset.metadata["cube_sql"]
 
 
+def test_custom_dataset_fields_can_be_deleted_and_stay_hidden(
+    canvas, semantic_model, monkeypatch, user
+):
+    monkeypatch.setattr(
+        canvas_service,
+        "infer_custom_dataset_columns",
+        lambda _workspace, _sql: [
+            {"name": "username", "type": "text"},
+            {"name": "visit_count", "type": "bigint"},
+        ],
+    )
+    monkeypatch.setattr(
+        canvas_commit_module, "build_and_promote_cube_schema", lambda ws, model: None
+    )
+    apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "custom_dataset",
+                "value": {
+                    "name": "visit_stats",
+                    "primary_key": "username",
+                    "definition_sql": "select username, count(*) as visit_count from raw_visits group by username",
+                },
+            }
+        ],
+        user,
+    )
+    assert commit_canvas(canvas, user)["blocked"] is False
+
+    dataset = semantic_model.datasets.get(name="visit_stats")
+    assert dataset.fields.filter(name="visit_count", is_visible=True).exists()
+    assert dataset.fields.filter(name="sum_visit_count", is_visible=True).exists()
+
+    result = apply_operations(
+        canvas,
+        [
+            {"op": "delete_object", "object": "field/visit_stats.visit_count"},
+            {"op": "delete_object", "object": "field/visit_stats.sum_visit_count"},
+        ],
+        user,
+    )
+
+    assert "errors" not in result
+    report = commit_canvas(canvas, user)
+    assert report["blocked"] is False
+
+    hidden_dimension = dataset.fields.get(name="visit_count")
+    hidden_measure = dataset.fields.get(name="sum_visit_count")
+    assert hidden_dimension.is_visible is False
+    assert hidden_measure.is_visible is False
+    assert "is_visible" in hidden_dimension.metadata["curated_fields"]
+    assert "is_visible" in hidden_measure.metadata["curated_fields"]
+
+    catalog_service._sync_fields(
+        dataset,
+        [
+            {"name": "username", "type": "text"},
+            {"name": "visit_count", "type": "bigint"},
+        ],
+        None,
+    )
+    hidden_dimension.refresh_from_db()
+    hidden_measure.refresh_from_db()
+    assert hidden_dimension.is_visible is False
+    assert hidden_measure.is_visible is False
+
+
 def test_custom_dataset_requires_primary_key(canvas, monkeypatch, user):
     monkeypatch.setattr(
         canvas_service,
