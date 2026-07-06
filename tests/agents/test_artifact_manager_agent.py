@@ -274,6 +274,57 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_artifact_manager_missing_task_returns_structured_failure(monkeypatch):
+    def fail_if_graph_is_built(*args, **kwargs):
+        raise AssertionError("missing task should fail before building the subagent graph")
+
+    monkeypatch.setattr(
+        "apps.agents.tools.artifact_manager_agent._build_artifact_manager_graph",
+        fail_if_graph_is_built,
+    )
+
+    queue = __import__("asyncio").Queue()
+    tool = create_artifact_manager_tool(
+        SimpleNamespace(id="workspace-1"),
+        SimpleNamespace(id="user-1"),
+        [],
+        conversation_id="thread-1",
+    )
+    result = await tool.ainvoke(
+        {
+            "intent": "create",
+            "tool_call_id": "toolu_PARENT",
+            "subagent_event_queue": queue,
+        }
+    )
+
+    queued = []
+    while not queue.empty():
+        queued.append(await queue.get())
+
+    assert result["status"] == "error"
+    assert "non-empty task" in result["message"]
+    assert "subagent_event_queue" not in result["message"]
+    assert "Field required" not in result["message"]
+    assert [item["event"]["type"] for item in queued] == [
+        "data-subagent-status",
+        "data-subagent-error",
+        "data-subagent-status",
+    ]
+    assert queued[-1]["event"]["data"]["phase"] == "failed"
+    trace_events = result["subagent_trace"]["events"]
+    assert any(
+        event["type"] == "data-subagent-error"
+        and "non-empty task" in event["data"]["message"]
+        for event in trace_events
+    )
+    assert any(
+        event["type"] == "data-subagent-status" and event["data"]["phase"] == "failed"
+        for event in trace_events
+    )
+
+
+@pytest.mark.asyncio
 async def test_artifact_manager_returns_failed_result_on_recursion_limit(monkeypatch):
     class FakeGraph:
         async def astream_events(self, input_state, config, version):

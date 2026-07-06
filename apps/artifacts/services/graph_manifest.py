@@ -13,7 +13,7 @@ from apps.artifacts.models import Artifact, ArtifactSemanticQuery
 
 from .graph_doc import (
     collect_query_specs,
-    member_to_key,
+    expected_result_keys,
     normalize_doc,
     query_diagnostics,
     validate_doc,
@@ -189,7 +189,4 @@ def _query_members(query: dict[str, Any]) -> list[str]:
 
 
 def _result_keys_for_manifest(query: dict[str, Any]) -> set[str]:
-    keys = {member_to_key(member) for member in _query_members(query)}
-    if query.get("time_dimension") and query.get("granularity"):
-        keys.add("date")
-    return keys
+    return expected_result_keys(query)

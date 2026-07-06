@@ -54,9 +54,11 @@ SUBAGENT_MESSAGE_MAX_CHARS = 40_000
 
 class ArtifactManagerInput(BaseModel):
     task: str = Field(
+        default="",
         description=(
-            "Specific artifact task to perform: create, revise, inspect, or check "
-            "a semantic story artifact."
+            "Required specific artifact task to perform: create, revise, inspect, or "
+            "check a semantic story artifact. Do not call artifact_manager without "
+            "a non-empty task."
         )
     )
     artifact_id: str | None = Field(default=None, description="Existing artifact id, if any.")
@@ -151,7 +153,7 @@ def create_artifact_manager_tool(
 
     @tool(args_schema=ArtifactManagerInput)
     async def artifact_manager(
-        task: str,
+        task: str = "",
         artifact_id: str | None = None,
         intent: str | None = None,
         tool_call_id: str | None = None,
@@ -160,27 +162,6 @@ def create_artifact_manager_tool(
         """Delegate semantic story artifact work to the Artifact Manager subagent."""
         parent_tool_call_id = tool_call_id or f"missing-parent-{uuid.uuid4().hex[:8]}"
         queue_token = set_subagent_event_queue(subagent_event_queue)
-        graph = _build_artifact_manager_graph(workspace, user, mcp_tools, conversation_id)
-        prompt = _format_artifact_manager_task(task, artifact_id, intent)
-        input_state = {
-            "messages": [HumanMessage(content=prompt)],
-            "workspace_id": str(workspace.id),
-            "user_id": str(user.id) if user else "",
-            "user_role": "analyst",
-            "thread_id": conversation_id or "",
-        }
-        config = {
-            "configurable": {"thread_id": f"{conversation_id or 'artifact'}:artifact-manager"},
-            "recursion_limit": NESTED_RECURSION_LIMIT,
-            "run_name": SUBAGENT_NAME,
-            "tags": ["subagent", SUBAGENT_NAME],
-            "metadata": {
-                "subagent": SUBAGENT_NAME,
-                "parent_tool_call_id": parent_tool_call_id,
-                "workspace_id": str(workspace.id),
-                "conversation_id": conversation_id or "",
-            },
-        }
         messages: list[Any] = []
         final_text = ""
         run_to_tool_call_id: dict[str, str] = {}
@@ -196,6 +177,40 @@ def create_artifact_manager_tool(
                 ),
                 trace,
             )
+            if not task.strip():
+                return await _artifact_manager_failure_result(
+                    parent_tool_call_id,
+                    trace,
+                    messages,
+                    final_text,
+                    (
+                        "artifact_manager requires a non-empty task. Call it again "
+                        "with a complete, self-contained artifact task description."
+                    ),
+                )
+            graph = _build_artifact_manager_graph(workspace, user, mcp_tools, conversation_id)
+            prompt = _format_artifact_manager_task(task, artifact_id, intent)
+            input_state = {
+                "messages": [HumanMessage(content=prompt)],
+                "workspace_id": str(workspace.id),
+                "user_id": str(user.id) if user else "",
+                "user_role": "analyst",
+                "thread_id": conversation_id or "",
+            }
+            config = {
+                "configurable": {
+                    "thread_id": f"{conversation_id or 'artifact'}:artifact-manager"
+                },
+                "recursion_limit": NESTED_RECURSION_LIMIT,
+                "run_name": SUBAGENT_NAME,
+                "tags": ["subagent", SUBAGENT_NAME],
+                "metadata": {
+                    "subagent": SUBAGENT_NAME,
+                    "parent_tool_call_id": parent_tool_call_id,
+                    "workspace_id": str(workspace.id),
+                    "conversation_id": conversation_id or "",
+                },
+            }
             async for event in graph.astream_events(input_state, config=config, version="v2"):
                 await _forward_nested_event(
                     event,

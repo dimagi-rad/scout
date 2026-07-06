@@ -253,6 +253,57 @@ def test_sync_manifest_persists_dependency_rows(workspace, member_user):
     assert row.datasets == ["visits"]
 
 
+@pytest.mark.django_db
+def test_manifest_result_keys_are_only_query_outputs(workspace, member_user):
+    doc = {
+        "schema_version": 1,
+        "blocks": [
+            {
+                "id": "q",
+                "type": "semantic_query",
+                "config": {
+                    "queries": {
+                        "bucketed": {
+                            "measures": ["visits.count"],
+                            "time_dimension": "visits.visit_date",
+                            "granularity": "day",
+                            "filters": [
+                                {
+                                    "field": "visits.status",
+                                    "operator": "equals",
+                                    "value": "approved",
+                                }
+                            ],
+                            "order_by": [
+                                {"field": "visits.visit_date", "direction": "asc"}
+                            ],
+                        }
+                    }
+                },
+            }
+        ],
+    }
+    artifact = Artifact.objects.create(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id="thread",
+        data={"story_doc": doc},
+    )
+
+    manifest = sync_artifact_semantic_query_manifest(artifact)
+    entry = manifest["entries"][0]
+
+    assert entry["members"] == [
+        "visits.count",
+        "visits.status",
+        "visits.visit_date",
+    ]
+    assert entry["result_keys"] == ["date", "visits_count"]
+
+
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_semantic_query_dependency_api_paginates(

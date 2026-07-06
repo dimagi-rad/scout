@@ -15,6 +15,8 @@ Call `artifact_manager` with a clear `task`, optional `artifact_id`, and optiona
 `intent` such as `create`, `apply`, `replace`, `check`, or `inspect`. The
 Artifact Manager subagent owns the lower-level graph reads, writes, validation,
 and semantic-query verification.
+Never call `artifact_manager` with only `intent` or only `artifact_id`; `task`
+must be a complete, self-contained instruction for the subagent.
 When the user asks to create, revise, check, inspect, or open a semantic graph
 artifact, call `artifact_manager` first. Do not preflight the task by calling
 `list_datasets`, `describe_dataset`, `semantic_query`, `artifact_graph_overview`,

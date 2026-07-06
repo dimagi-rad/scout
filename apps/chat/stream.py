@@ -45,9 +45,6 @@ from apps.agents.subagents.events import (
 
 logger = logging.getLogger(__name__)
 
-# Maximum wall-clock time for agent execution before we abort.
-AGENT_TIMEOUT_SECONDS = 300  # 5 minutes
-
 # Hard cap on the tool-output payload we put on the wire, to bound a runaway
 # tool from flooding the SSE stream / browser. Generous enough that real query
 # results (already row-limited upstream by the MCP server) round-trip intact so
@@ -275,19 +272,8 @@ async def langgraph_to_ui_stream(
     parent_pump = asyncio.create_task(_pump_parent_events())
 
     try:
-        deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
-
         while True:
-            if asyncio.get_event_loop().time() > deadline:
-                raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
-            try:
-                item = await asyncio.wait_for(
-                    event_queue.get(),
-                    timeout=max(0.1, deadline - asyncio.get_event_loop().time()),
-                )
-            except asyncio.TimeoutError:
-                raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
-
+            item = await event_queue.get()
             source = item.get("source")
             if source == "subagent":
                 event = item.get("event")
@@ -508,37 +494,6 @@ async def langgraph_to_ui_stream(
                         text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
-    except TimeoutError as exc:
-        ref = _error_ref(exc)
-        logger.warning(
-            "Agent execution timed out after %ds [ref=%s]", AGENT_TIMEOUT_SECONDS, ref
-        )
-        if reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": reasoning_id})
-            reasoning_started = False
-        if not text_started:
-            yield _sse({"type": "text-start", "id": text_id})
-            text_started = True
-        yield _sse(
-            {
-                "type": "text-delta",
-                "id": text_id,
-                "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
-            }
-        )
-        if text_started:
-            yield _sse({"type": "text-end", "id": text_id})
-            text_started = False
-        # Emit a native AI SDK error chunk so useChat's error state fires — a
-        # timed-out run MUST be distinguishable from a successful one (06#4).
-        # Without this the apology above was just message text followed by a
-        # normal finishReason 'stop', indistinguishable from success.
-        yield _sse(
-            {
-                "type": "error",
-                "errorText": f"The request timed out. Ref: {ref}",
-            }
-        )
     except Exception as exc:
         if _is_transient_overload(exc):
             # Anthropic was momentarily overloaded / rate-limited -- a transient
