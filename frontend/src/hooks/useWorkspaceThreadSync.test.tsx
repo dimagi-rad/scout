@@ -10,6 +10,7 @@ import type { TenantMembership } from "@/store/domainSlice"
 const WS_A = "11111111-1111-1111-1111-111111111111"
 const WS_B = "22222222-2222-2222-2222-222222222222"
 const THREAD_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+const THREAD_STALE = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 function domain(id: string): TenantMembership {
   return {
@@ -68,6 +69,31 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
       const path = screen.getByTestId("path").textContent ?? ""
       expect(path.startsWith(`/workspaces/${WS_B}/chat/`)).toBe(true)
       expect(path).not.toContain(THREAD_A)
+    })
+  })
+
+  it("keeps an explicit deep-linked thread when the store starts on a different thread", async () => {
+    useAppStore.setState({
+      domains: [domain(WS_A), domain(WS_B)],
+      domainsStatus: "loaded",
+      activeDomainId: WS_A,
+      threadId: THREAD_STALE,
+    })
+
+    render(
+      <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>
+        <Routes>
+          <Route path="/workspaces/:workspaceId/chat/:threadId" element={<Probe />} />
+          <Route path="/workspaces/:workspaceId/chat" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId("path").textContent).toBe(
+        `/workspaces/${WS_A}/chat/${THREAD_A}`,
+      )
+      expect(useAppStore.getState().threadId).toBe(THREAD_A)
     })
   })
 })
