@@ -5,7 +5,14 @@ import {
   getUserTenantsCached,
   refreshUserTenants,
 } from "@/api/userTenantsCache"
-import type { WorkspaceDetail, WorkspaceMember, WorkspaceTenant, UserTenant } from "@/api/workspaces"
+import type {
+  WorkspaceDetail,
+  WorkspaceMember,
+  WorkspaceInvite,
+  WorkspaceInviteStatus,
+  WorkspaceTenant,
+  UserTenant,
+} from "@/api/workspaces"
 import { ApiError } from "@/api/client"
 import { useAppStore } from "@/store/store"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
@@ -27,8 +34,32 @@ import { slugifyWorkspaceName, workspacePath } from "@/lib/workspacePath"
 
 const DEFAULT_NEW_MEMBER_ROLE: WorkspaceMember["role"] = "read_write"
 
+const INVITE_STATUS_LABELS: Record<WorkspaceInviteStatus, string> = {
+  pending: "Invited — awaiting sign-in",
+  awaiting_access: "Awaiting data access",
+  accepted: "Accepted",
+  revoked: "Revoked",
+  expired: "Expired",
+}
+
+function InviteStatusChip({ status }: { status: WorkspaceInviteStatus }) {
+  const tone =
+    status === "awaiting_access"
+      ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+      : "bg-muted text-muted-foreground"
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${tone}`}
+      data-testid={`invite-status-${status}`}
+    >
+      {INVITE_STATUS_LABELS[status]}
+    </span>
+  )
+}
+
 function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager: boolean }) {
   const [members, setMembers] = useState<WorkspaceMember[]>([])
+  const [invites, setInvites] = useState<WorkspaceInvite[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [updatingId, setUpdatingId] = useState<string | null>(null)
@@ -41,6 +72,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
   const [addRole, setAddRole] = useState<WorkspaceMember["role"]>(DEFAULT_NEW_MEMBER_ROLE)
   const [addSubmitting, setAddSubmitting] = useState(false)
   const [addError, setAddError] = useState<string | null>(null)
+  const [addInfo, setAddInfo] = useState<string | null>(null)
 
   const addTriggerRef = useRef<HTMLButtonElement>(null)
 
@@ -49,7 +81,8 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     setError(null)
     try {
       const data = await workspaceApi.getMembers(workspaceId)
-      setMembers(data)
+      setMembers(data.members)
+      setInvites(data.invites)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load members")
     } finally {
@@ -86,6 +119,33 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
   }
 
+  async function handleInviteRoleChange(inviteId: string, newRole: WorkspaceMember["role"]) {
+    setUpdatingId(inviteId)
+    try {
+      await workspaceApi.updateInviteRole(workspaceId, inviteId, newRole)
+      setInvites((prev) =>
+        prev.map((i) => (i.id === inviteId ? { ...i, role: newRole } : i))
+      )
+    } catch (err) {
+      setMutationError(err instanceof ApiError ? err.message : "Failed to update invite role")
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  async function handleRevokeInvite(inviteId: string) {
+    setRemovingId(inviteId)
+    try {
+      await workspaceApi.revokeInvite(workspaceId, inviteId)
+      setInvites((prev) => prev.filter((i) => i.id !== inviteId))
+      setConfirmRemoveId(null)
+    } catch (err) {
+      setMutationError(err instanceof ApiError ? err.message : "Failed to revoke invite")
+    } finally {
+      setRemovingId(null)
+    }
+  }
+
   async function handleAdd() {
     const email = addEmail.trim()
     if (!email) {
@@ -94,12 +154,24 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
     }
     setAddSubmitting(true)
     setAddError(null)
+    setAddInfo(null)
     try {
-      const newMember = await workspaceApi.addMember(workspaceId, {
+      const res = await workspaceApi.addMember(workspaceId, {
         email,
         role: addRole,
       })
-      setMembers((prev) => [...prev, newMember])
+      if (res.result === "member") {
+        setMembers((prev) => [...prev, res])
+      } else {
+        const { result, ...invite } = res
+        // Upsert: re-inviting an outstanding invite returns the same row.
+        setInvites((prev) => [...prev.filter((i) => i.id !== invite.id), invite])
+        setAddInfo(
+          result === "invite_pending"
+            ? `Invited ${invite.email}. They'll join automatically when they sign in to Scout.`
+            : `Invited ${invite.email}. They need access to this workspace's data source; it unlocks automatically once they have it.`
+        )
+      }
       setAddEmail("")
       setAddRole(DEFAULT_NEW_MEMBER_ROLE)
       setAddOpen(false)
@@ -128,6 +200,7 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
       <div className="mb-4 flex items-center justify-between">
         <span className="text-sm text-muted-foreground">
           {members.length} {members.length === 1 ? "member" : "members"}
+          {invites.length > 0 && ` · ${invites.length} invited`}
         </span>
         {isManager && !addOpen && (
           <Button
@@ -213,6 +286,14 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
         </form>
       )}
 
+      {addInfo && (
+        <p
+          className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
+          data-testid="add-member-invite-info"
+        >
+          {addInfo}
+        </p>
+      )}
       {mutationError && (
         <p className="mb-3 text-sm text-destructive">{mutationError}</p>
       )}
@@ -288,6 +369,98 @@ function MembersTab({ workspaceId, isManager }: { workspaceId: string; isManager
           </tbody>
         </table>
       </div>
+
+      {invites.length > 0 && (
+        <div className="mt-6" data-testid="invites-section">
+          <h3 className="mb-2 text-sm font-medium text-muted-foreground">Pending invites</h3>
+          <div className="rounded-lg border">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">Email</th>
+                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">Status</th>
+                  <th className="px-4 py-2 text-left font-medium text-muted-foreground">Role</th>
+                  {isManager && <th className="px-4 py-2" />}
+                </tr>
+              </thead>
+              <tbody>
+                {invites.map((invite) => (
+                  <tr
+                    key={invite.id}
+                    className="border-b last:border-0"
+                    data-testid={`invite-row-${invite.email}`}
+                  >
+                    <td className="px-4 py-3 font-medium">{invite.email}</td>
+                    <td className="px-4 py-3">
+                      <InviteStatusChip status={invite.status} />
+                    </td>
+                    <td className="px-4 py-3">
+                      {isManager ? (
+                        <Select
+                          value={invite.role}
+                          onValueChange={(v) =>
+                            handleInviteRoleChange(invite.id, v as WorkspaceMember["role"])
+                          }
+                          disabled={updatingId === invite.id}
+                        >
+                          <SelectTrigger
+                            className="h-8 w-32"
+                            data-testid={`invite-role-${invite.email}`}
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="read">Read</SelectItem>
+                            <SelectItem value="read_write">Read-Write</SelectItem>
+                            <SelectItem value="manage">Manager</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      ) : (
+                        <RoleBadge role={invite.role} />
+                      )}
+                    </td>
+                    {isManager && (
+                      <td className="px-4 py-3 text-right">
+                        {confirmRemoveId === invite.id ? (
+                          <div className="flex items-center justify-end gap-2">
+                            <span className="text-xs text-muted-foreground">Revoke?</span>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setConfirmRemoveId(null)}
+                            >
+                              Cancel
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => handleRevokeInvite(invite.id)}
+                              disabled={removingId === invite.id}
+                              data-testid={`confirm-revoke-invite-${invite.email}`}
+                            >
+                              {removingId === invite.id ? "Revoking…" : "Confirm"}
+                            </Button>
+                          </div>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:text-destructive"
+                            onClick={() => setConfirmRemoveId(invite.id)}
+                            data-testid={`invite-revoke-${invite.email}`}
+                          >
+                            Revoke
+                          </Button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

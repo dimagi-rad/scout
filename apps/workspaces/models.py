@@ -5,9 +5,11 @@ Defines Workspace, TenantSchema, and MaterializationRun models.
 """
 
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
 from django_pydantic_field import SchemaField
 
@@ -209,6 +211,87 @@ class WorkspaceMembership(models.Model):
 
     def __str__(self):
         return f"{self.user.email} in {self.workspace.name} ({self.role})"
+
+
+INVITE_TTL_DAYS = 30
+
+
+def default_invite_expiry():
+    return timezone.now() + timedelta(days=INVITE_TTL_DAYS)
+
+
+class WorkspaceInviteStatus(models.TextChoices):
+    PENDING = "pending", "Pending"  # invited; not yet logged into Scout
+    AWAITING_ACCESS = "awaiting_access", "Awaiting upstream access"  # logged in, no live tenant
+    ACCEPTED = "accepted", "Accepted"  # resolved into a WorkspaceMembership
+    REVOKED = "revoked", "Revoked"
+    EXPIRED = "expired", "Expired"
+
+
+# The two states in which an invite is still awaiting resolution — the ones the
+# conditional unique constraint and the resolver operate on.
+LIVE_INVITE_STATUSES = (
+    WorkspaceInviteStatus.PENDING,
+    WorkspaceInviteStatus.AWAITING_ACCESS,
+)
+
+
+class WorkspaceInvite(models.Model):
+    """A pre-authorization to join a workspace, keyed by email (not a User row).
+
+    An invite carries NO data access on its own: after Root Cause A,
+    apps/workspaces/access.py is the sole authorizer and effective access
+    requires a live TenantMembership recomputed every request. The invite only
+    auto-resolves into a WorkspaceMembership once the invitee logs into Scout AND
+    has live upstream access — so we never create placeholder User rows (the
+    blank-account mess A/B cleaned up); the email lives here until they log in.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(Workspace, on_delete=models.CASCADE, related_name="invites")
+    email = models.EmailField()  # stored normalized lower-case
+    role = models.CharField(max_length=20, choices=WorkspaceRole.choices)
+    status = models.CharField(
+        max_length=20,
+        choices=WorkspaceInviteStatus.choices,
+        default=WorkspaceInviteStatus.PENDING,
+    )
+    token = models.UUIDField(default=uuid.uuid4, editable=False)  # opaque email deep-link
+    invited_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(default=default_invite_expiry)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_membership = models.ForeignKey(
+        WorkspaceMembership,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace", "email"],
+                condition=Q(status__in=["pending", "awaiting_access"]),
+                name="one_live_invite_per_workspace_email",
+            )
+        ]
+
+    def __str__(self):
+        return f"invite {self.email} -> {self.workspace.name} ({self.status})"
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at < timezone.now()
 
 
 # Sentinel prefix in WorkspaceViewSchema.last_error marking a FAILED-by-cascade-

@@ -11,7 +11,9 @@ from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
 from apps.workspaces.api.workspace_views import (
+    MyInvitesView,
     WorkspaceDetailView,
+    WorkspaceInviteDetailView,
     WorkspaceListView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListView,
@@ -70,6 +72,11 @@ workspace_urlpatterns = [
         WorkspaceMemberDetailView.as_view(),
         name="workspace_member_detail",
     ),
+    path(
+        "invites/<uuid:invite_id>/",
+        WorkspaceInviteDetailView.as_view(),
+        name="workspace_invite_detail",
+    ),
     path("tenants/", WorkspaceTenantView.as_view(), name="workspace_tenants"),
     path("tenants/<uuid:wt_id>/", WorkspaceTenantView.as_view(), name="workspace_tenant_detail"),
 ]
@@ -84,6 +91,7 @@ urlpatterns = [
     # password reset, email management) is deliberately NOT mounted — see
     # apps/users/allauth_urls.py (arch #258, finding 13#9).
     path("accounts/", include("apps.users.allauth_urls")),
+    path("api/invites/", MyInvitesView.as_view(), name="my_invites"),
     path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(
         "api/workspaces/<uuid:workspace_id>/",

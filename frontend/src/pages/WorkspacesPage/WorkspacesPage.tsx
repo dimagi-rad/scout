@@ -1,6 +1,7 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { workspaceApi, type AwaitingInvite } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
@@ -76,6 +77,40 @@ function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onC
         <ChevronRight className="h-4 w-4 text-muted-foreground" />
       </div>
     </button>
+  )
+}
+
+function AwaitingInvitesBanner() {
+  const [invites, setInvites] = useState<AwaitingInvite[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    // Best-effort: a failure here must not block the workspaces list.
+    workspaceApi
+      .getMyInvites()
+      .then((data) => {
+        if (!cancelled) setInvites(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (invites.length === 0) return null
+
+  return (
+    <div className="mb-6 space-y-2" data-testid="awaiting-invites-banner">
+      {invites.map((invite) => (
+        <div
+          key={invite.id}
+          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
+          data-testid={`awaiting-invite-${invite.id}`}
+        >
+          {invite.message}
+        </div>
+      ))}
+    </div>
   )
 }
 
@@ -176,6 +211,8 @@ export function WorkspacesPage() {
           New workspace
         </Button>
       </div>
+
+      <AwaitingInvitesBanner />
 
       {isLoading ? (
         <div className="space-y-3">

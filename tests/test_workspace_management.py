@@ -5,7 +5,13 @@ from django.contrib.auth import get_user_model
 from django.test import Client
 
 from apps.users.models import TenantMembership
-from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceInvite,
+    WorkspaceInviteStatus,
+    WorkspaceMembership,
+    WorkspaceRole,
+)
 
 User = get_user_model()
 
@@ -287,9 +293,10 @@ class TestMemberAdd:
 
         assert resp.status_code == 201
         body = resp.json()
+        assert body["result"] == "member"
         assert body["email"] == "alice@example.com"
         assert body["role"] == WorkspaceRole.READ_WRITE
-        assert body.keys() == {"id", "user_id", "email", "name", "role", "created_at"}
+        assert body.keys() == {"result", "id", "user_id", "email", "name", "role", "created_at"}
         assert body["user_id"] == str(target.id)
         assert body["name"] == target.get_full_name()
 
@@ -326,19 +333,42 @@ class TestMemberAdd:
         assert resp.status_code == 400
         assert resp.json()["error"] == "Invalid role."
 
-    def test_unknown_email_returns_404(self, client, user, workspace):
+    def test_unknown_email_creates_pending_invite(self, client, user, workspace):
+        """No Scout user with that email → an email-keyed pending invite, not a 404."""
         client.force_login(user)
         resp = client.post(
             f"/api/workspaces/{workspace.id}/members/",
             {"email": "ghost@example.com", "role": WorkspaceRole.READ},
             content_type="application/json",
         )
-        assert resp.status_code == 404
-        assert resp.json()["error"] == "No Scout user with that email."
+        assert resp.status_code == 201, resp.json()
+        body = resp.json()
+        assert body["result"] == "invite_pending"
+        assert body["email"] == "ghost@example.com"
+        assert body["status"] == WorkspaceInviteStatus.PENDING
 
-    def test_user_without_shared_tenant_returns_403(self, client, user, workspace, db):
+        invite = WorkspaceInvite.objects.get(workspace=workspace, email="ghost@example.com")
+        assert invite.status == WorkspaceInviteStatus.PENDING
+        assert invite.invited_by == user
+        assert invite.role == WorkspaceRole.READ
+        # No placeholder User row is ever created.
+        assert not User.objects.filter(email__iexact="ghost@example.com").exists()
+
+    def test_email_is_normalized_lowercase_on_invite(self, client, user, workspace):
+        client.force_login(user)
+        resp = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "MixedCase@Example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert resp.status_code == 201, resp.json()
+        assert WorkspaceInvite.objects.filter(email="mixedcase@example.com").exists()
+
+    def test_user_without_shared_tenant_creates_awaiting_access_invite(
+        self, client, user, workspace, db
+    ):
         """Target exists but has no shared tenant and no token to refresh with →
-        403 telling them to reconnect (the share-time refresh has no token to try)."""
+        an awaiting_access invite that resolves once they gain upstream access."""
         _outsider = User.objects.create_user(email="outsider@example.com", password="pass")
         # Deliberately no TenantMembership and no SocialToken.
 
@@ -348,8 +378,33 @@ class TestMemberAdd:
             {"email": "outsider@example.com", "role": WorkspaceRole.READ},
             content_type="application/json",
         )
-        assert resp.status_code == 403
-        assert "sign into Scout again" in resp.json()["error"]
+        assert resp.status_code == 201, resp.json()
+        body = resp.json()
+        assert body["result"] == "invite_awaiting_access"
+        assert body["status"] == WorkspaceInviteStatus.AWAITING_ACCESS
+
+        invite = WorkspaceInvite.objects.get(workspace=workspace, email="outsider@example.com")
+        assert invite.status == WorkspaceInviteStatus.AWAITING_ACCESS
+        # The existing user is NOT added as a member (no live tenant access).
+        assert not WorkspaceMembership.objects.filter(workspace=workspace, user=_outsider).exists()
+
+    def test_reinvite_updates_role_and_is_idempotent(self, client, user, workspace):
+        client.force_login(user)
+        first = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.READ},
+            content_type="application/json",
+        )
+        assert first.status_code == 201
+        second = client.post(
+            f"/api/workspaces/{workspace.id}/members/",
+            {"email": "ghost@example.com", "role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        assert second.status_code == 201
+        invites = WorkspaceInvite.objects.filter(workspace=workspace, email="ghost@example.com")
+        assert invites.count() == 1
+        assert invites.first().role == WorkspaceRole.MANAGE
 
     @pytest.mark.django_db(transaction=True)
     def test_share_time_refresh_grants_access_then_adds(
@@ -378,8 +433,8 @@ class TestMemberAdd:
     def test_share_time_refresh_had_token_but_no_upstream_access(
         self, client, user, workspace, mocker, db
     ):
-        """Target had a token (refresh ran) but still lacks upstream access → 403
-        pointing at the source system, not 'reconnect'."""
+        """Target had a token (refresh ran) but still lacks upstream access → an
+        awaiting_access invite, not a hard error."""
         User.objects.create_user(email="noaccess@example.com", password="pass")
 
         async def fake_refresh(target, providers):
@@ -394,8 +449,8 @@ class TestMemberAdd:
             {"email": "noaccess@example.com", "role": WorkspaceRole.READ},
             content_type="application/json",
         )
-        assert resp.status_code == 403
-        assert "source system" in resp.json()["error"]
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["result"] == "invite_awaiting_access"
 
     def test_non_manager_cannot_add_members(self, client, workspace, tenant, db):
         writer = User.objects.create_user(email="wr@example.com", password="pass")
@@ -473,3 +528,114 @@ class TestMemberAdd:
         )
         assert resp.status_code == 201
         assert resp.json()["role"] == WorkspaceRole.MANAGE
+
+
+# ---------------------------------------------------------------------------
+# Member list: members + live invites
+# ---------------------------------------------------------------------------
+
+
+class TestMemberListWithInvites:
+    def test_get_members_returns_members_and_live_invites(
+        self, client, user, workspace, tenant, db
+    ):
+        member = User.objects.create_user(email="member@example.com", password="pass")
+        TenantMembership.objects.create(user=member, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=member, role=WorkspaceRole.READ
+        )
+        WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="pending@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.PENDING,
+        )
+        # A revoked invite must NOT appear.
+        WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email="revoked@example.com",
+            role=WorkspaceRole.READ,
+            status=WorkspaceInviteStatus.REVOKED,
+        )
+
+        client.force_login(user)
+        resp = client.get(f"/api/workspaces/{workspace.id}/members/")
+        assert resp.status_code == 200
+        body = resp.json()
+        member_emails = {m["email"] for m in body["members"]}
+        assert {"test@example.com", "member@example.com"} <= member_emails
+        invite_emails = {i["email"] for i in body["invites"]}
+        assert invite_emails == {"pending@example.com"}
+        assert body["invites"][0]["status"] == WorkspaceInviteStatus.PENDING
+
+
+# ---------------------------------------------------------------------------
+# Invite detail: revoke + role change
+# ---------------------------------------------------------------------------
+
+
+class TestInviteDetail:
+    def _make_invite(self, workspace, email="pending@example.com", role=WorkspaceRole.READ):
+        return WorkspaceInvite.objects.create(
+            workspace=workspace,
+            email=email,
+            role=role,
+            status=WorkspaceInviteStatus.PENDING,
+        )
+
+    def test_manager_can_revoke_invite(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 204
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.REVOKED
+
+    def test_manager_can_change_invite_role(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": WorkspaceRole.MANAGE},
+            content_type="application/json",
+        )
+        assert resp.status_code == 200
+        invite.refresh_from_db()
+        assert invite.role == WorkspaceRole.MANAGE
+
+    def test_invalid_role_returns_400(self, client, user, workspace):
+        invite = self._make_invite(workspace)
+        client.force_login(user)
+        resp = client.patch(
+            f"/api/workspaces/{workspace.id}/invites/{invite.id}/",
+            {"role": "admin"},
+            content_type="application/json",
+        )
+        assert resp.status_code == 400
+
+    def test_non_manager_cannot_revoke(self, client, workspace, tenant, db):
+        reader = User.objects.create_user(email="reader2@example.com", password="pass")
+        TenantMembership.objects.create(user=reader, tenant=tenant)
+        WorkspaceMembership.objects.create(
+            workspace=workspace, user=reader, role=WorkspaceRole.READ
+        )
+        invite = self._make_invite(workspace)
+        client.force_login(reader)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 403
+        invite.refresh_from_db()
+        assert invite.status == WorkspaceInviteStatus.PENDING
+
+    def test_revoke_unknown_invite_returns_404(self, client, user, workspace):
+        import uuid
+
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{uuid.uuid4()}/")
+        assert resp.status_code == 404
+
+    def test_cannot_touch_invite_of_other_workspace(self, client, user, workspace, db):
+        other_ws = Workspace.objects.create(name="Other")
+        invite = self._make_invite(other_ws)
+        client.force_login(user)
+        resp = client.delete(f"/api/workspaces/{workspace.id}/invites/{invite.id}/")
+        assert resp.status_code == 404

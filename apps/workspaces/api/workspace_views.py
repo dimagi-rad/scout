@@ -3,10 +3,12 @@
 import asyncio
 import logging
 
+from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db.models import Count, OuterRef, Subquery
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -20,15 +22,25 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
+from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
 from apps.workspaces.models import (
+    LIVE_INVITE_STATUSES,
     MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceInvite,
+    WorkspaceInviteStatus,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
+    default_invite_expiry,
+)
+from apps.workspaces.services.invite_notifications import (
+    describe_workspace_sources,
+    notify_awaiting_access,
+    send_pending_invite_email,
 )
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -79,6 +91,49 @@ def _is_last_manager(workspace, membership):
     if membership.role != WorkspaceRole.MANAGE:
         return False
     return workspace.memberships.filter(role=WorkspaceRole.MANAGE).count() <= 1
+
+
+def _serialize_invite(invite, result=None):
+    payload = {
+        "id": str(invite.id),
+        "email": invite.email,
+        "role": invite.role,
+        "status": invite.status,
+        "created_at": invite.created_at.isoformat(),
+    }
+    if result is not None:
+        payload["result"] = result
+    return payload
+
+
+def _upsert_invite(workspace, email, role, invited_by, new_status):
+    """Create or refresh the single live invite for (workspace, email).
+
+    Re-inviting an outstanding invite is idempotent — it updates role/expiry and
+    the pending↔awaiting_access status rather than violating the
+    one-live-invite-per-(workspace,email) constraint. A stale (expired) live
+    invite is retired to EXPIRED first so a fresh one can take its place.
+    """
+    live = WorkspaceInvite.objects.filter(
+        workspace=workspace, email=email, status__in=LIVE_INVITE_STATUSES
+    ).first()
+    if live and not live.is_expired:
+        live.role = role
+        live.invited_by = invited_by
+        live.status = new_status
+        live.expires_at = default_invite_expiry()
+        live.save(update_fields=["role", "invited_by", "status", "expires_at", "updated_at"])
+        return live
+    if live and live.is_expired:
+        live.status = WorkspaceInviteStatus.EXPIRED
+        live.save(update_fields=["status", "updated_at"])
+    return WorkspaceInvite.objects.create(
+        workspace=workspace,
+        email=email,
+        role=role,
+        invited_by=invited_by,
+        status=new_status,
+    )
 
 
 def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
@@ -414,7 +469,7 @@ class WorkspaceMemberListView(APIView):
             return err
 
         memberships = WorkspaceMembership.objects.filter(workspace=workspace).select_related("user")
-        results = [
+        members = [
             {
                 "id": str(m.id),
                 "user_id": str(m.user.id),
@@ -425,7 +480,13 @@ class WorkspaceMemberListView(APIView):
             }
             for m in memberships
         ]
-        return Response(results)
+        live_invites = WorkspaceInvite.objects.filter(
+            workspace=workspace,
+            status__in=LIVE_INVITE_STATUSES,
+            expires_at__gt=timezone.now(),
+        )
+        invites = [_serialize_invite(i) for i in live_invites]
+        return Response({"members": members, "invites": invites})
 
     def post(self, request, workspace_id):
         workspace, membership, err = resolve_workspace(request, workspace_id)
@@ -437,7 +498,7 @@ class WorkspaceMemberListView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        email = (request.data.get("email") or "").strip()
+        email = (request.data.get("email") or "").strip().lower()
         if not email or "@" not in email:
             return Response({"error": "Email is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -445,40 +506,44 @@ class WorkspaceMemberListView(APIView):
         if role not in WorkspaceRole.values:
             return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
 
+        tenant_ids = _live_tenant_ids(workspace)
         target = get_user_model().objects.filter(email__iexact=email).first()
+
+        # No Scout account yet → pure pre-authorization; resolves on their first login.
         if target is None:
+            invite = _upsert_invite(
+                workspace, email, role, request.user, WorkspaceInviteStatus.PENDING
+            )
+            send_pending_invite_email(invite)
             return Response(
-                {"error": "No Scout user with that email."},
-                status=status.HTTP_404_NOT_FOUND,
+                _serialize_invite(invite, result="invite_pending"),
+                status=status.HTTP_201_CREATED,
             )
 
-        workspace_tenant_ids = list(workspace.workspace_tenants.values_list("tenant_id", flat=True))
-
-        def target_shares_tenant():
-            return TenantMembership.objects.filter(
-                user=target, tenant_id__in=workspace_tenant_ids
-            ).exists()
-
-        if not target_shares_tenant():
+        if not _shares_live_tenant(target, tenant_ids):
             # The target may have been granted access upstream (Connect/HQ/OCS)
             # after their last Scout login. Refresh their memberships server-side
             # using their own token, then re-check — no manual reconnect needed.
             providers = list(
                 workspace.workspace_tenants.values_list("tenant__provider", flat=True).distinct()
             )
-            had_token = async_to_sync(_arefresh_target_for_workspace)(target, providers)
-            if not target_shares_tenant():
-                if had_token:
-                    msg = (
-                        "This user doesn't have access to this workspace's data "
-                        "source in the source system (e.g. the Connect opportunity)."
-                    )
-                else:
-                    msg = (
-                        "This user needs to sign into Scout again to refresh their "
-                        "access (Connections in the left menu)."
-                    )
-                return Response({"error": msg}, status=status.HTTP_403_FORBIDDEN)
+            async_to_sync(_arefresh_target_for_workspace)(target, providers)
+
+        # Still no live upstream access even after refresh → invite awaits it, rather
+        # than hard-failing: the invite resolves automatically once they gain access
+        # and log in (Root Cause A's live gate does the real enforcement regardless).
+        if not _shares_live_tenant(target, tenant_ids):
+            invite = _upsert_invite(
+                workspace, email, role, request.user, WorkspaceInviteStatus.AWAITING_ACCESS
+            )
+            # The invitee already has a Scout account, so they never get the
+            # pending-invite email; tell them directly they need upstream access.
+            # The manager just performed this action, so don't email them.
+            notify_awaiting_access(invite, target, notify_manager=False)
+            return Response(
+                _serialize_invite(invite, result="invite_awaiting_access"),
+                status=status.HTTP_201_CREATED,
+            )
 
         # authz-exempt: duplicate-membership check for the TARGET, not an access
         # decision for the requester (whose access came via resolve_workspace above).
@@ -496,6 +561,7 @@ class WorkspaceMemberListView(APIView):
         )
         return Response(
             {
+                "result": "member",
                 "id": str(new_membership.id),
                 "user_id": str(target.id),
                 "email": target.email,
@@ -582,6 +648,96 @@ class WorkspaceMemberDetailView(APIView):
 
         target.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkspaceInviteDetailView(APIView):
+    """
+    PATCH  /api/workspaces/<workspace_id>/invites/<invite_id>/ — change invite role (manage only).
+    DELETE /api/workspaces/<workspace_id>/invites/<invite_id>/ — revoke invite (manage only).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_manager_context(self, request, workspace_id, invite_id):
+        workspace, membership, err = resolve_workspace(request, workspace_id)
+        if err:
+            return None, None, err
+        if membership.role != WorkspaceRole.MANAGE:
+            return (
+                None,
+                None,
+                Response(
+                    {"error": "Only managers can manage invites."},
+                    status=status.HTTP_403_FORBIDDEN,
+                ),
+            )
+        try:
+            invite = WorkspaceInvite.objects.get(id=invite_id, workspace=workspace)
+        except WorkspaceInvite.DoesNotExist:
+            return None, None, Response(
+                {"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND
+            )
+        return workspace, invite, None
+
+    def patch(self, request, workspace_id, invite_id):
+        _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
+        if err:
+            return err
+        new_role = request.data.get("role")
+        if new_role not in WorkspaceRole.values:
+            return Response({"error": "Invalid role."}, status=status.HTTP_400_BAD_REQUEST)
+        invite.role = new_role
+        invite.save(update_fields=["role", "updated_at"])
+        return Response(_serialize_invite(invite))
+
+    def delete(self, request, workspace_id, invite_id):
+        _workspace, invite, err = self._get_manager_context(request, workspace_id, invite_id)
+        if err:
+            return err
+        invite.status = WorkspaceInviteStatus.REVOKED
+        invite.save(update_fields=["status", "updated_at"])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class MyInvitesView(APIView):
+    """GET /api/invites/ — the signed-in user's awaiting_access invites.
+
+    Feeds the in-app 'you're invited but need upstream access' banner. Matched on
+    the user's VERIFIED emails (same rule as the login resolver) so the message
+    can't be surfaced against an unverified address.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        emails = {
+            e.lower()
+            for e in EmailAddress.objects.filter(
+                user=request.user, verified=True
+            ).values_list("email", flat=True)
+        }
+        if request.user.email:
+            emails.add(request.user.email.lower())
+
+        invites = WorkspaceInvite.objects.filter(
+            email__in=emails,
+            status=WorkspaceInviteStatus.AWAITING_ACCESS,
+            expires_at__gt=timezone.now(),
+        ).select_related("workspace")
+        return Response(
+            [
+                {
+                    "id": str(i.id),
+                    "workspace_name": i.workspace.name,
+                    "message": (
+                        f"You were invited to '{i.workspace.name}' but don't yet have access to "
+                        f"{describe_workspace_sources(i.workspace)}. Ask to be added there — it "
+                        f"unlocks automatically once you do."
+                    ),
+                }
+                for i in invites
+            ]
+        )
 
 
 class WorkspaceTenantView(APIView):

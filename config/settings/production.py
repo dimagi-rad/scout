@@ -30,6 +30,13 @@ SECURE_HSTS_SECONDS = 31536000  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
 
+# Transactional email via Amazon SES, mirroring Connect/OCS. ANYMAIL={} means
+# no keys in env — boto3's default credential chain uses the worker/API EC2
+# instance role (scout-production stack), which must have ses:SendEmail. The
+# EMAIL_BACKEND / DEFAULT_FROM_EMAIL env overrides still win if set at deploy.
+EMAIL_BACKEND = env("EMAIL_BACKEND", default="anymail.backends.amazon_ses.EmailBackend")
+ANYMAIL = {}
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
