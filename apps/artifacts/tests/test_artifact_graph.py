@@ -451,6 +451,51 @@ async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_graph_manager_ignores_run_check_false_for_writes(workspace, member_user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=member_user,
+        title="Runtime invalid artifact",
+    )
+    graph_tool = next(
+        item for item in create_artifact_graph_tools(workspace, member_user, str(thread.id)) if item.name == "artifact_write"
+    )
+
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(
+            return_value={
+                "success": False,
+                "diagnostics": [],
+                "key_warnings": [
+                    {
+                        "query_key": "q.visits_by_day",
+                        "message": "Expected result key missing",
+                    }
+                ],
+                "summary": "1/1 queries ok",
+            }
+        ),
+    ):
+        result = await graph_tool.ainvoke(
+            {
+                "action": "create",
+                "title": "Runtime invalid",
+                "story_doc": graph_doc(),
+                "run_check": False,
+            }
+        )
+
+    assert result["status"] == "error"
+    assert "not published" in result["message"]
+    assert result["runtime"]["key_warnings"]
+    assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
+    assert await Artifact.all_objects.filter(artifact_type=ArtifactType.STORY, is_deleted=True).acount() == 1
+    assert await ThreadArtifact.objects.filter(thread=thread).acount() == 0
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_check_graph_artifact_loads_workspace_in_async_context(workspace, member_user):
     artifact = await Artifact.objects.acreate(
         workspace=workspace,

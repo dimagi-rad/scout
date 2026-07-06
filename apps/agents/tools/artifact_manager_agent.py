@@ -135,7 +135,10 @@ How to build data-backed blocks:
 Use `artifact_write(action="create")` for a new artifact, `replace` when
 rewriting the whole doc, `apply` for targeted edits, and `check` for runtime
 validation. If validation fails, correct the doc and call `artifact_write`
-again rather than explaining the failure to the parent.
+again rather than explaining the failure to the parent. Treat
+`runtime.success=false`, `diagnostics`, and `key_warnings` as blocking
+publication failures. Do not set `run_check=false` to publish a user-facing
+artifact.
 
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,

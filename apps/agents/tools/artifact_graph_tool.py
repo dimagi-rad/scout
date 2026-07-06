@@ -50,7 +50,13 @@ class ArtifactWriteInput(BaseModel):
     description: str = ""
     story_doc: dict[str, Any] | None = None
     ops: list[dict[str, Any]] | None = None
-    run_check: bool = True
+    run_check: bool = Field(
+        default=True,
+        description=(
+            "Deprecated. Runtime validation always runs for create, replace, "
+            "and apply before publishing."
+        ),
+    )
 
 
 def create_artifact_graph_tools(
@@ -145,7 +151,7 @@ def create_artifact_graph_tools(
                     title=title,
                     description=description,
                     story_doc=story_doc,
-                    run_check=run_check,
+                    run_check=True,
                 )
             if normalized_action == "replace":
                 return await _replace_graph_artifact(
@@ -155,7 +161,7 @@ def create_artifact_graph_tools(
                     artifact_id=artifact_id,
                     title=title,
                     story_doc=story_doc,
-                    run_check=run_check,
+                    run_check=True,
                 )
             if normalized_action == "apply":
                 return await _apply_graph_ops(
@@ -165,7 +171,7 @@ def create_artifact_graph_tools(
                     artifact_id=artifact_id,
                     title=title,
                     ops=ops,
-                    run_check=run_check,
+                    run_check=True,
                 )
             if normalized_action == "check":
                 artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id)
