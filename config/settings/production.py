@@ -30,12 +30,15 @@ SECURE_HSTS_SECONDS = 31536000  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
 
-# Transactional email via Amazon SES, mirroring Connect/OCS. ANYMAIL={} means
-# no keys in env — boto3's default credential chain uses the worker/API EC2
-# instance role (scout-production stack), which must have ses:SendEmail. The
-# EMAIL_BACKEND / DEFAULT_FROM_EMAIL env overrides still win if set at deploy.
+# Amazon SES via the EC2 instance role (no keys in env; role needs ses:SendEmail).
+# region_name is required: the role gives credentials but not a region, and the
+# container has no AWS_REGION, so boto3 raises NoRegionError without it (SCOUT-DJANGO-22).
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="anymail.backends.amazon_ses.EmailBackend")
-ANYMAIL = {}
+ANYMAIL = {
+    "AMAZON_SES_CLIENT_PARAMS": {
+        "region_name": env("AWS_SES_REGION", default="us-east-1"),
+    },
+}
 
 LOGGING = {
     "version": 1,

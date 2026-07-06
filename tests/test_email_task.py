@@ -4,6 +4,15 @@ import pytest
 from django.core import mail
 
 from apps.users.tasks import send_email
+from config.settings import production
+
+
+def test_production_ses_config_specifies_region():
+    """SCOUT-DJANGO-22: the EC2 instance role gives boto3 credentials but no
+    region, so ANYMAIL must set region_name or every send raises NoRegionError.
+    Dev/test use the console/locmem backend, so only prod exercises the client.
+    """
+    assert production.ANYMAIL["AMAZON_SES_CLIENT_PARAMS"]["region_name"]
 
 
 @pytest.mark.asyncio
