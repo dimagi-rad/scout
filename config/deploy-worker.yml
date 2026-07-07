@@ -55,6 +55,12 @@ env:
     # The resume task's get_mcp_tools call authenticates to the MCP server with
     # this shared secret (arch #253, 01#6). MUST match deploy-mcp.yml.
     - MCP_SHARED_SECRET
+    # Dedicated send-only SES keys (IAM user scout-ses-worker). The worker sends
+    # invite email but its scout_shared bridge container can't reach the instance
+    # role under IMDS hop limit 1 (arch #329), so it authenticates to SES with
+    # these instead. Only the worker gets them — see production.py ANYMAIL.
+    - AWS_SES_ACCESS_KEY_ID
+    - AWS_SES_SECRET_ACCESS_KEY
 
 ssh:
   user: scout
