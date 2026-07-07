@@ -30,14 +30,26 @@ SECURE_HSTS_SECONDS = 31536000  # 1 year
 SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 SECURE_HSTS_PRELOAD = True
 
-# Amazon SES via the EC2 instance role (no keys in env; role needs ses:SendEmail).
-# region_name is required: the role gives credentials but not a region, and the
-# container has no AWS_REGION, so boto3 raises NoRegionError without it (SCOUT-DJANGO-22).
+# Amazon SES. region_name is required: the container has no AWS_REGION, so boto3
+# raises NoRegionError without it (SCOUT-DJANGO-22).
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="anymail.backends.amazon_ses.EmailBackend")
+_ses_client_params = {
+    "region_name": env("AWS_SES_REGION", default="us-east-1"),
+}
+# The Procrastinate worker sends invite email but runs on the scout_shared Docker
+# bridge, where IMDS hop limit 1 (arch #329) blocks it from reaching the instance
+# role. When these dedicated send-only keys (IAM user scout-ses-worker,
+# ses:SendEmail/SendRawEmail only) are present it authenticates with them instead;
+# unset (API/MCP containers, local dev) -> boto3 falls back to the instance role /
+# default credential chain. Keeping the keys off the instance role means an SSRF on
+# the API can neither reach IMDS (hop 1) nor read these keys (worker-only).
+_ses_access_key = env("AWS_SES_ACCESS_KEY_ID", default=None)
+_ses_secret_key = env("AWS_SES_SECRET_ACCESS_KEY", default=None)
+if _ses_access_key and _ses_secret_key:
+    _ses_client_params["aws_access_key_id"] = _ses_access_key
+    _ses_client_params["aws_secret_access_key"] = _ses_secret_key
 ANYMAIL = {
-    "AMAZON_SES_CLIENT_PARAMS": {
-        "region_name": env("AWS_SES_REGION", default="us-east-1"),
-    },
+    "AMAZON_SES_CLIENT_PARAMS": _ses_client_params,
 }
 
 LOGGING = {
