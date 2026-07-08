@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
@@ -152,6 +152,7 @@ DEFAULT_MAX_TOKENS = 4096
 # Broken" rule (see apps/agents/prompts/base_system.py).
 ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
 ESCALATION_TRIGGER_COUNT = 3
+ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 
 
 def _tool_message_error_code(content: Any) -> str | None:
@@ -571,6 +572,66 @@ def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
     return result
 
 
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _artifact_manager_task_is_missing(args: Any) -> bool:
+    if not isinstance(args, dict):
+        return True
+    task = args.get("task")
+    return not isinstance(task, str) or not task.strip()
+
+
+def _latest_human_text(messages: list[Any]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            text = _message_text(msg).strip()
+            if text:
+                return text
+    return ""
+
+
+def _synthesize_artifact_manager_task(messages: list[Any]) -> str:
+    """Build a bounded fallback task when the LLM emits an empty tool call.
+
+    Anthropic can still produce an empty argument object despite a required
+    schema. For artifact work, the user's latest request is enough context: the
+    Artifact Manager subagent owns data discovery, semantic query verification,
+    graph construction, and validation.
+    """
+
+    user_request = _latest_human_text(messages)
+    if len(user_request) > ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS:
+        user_request = user_request[:ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS].rstrip()
+        user_request += "..."
+    if not user_request:
+        user_request = "Create or update the semantic story artifact requested in this thread."
+
+    return (
+        "Create or update a semantic story artifact for the user's latest request. "
+        "Treat this as a complete delegated artifact task. Do your own dataset "
+        "discovery and semantic-query verification inside the Artifact Manager; "
+        "use live semantic data, hidden semantic_query blocks, validated graph/table/stat "
+        "bindings, and publish only after artifact_write validation succeeds.\n\n"
+        f"User request:\n{user_request}"
+    )
+
+
 def _make_injecting_tool_node(
     base_tool_node: ToolNode,
     injections: dict[str, str],
@@ -598,7 +659,10 @@ def _make_injecting_tool_node(
 
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             modified_msg = copy.copy(last_msg)
+            persistable_msg = copy.copy(last_msg)
             modified_calls = []
+            persistable_calls = []
+            persistable_changed = False
             for tc in last_msg.tool_calls:
                 tc_id = tc.get("id") or ""
                 if tc["name"] in MCP_TOOL_NAMES:
@@ -611,18 +675,51 @@ def _make_injecting_tool_node(
                         )
                     extra["tool_call_id"] = tc_id
                     tc = {**tc, "args": {**tc["args"], **extra}}
+                    persistable_tc = copy.deepcopy(tc)
+                    persistable_tc["args"] = {
+                        k: v
+                        for k, v in persistable_tc.get("args", {}).items()
+                        if k not in INJECTED_TOOL_PARAMS
+                    }
                 elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
+                    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+                    if tc["name"] == "artifact_manager" and _artifact_manager_task_is_missing(
+                        args
+                    ):
+                        task = _synthesize_artifact_manager_task(messages)
+                        args = {**args, "task": task}
+                        logger.warning(
+                            "artifact_manager tool call had empty task; synthesized "
+                            "fallback task from latest user request (tool_call_id=%s)",
+                            tc_id,
+                        )
+                        persistable_changed = True
+                    persistable_tc = {**tc, "args": dict(args)}
                     extra = {"tool_call_id": tc_id}
                     if tc["name"] in SUBAGENT_TOOL_NAMES:
                         extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
-                    tc = {**tc, "args": {**tc["args"], **extra}}
+                    tc = {**tc, "args": {**args, **extra}}
+                else:
+                    persistable_tc = tc
                 modified_calls.append(tc)
+                persistable_calls.append(persistable_tc)
             modified_msg.tool_calls = modified_calls
+            if persistable_changed:
+                persistable_msg.tool_calls = persistable_calls
             messages = [*messages[:-1], modified_msg]
 
         token = set_subagent_event_queue(event_queue)
         try:
-            return await base_tool_node.ainvoke({"messages": messages}, config=config)
+            result = await base_tool_node.ainvoke({"messages": messages}, config=config)
+            if (
+                "persistable_msg" in locals()
+                and persistable_changed
+                and getattr(persistable_msg, "id", None)
+                and isinstance(result, dict)
+            ):
+                result_messages = list(result.get("messages", []))
+                return {**result, "messages": [persistable_msg, *result_messages]}
+            return result
         finally:
             reset_subagent_event_queue(token)
 

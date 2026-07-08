@@ -2,7 +2,7 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.base import SUBAGENT_EVENT_QUEUE_CONFIG_KEY, _make_injecting_tool_node
 from apps.agents.graph.state import AgentState
@@ -99,6 +99,68 @@ def test_make_injecting_tool_node_injects_subagent_queue_for_artifact_manager(mo
     forwarded_args = captured_messages[0][-1].tool_calls[0]["args"]
     assert forwarded_args["tool_call_id"] == "tc-art"
     assert forwarded_args[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] is queue
+
+
+def test_make_injecting_tool_node_synthesizes_missing_artifact_task(monkeypatch):
+    """If the model emits artifact_manager({}), recover from the user request.
+
+    Anthropic can ignore the required schema. The graph should still execute the
+    Artifact Manager with a useful task and persist the corrected tool-call args
+    so reloads do not keep showing an empty input.
+    """
+
+    monkeypatch.setattr(
+        "apps.agents.graph.base.LOCAL_CONTEXT_TOOL_NAMES",
+        {"artifact_manager"},
+    )
+
+    captured_messages: list = []
+    base_node = MagicMock()
+
+    async def fake_ainvoke(payload, **kwargs):
+        captured_messages.append(payload["messages"])
+        return {
+            "messages": [
+                ToolMessage(
+                    content='{"status":"created"}',
+                    tool_call_id="tc-art",
+                    name="artifact_manager",
+                )
+            ]
+        }
+
+    base_node.ainvoke = AsyncMock(side_effect=fake_ainvoke)
+    node = _make_injecting_tool_node(base_node, {})
+    queue = asyncio.Queue()
+    user_msg = HumanMessage(
+        content="make me a demo artifact library with every block and chart type"
+    )
+    ai_msg = AIMessage(
+        content="I'll delegate this to the Artifact Manager.",
+        id="ai-empty-artifact-call",
+        tool_calls=[{"name": "artifact_manager", "id": "tc-art", "args": {}}],
+    )
+
+    result = asyncio.run(
+        node(
+            {"messages": [user_msg, ai_msg]},
+            config={"configurable": {SUBAGENT_EVENT_QUEUE_CONFIG_KEY: queue}},
+        )
+    )
+
+    forwarded_args = captured_messages[0][-1].tool_calls[0]["args"]
+    assert "task" in forwarded_args
+    assert "demo artifact library" in forwarded_args["task"]
+    assert forwarded_args["tool_call_id"] == "tc-art"
+    assert forwarded_args[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] is queue
+
+    persisted_ai = result["messages"][0]
+    persisted_args = persisted_ai.tool_calls[0]["args"]
+    assert persisted_ai.id == "ai-empty-artifact-call"
+    assert persisted_args["task"] == forwarded_args["task"]
+    assert "tool_call_id" not in persisted_args
+    assert SUBAGENT_EVENT_QUEUE_CONFIG_KEY not in persisted_args
+    assert result["messages"][1].tool_call_id == "tc-art"
 
 
 def test_make_injecting_tool_node_warns_on_missing_tool_call_id(monkeypatch, caplog):
