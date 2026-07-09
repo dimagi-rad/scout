@@ -6,12 +6,16 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from cryptography.fernet import Fernet
 from django.conf import settings
 from django.contrib.sites.models import Site
+from django.test import RequestFactory
+from django.urls import NoReverseMatch
 from django.utils import timezone
 
+from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.services.credential_resolver import _social_token_qs
 
 
@@ -61,6 +65,34 @@ class TestTokenEncryptionAdapter:
         """Should raise ValueError when DB_CREDENTIAL_KEY is not set."""
         with pytest.raises(ValueError, match="DB_CREDENTIAL_KEY"):
             adapter.encrypt_token("some_token")
+
+
+class TestConnectRedirectUrl:
+    """The ``?process=connect`` flow must not reverse the unmounted
+    ``socialaccount_connections`` URL name (prod SCOUT-DJANGO-25)."""
+
+    def test_returns_spa_connections_path(self):
+        request = RequestFactory().get("/accounts/google/login/", {"process": "connect"})
+        url = EncryptingSocialAccountAdapter().get_connect_redirect_url(request, None)
+        assert url == "/settings/connections"
+
+    def test_honors_mount_prefix(self):
+        request = RequestFactory().get("/accounts/google/login/")
+        request.META["SCRIPT_NAME"] = "/scout"
+        url = EncryptingSocialAccountAdapter().get_connect_redirect_url(request, None)
+        assert url == "/scout/settings/connections"
+
+    def test_does_not_raise_no_reverse_match(self):
+        request = RequestFactory().get("/accounts/google/login/")
+        url = EncryptingSocialAccountAdapter().get_connect_redirect_url(request, None)
+        assert url
+
+    def test_default_adapter_would_raise(self):
+        """Guard: allauth's default reverses a name Scout doesn't mount, so the
+        override is load-bearing — if this stops raising, revisit the override."""
+        request = RequestFactory().get("/accounts/google/login/")
+        with pytest.raises(NoReverseMatch):
+            DefaultSocialAccountAdapter().get_connect_redirect_url(request, None)
 
 
 class TestCommCareConnectProvider:
