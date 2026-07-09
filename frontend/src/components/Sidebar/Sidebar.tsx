@@ -28,6 +28,7 @@ export function Sidebar() {
   const threadId = useAppStore((s) => s.threadId)
   const threads = useAppStore((s) => s.threads)
   const threadsStatus = useAppStore((s) => s.threadsStatus)
+  const threadsAccessLostMessage = useAppStore((s) => s.threadsAccessLostMessage)
   const fetchThreads = useAppStore((s) => s.uiActions.fetchThreads)
   const newThread = useAppStore((s) => s.uiActions.newThread)
   const selectThread = useAppStore((s) => s.uiActions.selectThread)
@@ -112,7 +113,17 @@ export function Sidebar() {
           </Button>
         </div>
         <div className="flex-1 overflow-y-auto px-2 pb-2">
-          {threadsStatus === "error" && (
+          {threadsStatus === "error" && threadsAccessLostMessage && (
+            // Lost upstream tenant access: retry won't help, so explain what
+            // happened and what to do instead of offering a dead retry.
+            <div
+              className="px-3 py-2 text-xs text-muted-foreground"
+              data-testid="sidebar-threads-access-lost"
+            >
+              <p>{threadsAccessLostMessage}</p>
+            </div>
+          )}
+          {threadsStatus === "error" && !threadsAccessLostMessage && (
             // 07#7: a load failure must not look like "no conversations". Show a
             // distinct error + retry so an outage is recoverable, not silent.
             <div
