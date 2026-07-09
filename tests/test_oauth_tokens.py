@@ -15,6 +15,7 @@ from django.contrib.sites.models import Site
 from django.utils import timezone
 
 from apps.users.services.credential_resolver import _social_token_qs
+from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_token
 
 
 class TestTokenStorageSettings:
@@ -134,11 +135,6 @@ class TestTokenRefresh:
     @pytest.mark.asyncio
     async def test_refresh_400_logs_warning_not_error(self, httpx_mock, caplog):
         """A 400 invalid_grant (dead token) is expected: WARNING, no exception log."""
-        from apps.users.services.token_refresh import (
-            TokenRefreshError,
-            refresh_oauth_token,
-        )
-
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(
             url=token_url,
@@ -166,11 +162,6 @@ class TestTokenRefresh:
     @pytest.mark.asyncio
     async def test_refresh_500_logs_exception(self, httpx_mock, caplog):
         """A 5xx is genuinely unexpected: keep exception-level logging."""
-        from apps.users.services.token_refresh import (
-            TokenRefreshError,
-            refresh_oauth_token,
-        )
-
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(url=token_url, method="POST", status_code=503)
 
@@ -190,11 +181,6 @@ class TestTokenRefresh:
     @pytest.mark.asyncio
     async def test_refresh_network_error_logs_exception(self, httpx_mock, caplog):
         """A network error is unexpected: keep exception-level logging."""
-        from apps.users.services.token_refresh import (
-            TokenRefreshError,
-            refresh_oauth_token,
-        )
-
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_exception(httpx.ConnectError("connection refused"), url=token_url)
 
