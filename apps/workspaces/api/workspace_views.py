@@ -236,6 +236,15 @@ class WorkspaceListView(APIView):
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
 
+        # Bulk live-access check, one query for the whole list. A workspace is
+        # accessible iff it has no tenants OR the user shares a live tenant with
+        # it — the same rule apps/workspaces/access.py enforces per request. We
+        # surface it here (rather than filtering rows out) so the client can keep
+        # orphaned workspaces addressable by URL while gating them in the UI.
+        user_live_tenant_ids = set(
+            TenantMembership.objects.filter(user=request.user).values_list("tenant_id", flat=True)
+        )
+
         results = []
         for m in memberships:
             tenants = [
@@ -246,6 +255,8 @@ class WorkspaceListView(APIView):
                 }
                 for wt in m.workspace.workspace_tenants.all()
             ]
+            ws_tenant_ids = [wt.tenant_id for wt in m.workspace.workspace_tenants.all()]
+            has_access = not ws_tenant_ids or bool(set(ws_tenant_ids) & user_live_tenant_ids)
             results.append(
                 {
                     "id": str(m.workspace.id),
@@ -254,6 +265,7 @@ class WorkspaceListView(APIView):
                     "is_auto_created": m.workspace.is_auto_created,
                     "role": m.role,
                     "tenants": tenants,
+                    "has_access": has_access,
                     "member_count": m.member_count,
                     "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
                     "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
