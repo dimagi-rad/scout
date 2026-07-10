@@ -104,6 +104,23 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         )
         raise ImmediateHttpResponse(redirect("account_login"))
 
+    def get_connect_redirect_url(self, request, socialaccount):
+        """Where allauth sends the browser after a ``?process=connect`` round-trip.
+
+        allauth's default reverses ``socialaccount_connections``, a name that
+        lives in ``allauth.socialaccount.urls`` — which Scout deliberately does
+        NOT mount (see apps/users/allauth_urls.py). That reverse raises
+        NoReverseMatch and, because allauth evaluates it eagerly (before the
+        ``or sociallogin.get_redirect_url(...)`` fallback), the connect flow 500s
+        even when the SPA passes a valid ``?next=`` (prod SCOUT-DJANGO-25).
+
+        Point at the SPA connections page instead, honoring any mount prefix
+        (FORCE_SCRIPT_NAME → SCRIPT_NAME in request meta) the same way the
+        artifact sandbox does.
+        """
+        script_name = request.META.get("SCRIPT_NAME", "").rstrip("/")
+        return f"{script_name}/settings/connections"
+
 
 def encrypt_credential(plaintext: str) -> str:
     """Fernet-encrypt a credential string using DB_CREDENTIAL_KEY."""
