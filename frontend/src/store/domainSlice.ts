@@ -1,6 +1,6 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
-import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
+import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 
 // TenantMembership kept as alias so existing imports continue to work
 export type TenantMembership = WorkspaceListItem & {
@@ -36,11 +36,17 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
       try {
         const domains = await workspaceApi.list()
         const activeDomainId = get().activeDomainId
+        // Default to the first workspace the user can still access, never an
+        // orphaned one whose upstream access was removed — landing there would
+        // just show the lost-access modal. A deep link to an orphan still works
+        // (the URL→store sync adopts it); this only governs the no-URL default.
+        const defaultId =
+          (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
         set({
           domains,
           domainsStatus: "loaded",
           domainsError: null,
-          activeDomainId: activeDomainId ?? (domains[0]?.id ?? null),
+          activeDomainId: activeDomainId ?? defaultId,
         })
       } catch (error) {
         set({
