@@ -58,7 +58,7 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
   it("surfaces the server message when upstream tenant access was lost", async () => {
     const message =
-      "You no longer have access to CommCare project(s): skelly. " +
+      "You no longer have access to: skelly. " +
       "Access may have been removed upstream — reconnect or ask an admin."
     vi.spyOn(api, "get").mockRejectedValue(
       new ApiError(403, message, {

@@ -63,7 +63,7 @@ def access_denied_body(result: WorkspaceAccess) -> dict:
         projects = ", ".join(result.lost_tenant_names)
         return {
             "error": (
-                f"You no longer have access to CommCare project(s): {projects}. "
+                f"You no longer have access to: {projects}. "
                 "Access may have been removed upstream — reconnect or ask an admin."
             ),
             "reason": TENANT_ACCESS_LOST,
