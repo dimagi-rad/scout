@@ -81,14 +81,18 @@ async def _get_thread_artifacts(thread_id):
 
 
 async def _list_threads(user, *, workspace_id):
-    """Return recent threads for a workspace/user."""
+    """Return ``(threads, error_response)`` for a workspace/user.
+
+    ``error_response`` is a ready-to-return 403 ``JsonResponse`` (generic, or the
+    lost-upstream-access variant) when access is denied; ``None`` on success.
+    """
     from apps.workspaces.workspace_resolver import aresolve_workspace
 
-    workspace, _err = await aresolve_workspace(user, workspace_id)
-    if workspace is None:
-        return None
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return None, err
 
-    return [
+    threads = [
         {
             "id": str(t.id),
             "title": t.title,
@@ -101,6 +105,7 @@ async def _list_threads(user, *, workspace_id):
             "-updated_at"
         )[:50]
     ]
+    return threads, None
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
@@ -139,9 +144,9 @@ async def thread_list_view(request, workspace_id):
 
     user = request._authenticated_user
 
-    threads = await _list_threads(user, workspace_id=workspace_id)
-    if threads is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    threads, err = await _list_threads(user, workspace_id=workspace_id)
+    if err is not None:
+        return err
     return JsonResponse(threads, safe=False)
 
 

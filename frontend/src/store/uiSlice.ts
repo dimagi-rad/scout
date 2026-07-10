@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand"
-import { api } from "@/api/client"
+import { ApiError, api } from "@/api/client"
 import { markThreadViewed } from "@/api/threads"
 
 export interface Thread {
@@ -27,6 +27,9 @@ export interface UiSlice {
   activeArtifactId: string | null
   threads: Thread[]
   threadsStatus: ThreadsStatus
+  // Actionable message when the user lost upstream (tenant) access to the
+  // workspace — distinct from a retryable outage. null in every other case.
+  threadsAccessLostMessage: string | null
   uiActions: {
     newThread: () => void
     selectThread: (id: string) => Promise<void>
@@ -46,6 +49,7 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
   activeArtifactId: null,
   threads: [],
   threadsStatus: "idle",
+  threadsAccessLostMessage: null,
   uiActions: {
     newThread: () => {
       set({ threadId: crypto.randomUUID(), activeArtifactId: null })
@@ -67,13 +71,23 @@ export const createUiSlice: StateCreator<UiSlice, [], [], UiSlice> = (set, get) 
       set({ threadsStatus: "loading" })
       try {
         const threads = await api.get<Thread[]>(`/api/workspaces/${workspaceId}/threads/`)
-        set({ threads, threadsStatus: "loaded" })
+        set({ threads, threadsStatus: "loaded", threadsAccessLostMessage: null })
       } catch (error) {
         // Distinguish an outage from genuinely-empty history (07#7): reporting
         // "loaded" with [] reads as "all conversations deleted" during a
         // DB/checkpointer blip. Keep shown threads and flag the error for retry.
         console.error("[Scout] Failed to load threads:", error)
-        set({ threadsStatus: "error" })
+        // Lost upstream tenant access is not retryable: show the server's
+        // actionable message instead of the generic "couldn't load" + retry.
+        const accessLost =
+          error instanceof ApiError &&
+          typeof error.body === "object" &&
+          error.body !== null &&
+          (error.body as { reason?: string }).reason === "tenant_access_lost"
+        set({
+          threadsStatus: "error",
+          threadsAccessLostMessage: accessLost ? error.message : null,
+        })
       }
     },
     updateThreadSharing: async (

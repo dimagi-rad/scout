@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
-import { api } from "@/api/client"
+import { ApiError, api } from "@/api/client"
 import type { Thread } from "@/store/uiSlice"
 
 function thread(id: string, title: string): Thread {
@@ -53,5 +53,32 @@ describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
 
     expect(useAppStore.getState().threadsStatus).toBe("loaded")
     expect(useAppStore.getState().threads).toEqual(fetched)
+    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
+  })
+
+  it("surfaces the server message when upstream tenant access was lost", async () => {
+    const message =
+      "You no longer have access to: skelly. " +
+      "Access may have been removed upstream — reconnect or ask an admin."
+    vi.spyOn(api, "get").mockRejectedValue(
+      new ApiError(403, message, {
+        error: message,
+        reason: "tenant_access_lost",
+        lost_tenants: ["skelly"],
+      }),
+    )
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsStatus).toBe("error")
+    expect(useAppStore.getState().threadsAccessLostMessage).toBe(message)
+  })
+
+  it("does not set an access-lost message for a generic outage", async () => {
+    vi.spyOn(api, "get").mockRejectedValue(new Error("503 Service Unavailable"))
+
+    await useAppStore.getState().uiActions.fetchThreads("ws-1")
+
+    expect(useAppStore.getState().threadsAccessLostMessage).toBeNull()
   })
 })

@@ -36,7 +36,7 @@ async function request<T>(
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
-    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText)
+    throw new ApiError(res.status, body.detail ?? body.error ?? res.statusText, body)
   }
 
   if (res.status === 204) {
@@ -48,11 +48,13 @@ async function request<T>(
 
 export class ApiError extends Error {
   status: number
+  body: unknown
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, body?: unknown) {
     super(message)
     this.name = "ApiError"
     this.status = status
+    this.body = body
   }
 }
 
