@@ -2,9 +2,11 @@
 Tests for OAuth token storage, encryption, retrieval, and refresh.
 """
 
+import logging
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
@@ -17,6 +19,7 @@ from django.utils import timezone
 
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.services.credential_resolver import _social_token_qs
+from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_token
 
 
 class TestTokenStorageSettings:
@@ -160,6 +163,71 @@ class TestTokenRefresh:
 
         with pytest.raises(TokenRefreshError):
             await refresh_oauth_token(social_token, token_url)
+
+    @pytest.mark.asyncio
+    async def test_refresh_400_logs_warning_not_error(self, httpx_mock, caplog):
+        """A 400 invalid_grant (dead token) is expected: WARNING, no exception log."""
+        token_url = "https://example.com/oauth/token/"
+        httpx_mock.add_response(
+            url=token_url,
+            method="POST",
+            status_code=400,
+            json={"error": "invalid_grant"},
+        )
+
+        social_token = MagicMock()
+        social_token.token_secret = "dead_refresh_token"
+        social_token.app.client_id = "client_123"
+        social_token.app.secret = "secret_456"
+
+        with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
+            with pytest.raises(TokenRefreshError):
+                await refresh_oauth_token(social_token, token_url)
+
+        records = [r for r in caplog.records if r.name == "apps.users.services.token_refresh"]
+        assert records, "expected a log record"
+        assert all(r.levelno == logging.WARNING for r in records)
+        assert not any(r.levelno >= logging.ERROR for r in records)
+        assert not any(r.exc_info for r in records)
+        assert "invalid_grant" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_refresh_500_logs_exception(self, httpx_mock, caplog):
+        """A 5xx is genuinely unexpected: keep exception-level logging."""
+        token_url = "https://example.com/oauth/token/"
+        httpx_mock.add_response(url=token_url, method="POST", status_code=503)
+
+        social_token = MagicMock()
+        social_token.token_secret = "old_refresh_token"
+        social_token.app.client_id = "client_123"
+        social_token.app.secret = "secret_456"
+
+        with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
+            with pytest.raises(TokenRefreshError):
+                await refresh_oauth_token(social_token, token_url)
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, "expected an ERROR/exception-level log record"
+        assert any(r.exc_info for r in error_records)
+
+    @pytest.mark.asyncio
+    async def test_refresh_network_error_logs_exception(self, httpx_mock, caplog):
+        """A network error is unexpected: keep exception-level logging."""
+        token_url = "https://example.com/oauth/token/"
+        httpx_mock.add_exception(httpx.ConnectError("connection refused"), url=token_url)
+
+        social_token = MagicMock()
+        social_token.token_secret = "old_refresh_token"
+        social_token.app.client_id = "client_123"
+        social_token.app.secret = "secret_456"
+
+        with caplog.at_level(logging.DEBUG, logger="apps.users.services.token_refresh"):
+            with pytest.raises(TokenRefreshError):
+                await refresh_oauth_token(social_token, token_url)
+
+        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_records, "expected an ERROR/exception-level log record"
+        assert any(r.exc_info for r in error_records)
 
     def test_token_needs_refresh_when_expiring_soon(self):
         from apps.users.services.token_refresh import token_needs_refresh

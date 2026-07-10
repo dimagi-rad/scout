@@ -86,6 +86,20 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
                 },
             )
             response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        # A 4xx (typically 400 invalid_grant on a dead refresh token) is an
+        # expected outcome, not a bug -- log at WARNING with the body so we can
+        # tell invalid_grant (dead token) from invalid_client (bad secret).
+        if 400 <= e.response.status_code < 500:
+            logger.warning(
+                "Token refresh rejected for app %s: HTTP %s %s",
+                social_token.app.client_id,
+                e.response.status_code,
+                e.response.text,
+            )
+        else:
+            logger.exception("Token refresh failed for app %s", social_token.app.client_id)
+        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
