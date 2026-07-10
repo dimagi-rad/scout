@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
 import { Check, ChevronDown, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { workspaceDataState, workspaceHasData } from "@/api/workspaces"
+import { workspaceDataState, workspaceHasData, workspaceHasAccess } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds, recordWorkspaceUse } from "@/lib/recentWorkspaces"
@@ -141,6 +141,25 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
   )
 }
 
+/** A workspace the user has lost upstream access to: shown for context but
+ *  not selectable — the only way in is the lost-access modal's guidance. */
+function LostAccessRow({ ws }: { ws: TenantMembership }) {
+  const { Icon } = getProviderMeta(firstProvider(ws))
+  return (
+    <div
+      data-testid={`domain-item-lost-${ws.id}`}
+      aria-disabled
+      title="You no longer have access to this workspace"
+      style={{ height: ROW_HEIGHT }}
+      className="flex w-full cursor-not-allowed items-center gap-2 rounded-sm px-2 text-left text-sm text-muted-foreground/50"
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="flex-1 truncate">{ws.display_name}</span>
+      <span className="shrink-0 text-xs">No access</span>
+    </div>
+  )
+}
+
 interface WorkspaceSwitcherProps {
   /**
    * Visual treatment of the popover trigger.
@@ -175,30 +194,35 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
 
+  // The active workspace may be an orphan reached by deep link, so look across
+  // ALL domains here. Everything else lists only workspaces the user can still
+  // access; lost-access ones surface in a separate, disabled section.
   const activeWorkspace = domains.find((d) => d.id === activeDomainId)
+  const accessible = useMemo(() => domains.filter(workspaceHasAccess), [domains])
+  const lost = useMemo(() => domains.filter((d) => !workspaceHasAccess(d)), [domains])
 
   // Providers present across the user's workspaces, ordered by count desc.
   const providers = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const ws of domains) {
+    for (const ws of accessible) {
       for (const p of new Set((ws.tenants ?? []).map((t) => t.provider))) {
         counts.set(p, (counts.get(p) ?? 0) + 1)
       }
     }
     return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([value, count]) => ({ value, count }))
-  }, [domains])
+  }, [accessible])
 
   // Segmented controls only earn their space when there's enough to navigate.
-  const showSegments = domains.length >= SEGMENT_MIN_WORKSPACES || providers.length > 1
+  const showSegments = accessible.length >= SEGMENT_MIN_WORKSPACES || providers.length > 1
 
   // Recent workspaces (newest first), filtered to ones the user still has.
   const recent = useMemo(() => {
-    const byId = new Map(domains.map((d) => [d.id, d]))
+    const byId = new Map(accessible.map((d) => [d.id, d]))
     return recentIds
       .map((id) => byId.get(id))
       .filter((d): d is TenantMembership => d != null)
       .slice(0, RECENT_LIMIT)
-  }, [domains, recentIds])
+  }, [accessible, recentIds])
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -210,13 +234,13 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     // When searching, ignore the Recent segment and search across everything.
     let base: TenantMembership[]
     if (q) {
-      base = domains
+      base = accessible
     } else if (segment === "recent") {
       base = recent
     } else if (segment === "all") {
-      base = domains
+      base = accessible
     } else {
-      base = domains.filter((ws) => hasProvider(ws, segment))
+      base = accessible.filter((ws) => hasProvider(ws, segment))
     }
 
     let list = base.filter(matchesSearch)
@@ -227,7 +251,20 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
       list = [...list].sort((a, b) => a.display_name.localeCompare(b.display_name))
     }
     return list
-  }, [domains, recent, search, segment, hasDataOnly])
+  }, [accessible, recent, search, segment, hasDataOnly])
+
+  // Lost-access workspaces matching the current search, shown disabled below.
+  const lostVisible = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const list = q
+      ? lost.filter(
+          (ws) =>
+            ws.display_name.toLowerCase().includes(q) ||
+            (ws.tenants ?? []).some((t) => t.tenant_name.toLowerCase().includes(q)),
+        )
+      : lost
+    return [...list].sort((a, b) => a.display_name.localeCompare(b.display_name))
+  }, [lost, search])
 
   function resetView() {
     setHighlight(0)
@@ -320,7 +357,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
   const segmentCount = (key: SegmentKey): number | null => {
     if (key === "recent") return recent.length || null
-    if (key === "all") return domains.length
+    if (key === "all") return accessible.length
     return providers.find((p) => p.value === key)?.count ?? null
   }
 
@@ -481,7 +518,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
             style={{ maxHeight: LIST_MAX_HEIGHT }}
             data-testid="workspace-list"
           >
-            {visible.length === 0 ? (
+            {visible.length === 0 && lostVisible.length === 0 ? (
               <p className="px-2 py-6 text-center text-sm text-muted-foreground">
                 {hasDataOnly
                   ? "No workspaces with data yet."
@@ -513,6 +550,15 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                     )
                   })}
                 </div>
+              </div>
+            )}
+
+            {lostVisible.length > 0 && (
+              <div data-testid="workspace-list-lost" className="mt-1 border-t pt-1">
+                <p className="px-2 py-1 text-xs font-medium text-muted-foreground/70">No access</p>
+                {lostVisible.map((ws) => (
+                  <LostAccessRow key={ws.id} ws={ws} />
+                ))}
               </div>
             )}
           </div>

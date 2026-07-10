@@ -4,6 +4,7 @@ import { Sidebar } from "@/components/Sidebar"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
 import { ArtifactPanel } from "@/components/ArtifactPanel/ArtifactPanel"
 import { OfflineBanner } from "@/components/OfflineBanner/OfflineBanner"
+import { LostAccessModal } from "@/components/LostAccessModal/LostAccessModal"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
 import { useAppStore } from "@/store/store"
 import { WorkspaceJobsProvider } from "@/contexts/WorkspaceJobsContext"
@@ -62,6 +63,7 @@ export function AppLayout() {
         </div>
         <ArtifactPanel />
         <OfflineBanner />
+        <LostAccessModal />
       </div>
     </WorkspaceJobsProvider>
   )

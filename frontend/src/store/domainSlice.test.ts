@@ -55,3 +55,45 @@ describe("domainSlice.ensureTenant — surfaces failure, not empty (07#6)", () =
     expect(useAppStore.getState().domainsError).toBeNull()
   })
 })
+
+describe("domainSlice.fetchDomains — default pick skips lost-access workspaces", () => {
+  beforeEach(() => {
+    useAppStore.setState({ activeDomainId: null, domains: [], domainsStatus: "idle" })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const ws = (id: string, has_access: boolean) => ({
+    id,
+    name: id,
+    display_name: id,
+    is_auto_created: false,
+    role: "manage",
+    tenants: [{ id: `t-${id}`, tenant_name: id, provider: "commcare" }],
+    has_access,
+    member_count: 1,
+    schema_status: "available",
+    last_synced_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+  })
+
+  it("defaults to the first accessible workspace, not an orphan listed first", async () => {
+    const { workspaceApi } = await import("@/api/workspaces")
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("skelly", false), ws("live", true)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("live")
+  })
+
+  it("falls back to the first workspace when none are accessible", async () => {
+    const { workspaceApi } = await import("@/api/workspaces")
+    vi.spyOn(workspaceApi, "list").mockResolvedValue([ws("skelly", false)] as never)
+
+    await useAppStore.getState().domainActions.fetchDomains()
+
+    expect(useAppStore.getState().activeDomainId).toBe("skelly")
+  })
+})

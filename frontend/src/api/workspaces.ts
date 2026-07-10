@@ -18,6 +18,10 @@ export interface WorkspaceListItem {
   is_auto_created: boolean
   role: "read" | "read_write" | "manage"
   tenants: WorkspaceListTenant[]
+  // Live upstream access. The server returns every membership (so orphaned
+  // workspaces stay addressable by URL) and flags the ones the user has lost
+  // tenant access to. Absent on older cached payloads — treat missing as true.
+  has_access?: boolean
   member_count: number
   schema_status: SchemaStatus
   last_synced_at: string | null
@@ -130,6 +134,15 @@ export function workspaceHasData(ws: {
   last_synced_at?: string | null
 }): boolean {
   return workspaceDataState(ws) === "ready"
+}
+
+/**
+ * Whether the user still has live upstream access to a workspace. The server
+ * omits `has_access` on older cached payloads; treat missing as accessible so a
+ * stale payload never locks the whole app behind the lost-access modal.
+ */
+export function workspaceHasAccess(ws: { has_access?: boolean }): boolean {
+  return ws.has_access !== false
 }
 
 // ── Workspace CRUD ─────────────────────────────────────────────────────────
