@@ -28,6 +28,9 @@ env:
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
+    # The semantic_query MCP tool runs apps.semantic's CubeClient in-process.
+    CUBE_API_URL: "http://scout-staging-cube:4000"
+    CUBE_VALIDATOR_URL: "http://scout-staging-cube:4010"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
@@ -35,6 +38,7 @@ env:
     - DJANGO_SECRET_KEY
     - SENTRY_DSN
     - MCP_SHARED_SECRET
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout
