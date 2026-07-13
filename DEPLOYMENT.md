@@ -203,6 +203,10 @@ driver so `kamal app logs` works directly.
    with each provider (CommCare, Connect, OCS, Google) — otherwise OAuth login
    fails on staging. `setup_oauth_apps` runs automatically for the staging domain
    in the API container's entrypoint.
+4. **Cube secret**: add `SCOUT_CUBEJS_API_SECRET` to AWS Secrets Manager
+   (us-east-1) — a random HS256 signing key shared by the API, worker, and the
+   `scout-staging-cube` service. Without it kamal cannot resolve `CUBEJS_API_SECRET`
+   and those containers fail to boot.
 
 ### Deploying (from the branch you want to test)
 
@@ -212,12 +216,14 @@ source .env.deploy && source config/staging.env
 
 # First time
 kamal setup -c config/deploy-staging-mcp.yml
+kamal setup -c config/deploy-staging-cube.yml
 kamal setup -c config/deploy-staging.yml
 kamal setup -c config/deploy-staging-worker.yml
 kamal setup -c config/deploy-staging-frontend.yml
 
 # Subsequent deploys
 kamal deploy -c config/deploy-staging-mcp.yml
+kamal deploy -c config/deploy-staging-cube.yml
 kamal deploy -c config/deploy-staging.yml
 kamal deploy -c config/deploy-staging-worker.yml
 kamal deploy -c config/deploy-staging-frontend.yml

@@ -28,6 +28,8 @@ env:
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
+    CUBE_API_URL: "http://scout-staging-cube:4000"
+    CUBE_VALIDATOR_URL: "http://scout-staging-cube:4010"
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
     SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
     DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
@@ -44,6 +46,7 @@ env:
     - MCP_SHARED_SECRET
     - AWS_SES_ACCESS_KEY_ID
     - AWS_SES_SECRET_ACCESS_KEY
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout

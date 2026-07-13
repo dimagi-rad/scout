@@ -1,0 +1,51 @@
+# Scout Cube semantic-query runtime — STAGING. Internal only, reached by the
+# staging API and worker at scout-staging-cube:4000 (query API) and :4010
+# (schema validator) on the scout_staging_shared network.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+service: scout-staging-cube
+
+image: scout/cube
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      # Distinct alias so a co-located prod cube stack cannot round-robin onto
+      # staging over the shared `kamal` network (see deploy-staging.yml header).
+      network: "scout_staging_shared"
+      network-alias: "scout-staging-cube"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    # DEV_MODE exposes the Cube playground and an unauthenticated /meta — keep it
+    # off outside local docker-compose.
+    CUBEJS_DEV_MODE: "false"
+    CUBEJS_TELEMETRY: "false"
+    CUBEJS_EXTERNAL_DEFAULT: "false"
+    CUBEJS_PRE_AGGREGATIONS_SCHEMA: "false"
+    CUBEJS_PORT: "4000"
+    CUBE_VALIDATOR_PORT: "4010"
+  secret:
+    # DATABASE_URL: reads active Cube YAML from semantic_cubeschema (staging DB).
+    # MANAGED_DATABASE_URL: the tenant data source Cube queries against.
+    # CUBEJS_API_SECRET: verifies the JWTs the API/worker sign per request.
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - CUBEJS_API_SECRET
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64
+  context: cube_config
+  dockerfile: Dockerfile

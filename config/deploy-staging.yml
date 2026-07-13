@@ -37,6 +37,8 @@ env:
     DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
     SECURE_SSL_REDIRECT: "False"
     MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
+    CUBE_API_URL: "http://scout-staging-cube:4000"
+    CUBE_VALIDATOR_URL: "http://scout-staging-cube:4010"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60
@@ -63,6 +65,7 @@ env:
     - SENTRY_DSN
     - TASKBADGER_API_KEY
     - MCP_SHARED_SECRET
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout
