@@ -41,7 +41,7 @@ env:
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
-    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
   secret:
     # DATABASE_URL resolves to the staging database via SCOUT_DB_NAME
     # (config/staging.env). No REDIS_URL — staging falls back to LocMemCache.

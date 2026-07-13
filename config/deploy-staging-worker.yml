@@ -26,7 +26,7 @@ env:
     DJANGO_SETTINGS_MODULE: config.settings.production
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
-    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
     SCOUT_BASE_URL: "https://scout-staging.dimagi.com"

@@ -26,7 +26,7 @@ env:
     DJANGO_SETTINGS_MODULE: config.settings.production
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
-    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     # Required by resume_thread_after_materialization → get_mcp_tools.
     # Without this the worker falls back to localhost:8100 and every resume
     # task fails with httpx.ConnectError.
