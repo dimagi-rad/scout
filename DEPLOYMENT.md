@@ -8,7 +8,7 @@ Pushes to `main` trigger an automated deployment via GitHub Actions.
 - **EC2** (t3.medium) — runs all containers via Docker/Kamal
 - **RDS PostgreSQL 16** — platform database (password managed by AWS Secrets Manager)
 - **ElastiCache Redis 7** — caching and Celery broker
-- **ECR** — Docker image registry (scout/api, scout/mcp, scout/frontend)
+- **ECR** — Docker image registry (scout/api, scout/mcp, scout/frontend, scout/cube)
 - **GitHub OIDC** — keyless authentication for CI/CD (no long-lived IAM keys)
 
 All infrastructure is defined in `infra/scout-stack.yml` (CloudFormation) and deployed
@@ -207,6 +207,12 @@ driver so `kamal app logs` works directly.
    (us-east-1) — a random HS256 signing key shared by the API, worker, and the
    `scout-staging-cube` service. Without it kamal cannot resolve `CUBEJS_API_SECRET`
    and those containers fail to boot.
+5. **Cube ECR repo**: the cube image needs its own repository (the others already
+   exist):
+   ```bash
+   aws ecr create-repository --repository-name scout/cube \
+     --region us-east-1 --profile scout
+   ```
 
 ### Deploying (from the branch you want to test)
 
