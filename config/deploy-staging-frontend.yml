@@ -14,7 +14,7 @@ servers:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
       network: "scout_staging_shared"
-      network-alias: "scout-frontend-web"
+      network-alias: "scout-staging-frontend-web"
 
 registry:
   server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
@@ -28,9 +28,10 @@ builder:
   arch: amd64
   dockerfile: Dockerfile.frontend
   args:
-    # Same conf as prod: nginx proxies to "scout-web" / "scout-mcp-web", which
-    # resolve to the staging API/MCP within scout_staging_shared.
-    NGINX_CONF: frontend/nginx.prod-kamal.conf
+    # Staging-specific conf: proxies to "scout-staging-web" so it resolves to the
+    # staging API, not prod's. A shared alias would collide on the `kamal` network
+    # (see nginx.staging-kamal.conf header and deploy-staging.yml).
+    NGINX_CONF: frontend/nginx.staging-kamal.conf
 
 env:
   clear:
