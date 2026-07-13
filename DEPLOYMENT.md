@@ -173,6 +173,63 @@ hidden source maps, uploads them to Sentry tagged with the release (git SHA), th
 deletes them from `dist/` so they don't ship to browsers. The auth token is passed as a
 BuildKit secret (`--secret id=sentry_auth_token`) and never lands in an image layer.
 
+## Second environment (staging)
+
+A staging environment (`scout-staging.dimagi.com`) runs **co-located on the
+production EC2 host** for testing branches. It reuses every AWS Secrets Manager
+value, the ECR repos, and the RDS *instance* — but has **its own database**
+(`agent_platform_staging`) and its own Docker network (`scout_staging_shared`),
+so its data and internal services are isolated from production. Config lives in
+`config/deploy-staging*.yml` and is deployed manually (not from CI).
+
+Notes: it runs the API with 2 uvicorn workers (not 4) and no Redis (LocMemCache)
+to limit its footprint on the shared t3.medium, and uses Docker's `json-file` log
+driver so `kamal app logs` works directly.
+
+### One-time setup
+
+1. **Create the database** on the existing RDS instance (uses the prod master
+   role; run from a machine with AWS access):
+   ```bash
+   source .env.deploy
+   DATABASE_URL=$(SCOUT_DB_NAME=postgres ./scripts/resolve-database-url.sh)
+   psql "$DATABASE_URL" -c "CREATE DATABASE agent_platform_staging;"
+   ```
+2. **DNS**: add an A record `scout-staging.dimagi.com` → the EC2 Elastic IP
+   (`SCOUT_EC2_IP` in `.env.deploy`). Kamal's proxy issues the TLS cert once the
+   record resolves.
+3. **OAuth**: the staging host reuses the production OAuth client IDs, so register
+   its callback URLs (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`)
+   with each provider (CommCare, Connect, OCS, Google) — otherwise OAuth login
+   fails on staging. `setup_oauth_apps` runs automatically for the staging domain
+   in the API container's entrypoint.
+
+### Deploying (from the branch you want to test)
+
+```bash
+git checkout codex/semantic-model-work
+source .env.deploy && source config/staging.env
+
+# First time
+kamal setup -c config/deploy-staging-mcp.yml
+kamal setup -c config/deploy-staging.yml
+kamal setup -c config/deploy-staging-worker.yml
+kamal setup -c config/deploy-staging-frontend.yml
+
+# Subsequent deploys
+kamal deploy -c config/deploy-staging-mcp.yml
+kamal deploy -c config/deploy-staging.yml
+kamal deploy -c config/deploy-staging-worker.yml
+kamal deploy -c config/deploy-staging-frontend.yml
+```
+
+Migrations run automatically against the staging database when the API container
+starts. Logs: `kamal app logs -c config/deploy-staging.yml`.
+
+> Always `source config/staging.env` before staging commands — it points
+> `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
+> would deploy staging containers against the **production** database.
+
 ## Manual Deployment
 
 For deploying from your local machine (e.g., debugging or first-time setup):

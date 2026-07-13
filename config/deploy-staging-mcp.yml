@@ -1,0 +1,43 @@
+# Scout MCP Server — STAGING. Internal only, reached by the staging API at
+# scout-mcp-web:8100 on the scout_staging_shared network.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+service: scout-staging-mcp
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-mcp-web"
+    cmd: "python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8100"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    SENTRY_ENVIRONMENT: "staging"
+    SENTRY_TRACES_SAMPLE_RATE: "0.1"
+    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+  secret:
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - DB_CREDENTIAL_KEY
+    - DJANGO_SECRET_KEY
+    - SENTRY_DSN
+    - MCP_SHARED_SECRET
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64
