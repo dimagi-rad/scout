@@ -5,11 +5,20 @@ echo "Ensuring Docker networks exist on remote server..."
 
 SSH_USER="scout"
 
+# Use the dedicated deploy key if it exists; otherwise fall back to the ssh-agent
+# (same mechanism Kamal itself uses when no key file is present).
+SSH_KEY="${SCOUT_DEPLOY_KEY:-$HOME/.ssh/scout-deploy.pem}"
+if [ -f "$SSH_KEY" ]; then
+  KEY_OPTS=(-o IdentitiesOnly=yes -i "$SSH_KEY")
+else
+  KEY_OPTS=()
+fi
+
 # scout_shared: production. scout_staging_shared: the co-located staging stack.
 # Each stack keeps identical internal aliases (scout-web, scout-mcp-web) on its
 # own network, so the frontend nginx conf and MCP_SERVER_URL are shared verbatim.
 for net in scout_shared scout_staging_shared; do
-  ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/scout-deploy.pem "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net}"
+  ssh -o StrictHostKeyChecking=no "${KEY_OPTS[@]}" "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net}"
 done
 
 echo "Network setup complete"
