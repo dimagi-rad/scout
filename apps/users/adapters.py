@@ -71,6 +71,17 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
                 data["token_secret"] = self.decrypt_token(data["token_secret"])
         return super().deserialize_instance(model, data)
 
+    def get_connect_redirect_url(self, request, socialaccount):
+        """Redirect to the SPA after connecting a social account to an existing user.
+
+        The stock implementation reverses ``socialaccount_connections`` — the HTML
+        connection-management view, which Scout's narrowed allauth URL surface
+        deliberately omits (see apps/users/allauth_urls.py). Without this override,
+        connecting a provider to an already-logged-in account raises NoReverseMatch.
+        The SPA owns account management, so send the user back to its root.
+        """
+        return settings.LOGIN_REDIRECT_URL
+
     def pre_social_login(self, request, sociallogin):
         """Reject OAuth logins whose email is not in the per-provider allow-list.
 

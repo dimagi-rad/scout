@@ -41,6 +41,18 @@ def _make_sociallogin(provider: str, email: str) -> SocialLogin:
     return sociallogin
 
 
+class TestConnectRedirectUrl:
+    """The connect flow must not reverse the omitted socialaccount_connections view."""
+
+    def test_connect_redirect_points_at_spa(self):
+        """Connecting a provider to a logged-in user redirects to the SPA root
+        rather than the HTML connections view the narrowed URL surface omits."""
+        adapter = EncryptingSocialAccountAdapter()
+        account = SocialAccount(provider="commcare", uid="test-uid")
+        url = adapter.get_connect_redirect_url(_make_request(), account)
+        assert url == settings.LOGIN_REDIRECT_URL
+
+
 class TestPreSocialLoginEnforcement:
     """Test the adapter's pre_social_login domain-restriction logic."""
 
