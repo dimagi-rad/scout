@@ -1,0 +1,52 @@
+# Scout Procrastinate Worker — STAGING. No HTTP interface. Its task queue is
+# the staging PostgreSQL database, so it is isolated from production's worker.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+service: scout-staging-worker
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_staging_shared"
+    cmd: "python manage.py procrastinate worker"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    SENTRY_ENVIRONMENT: "staging"
+    SENTRY_TRACES_SAMPLE_RATE: "0.1"
+    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
+    DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
+  secret:
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - DJANGO_SECRET_KEY
+    - DB_CREDENTIAL_KEY
+    - SENTRY_DSN
+    - ANTHROPIC_API_KEY
+    - LANGFUSE_SECRET_KEY
+    - LANGFUSE_PUBLIC_KEY
+    - TASKBADGER_API_KEY
+    - MCP_SHARED_SECRET
+    - AWS_SES_ACCESS_KEY_ID
+    - AWS_SES_SECRET_ACCESS_KEY
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64

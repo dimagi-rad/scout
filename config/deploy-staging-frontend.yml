@@ -1,0 +1,47 @@
+# Scout Frontend — STAGING. Sole public entry point for the staging host.
+# Shares the host's single kamal-proxy with production; routing is by hostname
+# (scout-staging.dimagi.com vs scout.dimagi.com), so both get their own cert.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+service: scout-staging-frontend
+
+image: scout/frontend
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-frontend-web"
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64
+  dockerfile: Dockerfile.frontend
+  args:
+    # Same conf as prod: nginx proxies to "scout-web" / "scout-mcp-web", which
+    # resolve to the staging API/MCP within scout_staging_shared.
+    NGINX_CONF: frontend/nginx.prod-kamal.conf
+
+env:
+  clear:
+    EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
+
+proxy:
+  host: scout-staging.dimagi.com
+  app_port: 3000
+  ssl: true
+  forward_headers: true
+  healthcheck:
+    interval: 5
+    path: /
+    timeout: 3
