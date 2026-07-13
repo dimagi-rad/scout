@@ -26,9 +26,11 @@ registry:
 
 env:
   clear:
-    # DEV_MODE exposes the Cube playground and an unauthenticated /meta — keep it
-    # off outside local docker-compose.
-    CUBEJS_DEV_MODE: "false"
+    # DEV_MODE is on so Cube uses its in-memory queue/cache instead of requiring a
+    # separate Cube Store cluster. Safe here only because staging Cube is internal
+    # (proxy:false, scout_staging_shared network) — never expose this port publicly.
+    # Prod should run Cube Store with DEV_MODE off instead.
+    CUBEJS_DEV_MODE: "true"
     CUBEJS_TELEMETRY: "false"
     CUBEJS_EXTERNAL_DEFAULT: "false"
     CUBEJS_PRE_AGGREGATIONS_SCHEMA: "false"
