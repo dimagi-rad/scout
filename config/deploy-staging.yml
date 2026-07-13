@@ -13,10 +13,12 @@ servers:
     hosts:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
-      # Own Docker network so the identical internal aliases below resolve to
-      # the staging containers, not production's.
+      # Distinct alias from prod's scout-web: Kamal 2 applies --network-alias on
+      # the shared `kamal` network, so reusing prod's alias round-robins traffic
+      # across both stacks (a scout.dimagi.com request hitting staging 400s on
+      # ALLOWED_HOSTS). The scout_staging_shared network alone does not isolate.
       network: "scout_staging_shared"
-      network-alias: "scout-web"
+      network-alias: "scout-staging-web"
     # Fewer workers than prod (4): staging shares the t3.medium with production.
     cmd: "uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 2 --timeout-keep-alive 120 --lifespan off --no-access-log"
     proxy: false
@@ -34,7 +36,7 @@ env:
     SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
     DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
     SECURE_SSL_REDIRECT: "False"
-    MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60

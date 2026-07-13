@@ -1,5 +1,5 @@
 # Scout MCP Server — STAGING. Internal only, reached by the staging API at
-# scout-mcp-web:8100 on the scout_staging_shared network.
+# scout-staging-mcp-web:8100 on the scout_staging_shared network.
 #
 # Requires: source .env.deploy && source config/staging.env
 
@@ -13,7 +13,7 @@ servers:
       - <%= ENV.fetch('SCOUT_EC2_IP') %>
     options:
       network: "scout_staging_shared"
-      network-alias: "scout-mcp-web"
+      network-alias: "scout-staging-mcp-web"
     cmd: "python -m mcp_server --transport streamable-http --host 0.0.0.0 --port 8100"
     proxy: false
 
