@@ -1428,11 +1428,19 @@ def _run_server(args: argparse.Namespace) -> None:
     if args.transport == "streamable-http":
         mcp.settings.host = args.host
         mcp.settings.port = args.port
-        # Allow internal Docker network hostname in addition to loopback defaults.
-        # The MCP server is internal-only; DNS rebinding protection is still on.
+        # Allow the internal Docker network hostnames in addition to loopback
+        # defaults. The MCP server is internal-only; DNS rebinding protection is
+        # still on. One image serves both stacks, so both aliases are listed:
+        # scout-mcp-web (prod) and scout-staging-mcp-web (co-located staging).
         mcp.settings.transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
+            allowed_hosts=[
+                "127.0.0.1:*",
+                "localhost:*",
+                "[::1]:*",
+                "scout-mcp-web:*",
+                "scout-staging-mcp-web:*",
+            ],
         )
 
     mcp.run(transport=args.transport)
