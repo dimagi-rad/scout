@@ -1,0 +1,72 @@
+# Scout Django API — STAGING (second environment, co-located on the prod EC2)
+# Internal only (no proxy) — reached via nginx in the staging frontend container.
+#
+# Requires: source .env.deploy && source config/staging.env
+# See DEPLOYMENT.md → "Second environment (staging)".
+
+service: scout-staging
+
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      # Own Docker network so the identical internal aliases below resolve to
+      # the staging containers, not production's.
+      network: "scout_staging_shared"
+      network-alias: "scout-web"
+    # Fewer workers than prod (4): staging shares the t3.medium with production.
+    cmd: "uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 2 --timeout-keep-alive 120 --lifespan off --no-access-log"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    DJANGO_ALLOWED_HOSTS: "scout-staging.dimagi.com"
+    CSRF_TRUSTED_ORIGINS: "https://scout-staging.dimagi.com"
+    SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
+    DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
+    SECURE_SSL_REDIRECT: "False"
+    MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
+    MAX_CONNECTIONS_PER_PROJECT: 5
+    MAX_QUERIES_PER_MINUTE: 60
+    LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    SENTRY_ENVIRONMENT: "staging"
+    SENTRY_TRACES_SAMPLE_RATE: "0.1"
+    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+  secret:
+    # DATABASE_URL resolves to the staging database via SCOUT_DB_NAME
+    # (config/staging.env). No REDIS_URL — staging falls back to LocMemCache.
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - DJANGO_SECRET_KEY
+    - DB_CREDENTIAL_KEY
+    - ANTHROPIC_API_KEY
+    - LANGFUSE_SECRET_KEY
+    - LANGFUSE_PUBLIC_KEY
+    - COMMCARE_OAUTH_CLIENT_ID
+    - COMMCARE_OAUTH_CLIENT_SECRET
+    - CONNECT_OAUTH_CLIENT_ID
+    - CONNECT_OAUTH_CLIENT_SECRET
+    - OCS_OAUTH_CLIENT_ID
+    - OCS_OAUTH_CLIENT_SECRET
+    - SENTRY_DSN
+    - TASKBADGER_API_KEY
+    - MCP_SHARED_SECRET
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64
+
+# No awslogs block: staging uses Docker's json-file driver so `kamal app logs
+# -c config/deploy-staging.yml` works directly for debugging.

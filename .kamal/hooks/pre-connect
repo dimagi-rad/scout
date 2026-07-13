@@ -1,10 +1,15 @@
 #!/bin/bash
 # Ensure shared Docker network exists before any service deploys
 
-echo "Ensuring Docker network 'scout_shared' exists on remote server..."
+echo "Ensuring Docker networks exist on remote server..."
 
 SSH_USER="scout"
 
-ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/scout-deploy.pem "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect scout_shared >/dev/null 2>&1 || docker network create scout_shared"
+# scout_shared: production. scout_staging_shared: the co-located staging stack.
+# Each stack keeps identical internal aliases (scout-web, scout-mcp-web) on its
+# own network, so the frontend nginx conf and MCP_SERVER_URL are shared verbatim.
+for net in scout_shared scout_staging_shared; do
+  ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/scout-deploy.pem "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net}"
+done
 
 echo "Network setup complete"
