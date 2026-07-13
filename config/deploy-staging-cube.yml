@@ -47,5 +47,7 @@ ssh:
 
 builder:
   arch: amd64
+  # dockerfile is resolved from the repo root; context is the build dir the
+  # Dockerfile's COPY paths are relative to.
   context: cube_config
-  dockerfile: Dockerfile
+  dockerfile: cube_config/Dockerfile
