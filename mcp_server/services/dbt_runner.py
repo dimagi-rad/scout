@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml
 from dbt.cli.main import dbtRunner
@@ -58,12 +58,17 @@ def generate_profiles_yml(
             ``None`` the ``role`` key is omitted (dbt connects as the URL user).
     """
     parsed = urlparse(db_url)
+    # urlparse leaves username/password percent-encoded; resolve-database-url.sh
+    # URL-encodes the RDS-managed password (which rotates to values with special
+    # chars). psycopg/Django decode automatically, but dbt receives whatever we
+    # write here verbatim, so decode to match — otherwise auth fails whenever the
+    # password contains an encoded char (SCOUT-DJANGO-1T).
     output = {
         "type": "postgres",
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 5432,
-        "user": parsed.username or "",
-        "password": parsed.password or "",
+        "user": unquote(parsed.username) if parsed.username else "",
+        "password": unquote(parsed.password) if parsed.password else "",
         "dbname": parsed.path.lstrip("/") if parsed.path else "",
         "schema": schema_name,
         # Confine resolution to the target schema only — see docstring.
