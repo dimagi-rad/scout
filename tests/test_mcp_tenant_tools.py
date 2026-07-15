@@ -22,9 +22,23 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.catalog import CatalogTable, TableDescription
 from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
+
+
+def _catalog_table(name, *, type="source", description="", row_count=None, materialized_at=None):
+    return CatalogTable(
+        name=name,
+        type=type,
+        logical_name=name,
+        description=description,
+        row_count=row_count,
+        materialized_at=materialized_at,
+        verified=True,
+    )
+
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -227,7 +241,7 @@ class TestExecuteAsyncParameterized:
 # list_tables tool handler
 # ---------------------------------------------------------------------------
 
-PATCH_PIPELINE_LIST_TABLES = "mcp_server.server.pipeline_list_tables"
+PATCH_PIPELINE_LIST_TABLES = "mcp_server.server.list_catalog"
 
 
 def _fake_sync_to_async(fn):
@@ -251,20 +265,19 @@ class TestListTablesTool:
         mock_run = MagicMock()
         mock_run.pipeline = "commcare_sync"
         mock_tables = [
-            {
-                "name": "cases",
-                "type": "table",
-                "description": "CommCare cases",
-                "materialized_row_count": 100,
-                "row_count_verified": False,
-                "materialized_at": "2026-02-24T10:00:00Z",
-            }
+            _catalog_table(
+                "cases",
+                description="CommCare cases",
+                row_count=100,
+                materialized_at="2026-02-24T10:00:00Z",
+            )
         ]
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch(PATCH_RESOLVE_PIPELINE, new=AsyncMock(return_value=MagicMock())),
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=mock_tables),
         ):
@@ -288,21 +301,18 @@ class TestListTablesTool:
         from mcp_server.server import list_tables
 
         mock_ts = MagicMock()
-        mock_tenant = MagicMock()
-        mock_tenant.provider = "commcare"
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
+            patch(PATCH_RESOLVE_PIPELINE, new=AsyncMock(return_value=MagicMock())),
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
         ):
             mock_ctx.return_value = tenant_context
             mock_vs_cls.objects.filter.return_value.aexists = AsyncMock(return_value=False)
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tenant_cls.objects.aget = AsyncMock(return_value=mock_tenant)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -347,7 +357,13 @@ class TestListTablesTool:
 # describe_table tool handler
 # ---------------------------------------------------------------------------
 
-PATCH_PIPELINE_DESCRIBE_TABLE = "mcp_server.server.pipeline_describe_table"
+PATCH_PIPELINE_DESCRIBE_TABLE = "mcp_server.server.describe"
+# Pipeline resolution and the TenantMetadata read moved into apps-owned service
+# helpers (arch #251, Phase 4); the tool references them via these names in the
+# server module, so mocks are repointed here (was mcp_server.server.TenantMetadata
+# / mcp_server.server.Tenant).
+PATCH_RESOLVE_PIPELINE = "mcp_server.server.aresolve_pipeline_config"
+PATCH_TENANT_METADATA = "mcp_server.server.aget_tenant_metadata"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -359,10 +375,10 @@ class TestDescribeTableTool:
         mock_ts.tenant_membership = MagicMock()
         mock_run = MagicMock()
         mock_run.pipeline = "commcare_sync"
-        mock_table = {
-            "name": "cases",
-            "description": "CommCare case records",
-            "columns": [
+        mock_table = TableDescription(
+            name="cases",
+            description="CommCare case records",
+            columns=[
                 {
                     "name": "case_id",
                     "type": "text",
@@ -378,18 +394,18 @@ class TestDescribeTableTool:
                     "description": "Contains case properties. Available case types: pregnancy",
                 },
             ],
-        }
+        )
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch(PATCH_TENANT_METADATA, new=AsyncMock(return_value=MagicMock())),
+            patch(PATCH_RESOLVE_PIPELINE, new=AsyncMock(return_value=MagicMock())),
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=mock_table),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -407,21 +423,17 @@ class TestDescribeTableTool:
 
         mock_ts = MagicMock()
         mock_ts.tenant_membership = MagicMock()
-        mock_tenant = MagicMock()
-        mock_tenant.provider = "commcare"
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch(PATCH_TENANT_METADATA, new=AsyncMock(return_value=None)),
+            patch(PATCH_RESOLVE_PIPELINE, new=AsyncMock(return_value=MagicMock())),
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tenant_cls.objects.aget = AsyncMock(return_value=mock_tenant)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -447,7 +459,7 @@ class TestDescribeTableTool:
 # get_metadata tool handler
 # ---------------------------------------------------------------------------
 
-PATCH_PIPELINE_GET_METADATA = "mcp_server.server.pipeline_get_metadata"
+PATCH_PIPELINE_GET_METADATA = "mcp_server.server.catalog_metadata"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -489,13 +501,13 @@ class TestGetMetadataTool:
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch(PATCH_TENANT_METADATA, new=AsyncMock(return_value=MagicMock())),
+            patch(PATCH_RESOLVE_PIPELINE, new=AsyncMock(return_value=MagicMock())),
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_GET_METADATA, return_value=mock_result),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -509,11 +521,18 @@ class TestGetMetadataTool:
         assert len(result["data"]["relationships"]) == 1
 
     async def test_returns_empty_when_no_active_schema(self, tenant_id, tenant_context):
+        # ts is None means a multi-tenant ws_* view schema. The catalog reads that
+        # schema directly (the ws_* lookup-miss fix); here it yields no tables, so
+        # table_count is 0 without the old early-return that ignored ws_* columns.
         from mcp_server.server import get_metadata
 
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
+            patch(
+                PATCH_PIPELINE_GET_METADATA,
+                new=AsyncMock(return_value={"tables": {}, "relationships": []}),
+            ),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)

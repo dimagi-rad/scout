@@ -8,7 +8,6 @@ from django.test import Client
 from django.utils import timezone
 
 from apps.users.models import Tenant
-from apps.workspaces.api.workspace_views import _derive_schema_status
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -18,6 +17,7 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
+from apps.workspaces.services.world_state import _derive_status as _derive_schema_status
 
 
 @pytest.fixture

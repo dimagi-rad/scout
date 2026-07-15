@@ -35,17 +35,29 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from apps.chat.models import Thread, ThreadJob
 from apps.transformations.services.lineage import aget_lineage_chain
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     Workspace,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.catalog import (
+    CatalogContext,
+    catalog_metadata,
+    describe,
+    list_catalog,
+    to_tool_dict,
+)
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    aresolve_pipeline_config,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
+from apps.workspaces.services.world_state import derive_world_state
 from apps.workspaces.tasks import materialize_workspace
 from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
@@ -53,6 +65,7 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
     NOT_FOUND,
+    PIPELINE_UNRESOLVED,
     SCHEMA_BUILD_FAILED,
     VALIDATION_ERROR,
     error_response,
@@ -60,12 +73,6 @@ from mcp_server.envelope import (
     tool_context,
 )
 from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.metadata import (
-    pipeline_describe_table,
-    pipeline_get_metadata,
-    pipeline_list_tables,
-    workspace_list_tables,
-)
 from mcp_server.services.query import execute_query
 
 logger = logging.getLogger(__name__)
@@ -78,29 +85,6 @@ async def _resolve_mcp_context(workspace_id: str):
     if not workspace_id:
         raise ValueError("workspace_id is required")
     return await load_workspace_context(workspace_id)
-
-
-async def _resolve_pipeline_config(ts, last_run):
-    """Pick the right PipelineConfig for a TenantSchema.
-
-    Prefers the last run's pipeline, then the tenant provider's, then
-    ``commcare_sync`` (preserves historical behavior).
-
-    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``); we
-    can't infer a tenant-specific pipeline there, so fall back to commcare_sync
-    (per-tenant routing happens at load time, not metadata-describe time).
-    """
-    registry = get_registry()
-    if last_run:
-        cfg = registry.get(last_run.pipeline)
-        if cfg:
-            return cfg
-    if ts is not None:
-        tenant = await Tenant.objects.aget(id=ts.tenant_id)
-        cfg = registry.get_by_provider(tenant.provider)
-        if cfg:
-            return cfg
-    return registry.get("commcare_sync")
 
 
 @mcp.tool()
@@ -125,13 +109,20 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             return tc["result"]
 
         # Multi-tenant workspaces point at a WorkspaceViewSchema (namespaced
-        # views): use information_schema directly instead of MaterializationRun.
+        # views): the catalog reconciles them from information_schema directly.
         if workspace_id:
             is_view_schema = await WorkspaceViewSchema.objects.filter(
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
             ).aexists()
             if is_view_schema:
-                tables = await workspace_list_tables(ctx)
+                catalog_ctx = CatalogContext(
+                    query_context=ctx,
+                    is_view_schema=True,
+                    tenant_schema=None,
+                    pipeline_config=None,
+                    workspace_id=workspace_id,
+                )
+                tables = [to_tool_dict(t) for t in await list_catalog(catalog_ctx)]
                 tc["result"] = success_response(
                     {"tables": tables, "note": None},
                     schema=ctx.schema_name,
@@ -159,9 +150,21 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             .order_by("-completed_at")
             .afirst()
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await aresolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as e:
+            tc["result"] = error_response(PIPELINE_UNRESOLVED, str(e))
+            return tc["result"]
 
-        tables = await pipeline_list_tables(ts, pipeline_config)
+        catalog_ctx = CatalogContext(
+            query_context=ctx,
+            is_view_schema=False,
+            tenant_schema=ts,
+            pipeline_config=pipeline_config,
+            tenant_ids=[ts.tenant_id],
+            workspace_id=workspace_id or None,
+        )
+        tables = [to_tool_dict(t) for t in await list_catalog(catalog_ctx)]
 
         note = (
             "No completed materialization run found. Run run_materialization to load data."
@@ -204,6 +207,7 @@ async def describe_table(
 
         last_run = None
         tenant_metadata = None
+        pipeline_config = None
         if ts is not None:
             last_run = (
                 await MaterializationRun.objects.filter(
@@ -216,13 +220,25 @@ async def describe_table(
                 .order_by("-completed_at")
                 .afirst()
             )
-            tenant_metadata = await TenantMetadata.objects.filter(
-                tenant_membership__tenant_id=ts.tenant_id
-            ).afirst()
+            tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
+            try:
+                pipeline_config = await aresolve_pipeline_config(ts, last_run)
+            except PipelineResolutionError as e:
+                tc["result"] = error_response(PIPELINE_UNRESOLVED, str(e))
+                return tc["result"]
 
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
-
-        table = await pipeline_describe_table(table_name, ctx, tenant_metadata, pipeline_config)
+        # ts is None only for a multi-tenant ws_* view schema, where no single
+        # tenant pipeline exists to infer: pass None and let describe read columns
+        # from information_schema directly.
+        catalog_ctx = CatalogContext(
+            query_context=ctx,
+            is_view_schema=ts is None,
+            tenant_schema=ts,
+            pipeline_config=pipeline_config,
+            tenant_ids=[ts.tenant_id] if ts is not None else [],
+            workspace_id=workspace_id or None,
+        )
+        table = await describe(catalog_ctx, table_name, tenant_metadata)
         if table is None:
             tc["result"] = error_response(
                 NOT_FOUND, f"Table '{table_name}' not found in schema '{ctx.schema_name}'"
@@ -230,7 +246,7 @@ async def describe_table(
             return tc["result"]
 
         tc["result"] = success_response(
-            table,
+            table.as_dict(),
             schema=ctx.schema_name,
             timing_ms=tc["timer"].elapsed_ms,
         )
@@ -259,32 +275,43 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             return tc["result"]
 
         ts = await TenantSchema.objects.filter(schema_name=ctx.schema_name).afirst()
-        if ts is None:
-            tc["result"] = success_response(
-                {"schema": ctx.schema_name, "table_count": 0, "tables": {}, "relationships": []},
-                schema=ctx.schema_name,
-                timing_ms=tc["timer"].elapsed_ms,
-            )
-            return tc["result"]
 
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema=ts,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
+        last_run = None
+        tenant_metadata = None
+        pipeline_config = None
+        if ts is not None:
+            last_run = (
+                await MaterializationRun.objects.filter(
+                    tenant_schema=ts,
+                    state__in=[
+                        MaterializationRun.RunState.COMPLETED,
+                        MaterializationRun.RunState.PARTIAL,
+                    ],
+                )
+                .order_by("-completed_at")
+                .afirst()
             )
-            .order_by("-completed_at")
-            .afirst()
+            tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
+            try:
+                pipeline_config = await aresolve_pipeline_config(ts, last_run)
+            except PipelineResolutionError as e:
+                tc["result"] = error_response(PIPELINE_UNRESOLVED, str(e))
+                return tc["result"]
+
+        # ts is None here only for a multi-tenant ws_* view schema (an
+        # unprovisioned workspace raises in _resolve_mcp_context above). The
+        # catalog reads columns from the ws_* information_schema directly, so
+        # multi-tenant get_metadata now returns real tables/columns instead of
+        # the old table_count=0 (the ws_* lookup-miss fix).
+        catalog_ctx = CatalogContext(
+            query_context=ctx,
+            is_view_schema=ts is None,
+            tenant_schema=ts,
+            pipeline_config=pipeline_config,
+            tenant_ids=[ts.tenant_id] if ts is not None else [],
+            workspace_id=workspace_id or None,
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
-
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant_id=ts.tenant_id
-        ).afirst()
-
-        metadata = await pipeline_get_metadata(ts, ctx, tenant_metadata, pipeline_config)
+        metadata = await catalog_metadata(catalog_ctx, tenant_metadata)
 
         tc["result"] = success_response(
             {
@@ -784,112 +811,123 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = not_provisioned
             return tc["result"]
 
+        # Canonical world-state read-model (arch #251): drives status,
+        # last_materialized_at, and the in-progress predicate so this tool tells
+        # the same story as the status API and the prompt builders.
+        world = await derive_world_state(workspace)
+        last_materialized_at = world.last_synced_at.isoformat() if world.last_synced_at else None
+
         if tenant_count == 1:
             tenant = await workspace.tenants.afirst()
             ts = await TenantSchema.objects.filter(
                 tenant=tenant,
-                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+                state=SchemaState.ACTIVE,
             ).afirst()
 
-            if ts is None:
+            # Usable iff an ACTIVE schema exists OR a (re)build is running — the
+            # same in-progress predicate the status API and prompt use, so this
+            # tool can't report not_provisioned while a run is in flight.
+            if ts is None and not world.in_progress:
                 tc["result"] = not_provisioned
                 return tc["result"]
 
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
-            )
-
-            last_materialized_at = None
-            tables = []
-            if last_run:
-                if last_run.completed_at:
-                    last_materialized_at = last_run.completed_at.isoformat()
-                result_data = last_run.result or {}
-                if "tables" in result_data:
-                    tables = result_data["tables"]
-                elif "table" in result_data and "rows_loaded" in result_data:
-                    tables = [
-                        {"name": result_data["table"], "row_count": result_data["rows_loaded"]}
-                    ]
+            tables: list = []
+            schema_name = ""
+            if ts is not None:
+                schema_name = ts.schema_name
+                # The canonical reconciled catalog (arch #251, Phase 3): same
+                # source-of-truth, fail-closed reconciliation, and stg_* policy the
+                # status API, prompt, MCP list_tables, and DRF dictionary use, so
+                # this tool tells the same story. An unresolvable pipeline degrades
+                # to an empty table list rather than erroring — this status tool's
+                # contract is "always succeeds" (the world_state story stays truthful).
+                try:
+                    pipeline_config = await aresolve_pipeline_config(ts, None)
+                    catalog_ctx = CatalogContext(
+                        query_context=None,
+                        is_view_schema=False,
+                        tenant_schema=ts,
+                        pipeline_config=pipeline_config,
+                        tenant_ids=[ts.tenant_id],
+                        workspace_id=str(workspace_id),
+                    )
+                    tables = [to_tool_dict(t) for t in await list_catalog(catalog_ctx)]
+                except PipelineResolutionError:
+                    logger.warning(
+                        "get_schema_status: no pipeline resolved for schema %s; "
+                        "returning status without a table list",
+                        ts.schema_name,
+                    )
 
             tc["result"] = success_response(
                 {
                     "exists": True,
-                    "state": ts.state,
+                    "state": world.status,
                     "last_materialized_at": last_materialized_at,
                     "tables": tables,
                 },
-                schema=ts.schema_name,
+                schema=schema_name,
             )
             return tc["result"]
 
         # Multi-tenant: WorkspaceViewSchema + per-tenant materialization.
-        vs = await WorkspaceViewSchema.objects.filter(
-            workspace_id=workspace_id,
-            state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-        ).afirst()
-
-        if vs is None:
-            # No usable view schema. Distinguish a genuine never-built state
-            # from a FAILED build: the latter means the per-tenant data loaded
-            # but the workspace query layer could not be assembled, which the
-            # agent must surface (and must NOT mistake for "just run
-            # materialization"). Additive fields only — shape stays compatible.
+        if world.status == "failed":
+            # A FAILED view schema means the per-tenant data loaded but the
+            # workspace query layer could not be assembled. Return a TOP-LEVEL
+            # error envelope (success=False), not a success-on-failure carrying
+            # ``data.error`` (arch #246, 13#6): the latter is mis-classified as a
+            # success by both the rich cards and the agent (the "agent told
+            # completed" class), so the agent must surface this build failure, not
+            # silently treat the workspace as queryable or invite a pointless re-run.
             failed_vs = await WorkspaceViewSchema.objects.filter(
                 workspace_id=workspace_id,
                 state=SchemaState.FAILED,
             ).afirst()
-            if failed_vs is not None:
-                # Return a TOP-LEVEL error envelope (success=False), not a
-                # success envelope carrying ``data.error`` (arch #246, 13#6).
-                # A success-on-failure is mis-classified as success by both the
-                # rich cards and the agent (the "agent told completed" class):
-                # the agent must surface this build failure, not silently treat
-                # the workspace as queryable or invite a pointless re-run.
-                tc["result"] = error_response(
-                    SCHEMA_BUILD_FAILED,
-                    "The workspace view schema failed to build.",
-                    detail=failed_vs.last_error or "View schema build failed.",
-                )
-                return tc["result"]
+            tc["result"] = error_response(
+                SCHEMA_BUILD_FAILED,
+                "The workspace view schema failed to build.",
+                detail=(
+                    world.last_error
+                    or (failed_vs.last_error if failed_vs else None)
+                    or "View schema build failed."
+                ),
+            )
+            return tc["result"]
+
+        active_vs = await WorkspaceViewSchema.objects.filter(
+            workspace_id=workspace_id,
+            state=SchemaState.ACTIVE,
+        ).afirst()
+
+        # Usable iff an ACTIVE view schema exists OR a rebuild is in progress
+        # (aligned with derive_world_state, so a rebuild window is never reported
+        # as not_provisioned).
+        if active_vs is None and not world.in_progress:
             tc["result"] = not_provisioned
             return tc["result"]
 
-        tenant_ids = [t.id async for t in workspace.tenants.all()]
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema__tenant_id__in=tenant_ids,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
+        tables = []
+        schema_name = ""
+        if active_vs is not None:
+            schema_name = active_vs.schema_name
+            ctx = await _resolve_mcp_context(workspace_id)
+            catalog_ctx = CatalogContext(
+                query_context=ctx,
+                is_view_schema=True,
+                tenant_schema=None,
+                pipeline_config=None,
+                workspace_id=str(workspace_id),
             )
-            .order_by("-completed_at")
-            .afirst()
-        )
-        last_materialized_at = None
-        if last_run and last_run.completed_at:
-            last_materialized_at = last_run.completed_at.isoformat()
-
-        ctx = await _resolve_mcp_context(workspace_id)
-        tables = await workspace_list_tables(ctx)
+            tables = [to_tool_dict(t) for t in await list_catalog(catalog_ctx)]
 
         tc["result"] = success_response(
             {
                 "exists": True,
-                "state": vs.state,
+                "state": world.status,
                 "last_materialized_at": last_materialized_at,
                 "tables": tables,
             },
-            schema=vs.schema_name,
+            schema=schema_name,
         )
         return tc["result"]
 

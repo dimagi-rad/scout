@@ -11,10 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
-from django.db import models
 
-from apps.transformations.models import TransformationAsset
-from apps.transformations.services.lineage import aget_terminal_assets
 from apps.workspaces.models import MaterializationRun
 from mcp_server.context import QueryContext, _parse_db_url
 from mcp_server.pipeline_registry import PipelineConfig
@@ -88,22 +85,6 @@ async def pipeline_list_tables(
                 "type": "table",
                 "description": source_descriptions.get(source_name, ""),
                 "materialized_row_count": source_data.get("rows"),
-                "row_count_verified": False,
-                "materialized_at": materialized_at,
-            }
-        )
-
-    for model_name in pipeline_config.dbt_models:
-        if live_table_names and model_name not in live_table_names:
-            # If we were able to query information_schema, only surface dbt
-            # models that physically exist; otherwise list them optimistically.
-            continue
-        tables.append(
-            {
-                "name": model_name,
-                "type": "table",
-                "description": "",
-                "materialized_row_count": None,
                 "row_count_verified": False,
                 "materialized_at": materialized_at,
             }
@@ -264,92 +245,3 @@ def _build_jsonb_annotations(
             return {"form_data": f"Contains form submission data. Available forms: {form_names}"}
 
     return {}
-
-
-async def transformation_aware_list_tables(
-    tenant_schema: TenantSchema,
-    pipeline_config: PipelineConfig,
-    tenant_ids: list,
-    workspace_id=None,
-) -> list[dict]:
-    """List tables combining raw sources with terminal transformation assets.
-
-    If TransformationAsset records exist for the tenant, terminal models
-    replace their upstream tables in the listing. Otherwise falls back
-    to the standard pipeline_list_tables behavior.
-    """
-    terminal_assets = await aget_terminal_assets(tenant_ids, workspace_id)
-
-    if not terminal_assets:
-        return await pipeline_list_tables(tenant_schema, pipeline_config)
-
-    # Walk replaces-chains scoped to visible assets — prevents cross-tenant disclosure.
-    visible_q = models.Q(tenant_id__in=tenant_ids)
-    if workspace_id:
-        visible_q = visible_q | models.Q(workspace_id=workspace_id)
-
-    replaced_names = set()
-    for asset in terminal_assets:
-        next_id = asset.replaces_id
-        visited = set()
-        while next_id and next_id not in visited:
-            visited.add(next_id)
-            upstream = await TransformationAsset.objects.filter(visible_q, id=next_id).afirst()
-            if upstream is None:
-                break
-            replaced_names.add(upstream.name)
-            next_id = upstream.replaces_id
-
-    raw_tables = await pipeline_list_tables(tenant_schema, pipeline_config)
-    terminal_names = {asset.name for asset in terminal_assets}
-    result = [
-        t for t in raw_tables if t["name"] not in replaced_names and t["name"] not in terminal_names
-    ]
-
-    for asset in terminal_assets:
-        result.append(
-            {
-                "name": asset.name,
-                "type": "table",
-                "description": asset.description,
-                "materialized_row_count": None,
-                "row_count_verified": False,
-                "materialized_at": None,
-            }
-        )
-
-    return result
-
-
-async def pipeline_get_metadata(
-    tenant_schema: TenantSchema,
-    ctx: QueryContext,
-    tenant_metadata: TenantMetadata | None,
-    pipeline_config: PipelineConfig,
-) -> dict:
-    """Return full metadata snapshot: tables with enriched columns and pipeline relationships.
-
-    Returns {"tables": {}, "relationships": []} if no completed run exists.
-    """
-    tables_list = await pipeline_list_tables(tenant_schema, pipeline_config)
-    if not tables_list:
-        return {"tables": {}, "relationships": []}
-
-    tables = {}
-    for t in tables_list:
-        detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
-        if detail:
-            tables[t["name"]] = detail
-
-    relationships = [
-        {
-            "from_table": r.from_table,
-            "from_column": r.from_column,
-            "to_table": r.to_table,
-            "to_column": r.to_column,
-            "description": r.description,
-        }
-        for r in pipeline_config.relationships
-    ]
-
-    return {"tables": tables, "relationships": relationships}

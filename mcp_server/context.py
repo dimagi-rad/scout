@@ -63,7 +63,7 @@ async def load_tenant_context(tenant_id: str, provider: str) -> QueryContext:
     ts = await TenantSchema.objects.filter(
         tenant__external_id=tenant_id,
         tenant__provider=provider,
-        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+        state=SchemaState.ACTIVE,
     ).afirst()
 
     if ts is None:
