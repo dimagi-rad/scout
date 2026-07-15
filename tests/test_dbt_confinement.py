@@ -173,6 +173,42 @@ def test_generated_staging_model_resolves_raw_cases(confinement_schemas, setting
 
 
 @pytest.mark.django_db(transaction=True)
+def test_readonly_role_can_read_dbt_materialized_table(confinement_schemas, managed_conn):
+    """The ``_ro`` query role can SELECT a table dbt materialized under the ``_dbt``
+    confinement role.
+
+    Regression for the prod ``permission denied for table stg_visits`` error: since
+    issue #241 dbt owns the tables it creates, so the CURRENT_USER default-privilege
+    grant never reached them and the ``_ro`` role (used by the MCP query path via
+    ``SET ROLE``) could not read freshly materialized staging tables.
+    """
+    attacker_schema, _, attacker_tenant = confinement_schemas
+
+    TransformationAsset.objects.create(
+        name="stg_case_patient",
+        scope=TransformationScope.SYSTEM,
+        tenant=attacker_tenant,
+        sql_content="SELECT case_id, case_type FROM raw_cases WHERE case_type = 'patient'",
+    )
+    run = run_transformation_pipeline(tenant=attacker_tenant, schema_name=attacker_schema)
+    assert run.status == TransformationRunStatus.COMPLETED, run.error_message
+
+    ro_role = f"{attacker_schema}_ro"
+    cur = managed_conn.cursor()
+    cur.execute(psycopg.sql.SQL("SET ROLE {}").format(psycopg.sql.Identifier(ro_role)))
+    try:
+        cur.execute(
+            psycopg.sql.SQL("SELECT count(*) FROM {}.stg_case_patient").format(
+                psycopg.sql.Identifier(attacker_schema)
+            )
+        )
+        assert cur.fetchone()[0] == 1
+    finally:
+        managed_conn.rollback()
+        cur.execute("RESET ROLE")
+
+
+@pytest.mark.django_db(transaction=True)
 def test_cross_tenant_asset_cannot_materialize(confinement_schemas):
     """A SYSTEM asset whose free-text SQL reaches into ANOTHER tenant's schema
     cannot materialize: dbt runs it under the confinement role, which lacks USAGE
