@@ -7,7 +7,7 @@ from allauth.account.models import EmailAddress
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db.models import Count, OuterRef, Subquery
+from django.db.models import Count
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -25,16 +25,12 @@ from apps.users.services.tenant_resolution import (
 from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
 from apps.workspaces.models import (
     LIVE_INVITE_STATUSES,
-    MaterializationRun,
-    SchemaState,
-    TenantSchema,
     Workspace,
     WorkspaceInvite,
     WorkspaceInviteStatus,
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
-    WorkspaceViewSchema,
     default_invite_expiry,
 )
 from apps.workspaces.services.invite_notifications import (
@@ -42,6 +38,7 @@ from apps.workspaces.services.invite_notifications import (
     notify_awaiting_access,
     send_pending_invite_email,
 )
+from apps.workspaces.services.world_state import WorldState, derive_world_state
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
 logger = logging.getLogger(__name__)
@@ -136,74 +133,10 @@ def _upsert_invite(workspace, email, role, invited_by, new_status):
     )
 
 
-def _derive_schema_status(tenant_count, active_count, provisioning, view_schema_state):
-    """Derive a workspace's schema status, shared by the list and detail endpoints
-    so they never drift. Returns "available" | "provisioning" | "unavailable" | "failed".
-
-    - Single-tenant: available iff every tenant is ACTIVE; provisioning if any is
-      mid-provisioning; else unavailable.
-    - Multi-tenant: tracked by the view schema — ACTIVE ⇒ available, FAILED ⇒
-      failed (per-tenant data may have loaded but there's no queryable surface),
-      else provisioning.
-    """
-    if tenant_count > 1:
-        if view_schema_state == SchemaState.ACTIVE:
-            return "available"
-        if view_schema_state == SchemaState.FAILED:
-            return "failed"
-        return "provisioning"
-
-    if active_count == tenant_count and tenant_count > 0:
-        return "available"
-    if provisioning:
-        return "provisioning"
-    return "unavailable"
-
-
-def _schema_status_for_workspaces(workspaces):
-    """Compute schema_status for many workspaces with bulk queries (no N+1).
-
-    ``workspaces`` must have ``workspace_tenants__tenant`` prefetched. Returns a
-    dict mapping workspace id -> status string.
-    """
-    workspace_ids = [w.id for w in workspaces]
-    if not workspace_ids:
-        return {}
-
-    # All tenant ids across these workspaces.
-    tenant_ids = {wt.tenant_id for w in workspaces for wt in w.workspace_tenants.all()}
-
-    # Per-tenant schema states (one bulk query).
-    active_tenants = set()
-    provisioning_tenants = set()
-    if tenant_ids:
-        for tenant_id, state in TenantSchema.objects.filter(tenant_id__in=tenant_ids).values_list(
-            "tenant_id", "state"
-        ):
-            if state == SchemaState.ACTIVE:
-                active_tenants.add(tenant_id)
-            elif state in (SchemaState.PROVISIONING, SchemaState.MATERIALIZING):
-                provisioning_tenants.add(tenant_id)
-
-    # Multi-tenant workspaces' view schema states (one bulk query).
-    view_states = dict(
-        WorkspaceViewSchema.objects.filter(workspace_id__in=workspace_ids).values_list(
-            "workspace_id", "state"
-        )
-    )
-
-    statuses = {}
-    for w in workspaces:
-        ws_tenant_ids = [wt.tenant_id for wt in w.workspace_tenants.all()]
-        active_count = sum(1 for tid in ws_tenant_ids if tid in active_tenants)
-        provisioning = any(tid in provisioning_tenants for tid in ws_tenant_ids)
-        statuses[w.id] = _derive_schema_status(
-            tenant_count=len(ws_tenant_ids),
-            active_count=active_count,
-            provisioning=provisioning,
-            view_schema_state=view_states.get(w.id),
-        )
-    return statuses
+async def _world_states_for(workspaces) -> dict:
+    """Canonical WorldState per workspace, keyed by workspace id. The single
+    derivation both the list and detail endpoints share (arch #251)."""
+    return {w.id: await derive_world_state(w) for w in workspaces}
 
 
 class WorkspaceListView(APIView):
@@ -215,26 +148,14 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        latest_run = (
-            MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
-                tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
-            )
-            .order_by("-completed_at")
-            .values("completed_at")[:1]
-        )
-
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
             .prefetch_related("workspace__workspace_tenants__tenant")
-            .annotate(
-                member_count=Count("workspace__memberships", distinct=True),
-                last_synced_at=Subquery(latest_run),
-            )
+            .annotate(member_count=Count("workspace__memberships", distinct=True))
         )
         memberships = list(memberships)
-        schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
+        world_states = async_to_sync(_world_states_for)([m.workspace for m in memberships])
 
         # Bulk live-access check, one query for the whole list. A workspace is
         # accessible iff it has no tenants OR the user shares a live tenant with
@@ -257,6 +178,8 @@ class WorkspaceListView(APIView):
             ]
             ws_tenant_ids = [wt.tenant_id for wt in m.workspace.workspace_tenants.all()]
             has_access = not ws_tenant_ids or bool(set(ws_tenant_ids) & user_live_tenant_ids)
+            ws_state = world_states.get(m.workspace.id)
+            last_synced = ws_state.last_synced_at if ws_state else None
             results.append(
                 {
                     "id": str(m.workspace.id),
@@ -267,8 +190,8 @@ class WorkspaceListView(APIView):
                     "tenants": tenants,
                     "has_access": has_access,
                     "member_count": m.member_count,
-                    "schema_status": schema_statuses.get(m.workspace.id, "unavailable"),
-                    "last_synced_at": (m.last_synced_at.isoformat() if m.last_synced_at else None),
+                    "schema_status": ws_state.status if ws_state else "unavailable",
+                    "last_synced_at": (last_synced.isoformat() if last_synced else None),
                     "created_at": m.workspace.created_at.isoformat(),
                 }
             )
@@ -352,38 +275,8 @@ class WorkspaceDetailView(APIView):
             return err
 
         tenants = list(workspace.tenants.all())
-        active_schemas = TenantSchema.objects.filter(
-            tenant__in=tenants, state=SchemaState.ACTIVE
-        ).count()
-        provisioning = TenantSchema.objects.filter(
-            tenant__in=tenants,
-            state__in=[SchemaState.PROVISIONING, SchemaState.MATERIALIZING],
-        ).exists()
-
-        view_schema_state = None
-        if len(tenants) > 1:
-            try:
-                view_schema_state = workspace.view_schema.state
-            except WorkspaceViewSchema.DoesNotExist:
-                view_schema_state = None
-
-        schema_status = _derive_schema_status(
-            tenant_count=len(tenants),
-            active_count=active_schemas,
-            provisioning=provisioning,
-            view_schema_state=view_schema_state,
-        )
-
-        latest_completed = (
-            MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
-                tenant_schema__tenant__in=tenants,
-            )
-            .order_by("-completed_at")
-            .values_list("completed_at", flat=True)
-            .first()
-        )
-        last_synced_at = latest_completed.isoformat() if latest_completed else None
+        ws_state: WorldState = async_to_sync(derive_world_state)(workspace)
+        last_synced_at = ws_state.last_synced_at.isoformat() if ws_state.last_synced_at else None
 
         first_tenant = tenants[0] if tenants else None
         display_name = (
@@ -397,7 +290,7 @@ class WorkspaceDetailView(APIView):
                 "is_auto_created": workspace.is_auto_created,
                 "role": membership.role,
                 "system_prompt": workspace.system_prompt,
-                "schema_status": schema_status,
+                "schema_status": ws_state.status,
                 "tenant_count": len(tenants),
                 "member_count": workspace.memberships.count(),
                 "created_at": workspace.created_at.isoformat(),
@@ -686,8 +579,10 @@ class WorkspaceInviteDetailView(APIView):
         try:
             invite = WorkspaceInvite.objects.get(id=invite_id, workspace=workspace)
         except WorkspaceInvite.DoesNotExist:
-            return None, None, Response(
-                {"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND
+            return (
+                None,
+                None,
+                Response({"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND),
             )
         return workspace, invite, None
 
@@ -724,9 +619,9 @@ class MyInvitesView(APIView):
     def get(self, request):
         emails = {
             e.lower()
-            for e in EmailAddress.objects.filter(
-                user=request.user, verified=True
-            ).values_list("email", flat=True)
+            for e in EmailAddress.objects.filter(user=request.user, verified=True).values_list(
+                "email", flat=True
+            )
         }
         if request.user.email:
             emails.add(request.user.email.lower())
