@@ -88,19 +88,33 @@ def _statement_resources(stmt: dict) -> list:
     return [resource] if isinstance(resource, str) else resource
 
 
-def test_batch_get_secret_value_not_account_wide():
-    """kamal fetches secrets with BatchGetSecretValue; it must not be on '*'.
-
-    Granting BatchGetSecretValue on Resource '*' lets the CI role batch-read
-    every secret in the account. kamal passes an explicit --secret-id-list, so
-    per-secret authorization against the scout-namespaced prefixes is sufficient
-    (arch 10#9).
+def test_batch_get_secret_value_is_account_wide():
+    """kamal's aws_secrets_manager adapter fetches secrets with a name *filter*,
+    not --secret-id-list, so IAM only authorizes BatchGetSecretValue against
+    Resource '*' — a prefix-scoped resource is denied outright (PR #335,
+    correcting the arch 10#9 assumption this test used to encode). Actual
+    secret *values* stay gated by the still-scoped GetSecretValue statement
+    (see test_get_secret_value_scoped_to_scout_prefixes below), so this does
+    not widen what the role can read — only the batch/list action.
     """
     statements = _statements_for_action("secretsmanager:BatchGetSecretValue")
     assert statements, "expected a BatchGetSecretValue statement (kamal uses it to fetch secrets)"
     for stmt in statements:
+        assert _statement_resources(stmt) == ["*"], (
+            "secretsmanager:BatchGetSecretValue must be granted on Resource '*' — "
+            "kamal's adapter uses a name filter, which IAM only authorizes against '*' "
+            "(arch 10#9, corrected by PR #335)."
+        )
+
+
+def test_get_secret_value_scoped_to_scout_prefixes():
+    """GetSecretValue — the action that actually returns secret material — must
+    stay scoped to the scout-namespaced prefixes the deploy reads, even though
+    BatchGetSecretValue (above) is necessarily Resource '*'.
+    """
+    for stmt in _statements_for_action("secretsmanager:GetSecretValue"):
         assert "*" not in _statement_resources(stmt), (
-            "secretsmanager:BatchGetSecretValue must not be granted on Resource '*' — "
+            "secretsmanager:GetSecretValue must not be granted on Resource '*' — "
             "scope it to the scout-namespaced secret prefixes the deploy fetches (arch 10#9)."
         )
 

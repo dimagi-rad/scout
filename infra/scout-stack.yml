@@ -509,19 +509,16 @@ Resources:
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:COMMCARE_*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:CONNECT_*'
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:OCS_*'
-              # `kamal secrets fetch` calls BatchGetSecretValue with an explicit
-              # --secret-id-list, so per-secret authorization against these
-              # prefixes is enough — no need for the account-wide Resource '*'
-              # this replaces (arch 10#9). The RDS secret is read via
-              # GetSecretValue above, not batched, so it is not listed here.
+              # `kamal secrets fetch` calls BatchGetSecretValue with a name
+              # *filter*, not --secret-id-list, so IAM authorizes the action
+              # against Resource '*' — prefix-scoped resources are denied
+              # ("no identity-based policy allows the action"). Resource must be
+              # '*' here; the secret *values* stay gated by the prefix-scoped
+              # GetSecretValue above, so this does not widen what can be read.
               - Effect: Allow
                 Action:
                   - secretsmanager:BatchGetSecretValue
-                Resource:
-                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:SCOUT_*'
-                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:COMMCARE_*'
-                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:CONNECT_*'
-                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:OCS_*'
+                Resource: '*'
 
   # ── Observability / detection layer (arch #257, finding 08#7) ────
   # The stack previously created log groups but NOTHING converted a dead
