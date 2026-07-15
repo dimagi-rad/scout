@@ -403,11 +403,18 @@ class SchemaManager:
 
             view_role = readonly_role_name(view_schema_name)
 
-            # The _ro role is reused across rebuilds; revoke grants on tenants no
-            # longer in the workspace, else a removed tenant's data stays reachable
-            # (issue #244).
-            current_schemas = {view_schema_name} | {s for s, _ in tenant_schemas}
-            self._revoke_stale_view_role_grants(cursor, view_role, current_schemas)
+            # The view role needs access to the view schema ONLY. The views are
+            # owned by CURRENT_USER and created with plain CREATE VIEW (no
+            # security_invoker), so reads through them resolve the underlying
+            # tenant tables with the OWNER's privileges — the view role never
+            # touches the raw tenant schemas directly. Granting it USAGE/SELECT
+            # there was therefore unnecessary and widened cross-tenant reach (a
+            # SET ROLE {view_role} session could read raw tenant tables), and the
+            # tenant-schema default-ACL entries it left behind blocked DROP ROLE
+            # at teardown. Revoke any such grants left by earlier versions by
+            # scoping the "keep" set to the view schema alone (issue #244 cleanup
+            # of removed tenants still holds — they're revoked here too).
+            self._revoke_stale_view_role_grants(cursor, view_role, {view_schema_name})
 
             # ALTER DEFAULT PRIVILEGES only covers future tables, not the views
             # just created — grant SELECT on them explicitly.
@@ -417,21 +424,6 @@ class SchemaManager:
                     psycopg.sql.Identifier(view_role),
                 )
             )
-
-            # Views reference the constituent tenant schemas directly.
-            for tenant_schema_name, _ in tenant_schemas:
-                cursor.execute(
-                    psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                        psycopg.sql.Identifier(tenant_schema_name),
-                        psycopg.sql.Identifier(view_role),
-                    )
-                )
-                cursor.execute(
-                    psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
-                        psycopg.sql.Identifier(tenant_schema_name),
-                        psycopg.sql.Identifier(view_role),
-                    )
-                )
 
             cursor.close()
         except Exception as exc:
@@ -562,6 +554,20 @@ class SchemaManager:
         WHERE r.rolname = %s
     """
 
+    # Finds (schema, owning-role) pairs where the role is a grantee in a schema's
+    # DEFAULT PRIVILEGES. These pg_default_acl entries also survive DROP SCHEMA
+    # CASCADE (the schema they target may be a *different* one that still exists)
+    # and, like direct ACLs, block DROP ROLE. Earlier versions set such entries on
+    # the constituent tenant schemas for the workspace view role.
+    _SCHEMAS_WITH_ROLE_DEFAULT_ACLS_SQL = """
+        SELECT DISTINCT n.nspname, pg_get_userbyid(d.defaclrole) AS owner_role
+        FROM pg_default_acl d
+        JOIN pg_namespace n ON n.oid = d.defaclnamespace
+        CROSS JOIN aclexplode(d.defaclacl) AS acl
+        JOIN pg_roles r ON r.oid = acl.grantee
+        WHERE r.rolname = %s AND d.defaclobjtype = 'r'
+    """
+
     async def _adrop_readonly_role(self, cursor, schema_name: str) -> None:
         """Async version of _drop_readonly_role."""
         role_name = readonly_role_name(schema_name)
@@ -579,6 +585,18 @@ class SchemaManager:
             )
             await cursor.execute(
                 psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+        await cursor.execute(self._SCHEMAS_WITH_ROLE_DEFAULT_ACLS_SQL, (role_name,))
+        for schema, owner_role in await cursor.fetchall():
+            await cursor.execute(
+                psycopg.sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
+                    "REVOKE ALL ON TABLES FROM {}"
+                ).format(
+                    psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
                     psycopg.sql.Identifier(role_name),
                 )
@@ -611,6 +629,18 @@ class SchemaManager:
             )
             cursor.execute(
                 psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+        cursor.execute(self._SCHEMAS_WITH_ROLE_DEFAULT_ACLS_SQL, (role_name,))
+        for schema, owner_role in cursor.fetchall():
+            cursor.execute(
+                psycopg.sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
+                    "REVOKE ALL ON TABLES FROM {}"
+                ).format(
+                    psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
                     psycopg.sql.Identifier(role_name),
                 )
