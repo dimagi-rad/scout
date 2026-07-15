@@ -101,11 +101,11 @@ class TestHeadlessMode:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_headless_no_data_prompt_is_blocking_not_resume(self, tenant, user):
+    async def test_headless_no_data_prompt_is_blocking_not_resume(self, workspace, tenant, user):
         from apps.agents.graph.base import _fetch_schema_context
 
-        interactive = await _fetch_schema_context(tenant, user, interactive=True)
-        headless = await _fetch_schema_context(tenant, user, interactive=False)
+        interactive = await _fetch_schema_context(workspace, tenant, user, interactive=True)
+        headless = await _fetch_schema_context(workspace, tenant, user, interactive=False)
 
         assert "run_materialization" in headless
         # Interactive tells the agent to end its turn and wait for an async resume.
@@ -117,18 +117,29 @@ class TestHeadlessMode:
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
     async def test_headless_in_progress_prompt_does_not_trigger_second_materialization(
-        self, tenant, user
+        self, workspace, tenant, user
     ):
         """When a materialization is already in progress, the headless prompt
         must NOT tell the agent "no data loaded → call run_materialization" (that
-        starts a 2nd parallel run). It gets distinct in-progress guidance."""
-        from apps.agents.graph.base import _fetch_schema_context
-        from apps.workspaces.models import SchemaState, TenantSchema
+        starts a 2nd parallel run). It gets distinct in-progress guidance.
 
-        await TenantSchema.objects.acreate(
-            tenant=tenant, schema_name="t_inprog", state=SchemaState.MATERIALIZING
+        In-progress is keyed off a MaterializationRun in ACTIVE_STATES (arch #251,
+        the ONE definition) — SchemaState.MATERIALIZING is a dead state.
+        """
+        from apps.agents.graph.base import _fetch_schema_context
+        from apps.workspaces.models import (
+            MaterializationRun,
+            SchemaState,
+            TenantSchema,
         )
-        msg = await _fetch_schema_context(tenant, user, interactive=False)
+
+        ts = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="t_inprog", state=SchemaState.PROVISIONING
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=ts, pipeline="commcare", state=MaterializationRun.RunState.LOADING
+        )
+        msg = await _fetch_schema_context(workspace, tenant, user, interactive=False)
 
         assert "run_materialization" in msg  # still the only path to data, headless
         assert "no data has been loaded" not in msg.lower()  # would imply "start one"

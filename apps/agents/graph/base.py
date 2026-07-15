@@ -30,19 +30,22 @@ from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
 from apps.workspaces.models import (
-    MaterializationRun,
     SchemaState,
     TenantSchema,
-    WorkspaceViewSchema,
 )
+from apps.workspaces.services.catalog import (
+    CatalogContext,
+    describe,
+    list_catalog,
+    to_tool_dict,
+)
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    select_pipeline_config,
+)
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
+from apps.workspaces.services.world_state import derive_world_state
 from mcp_server.context import load_tenant_context, load_workspace_context
-from mcp_server.pipeline_registry import get_registry
-from mcp_server.services.metadata import (
-    pipeline_describe_table,
-    pipeline_list_tables,
-    transformation_aware_list_tables,
-    workspace_list_tables,
-)
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -190,7 +193,9 @@ _SYSTEM_PROMPT_TTL = 60  # short, to limit staleness from knowledge/schema chang
 def _system_prompt_cache_key(workspace, user, interactive: bool = True) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
-    user.id: _fetch_schema_context scopes TenantMetadata lookup per-user.
+    user.id: retained as a defensive cache dimension. The prompt no longer varies
+    by user post-Phase 4 (TenantMetadata is read tenant-wide, not per-user), but
+    keying on it costs only cache entries, never correctness.
     system_prompt hash: edits invalidate immediately.
     interactive: materialization guidance differs (fire-and-resume vs blocking).
     """
@@ -284,24 +289,32 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 )
 
 
-async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
+async def _fetch_schema_context(workspace, tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
-    Tries to build a full schema block (tables + columns). Falls back to a compact
-    block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
+    The status story (loaded / in-progress / not-ready) is driven by the canonical
+    ``derive_world_state`` read-model (arch #251) so this prompt agrees with the
+    status API and the MCP ``get_schema_status`` tool. Tries to build a full schema
+    block (tables + columns), falling back to a compact block (tables + row counts
+    only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
 
     ``interactive`` selects the materialization guidance: fire-and-resume (chat)
     vs blocking (headless recipe runs).
     """
-    ts = await TenantSchema.objects.filter(
-        tenant=tenant,
-        state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-    ).afirst()
+    world = await derive_world_state(workspace)
 
-    registry = get_registry()
-    pipeline_config = registry.get_by_provider(tenant.provider)
+    if world.in_progress:
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        return (
+            "A materialization is already in progress in the background. Do NOT "
+            "trigger another one and do NOT call other data tools (the data is "
+            "not yet ready). Briefly tell the user it's still loading and end "
+            "your turn — the system will resume the conversation automatically "
+            "when the current materialization completes."
+        )
 
-    if ts is None:
+    if world.status != "available":
         if not interactive:
             return _HEADLESS_MATERIALIZE_GUIDANCE
         # No `pipeline=` arg: run_materialization's LLM-facing schema is empty
@@ -315,52 +328,77 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
             "conversation automatically when materialization completes."
         )
 
-    if ts.state == SchemaState.MATERIALIZING:
-        if not interactive:
-            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools (the data is "
-            "not yet ready). Briefly tell the user it's still loading and end "
-            "your turn — the system will resume the conversation automatically "
-            "when the current materialization completes."
-        )
-
-    if pipeline_config is None:
-        pipeline_config = registry.get("commcare_sync")
-
-    # transformation-aware listing prefers terminal models over replaced ones
-    from apps.transformations.services.lineage import aget_terminal_assets
-
-    terminal_assets = await aget_terminal_assets(tenant_ids=[tenant.id])
-
-    if terminal_assets:
-        tables = await transformation_aware_list_tables(ts, pipeline_config, tenant_ids=[tenant.id])
-    else:
-        tables = await pipeline_list_tables(ts, pipeline_config)
-
-    if not tables:
+    ts = await TenantSchema.objects.filter(
+        tenant=tenant,
+        state=SchemaState.ACTIVE,
+    ).afirst()
+    if ts is None:
         return "Data is loaded but no tables are available yet. The materialization may still be completing."
 
-    last_materialized_at = tables[0].get("materialized_at") if tables else None
+    # Canonical pipeline resolution (arch #251, Phase 4 / #256): no silent
+    # commcare_sync fallback for a non-commcare tenant. If the provider has no
+    # pipeline (e.g. a broken deploy), degrade the prompt truthfully instead of
+    # advertising wrong-provider tables.
+    try:
+        pipeline_config = select_pipeline_config(None, tenant.provider)
+    except PipelineResolutionError:
+        logger.warning(
+            "No pipeline resolved for tenant %s (provider=%s); omitting schema block",
+            tenant.external_id,
+            tenant.provider,
+        )
+        return (
+            "Data is loaded, but the materialization pipeline for this workspace "
+            "could not be resolved, so the table list is unavailable."
+        )
+
+    # Canonical reconciled catalog (arch #251, Phase 3): same source-of-truth,
+    # fail-closed reconciliation, and stg_* policy as the MCP tools and DRF
+    # dictionary, so the prompt can no longer name a table list_tables omits.
+    catalog_ctx = CatalogContext(
+        query_context=None,
+        is_view_schema=False,
+        tenant_schema=ts,
+        pipeline_config=pipeline_config,
+        tenant_ids=[tenant.id],
+        workspace_id=str(workspace.id),
+    )
+    catalog_tables = await list_catalog(catalog_ctx)
+
+    if not catalog_tables:
+        return "Data is loaded but no tables are available yet. The materialization may still be completing."
+
+    has_transforms = any(t.type == "transform" for t in catalog_tables)
+    tables = [to_tool_dict(t) for t in catalog_tables]
+
+    last_materialized_at = world.last_synced_at.isoformat() if world.last_synced_at else None
 
     try:
         ctx = await load_tenant_context(tenant.external_id, tenant.provider)
-        from apps.workspaces.models import TenantMetadata
+        # One deterministic, live-filtered TenantMetadata read (arch #251, Phase 4,
+        # Decision 5): the same tenant/table yields identical column annotations
+        # here, in the MCP tools, and in the DRF dictionary — including for a user
+        # who never triggered materialization (the old user-scoped read showed
+        # nothing). ``user`` no longer scopes this.
+        tenant_metadata = await aget_tenant_metadata(tenant.id)
 
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant=tenant, tenant_membership__user=user
-        ).afirst()
-
+        describe_ctx = CatalogContext(
+            query_context=ctx,
+            is_view_schema=False,
+            tenant_schema=ts,
+            pipeline_config=pipeline_config,
+            tenant_ids=[tenant.id],
+            workspace_id=str(workspace.id),
+        )
         column_map: dict[str, list[dict]] = {}
-        for t in tables:
-            detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
+        for t in catalog_tables:
+            detail = await describe(describe_ctx, t.name, tenant_metadata)
             if detail:
-                column_map[t["name"]] = detail.get("columns", [])
+                column_map[t.name] = detail.columns
 
         full_text = _render_full_schema(tables, column_map, last_materialized_at)
 
-        if terminal_assets:
+        if has_transforms:
             full_text += (
                 "\n\nThese tables are produced by a transformation pipeline. "
                 "Use the `get_lineage` tool to explore how any table was built."
@@ -374,7 +412,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
         )
 
     compact = _render_compact_schema(tables, last_materialized_at)
-    if terminal_assets:
+    if has_transforms:
         compact += (
             "\n\nThese tables are produced by a transformation pipeline. "
             "Use the `get_lineage` tool to explore how any table was built."
@@ -392,23 +430,16 @@ _MULTI_TENANT_NAMESPACE_HINT = (
 async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool = True) -> str:
     """Build the ## Data Availability block for a multi-tenant workspace.
 
-    Mirrors `_fetch_schema_context` but consults `WorkspaceViewSchema` plus the
-    per-tenant `MaterializationRun` records, so the agent knows up front whether
-    data is loaded, still materializing, or missing — without having to call
-    `list_tables` first to discover the state.
+    Mirrors `_fetch_schema_context`: the status story (loaded / in-progress /
+    not-ready) comes from the canonical ``derive_world_state`` read-model (arch
+    #251) — which already folds in the view schema state, view-schema rebuild
+    windows, and active per-tenant runs — so the agent knows up front whether
+    data is loaded, still materializing, or missing without calling `list_tables`,
+    and this prompt agrees with the status API and MCP ``get_schema_status``.
     """
-    vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
+    world = await derive_world_state(workspace)
 
-    tenant_ids = [t.id async for t in workspace.tenants.all()]
-
-    active_run = None
-    if tenant_ids:
-        active_run = await MaterializationRun.objects.filter(
-            tenant_schema__tenant_id__in=tenant_ids,
-            state__in=list(MaterializationRun.ACTIVE_STATES),
-        ).afirst()
-
-    if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
+    if world.in_progress:
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return (
@@ -419,7 +450,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
             "when the current materialization completes."
         )
 
-    if vs is None or vs.state != SchemaState.ACTIVE:
+    if world.status != "available":
         if not interactive:
             return f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n{_HEADLESS_MATERIALIZE_GUIDANCE}"
         return (
@@ -435,26 +466,18 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
     tables: list[dict] = []
     try:
         ctx = await load_workspace_context(str(workspace.id))
-        tables = await workspace_list_tables(ctx)
+        catalog_ctx = CatalogContext(
+            query_context=ctx,
+            is_view_schema=True,
+            tenant_schema=None,
+            pipeline_config=None,
+            workspace_id=str(workspace.id),
+        )
+        tables = [to_tool_dict(t) for t in await list_catalog(catalog_ctx)]
     except Exception:
         logger.debug("Could not fetch multi-tenant table list for context injection", exc_info=True)
 
-    last_run = None
-    if tenant_ids:
-        last_run = (
-            await MaterializationRun.objects.filter(
-                tenant_schema__tenant_id__in=tenant_ids,
-                state__in=[
-                    MaterializationRun.RunState.COMPLETED,
-                    MaterializationRun.RunState.PARTIAL,
-                ],
-            )
-            .order_by("-completed_at")
-            .afirst()
-        )
-    last_materialized_at = (
-        last_run.completed_at.isoformat() if last_run and last_run.completed_at else None
-    )
+    last_materialized_at = world.last_synced_at.isoformat() if world.last_synced_at else None
 
     if not tables:
         return (
@@ -840,8 +863,13 @@ async def _build_system_prompt(
 
     if tenant_count == 1:
         tenant = await workspace.tenants.afirst()
-        pipeline_config = get_registry().get_by_provider(tenant.provider)
-        pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
+        # Display only: show the resolved pipeline, or the provider name if none
+        # resolves — never a hardcoded "commcare_sync" lie for a non-commcare
+        # tenant (arch #251, Phase 4 / #256).
+        try:
+            pipeline_name = select_pipeline_config(None, tenant.provider).name
+        except PipelineResolutionError:
+            pipeline_name = tenant.provider
 
         volatile_sections.append(f"""
 ## Tenant Context
@@ -859,7 +887,7 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
 
         # Pre-fetch so the agent needn't call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant, user, interactive)
+        schema_context = await _fetch_schema_context(workspace, tenant, user, interactive)
         volatile_sections.append(f"\n## Data Availability\n\n{schema_context}\n")
     elif tenant_count > 1:
         volatile_sections.append("""

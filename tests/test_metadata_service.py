@@ -8,7 +8,7 @@ import pytest
 from mcp_server.services.metadata import _live_tables_in_schema
 
 
-def _make_pipeline_config(sources=None, dbt_models=None, relationships=None):
+def _make_pipeline_config(sources=None, relationships=None):
     """Build a minimal PipelineConfig for testing."""
     from mcp_server.pipeline_registry import (
         PipelineConfig,
@@ -100,13 +100,16 @@ class TestPipelineListTables:
         assert "row_count" not in cases
 
     @pytest.mark.asyncio
-    async def test_includes_dbt_models_with_null_materialized_row_count(self):
+    async def test_declared_dbt_models_are_not_surfaced(self):
+        """Phase 5 (#251): the pipeline dbt-model listing path was removed. Even
+        when a config declares ``transforms`` and the models physically exist,
+        they must NOT appear in the catalog — only reconciled sources do."""
         from mcp_server.services.metadata import pipeline_list_tables
 
         mock_ts = MagicMock()
         mock_ts.schema_name = "t_test"
         pipeline_config = _make_pipeline_config(sources=[("cases", "Cases")])
-        pipeline_config = _set_dbt_models(pipeline_config, ["stg_cases", "stg_forms"])
+        pipeline_config = _set_dbt_models(pipeline_config, ["stg_cases", "dim_cases"])
 
         completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
         mock_run = MagicMock()
@@ -117,7 +120,7 @@ class TestPipelineListTables:
             patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
             patch(
                 "mcp_server.services.metadata._live_tables_in_schema",
-                AsyncMock(return_value={"raw_cases", "stg_cases", "stg_forms"}),
+                AsyncMock(return_value={"raw_cases", "stg_cases", "dim_cases"}),
             ),
         ):
             mock_run_cls.RunState.COMPLETED = "completed"
@@ -128,12 +131,9 @@ class TestPipelineListTables:
             result = await pipeline_list_tables(mock_ts, pipeline_config)
 
         names = [t["name"] for t in result]
-        assert "stg_cases" in names
-        assert "stg_forms" in names
-        stg = next(t for t in result if t["name"] == "stg_cases")
-        assert stg["materialized_row_count"] is None
-        assert stg["row_count_verified"] is False
-        assert stg["materialized_at"] == completed_at.isoformat()
+        assert names == ["raw_cases"]
+        assert "stg_cases" not in names
+        assert "dim_cases" not in names
 
     @pytest.mark.asyncio
     async def test_excludes_failed_and_skipped_sources(self):
@@ -467,92 +467,6 @@ class TestPipelineDescribeTable:
 
         assert result is not None
         assert result["columns"][0]["description"] == ""
-
-
-class TestPipelineGetMetadata:
-    def _make_ctx(self, schema_name="test_schema"):
-        from mcp_server.context import QueryContext
-
-        return QueryContext(
-            tenant_id="test-domain",
-            schema_name=schema_name,
-            max_rows_per_query=500,
-            max_query_timeout_seconds=30,
-            connection_params={},
-        )
-
-    @pytest.mark.asyncio
-    async def test_returns_empty_when_no_completed_run(self):
-        from mcp_server.services.metadata import pipeline_get_metadata
-
-        ctx = self._make_ctx()
-        mock_ts = MagicMock()
-        pipeline_config = _make_pipeline_config()
-
-        with patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls:
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
-            qs.afirst = AsyncMock(return_value=None)
-
-            result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
-
-        assert result == {"tables": {}, "relationships": []}
-
-    @pytest.mark.asyncio
-    async def test_includes_relationships_from_pipeline_config(self):
-        from mcp_server.services.metadata import pipeline_get_metadata
-
-        ctx = self._make_ctx()
-        mock_ts = MagicMock()
-        mock_ts.schema_name = "t_test"
-        pipeline_config = _make_pipeline_config(
-            sources=[("cases", "Cases")],
-            relationships=[
-                {
-                    "from_table": "forms",
-                    "from_column": "case_ids",
-                    "to_table": "cases",
-                    "to_column": "case_id",
-                    "description": "Forms reference cases",
-                }
-            ],
-        )
-
-        completed_at = datetime(2026, 2, 24, 10, 0, 0, tzinfo=UTC)
-        mock_run = MagicMock()
-        mock_run.completed_at = completed_at
-        mock_run.result = {"sources": {"cases": {"state": "completed", "rows": 100}}}
-
-        with (
-            patch("mcp_server.services.metadata.MaterializationRun") as mock_run_cls,
-            patch(
-                "mcp_server.services.metadata._live_tables_in_schema",
-                AsyncMock(return_value={"raw_cases"}),
-            ),
-            patch(
-                "mcp_server.services.metadata._execute_async_parameterized",
-                new=AsyncMock(
-                    return_value={
-                        "rows": [["case_id", "text", "NO", None]],
-                        "row_count": 1,
-                    }
-                ),
-            ),
-        ):
-            mock_run_cls.RunState.COMPLETED = "completed"
-            mock_run_cls.RunState.PARTIAL = "partial"
-            qs = mock_run_cls.objects.filter.return_value.order_by.return_value
-            qs.afirst = AsyncMock(return_value=mock_run)
-
-            result = await pipeline_get_metadata(mock_ts, ctx, None, pipeline_config)
-
-        assert "raw_cases" in result["tables"]
-        assert len(result["relationships"]) == 1
-        rel = result["relationships"][0]
-        assert rel["from_table"] == "forms"
-        assert rel["to_table"] == "cases"
-        assert rel["description"] == "Forms reference cases"
 
 
 class TestLiveTablesInSchema:

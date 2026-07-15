@@ -15,14 +15,18 @@ from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     WorkspaceRole,
 )
+from apps.workspaces.services.catalog import list_catalog_sync
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    resolve_pipeline_config_sync,
+)
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.tenant_metadata import get_tenant_metadata_sync
 from apps.workspaces.tasks import refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
-from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -145,66 +149,21 @@ def _live_tables_in_schema_sync(schema_name: str) -> set[str]:
         return set()
 
 
-def _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names: set[str]) -> list:
-    """Synchronous equivalent of ``pipeline_list_tables`` for the sync DRF view.
+def _sync_pipeline_list_tables(
+    tenant_schema, pipeline_config, live_table_names: set[str], workspace_id=None
+) -> list:
+    """Reconciled catalog for the sync DRF data dictionary.
 
-    Uses sync ORM and the already-fetched ``live_table_names`` so the request
-    reads the managed DB once, avoiding the old async_to_sync event loop per
-    request (arch #254, finding 10#2). Surfaces only ``completed`` sources whose
-    physical table is present, plus dbt models that physically exist.
+    Delegates to the canonical catalog service (arch #251, Phase 3) so the
+    dictionary returns the SAME table set as the agent prompt and the MCP tools —
+    same source-of-truth, same fail-closed reconciliation (including terminal
+    transformation assets), and the same ``stg_*`` policy. Stays sync and reuses
+    the caller's already-fetched ``live_table_names`` so the request reads the
+    managed DB once (no async_to_sync event loop per request, arch #254 10#2).
     """
-    run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=tenant_schema,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
+    return list_catalog_sync(
+        tenant_schema, pipeline_config, live_table_names, workspace_id=workspace_id
     )
-    if run is None:
-        return []
-
-    materialized_at = run.completed_at.isoformat() if run.completed_at else None
-    sources_result = (run.result or {}).get("sources", {})
-    source_descriptions = {s.name: s.description for s in pipeline_config.sources}
-    source_physical_names = {s.name: s.physical_table_name for s in pipeline_config.sources}
-
-    tables = []
-    for source_name, source_data in sources_result.items():
-        if (source_data or {}).get("state") != "completed":
-            continue
-        physical_name = source_physical_names.get(source_name, f"raw_{source_name}")
-        if physical_name not in live_table_names:
-            continue
-        tables.append(
-            {
-                "name": physical_name,
-                "type": "table",
-                "description": source_descriptions.get(source_name, ""),
-                "materialized_row_count": source_data.get("rows"),
-                "row_count_verified": False,
-                "materialized_at": materialized_at,
-            }
-        )
-
-    for model_name in pipeline_config.dbt_models:
-        if live_table_names and model_name not in live_table_names:
-            continue
-        tables.append(
-            {
-                "name": model_name,
-                "type": "table",
-                "description": "",
-                "materialized_row_count": None,
-                "row_count_verified": False,
-                "materialized_at": materialized_at,
-            }
-        )
-
-    return tables
 
 
 def _get_table_columns(schema_name: str, table_name: str) -> list[dict]:
@@ -291,8 +250,13 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
 
 
 def _get_tenant_metadata(tenant):
-    """Return TenantMetadata for any membership in the given tenant, or None."""
-    return TenantMetadata.objects.filter(tenant_membership__tenant=tenant).first()
+    """Return the canonical TenantMetadata for the tenant, or None.
+
+    Delegates to the ONE deterministic, live-filtered read (arch #251, Phase 4,
+    Decision 5) so the dictionary shows the same annotations as the prompt and
+    the MCP tools.
+    """
+    return get_tenant_metadata_sync(tenant.id)
 
 
 def _serialize_annotation(tk):
@@ -386,13 +350,23 @@ class DataDictionaryView(APIView):
             .first()
         )
 
-        registry = get_registry()
-        if last_run:
-            pipeline_config = registry.get(last_run.pipeline)
-        else:
-            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
-        if pipeline_config is None:
-            pipeline_config = registry.get("commcare_sync")
+        # Canonical pipeline resolution (arch #251, Phase 4 / #256): a truthful
+        # error instead of silently serving commcare metadata for a non-commcare
+        # tenant whose pipeline can't be resolved.
+        try:
+            pipeline_config = resolve_pipeline_config_sync(tenant_schema, last_run)
+        except PipelineResolutionError:
+            logger.warning(
+                "No pipeline resolved for schema '%s'; data dictionary unavailable",
+                tenant_schema.schema_name,
+            )
+            return Response(
+                {
+                    "error": "The data pipeline for this workspace could not be resolved.",
+                    "schema_status": "pipeline_unresolved",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         schema_name = tenant_schema.schema_name
 
@@ -410,11 +384,11 @@ class DataDictionaryView(APIView):
             live_table_names = set()
             all_columns = {}
 
-        tables_list = [
-            t
-            for t in _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names)
-            if not t["name"].startswith("stg_")
-        ]
+        # The catalog service applies the stg_* policy (Decision 4a) itself, so no
+        # per-view filter here.
+        tables_list = _sync_pipeline_list_tables(
+            tenant_schema, pipeline_config, live_table_names, workspace_id=workspace.id
+        )
         if not tables_list:
             return Response({"tables": {}, "generated_at": None})
 
@@ -556,7 +530,9 @@ class TableDetailView(APIView):
             if len(parts) == 2:
                 schema_name, table_name = parts
                 if schema_name == tenant_schema.schema_name:
-                    table_data = self._get_pipeline_table(tenant_schema, schema_name, table_name)
+                    table_data = self._get_pipeline_table(
+                        tenant_schema, schema_name, table_name, workspace_id=workspace.id
+                    )
                     if table_data is not None:
                         return table_data
 
@@ -564,11 +540,13 @@ class TableDetailView(APIView):
         raw_dict = workspace.data_dictionary or {}
         return raw_dict.get("tables", {}).get(qualified_name)
 
-    def _get_pipeline_table(self, tenant_schema, schema_name, table_name):
-        """Return table data from pipeline models, or None if not found or hidden."""
-        if table_name.startswith("stg_"):
-            return None
+    def _get_pipeline_table(self, tenant_schema, schema_name, table_name, workspace_id=None):
+        """Return table data from pipeline models, or None if not found or hidden.
 
+        Membership in the reconciled catalog (which applies the stg_* policy and
+        fail-closed reconciliation) is the single gate — a stg_* or physically
+        absent table simply isn't in ``known``.
+        """
         last_run = (
             MaterializationRun.objects.filter(
                 tenant_schema=tenant_schema,
@@ -580,18 +558,25 @@ class TableDetailView(APIView):
             .order_by("-completed_at")
             .first()
         )
-        registry = get_registry()
-        if last_run:
-            pipeline_config = registry.get(last_run.pipeline)
-        else:
-            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
-        if pipeline_config is None:
-            pipeline_config = registry.get("commcare_sync")
+        # Canonical pipeline resolution (arch #251, Phase 4 / #256): if no pipeline
+        # resolves, treat the table as not found rather than describing it with
+        # wrong-provider (commcare) metadata.
+        try:
+            pipeline_config = resolve_pipeline_config_sync(tenant_schema, last_run)
+        except PipelineResolutionError:
+            logger.warning(
+                "No pipeline resolved for schema '%s'; table '%s' treated as not found",
+                schema_name,
+                table_name,
+            )
+            return None
 
         live_table_names = _live_tables_in_schema_sync(schema_name)
         known = {
             t["name"]
-            for t in _sync_pipeline_list_tables(tenant_schema, pipeline_config, live_table_names)
+            for t in _sync_pipeline_list_tables(
+                tenant_schema, pipeline_config, live_table_names, workspace_id=workspace_id
+            )
         }
         if table_name not in known:
             return None
