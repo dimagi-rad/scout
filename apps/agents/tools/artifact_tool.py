@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class CreateArtifactInput(BaseModel):
     title: str
     artifact_type: str
-    code: str
+    code: str | None = None
     description: str = ""
     data: dict | None = None
     source_queries: list[dict[str, str]] | None = Field(default=None)
@@ -29,7 +29,7 @@ class CreateArtifactInput(BaseModel):
 
 class UpdateArtifactInput(BaseModel):
     artifact_id: str
-    code: str
+    code: str | None = None
     title: str | None = None
     data: dict | None = None
     source_queries: list[dict[str, str]] | None = Field(default=None)
