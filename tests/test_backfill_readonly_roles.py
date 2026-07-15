@@ -161,10 +161,12 @@ class TestBackfillReadonlyRoles:
         assert not any("CREATE ROLE" in c for c in calls)
         assert not any("GRANT" in c for c in calls)
 
-    def test_view_schema_grants_default_privileges_on_tenant_schemas(
+    def test_view_schema_backfill_grants_nothing_on_tenant_schemas(
         self, tenant_membership, workspace
     ):
-        """View role must get ALTER DEFAULT PRIVILEGES on constituent tenant schemas (11#8)."""
+        """The view role must NOT be granted any access to raw tenant schemas: the
+        views run with owner privileges, so such grants are unnecessary cross-tenant
+        over-exposure (and their default-ACL entries block role teardown)."""
         ts = TenantSchema.objects.create(
             tenant=tenant_membership.tenant,
             schema_name="ws_tenant",
@@ -181,6 +183,7 @@ class TestBackfillReadonlyRoles:
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = None
+        mock_cursor.fetchall.return_value = []
         mock_conn.cursor.return_value = mock_cursor
 
         with patch(
@@ -191,9 +194,10 @@ class TestBackfillReadonlyRoles:
 
         view_role = readonly_role_name(vs.schema_name)
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
-        # The view role must hold ALTER DEFAULT PRIVILEGES on the tenant schema so a
-        # rematerialization between view rebuilds doesn't leave new tables unreadable.
-        assert any(
+        assert not any(
+            "GRANT" in c and ts.schema_name in c and view_role in c for c in calls
+        ), "view role must not be granted access to raw tenant schemas"
+        assert not any(
             "ALTER DEFAULT PRIVILEGES" in c and ts.schema_name in c and view_role in c
             for c in calls
-        ), "view role needs default privileges on constituent tenant schemas"
+        )

@@ -102,39 +102,14 @@ class Command(BaseCommand):
         )
 
     def _backfill_view_schema(self, cursor, mgr, vs) -> None:
-        """Create the view-schema role and grant it access to constituent tenant schemas.
+        """Backfill the view-schema role.
 
-        Mirrors build_view_schema: the role gets SELECT on existing tables in each
-        constituent tenant schema AND default privileges, so a rematerialization
-        that runs between view rebuilds doesn't leave the new tables unreadable.
+        The view role needs access to the view schema ONLY: the views are owned by
+        CURRENT_USER and run with owner privileges, so the role never reads the raw
+        tenant schemas directly. Also revoke any tenant-schema grants left by
+        earlier versions — they widened cross-tenant reach and their default-ACL
+        entries blocked role teardown.
         """
         self._backfill_schema(cursor, mgr, vs.schema_name)
         role = readonly_role_name(vs.schema_name)
-        tenant_schemas_for_ws = TenantSchema.objects.filter(
-            tenant__in=vs.workspace.tenants.all(),
-            state=SchemaState.ACTIVE,
-        )
-        for ts in tenant_schemas_for_ws:
-            cursor.execute(
-                psycopg.sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(
-                    psycopg.sql.Identifier(ts.schema_name),
-                    psycopg.sql.Identifier(role),
-                )
-            )
-            cursor.execute(
-                psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(
-                    psycopg.sql.Identifier(ts.schema_name),
-                    psycopg.sql.Identifier(role),
-                )
-            )
-            # Default privileges so tables created later (by a rematerialization
-            # before the view is rebuilt) are still readable through this role.
-            cursor.execute(
-                psycopg.sql.SQL(
-                    "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
-                    "GRANT SELECT ON TABLES TO {}"
-                ).format(
-                    psycopg.sql.Identifier(ts.schema_name),
-                    psycopg.sql.Identifier(role),
-                )
-            )
+        mgr._revoke_stale_view_role_grants(cursor, role, {vs.schema_name})
