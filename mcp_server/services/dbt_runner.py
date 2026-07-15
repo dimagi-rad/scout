@@ -129,7 +129,23 @@ def run_dbt(
         res = dbt.invoke(cli_args)
 
     if not res.success:
-        error_msg = str(res.exception) if res.exception else "dbt run failed"
+        # A node-level model failure sets res.success=False but leaves
+        # res.exception None — the real cause (e.g. 'column "x" does not exist')
+        # lives in each node's message. Surface those instead of the opaque
+        # "dbt run failed" so callers/Sentry don't have to dig through dbt logs.
+        node_errors = [
+            f"{r.node.name}: {r.message}"
+            for r in (res.result or [])
+            if hasattr(r, "node")
+            and str(getattr(r, "status", "")) in ("error", "fail")
+            and getattr(r, "message", None)
+        ]
+        if res.exception:
+            error_msg = str(res.exception)
+        elif node_errors:
+            error_msg = "; ".join(node_errors)
+        else:
+            error_msg = "dbt run failed"
         logger.error("dbt run failed: %s", error_msg)
         return {"success": False, "error": error_msg, "models": {}}
 

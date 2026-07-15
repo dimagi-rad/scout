@@ -169,6 +169,35 @@ class TestRunDbt:
         assert result["success"] is False
         assert "error" in result
 
+    def test_surfaces_node_error_when_no_exception(self, tmp_path):
+        """Node-level model failures (success=False, exception=None) must surface
+        the per-node message, not the opaque 'dbt run failed' (SCOUT-DJANGO-1T)."""
+        from mcp_server.services.dbt_runner import run_dbt
+
+        node = MagicMock()
+        node.name = "stg_visits"
+        failed = MagicMock(node=node, status="error")
+        failed.message = 'column "user_id" does not exist'
+
+        mock_result = MagicMock()
+        mock_result.success = False
+        mock_result.exception = None
+        mock_result.result = [failed]
+
+        mock_runner = MagicMock()
+        mock_runner.invoke.return_value = mock_result
+
+        with patch("mcp_server.services.dbt_runner.dbtRunner", return_value=mock_runner):
+            result = run_dbt(
+                dbt_project_dir=str(tmp_path),
+                profiles_dir=str(tmp_path),
+                models=["stg_visits"],
+            )
+
+        assert result["success"] is False
+        assert "stg_visits" in result["error"]
+        assert 'column "user_id" does not exist' in result["error"]
+
     def test_passes_correct_cli_args(self, tmp_path):
         from mcp_server.services.dbt_runner import run_dbt
 
