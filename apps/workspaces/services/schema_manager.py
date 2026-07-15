@@ -766,6 +766,13 @@ class SchemaManager:
         )
         # Confinement role for the dbt transform phase (issue #241).
         self._create_dbt_role(cursor, schema_name)
+        # dbt materializes staging tables while SET ROLE'd to the _dbt confinement
+        # role (issue #241), so those tables are owned by _dbt, not CURRENT_USER —
+        # the CURRENT_USER default-privilege grant above never reaches them, and the
+        # _ro role gets "permission denied for table stg_visits" at query time. Set
+        # default privileges FOR the dbt role too so its future tables are readable
+        # by _ro. Safe because _create_dbt_role granted the dbt role TO CURRENT_USER,
+        # which is the membership ALTER DEFAULT PRIVILEGES FOR ROLE requires.
         cursor.execute(
             psycopg.sql.SQL(
                 "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
