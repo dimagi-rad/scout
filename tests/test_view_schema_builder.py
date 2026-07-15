@@ -17,7 +17,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
+from apps.workspaces.services.schema_manager import (
+    SchemaManager,
+    dbt_role_name,
+    readonly_role_name,
+)
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("MANAGED_DATABASE_URL"),
@@ -293,7 +297,9 @@ def test_build_view_schema_three_tables_three_views(two_tenant_workspace, manage
 
 
 def test_build_view_schema_readonly_role_has_access(two_tenant_workspace, managed_db_connection):
-    """Read-only role has access to the view schema and both underlying tenant schemas."""
+    """Read-only role can read through the views but has NO direct access to the raw
+    tenant schemas — views run with owner privileges, so granting the role tenant
+    access is both unnecessary and cross-tenant over-exposure."""
     from apps.workspaces.models import TenantSchema
     from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
 
@@ -322,20 +328,35 @@ def test_build_view_schema_readonly_role_has_access(two_tenant_workspace, manage
 
         c2 = conn.cursor()
         try:
-            # View schema USAGE grant
+            # USAGE on the view schema...
             c2.execute(
                 "SELECT has_schema_privilege(%s, %s, 'USAGE')",
                 (view_role, vs.schema_name),
             )
             assert c2.fetchone()[0] is True
 
-            # Tenant schema USAGE grants
+            # ...but NOT on the raw tenant schemas.
             for schema in ("build_domain_a_ro", "build_domain_b_ro"):
                 c2.execute(
                     "SELECT has_schema_privilege(%s, %s, 'USAGE')",
                     (view_role, schema),
                 )
-                assert c2.fetchone()[0] is True
+                assert c2.fetchone()[0] is False, f"view role should not reach {schema}"
+
+            # And it can actually read through the views (owner-privilege path).
+            c2.execute(
+                "SELECT table_name FROM information_schema.views WHERE table_schema = %s",
+                (vs.schema_name,),
+            )
+            view_names = [r[0] for r in c2.fetchall()]
+            assert view_names
+            c2.execute(f'SET ROLE "{view_role}"')
+            try:
+                for vn in view_names:
+                    c2.execute(f'SELECT count(*) FROM "{vs.schema_name}"."{vn}"')
+                    c2.fetchone()
+            finally:
+                c2.execute("RESET ROLE")
         finally:
             c2.close()
     finally:
@@ -859,7 +880,11 @@ def _role_grant_schemas(cursor, role_name: str) -> set[str]:
 
 def test_rebuild_revokes_ro_grants_on_removed_tenant_schema(db, managed_db_connection):
     """Issue #244: after a tenant is removed and the view schema is rebuilt, the
-    _ro role must no longer hold SELECT/USAGE on the removed tenant's schema."""
+    removed tenant's data must be unreachable through the view role.
+
+    Under the owner-privilege view model the role holds NO direct grants on raw
+    tenant schemas, so the property is enforced by (a) the role only ever reaching
+    the view schema and (b) the rebuild dropping the removed tenant's views."""
     User = get_user_model()
     user = User.objects.create_user(email="revoke@example.com", password="pass")
     # Unique schema names so sibling agents sharing the managed DB don't collide.
@@ -900,26 +925,43 @@ def test_rebuild_revokes_ro_grants_on_removed_tenant_schema(db, managed_db_conne
         c2 = conn.cursor()
         try:
             granted = _role_grant_schemas(c2, view_role)
-            # Initially the role can read all three constituent tenant schemas.
-            assert {sa, sb, sc} <= granted
+            # The role reaches ONLY the view schema — never the raw tenant schemas.
+            assert granted == {vs.schema_name}, sorted(granted)
+            # A view over tenant C's tables exists initially.
+            c2.execute(
+                "SELECT count(*) FROM information_schema.views "
+                "WHERE table_schema = %s AND table_name LIKE 'revoke_c_244__%%'",
+                (vs.schema_name,),
+            )
+            assert c2.fetchone()[0] >= 1
         finally:
             c2.close()
 
         # Remove tenant C from the workspace, then rebuild.
         wt_c.delete()
-        tsc_schema = sc
         vs = SchemaManager().build_view_schema(ws)
 
         c3 = conn.cursor()
         try:
             granted_after = _role_grant_schemas(c3, view_role)
-            # The _ro role must NO LONGER reach the removed tenant's schema.
-            assert tsc_schema not in granted_after, (
-                f"_ro role {view_role} still holds grants on removed schema {tsc_schema}: "
-                f"{sorted(granted_after)}"
+            # Still only the view schema; the removed tenant's raw schema was never
+            # (and is not) directly reachable.
+            assert granted_after == {vs.schema_name}, sorted(granted_after)
+            # C's views are gone, so its data is unreachable through the role...
+            c3.execute(
+                "SELECT count(*) FROM information_schema.views "
+                "WHERE table_schema = %s AND table_name LIKE 'revoke_c_244__%%'",
+                (vs.schema_name,),
             )
-            # ...but still reaches the remaining members.
-            assert {sa, sb} <= granted_after
+            assert c3.fetchone()[0] == 0
+            # ...while the remaining members' views persist.
+            c3.execute(
+                "SELECT count(*) FROM information_schema.views "
+                "WHERE table_schema = %s AND (table_name LIKE 'revoke_a_244__%%' "
+                "OR table_name LIKE 'revoke_b_244__%%')",
+                (vs.schema_name,),
+            )
+            assert c3.fetchone()[0] >= 2
         finally:
             c3.close()
     finally:
@@ -949,3 +991,81 @@ def test_rebuild_revokes_ro_grants_on_removed_tenant_schema(db, managed_db_conne
         tsa.delete()
         tsb.delete()
         tsc.delete()
+
+
+def test_teardown_view_schema_drops_role_despite_stale_default_acl(db, managed_db_connection):
+    """A view role that still holds a pg_default_acl entry on a tenant schema (left
+    by an earlier version that granted default privileges there) must not block
+    DROP ROLE at teardown. The tenant schema outlives the view schema, so that
+    entry survives DROP SCHEMA CASCADE and would strand the role."""
+    User = get_user_model()
+    user = User.objects.create_user(email="leak-acl@example.com", password="pass")
+    t = Tenant.objects.create(
+        provider="commcare", external_id="leak-acl-a", canonical_name="leak_acl_a"
+    )
+    ws = Workspace.objects.create(name="Leak ACL WS", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=t)
+    sa = "leak_acl_a_sch"
+    ts = TenantSchema.objects.create(tenant=t, schema_name=sa, state=SchemaState.ACTIVE)
+
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute(psycopg_sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(psycopg_sql.Identifier(sa)))
+        c.execute(
+            psycopg_sql.SQL("CREATE TABLE IF NOT EXISTS {}.cases (id TEXT)").format(
+                psycopg_sql.Identifier(sa)
+            )
+        )
+    finally:
+        c.close()
+
+    mgr = SchemaManager()
+    vs = None
+    try:
+        vs = mgr.build_view_schema(ws)
+        view_role = readonly_role_name(vs.schema_name)
+
+        # Simulate the pre-fix leftover: a default-ACL entry granting the view role
+        # SELECT on future tables in the tenant schema.
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                psycopg_sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
+                    "GRANT SELECT ON TABLES TO {}"
+                ).format(psycopg_sql.Identifier(sa), psycopg_sql.Identifier(view_role))
+            )
+        finally:
+            c2.close()
+
+        mgr.teardown_view_schema(vs)
+
+        c3 = conn.cursor()
+        try:
+            c3.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (view_role,))
+            assert c3.fetchone() is None, f"view role {view_role} dangled after teardown"
+        finally:
+            c3.close()
+    finally:
+        c4 = conn.cursor()
+        try:
+            c4.execute(
+                psycopg_sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(psycopg_sql.Identifier(sa))
+            )
+            for role in (readonly_role_name(sa), dbt_role_name(sa)):
+                c4.execute(
+                    psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg_sql.Identifier(role))
+                )
+            if vs:
+                c4.execute(
+                    psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        psycopg_sql.Identifier(readonly_role_name(vs.schema_name))
+                    )
+                )
+        finally:
+            c4.close()
+        if vs:
+            vs.delete()
+        ts.delete()
