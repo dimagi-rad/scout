@@ -527,7 +527,7 @@ class TestBuildViewSchemaProviderSafety:
 
 @pytest.mark.django_db
 class TestViewSchemaRoleCreation:
-    def test_build_view_schema_creates_readonly_role_with_tenant_grants(
+    def test_build_view_schema_creates_readonly_role_without_tenant_grants(
         self, workspace, tenant_membership
     ):
         ts = TenantSchema.objects.create(
@@ -558,14 +558,13 @@ class TestViewSchemaRoleCreation:
         assert any("CREATE ROLE" in c and view_role_name in c for c in calls), (
             f"Expected CREATE ROLE for {view_role_name}"
         )
-        # Should grant USAGE on view schema
+        # Should grant USAGE on the view schema
         assert any("GRANT USAGE ON SCHEMA" in c and vs.schema_name in c for c in calls)
-        # Should grant SELECT on constituent tenant schema tables
-        assert any(
-            "GRANT SELECT ON ALL TABLES IN SCHEMA" in c and ts.schema_name in c for c in calls
+        # Must NOT grant anything to the view role on the raw tenant schema: views
+        # run with owner privileges, so such grants are unnecessary over-exposure.
+        assert not any("GRANT" in c and ts.schema_name in c for c in calls), (
+            "view role must not be granted access to raw tenant schemas"
         )
-        # Should grant USAGE on constituent tenant schema
-        assert any("GRANT USAGE ON SCHEMA" in c and ts.schema_name in c for c in calls)
 
 
 class _AsyncCursor:

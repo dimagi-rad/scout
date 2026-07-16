@@ -24,7 +24,10 @@ from apps.transformations.services.commcare_staging import (
 
 logger = logging.getLogger(__name__)
 
-# Base columns always present on raw_visits.
+# Base columns always present on raw_visits — must match the raw_visits DDL in
+# mcp_server/services/materializer.py. The loader emits "username" (there is no
+# "user_id" column); listing user_id here made every stg_visits build fail with
+# 'column "user_id" does not exist'.
 _VISIT_BASE_COLUMNS = [
     "visit_id",
     "opportunity_id",

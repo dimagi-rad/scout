@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import yaml
 from dbt.cli.main import dbtRunner
@@ -58,12 +58,17 @@ def generate_profiles_yml(
             ``None`` the ``role`` key is omitted (dbt connects as the URL user).
     """
     parsed = urlparse(db_url)
+    # urlparse leaves username/password percent-encoded; resolve-database-url.sh
+    # URL-encodes the RDS-managed password (which rotates to values with special
+    # chars). psycopg/Django decode automatically, but dbt receives whatever we
+    # write here verbatim, so decode to match — otherwise auth fails whenever the
+    # password contains an encoded char (SCOUT-DJANGO-1T).
     output = {
         "type": "postgres",
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 5432,
-        "user": parsed.username or "",
-        "password": parsed.password or "",
+        "user": unquote(parsed.username) if parsed.username else "",
+        "password": unquote(parsed.password) if parsed.password else "",
         "dbname": parsed.path.lstrip("/") if parsed.path else "",
         "schema": schema_name,
         # Confine resolution to the target schema only — see docstring.
@@ -124,7 +129,23 @@ def run_dbt(
         res = dbt.invoke(cli_args)
 
     if not res.success:
-        error_msg = str(res.exception) if res.exception else "dbt run failed"
+        # A node-level model failure sets res.success=False but leaves
+        # res.exception None — the real cause (e.g. 'column "x" does not exist')
+        # lives in each node's message. Surface those instead of the opaque
+        # "dbt run failed" so callers/Sentry don't have to dig through dbt logs.
+        node_errors = [
+            f"{r.node.name}: {r.message}"
+            for r in (res.result or [])
+            if hasattr(r, "node")
+            and str(getattr(r, "status", "")) in ("error", "fail")
+            and getattr(r, "message", None)
+        ]
+        if res.exception:
+            error_msg = str(res.exception)
+        elif node_errors:
+            error_msg = "; ".join(node_errors)
+        else:
+            error_msg = "dbt run failed"
         logger.error("dbt run failed: %s", error_msg)
         return {"success": False, "error": error_msg, "models": {}}
 
