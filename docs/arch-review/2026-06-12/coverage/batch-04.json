@@ -1,0 +1,114 @@
+[
+  {
+    "reviewer": "gap2-gap2-runtime-verifier-criticals",
+    "coverage": {
+      "deep": [
+        "/Users/bderenzi/Code/dimagi/scout/apps/recipes/services/runner.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/agents/graph/base.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/recipes/api/views.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/transformations/services/commcare_staging.py",
+        "/Users/bderenzi/Code/dimagi/scout/mcp_server/services/dbt_runner.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/transformations/services/dbt_project.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/transformations/services/executor.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/workspaces/tasks.py",
+        "/Users/bderenzi/Code/dimagi/scout/mcp_server/services/materializer.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/workspaces/services/schema_manager.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/workspaces/api/views.py",
+        "/Users/bderenzi/Code/dimagi/scout/mcp_server/services/sql_validator.py",
+        "/Users/bderenzi/Code/dimagi/scout/mcp_server/services/query.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/chat/views.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/agents/memory/checkpointer.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/chat/checkpointer.py",
+        "/Users/bderenzi/Code/dimagi/scout/apps/artifacts/views.py",
+        "/Users/bderenzi/Code/dimagi/scout/frontend/src/components/ArtifactPanel/ArtifactPanel.tsx"
+      ],
+      "skimmed": [
+        "/Users/bderenzi/Code/dimagi/scout/docker-compose.yml",
+        "/Users/bderenzi/Code/dimagi/scout/docs/arch-review/2026-06-12/cartography.md",
+        "/Users/bderenzi/Code/dimagi/scout/docs/arch-review-methodology.md"
+      ],
+      "not_examined": [
+        "Full end-to-end materialization for (c) was NOT executed (verified by code trace only; MCP server / honcho stack not brought up because Docker/OrbStack was down)",
+        "MCP server and full honcho dev stack were NOT brought up; the (d) validator bypass was confirmed by reading sql_validator + live pg_catalog reads as the readonly role, NOT by driving the MCP query tool end-to-end over the wire",
+        "Verification ran against PostgreSQL 18.3, not the PG16 in docker-compose; SET ROLE / pg_catalog ACL / 63-byte NAMEDATALEN truncation semantics are identical across PG16-PG18 so verdicts hold",
+        "Only the 7 assigned findings were verified; no new findings were hunted (per mandate)",
+        "Did not audit other call sites of build_agent_graph beyond RecipeRunner and the documented chat path",
+        "Did not exhaustively test every CommCare-generated asset type for (b); confirmed the case-type staging model path"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap2-gap2-vertical-allauth-surface",
+    "coverage": {
+      "deep": [
+        "config/urls.py",
+        "config/settings/base.py",
+        "config/settings/production.py",
+        "apps/users/adapters.py",
+        "apps/users/rate_limiting.py",
+        "apps/users/auth_views.py",
+        "apps/users/signals.py",
+        "apps/users/apps.py",
+        "templates/allauth/layouts/base.html",
+        ".venv/lib/python3.13/site-packages/allauth/socialaccount/internal/flows/login.py:28-72 (pre_social_login ordering)"
+      ],
+      "skimmed": [
+        "config/settings/development.py (email backend line)",
+        "config/settings/test.py (email backend line)",
+        "frontend/src/components/OnboardingWizard/OnboardingWizard.tsx (accounts link only)",
+        "frontend/src/components/LoginForm/LoginForm.tsx (login_url link only)",
+        "frontend/src/pages/ConnectionsPage/ConnectionsPage.tsx (process=connect link only)",
+        "Full resolved /accounts/ URLconf (34 patterns) via get_resolver()",
+        "allauth runtime settings introspection (RATE_LIMITS, EMAIL_VERIFICATION, LOGIN_ON_GET, AUTO_CONNECT, AUTO_SIGNUP, LOGOUT_ON_GET, is_open_for_signup)"
+      ],
+      "not_examined": [
+        "apps/users/providers/commcare|commcare_connect|ocs internals - extract_uid/extract_email_addresses/extract_common_fields and whether VERIFIED_EMAIL=True is honest (directly feeds the LOGIN_ON_GET auto-connect risk; belongs to the OAuth-provider vertical)",
+        "apps/users/services/merge.py internals (merge-gate consequence side; known finding owns it)",
+        "apps/users/services/tenant_resolution.py and credential_resolver.py (post-login signal callees, out of allauth-surface scope)",
+        "Whether a reverse proxy/WAF blocks /accounts/signup/ and /accounts/password/reset/ in the deployed env (infra config, not in repo) - F1/F3 assume routes are internet-reachable as mounted",
+        "Actual SMTP topology in prod (assumed no MTA at localhost:25; missing EMAIL_BACKEND is verified, deliverability failure is strong-inference)",
+        "account/3rdparty/ (socialaccount_connections) POST disconnect handlers vs the app's own disconnect_provider_view (auth_views.py:177) - possible divergent disconnect semantics, not traced",
+        "allauth ACCOUNT_PREVENT_ENUMERATION default and whether login/signup error messages leak account existence (only the reset page behavior spot-checked)"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap2-gap2-seam-credential-lifetime-long-jobs",
+    "coverage": {
+      "deep": [
+        "apps/users/services/credential_resolver.py",
+        "apps/users/services/token_refresh.py",
+        "apps/users/models.py",
+        "mcp_server/loaders/connect_base.py",
+        "mcp_server/loaders/commcare_base.py",
+        "mcp_server/loaders/ocs_base.py",
+        "mcp_server/services/materializer.py:90-520,663-680 (run_pipeline, failure handling, _summarize_error)",
+        "apps/workspaces/tasks.py:1-510,840-1290 (materialize/refresh tasks, resume task, aggregation, failure summaries)",
+        "apps/agents/mcp_client.py",
+        "apps/users/auth_views.py:195-270 (providers_view)"
+      ],
+      "skimmed": [
+        "apps/workspaces/services/schema_manager.py (provision only)",
+        "apps/workspaces/api/materialization_views.py (retry dispatch only)",
+        "mcp_server/server.py (run_materialization dispatch lines only)",
+        "mcp_server/loaders/commcare_cases.py + commcare_forms.py (page-size constants only)",
+        "mcp_server/auth.py",
+        "mcp_server/envelope.py (AUTH_TOKEN_EXPIRED)",
+        "upstream commcare-connect/config/settings/base.py + open-chat-studio/config/settings.py OAUTH2_PROVIDER blocks",
+        "dimagi/commcare-hq settings.py OAUTH2_PROVIDER block (fetched from GitHub master)",
+        "urllib3 2.6.3 Retry.sleep source",
+        "git history d4dee2e/7aca7ce/564906b"
+      ],
+      "not_examined": [
+        "apps/users/services/tenant_resolution.py and signals.py token-freshness behavior at login/me_view",
+        "apps/users/adapters.py — did NOT verify allauth populates SocialToken.expires_at from expires_in for the custom CommCare/Connect/OCS providers (if NULL, token_needs_refresh returns False forever and proactive refresh never fires for that provider)",
+        "whether each provider's deployed DOT config rotates/revokes access tokens on refresh (G2-CRED-6 hypothesis) and whether HQ production overrides the 15-min TTL",
+        "OCS/Connect refresh-token TTLs (refresh-token expiry would eventually break even task-start refresh)",
+        "concrete loaders beyond base classes and page-size constants; dbt/transform-phase credential needs (assumed managed-DB only)",
+        "frontend rendering of ThreadJob.error_summary (relied on known toolCallId-mismatch finding)",
+        "tests/test_mcp_token_refresh.py and tests/test_oauth_tokens.py beyond grep hits",
+        "whether any MCP tool makes provider API calls at interactive query time (assumed managed-DB only)"
+      ]
+    }
+  }
+]

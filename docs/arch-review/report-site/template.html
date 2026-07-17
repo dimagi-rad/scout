@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scout Architecture Review — {{DATE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ===================== Design tokens — clean technical document ===================== */
+:root {
+  --bg: #f7f8fa;
+  --bg-elev: #ffffff;
+  --bg-sunken: #f0f2f5;
+  --border: #e4e7ec;
+  --border-strong: #cfd4dc;
+  --text: #1f2430;
+  --text-soft: #58616f;
+  --text-faint: #8a93a2;
+  --accent: #2f6cad;
+  --accent-soft: #eaf1f9;
+  --accent-text: #245a93;
+  --rule: #e4e7ec;
+  --shadow: 0 1px 2px rgba(20,25,40,.05), 0 1px 3px rgba(20,25,40,.04);
+  --shadow-lg: 0 8px 26px rgba(20,25,40,.12);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  --broken:#c0291f;  --broken-bg:#fbe9e7;
+  --latent:#a4620a;  --latent-bg:#fbf0db;
+  --debt:#2156a8;    --debt-bg:#e8eff9;
+  --cosmetic:#6b7280; --cosmetic-bg:#eef0f3;
+
+  --confirmed:#2a7a3e; --confirmed-bg:#e6f3e9;
+  --partial:#9a5a0c;   --partial-bg:#fbf0db;
+  --refuted:#6b7280;   --refuted-bg:#eef0f3;
+
+  --imp-data-loss:#b01f15; --imp-security:#6d3bb0; --imp-correctness:#0e7180;
+  --imp-cost-perf:#b15812; --imp-velocity:#566173;
+}
+html[data-theme="dark"] {
+  --bg:#0f1318; --bg-elev:#161b22; --bg-sunken:#1c222b; --border:#2a313c; --border-strong:#3a424f;
+  --text:#e6e9ee; --text-soft:#a3acba; --text-faint:#6f7886;
+  --accent:#69a6df; --accent-soft:#162539; --accent-text:#9cc4ec; --rule:#2a313c;
+  --shadow:0 1px 2px rgba(0,0,0,.35); --shadow-lg:0 12px 36px rgba(0,0,0,.5);
+  --broken:#ef837a; --broken-bg:#321a18; --latent:#dca34a; --latent-bg:#2e2512; --debt:#7aa6ea; --debt-bg:#15233a; --cosmetic:#9aa3b2; --cosmetic-bg:#222831;
+  --confirmed:#68c47c; --confirmed-bg:#152a1b; --partial:#dca34a; --partial-bg:#2e2512; --refuted:#9aa3b2; --refuted-bg:#222831;
+  --imp-data-loss:#ef837a; --imp-security:#bb9ae6; --imp-correctness:#54bccb; --imp-cost-perf:#e09657; --imp-velocity:#9aa6b8;
+}
+* { box-sizing: border-box; }
+html, body { margin:0; padding:0; }
+body {
+  background:var(--bg); color:var(--text); font-family:var(--sans); font-size:15px; line-height:1.62;
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+}
+::selection { background:var(--accent-soft); }
+
+/* ===================== Layout ===================== */
+.app { display:grid; grid-template-columns:262px 1fr; min-height:100vh; }
+.sidebar {
+  position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+  background:linear-gradient(180deg, var(--bg-elev), var(--bg)); border-right:1px solid var(--border);
+  padding:26px 18px 18px; display:flex; flex-direction:column;
+}
+.sidebar::-webkit-scrollbar { width:8px; } .sidebar::-webkit-scrollbar-thumb { background:var(--border-strong); border-radius:8px; }
+.masthead { padding:0 8px 16px; margin-bottom:8px; border-bottom:1px solid var(--border); }
+.masthead .kicker { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--text-faint); font-weight:600; }
+.masthead h1 { font-weight:600; font-size:21px; line-height:1.1; letter-spacing:-.01em; margin:6px 0 8px; }
+.masthead .meta { font-family:var(--mono); font-size:10.5px; color:var(--text-faint); display:flex; gap:6px; flex-wrap:wrap; }
+.masthead .meta b { color:var(--text-soft); font-weight:500; }
+.navgroup { margin-top:16px; }
+.navgroup-l { font-family:var(--mono); font-size:9.5px; letter-spacing:.18em; text-transform:uppercase; color:var(--text-faint); padding:0 11px 6px; }
+.navlink {
+  display:flex; align-items:center; justify-content:space-between; gap:8px; position:relative;
+  padding:7px 11px; border-radius:7px; cursor:pointer; color:var(--text-soft);
+  font-size:13.5px; font-weight:500; text-decoration:none; transition:background .12s,color .12s;
+}
+.navlink:hover { background:var(--bg-sunken); color:var(--text); }
+.navlink.active { background:var(--accent-soft); color:var(--accent-text); font-weight:600; }
+.navlink.active::before { content:""; position:absolute; left:-18px; top:7px; bottom:7px; width:3px; border-radius:0 3px 3px 0; background:var(--accent); }
+.navlink .count { font-family:var(--mono); font-size:10.5px; color:var(--text-faint); }
+.navlink.active .count { color:var(--accent-text); }
+.sidebar .spacer { flex:1; min-height:18px; }
+.themebtn {
+  display:flex; align-items:center; gap:9px; padding:9px 12px; border-radius:8px; cursor:pointer;
+  color:var(--text-soft); font-size:12.5px; background:var(--bg-sunken); border:1px solid var(--border); transition:color .12s;
+}
+.themebtn:hover { color:var(--text); border-color:var(--border-strong); }
+.themebtn .ti { font-size:14px; }
+
+.main { min-width:0; }
+.content { max-width:1000px; margin:0 auto; padding:46px 48px 140px; }
+.tab { display:none; }
+.tab.active { display:block; }
+.tab.active > * { opacity:0; animation:rise .5s cubic-bezier(.2,.7,.2,1) forwards; }
+.tab.active > *:nth-child(1){animation-delay:.02s} .tab.active > *:nth-child(2){animation-delay:.07s}
+.tab.active > *:nth-child(3){animation-delay:.12s} .tab.active > *:nth-child(4){animation-delay:.17s}
+.tab.active > *:nth-child(n+5){animation-delay:.21s}
+@keyframes rise { from{opacity:0; transform:translateY(9px);} to{opacity:1; transform:none;} }
+@media (prefers-reduced-motion:reduce){ .tab.active > *{animation:none;opacity:1;} }
+
+/* ===================== Prose ===================== */
+.prose { color:var(--text); }
+.prose h1 { font-weight:600; font-size:27px; line-height:1.15; letter-spacing:-.01em; margin:0 0 6px; }
+.prose h2 { font-weight:600; font-size:20px; letter-spacing:-.005em; margin:38px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+.prose h3 { font-weight:600; font-size:16px; margin:26px 0 9px; }
+.prose h4 { font-family:var(--mono); font-size:11.5px; font-weight:600; margin:20px 0 7px; color:var(--text-soft); text-transform:uppercase; letter-spacing:.06em; }
+.prose p { margin:12px 0; }
+.prose ul, .prose ol { margin:12px 0; padding-left:24px; }
+.prose li { margin:6px 0; }
+.prose li::marker { color:var(--accent); }
+.prose a { color:var(--accent-text); text-decoration:none; border-bottom:1px solid var(--rule); transition:border-color .12s; }
+.prose a:hover { border-bottom-color:var(--accent); }
+.prose strong { font-weight:600; color:var(--text); }
+.prose em { color:var(--text-soft); }
+.prose code { font-family:var(--mono); font-size:12.5px; background:var(--bg-sunken); padding:1.5px 5px; border-radius:5px; border:1px solid var(--border); }
+.prose pre { background:var(--bg-sunken); border:1px solid var(--border); border-left:3px solid var(--accent); border-radius:4px; padding:16px 18px; overflow-x:auto; font-size:12.5px; line-height:1.55; }
+.prose pre code { background:none; border:none; padding:0; }
+.prose table { border-collapse:collapse; width:100%; margin:18px 0; font-size:13px; display:block; overflow-x:auto; }
+.prose th, .prose td { border:1px solid var(--border); padding:9px 12px; text-align:left; vertical-align:top; }
+.prose th { background:var(--bg-sunken); font-weight:600; font-family:var(--mono); font-size:11.5px; text-transform:uppercase; letter-spacing:.03em; }
+.prose blockquote { border-left:3px solid var(--rule); margin:16px 0; padding:3px 18px; color:var(--text-soft); font-style:italic; }
+.prose hr { border:none; border-top:1px solid var(--rule); margin:30px 0; }
+
+/* finding cross-reference links inside prose */
+a.ref {
+  font-family:var(--mono); font-size:11.5px; font-weight:600; color:var(--accent-text);
+  background:var(--accent-soft); padding:0 5px; border-radius:4px; border:1px solid transparent;
+  text-decoration:none; white-space:nowrap; cursor:pointer; transition:border-color .12s;
+}
+a.ref:hover { border-color:var(--accent); }
+
+/* in-page section index for narrative tabs */
+.toc { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin:18px 0 6px; padding:13px 16px;
+  background:var(--bg-elev); border:1px solid var(--border); border-radius:10px; box-shadow:var(--shadow); }
+.toc .toc-l { font-family:var(--mono); font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--text-faint); margin-right:4px; }
+.toc a { font-size:12.5px; color:var(--text-soft); text-decoration:none; padding:3px 9px; border-radius:14px; border:1px solid var(--border); background:var(--bg); transition:all .12s; }
+.toc a:hover { color:var(--accent-text); border-color:var(--accent); }
+
+/* ===================== Badges ===================== */
+.badge { display:inline-flex; align-items:center; gap:5px; font-family:var(--mono); font-size:10.5px; font-weight:600;
+  padding:2px 8px; border-radius:4px; letter-spacing:.02em; white-space:nowrap; line-height:1.55; cursor:help; }
+.b-broken{color:var(--broken);background:var(--broken-bg);} .b-latent{color:var(--latent);background:var(--latent-bg);}
+.b-debt{color:var(--debt);background:var(--debt-bg);} .b-cosmetic{color:var(--cosmetic);background:var(--cosmetic-bg);}
+.b-confirmed{color:var(--confirmed);background:var(--confirmed-bg);} .b-partial{color:var(--partial);background:var(--partial-bg);} .b-refuted{color:var(--refuted);background:var(--refuted-bg);}
+.imp { display:inline-flex; align-items:center; font-size:10.5px; font-weight:500; font-family:var(--mono); padding:2px 8px; border-radius:4px; border:1px solid var(--border); cursor:help; }
+.imp::before { content:""; width:7px; height:7px; border-radius:2px; margin-right:5px; background:currentColor; }
+.imp-data-loss{color:var(--imp-data-loss);} .imp-security{color:var(--imp-security);} .imp-correctness{color:var(--imp-correctness);}
+.imp-cost-perf{color:var(--imp-cost-perf);} .imp-velocity{color:var(--imp-velocity);}
+.cx { font-size:10.5px; font-family:var(--mono); color:var(--text-faint); cursor:help; }
+.rep { font-size:10.5px; font-family:var(--mono); font-weight:600; color:var(--text-soft); background:var(--bg-sunken); padding:2px 7px; border-radius:4px; border:1px solid var(--border); cursor:help; }
+
+/* ===================== Overview / stat cards ===================== */
+.hero .eyebrow { font-family:var(--mono); font-size:11px; color:var(--text-faint); letter-spacing:.08em; text-transform:uppercase; }
+.statgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px,1fr)); gap:12px; margin:24px 0 28px; }
+.stat { background:var(--bg-elev); border:1px solid var(--border); border-radius:10px; padding:16px 18px; box-shadow:var(--shadow); }
+.stat .n { font-size:27px; font-weight:700; letter-spacing:-.01em; line-height:1; }
+.stat .l { font-size:11.5px; color:var(--text-soft); margin-top:8px; line-height:1.45; }
+.stat .l b { color:var(--text); font-weight:600; }
+
+.panel { background:var(--bg-elev); border:1px solid var(--border); border-radius:13px; padding:22px 24px; box-shadow:var(--shadow); margin:20px 0; }
+.panel > h3:first-child { margin-top:0; font-size:18px; }
+.panel-l { font-family:var(--mono); font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--accent-text); margin:0 0 14px; font-weight:600; }
+.chartrow { display:grid; grid-template-columns:1fr 1fr; gap:30px; }
+@media (max-width:760px){ .chartrow{ grid-template-columns:1fr; } }
+.chart-h { font-family:var(--mono); font-size:11px; letter-spacing:.05em; text-transform:uppercase; color:var(--text-soft); margin:0 0 12px; }
+.bar { margin:10px 0; cursor:pointer; }
+.bar:hover .bar-fill { filter:brightness(1.06); }
+.bar:hover .bar-top span:first-child { color:var(--accent-text); }
+.bar-top { display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:5px; font-family:var(--mono); }
+.bar-top .v { color:var(--text-soft); font-weight:600; }
+.bar-track { background:var(--bg-sunken); border-radius:3px; height:10px; overflow:hidden; }
+.bar-fill { height:100%; border-radius:3px; transition:filter .12s; }
+
+/* ===================== Key / glossary ===================== */
+.keylede { font-size:16px; color:var(--text-soft); max-width:64ch; margin:6px 0 4px; }
+.keyblock { background:var(--bg-elev); border:1px solid var(--border); border-radius:13px; padding:6px 24px 18px; box-shadow:var(--shadow); margin:22px 0; }
+.keyblock-h { display:flex; align-items:baseline; gap:12px; padding:18px 0 10px; border-bottom:1px solid var(--rule); margin-bottom:4px; flex-wrap:wrap; }
+.keyblock-h h3 { font-size:18px; font-weight:600; margin:0; }
+.keyblock-h .q { font-size:13.5px; color:var(--text-soft); font-style:italic; }
+.keyrow { display:grid; grid-template-columns:160px 1fr; gap:18px; padding:15px 0; border-bottom:1px solid var(--border); align-items:start; }
+.keyrow:last-child { border-bottom:none; }
+.keyrow .kterm { display:flex; flex-direction:column; gap:8px; align-items:flex-start; }
+.keyrow .kdef { font-size:13.5px; line-height:1.6; color:var(--text-soft); }
+.keyrow .kdef b { color:var(--text); font-weight:600; }
+.keycount { font-family:var(--mono); font-size:10.5px; color:var(--text-faint); }
+.keycount b { color:var(--text-soft); font-weight:600; }
+@media (max-width:620px){ .keyrow{ grid-template-columns:1fr; gap:9px; } }
+
+/* ===================== Findings explorer ===================== */
+.toolbar { position:sticky; top:0; z-index:20; background:var(--bg); padding:16px 0 13px; margin-bottom:6px;
+  border-bottom:1px solid var(--rule); }
+.searchwrap { position:relative; margin-bottom:12px; }
+.searchwrap input { width:100%; padding:12px 80px 12px 40px; font-size:14px; border:1px solid var(--border-strong); border-radius:9px;
+  background:var(--bg-elev); color:var(--text); font-family:var(--sans); }
+.searchwrap input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.searchwrap .ico { position:absolute; left:14px; top:50%; transform:translateY(-50%); color:var(--text-faint); font-size:15px; }
+.searchwrap .kbd { position:absolute; right:13px; top:50%; transform:translateY(-50%); font-family:var(--mono); font-size:10.5px;
+  color:var(--text-faint); border:1px solid var(--border); border-radius:5px; padding:2px 7px; background:var(--bg-sunken); }
+.filters { display:flex; flex-wrap:wrap; gap:13px 22px; align-items:center; }
+.fgroup { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+.fgroup .lbl { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-faint); font-weight:600; margin-right:1px; }
+.chip { font-family:var(--mono); font-size:11px; font-weight:600; padding:3px 11px; border-radius:14px; cursor:pointer;
+  border:1px solid var(--border-strong); background:var(--bg-elev); color:var(--text-soft); user-select:none; transition:all .12s; }
+.chip:hover { border-color:var(--text-faint); color:var(--text); }
+.chip.on { color:#fdfbf4; border-color:transparent; }
+html[data-theme="dark"] .chip.on { color:#14130e; }
+.chip.on.c-broken{background:var(--broken);} .chip.on.c-latent{background:var(--latent);}
+.chip.on.c-debt{background:var(--debt);} .chip.on.c-cosmetic{background:var(--cosmetic);}
+.chip.on.c-confirmed{background:var(--confirmed);} .chip.on.c-partial{background:var(--partial);} .chip.on.c-refuted{background:var(--refuted);}
+.chip.on.c-data-loss{background:var(--imp-data-loss);} .chip.on.c-security{background:var(--imp-security);}
+.chip.on.c-correctness{background:var(--imp-correctness);} .chip.on.c-cost-perf{background:var(--imp-cost-perf);} .chip.on.c-velocity{background:var(--imp-velocity);}
+.chip.on.c-generic{ background:var(--accent); }
+.toolbar2 { display:flex; justify-content:space-between; align-items:center; margin-top:12px; gap:12px; flex-wrap:wrap; }
+.resultcount { font-size:13px; color:var(--text-soft); font-family:var(--mono); }
+.resultcount b { color:var(--text); }
+.controls { display:flex; gap:8px; align-items:center; }
+.controls select, .controls button.linkbtn { font-size:12.5px; padding:7px 11px; border:1px solid var(--border-strong); border-radius:8px;
+  background:var(--bg-elev); color:var(--text); cursor:pointer; font-family:var(--sans); transition:border-color .12s; }
+.linkbtn:hover, .controls select:hover { border-color:var(--accent); }
+
+/* inline legend strip */
+.legendbar { margin:12px 0 2px; }
+.legend-toggle { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono); font-size:11px; color:var(--text-soft);
+  cursor:pointer; background:none; border:none; padding:4px 0; letter-spacing:.03em; }
+.legend-toggle:hover { color:var(--accent-text); }
+.legend-toggle .tw { transition:transform .15s; font-size:9px; }
+.legend-toggle.open .tw { transform:rotate(90deg); }
+.legend { display:none; margin-top:11px; padding:16px 18px; background:var(--bg-elev); border:1px solid var(--border); border-radius:11px;
+  border-left:3px solid var(--accent); }
+.legend.open { display:block; }
+.legend-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:18px 26px; }
+.legend-ax .legend-ax-l { font-family:var(--mono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--accent-text); font-weight:600; margin-bottom:8px; }
+.legend-item { display:flex; gap:9px; margin:7px 0; align-items:baseline; font-size:12px; color:var(--text-soft); line-height:1.45; }
+.legend-item .ls { flex-shrink:0; }
+.legend-more { margin-top:12px; font-size:12px; }
+
+.subgroup { margin:28px 0 6px; }
+.subgroup-h { display:flex; align-items:center; gap:11px; cursor:pointer; padding:6px 0; }
+.subgroup-h .tw { color:var(--text-faint); transition:transform .15s; font-size:11px; }
+.subgroup-h.collapsed .tw { transform:rotate(-90deg); }
+.subgroup-h h3 { margin:0; font-size:16px; font-weight:600; }
+.subgroup-h .gc { font-family:var(--mono); font-size:11px; color:var(--text-faint); }
+.subgroup-h .gline { flex:1; height:1px; background:var(--rule); }
+
+.card { background:var(--bg-elev); border:1px solid var(--border); border-radius:11px; margin:11px 0; box-shadow:var(--shadow); overflow:hidden; transition:box-shadow .2s,border-color .2s; }
+.card:hover { border-color:var(--border-strong); }
+.card.hl { box-shadow:0 0 0 2px var(--accent), var(--shadow-lg); border-color:transparent; }
+.card-head { display:flex; gap:14px; padding:15px 18px; cursor:pointer; align-items:flex-start; }
+.card-head:hover { background:var(--bg-sunken); }
+.card-id { font-family:var(--mono); font-size:11.5px; font-weight:600; color:var(--accent-text); background:var(--accent-soft);
+  padding:2px 7px; border-radius:4px; white-space:nowrap; margin-top:2px; }
+.card-main { flex:1; min-width:0; }
+.card-title { font-size:15px; font-weight:600; line-height:1.42; margin-bottom:9px; letter-spacing:-.005em; }
+.card-badges { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.card-tw { color:var(--text-faint); font-size:11px; margin-top:4px; transition:transform .15s; }
+.card.open .card-tw { transform:rotate(90deg); }
+.card-body { display:none; padding:6px 18px 20px; border-top:1px solid var(--border); }
+.card.open .card-body { display:block; }
+.field { margin:17px 0; }
+.field-l { font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:.09em; color:var(--text-faint); font-weight:600; margin-bottom:7px; }
+.field-claim { font-size:13.5px; line-height:1.62; color:var(--text); }
+.chain { font-family:var(--mono); font-size:12px; line-height:1.9; background:var(--bg-sunken); border:1px solid var(--border); border-left:3px solid var(--accent);
+  border-radius:4px; padding:13px 15px; overflow-x:auto; color:var(--text-soft); }
+.chain .arrow { color:var(--accent-text); font-weight:600; padding:0 3px; }
+.filelist { display:flex; flex-direction:column; gap:4px; }
+.filelist code { font-family:var(--mono); font-size:12px; background:var(--bg-sunken); border:1px solid var(--border); padding:3px 9px; border-radius:5px; color:var(--text-soft); width:fit-content; max-width:100%; overflow-x:auto; }
+.revchips { display:flex; flex-wrap:wrap; gap:5px; }
+.revchip { font-family:var(--mono); font-size:10.5px; color:var(--text-soft); background:var(--bg-sunken); border:1px solid var(--border); padding:2px 8px; border-radius:12px; }
+.vbox { border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-top:7px; }
+.vbox-h { display:flex; align-items:center; gap:9px; padding:10px 14px; background:var(--bg-sunken); font-size:12.5px; }
+.vbox-h .vn { color:var(--text-faint); font-family:var(--mono); font-size:11px; }
+.vote { padding:12px 15px; border-top:1px solid var(--border); }
+.vote-evidence { font-size:12px; line-height:1.62; white-space:pre-wrap; color:var(--text-soft); font-family:var(--mono); }
+.vote-meta { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:9px; align-items:center; }
+.vote-correct { font-size:11px; color:var(--latent); font-family:var(--mono); margin-bottom:6px; }
+.empty { text-align:center; padding:64px 20px; color:var(--text-faint); font-family:var(--mono); font-size:13px; }
+
+/* methodology pipeline */
+.pipeline { margin:8px 0 2px; }
+.pstep { display:flex; gap:17px; }
+.pstep .rail { display:flex; flex-direction:column; align-items:center; }
+.pstep .dot { width:34px; height:34px; border-radius:50%; background:var(--accent-soft); border:1.5px solid var(--accent); color:var(--accent-text);
+  display:flex; align-items:center; justify-content:center; font-weight:600; font-size:14px; flex-shrink:0; font-family:var(--serif); }
+.pstep .line { flex:1; width:1.5px; background:var(--rule); min-height:16px; }
+.pstep:last-child .line { display:none; }
+.pstep .pbody { padding-bottom:22px; }
+.pstep .pt { font-weight:600; font-size:15.5px; font-family:var(--serif); }
+.pstep .pd { font-size:13px; color:var(--text-soft); margin-top:3px; line-height:1.55; }
+
+.rostergrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px; background:var(--border); border:1px solid var(--border); border-radius:11px; overflow:hidden; }
+.rcard { background:var(--bg-elev); padding:15px 17px; }
+.rcard .rn { font-size:23px; font-weight:700; line-height:1; }
+.rcard .rl { font-size:12.5px; color:var(--text); font-weight:600; margin-top:6px; }
+.rcard .rk { font-size:11px; color:var(--text-faint); font-family:var(--mono); margin-top:4px; line-height:1.4; }
+
+.callout { display:flex; gap:13px; background:var(--accent-soft); border-radius:11px; padding:15px 18px; margin:18px 0; font-size:13.5px; line-height:1.55; }
+.callout .ci { font-size:17px; }
+
+@media (max-width:900px){
+  .app { grid-template-columns:1fr; }
+  .sidebar { position:static; height:auto; }
+  .content { padding:28px 20px 100px; }
+  .prose h1 { font-size:30px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="masthead">
+      <div class="kicker">Architecture Review</div>
+      <h1>Scout</h1>
+      <div class="meta"><span><b>{{DATE}}</b></span><span>·</span><span>HEAD {{HEAD}}</span></div>
+    </div>
+
+    <div class="navgroup">
+      <div class="navgroup-l">The report</div>
+      <a class="navlink" data-tab="overview"><span>Overview</span></a>
+      <a class="navlink" data-tab="methodology"><span>Methodology</span></a>
+    </div>
+    <div class="navgroup">
+      <div class="navgroup-l">Findings</div>
+      <a class="navlink" data-tab="findings"><span>Findings explorer</span><span class="count">{{NFINDINGS}}</span></a>
+      <a class="navlink" data-tab="subsystems"><span>By subsystem</span></a>
+      <a class="navlink" data-tab="patterns"><span>Cross-cutting patterns</span></a>
+    </div>
+    <div class="navgroup">
+      <div class="navgroup-l">Takeaways</div>
+      <a class="navlink" data-tab="recommendations"><span>Recommendations</span></a>
+      <a class="navlink" data-tab="whats-fine"><span>What's actually fine</span></a>
+    </div>
+    <div class="navgroup">
+      <div class="navgroup-l">Reference</div>
+      <a class="navlink" data-tab="coverage"><span>Coverage &amp; confidence</span></a>
+      <a class="navlink" data-tab="key"><span>Key &amp; glossary</span></a>
+    </div>
+
+    <div class="spacer"></div>
+    <div class="themebtn" id="themebtn"><span class="ti" id="themeico">◐</span><span id="themelbl">Dark mode</span></div>
+  </nav>
+
+  <main class="main">
+    <div class="content">
+
+      <!-- ===== OVERVIEW ===== -->
+      <section class="tab" id="tab-overview">
+        <div class="hero prose">
+          <div class="eyebrow">Phase 4 synthesis · {{NFINDINGS}} adjudicated findings · 43 reviewers</div>
+          <h1>Executive summary</h1>
+        </div>
+        <div class="statgrid" id="statgrid"></div>
+        <div class="panel">
+          <div class="panel-l">Findings at a glance · click any bar to filter the explorer</div>
+          <div class="chartrow">
+            <div><div class="chart-h">By status</div><div id="chart-status"></div></div>
+            <div><div class="chart-h">By impact</div><div id="chart-impact"></div></div>
+          </div>
+          <div class="chartrow" style="margin-top:22px;">
+            <div><div class="chart-h">Verification verdict</div><div id="chart-verdict"></div></div>
+            <div><div class="chart-h">Complexity — accidental vs essential</div><div id="chart-complexity"></div></div>
+          </div>
+          <p style="font-size:12px;color:var(--text-faint);margin:16px 0 0;font-family:var(--mono);">New to the badges? See <a href="#key" class="ref" data-tab-link="key" style="cursor:pointer">Key &amp; glossary</a>.</p>
+        </div>
+        <div class="prose">{{OVERVIEW}}</div>
+      </section>
+
+      <!-- ===== METHODOLOGY ===== -->
+      <section class="tab" id="tab-methodology">
+        <div class="prose"><h1>How this review was produced</h1>
+        <p>This was not a single-pass read. It is a multi-fleet review run as a deterministic
+        Claude Code Workflow over the Scout codebase, designed after two earlier single-agent runs
+        overlapped only ~60% and each confidently misdescribed code it had read. The design goal:
+        <strong>a real miss should require three independent failures.</strong></p>
+        </div>
+        <div class="panel">
+          <div class="panel-l">The pipeline · five phases</div>
+          <div class="pipeline" id="pipeline"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-l">Round-1 review fleet</div>
+          <p style="font-size:13px;color:var(--text-soft);margin:0 0 16px;">Three overlapping partitions of the codebase — by module, by feature, and by failure class — plus seam, journey and history mandates. ~25–30 reviewers in round 1, then targeted gap rounds until dry.</p>
+          <div class="rostergrid" id="roster"></div>
+        </div>
+        <div class="prose">{{METHODOLOGY}}</div>
+      </section>
+
+      <!-- ===== FINDINGS EXPLORER ===== -->
+      <section class="tab" id="tab-findings">
+        <div class="prose"><h1 style="margin-bottom:6px;">Findings explorer</h1>
+        <p style="margin-top:4px;color:var(--text-soft);">Every adjudicated finding with its claim, evidence chain, files, the reviewers who independently found it, and the adversarial verification verdict. Filters combine across groups (AND) and union within a group (OR). Hover any badge for its definition.</p></div>
+        <div class="legendbar">
+          <button class="legend-toggle" id="legendToggle"><span class="tw">▶</span>Reading the badges — Status · Impact · Verdict · Complexity</button>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div class="toolbar">
+          <div class="searchwrap">
+            <span class="ico">⌕</span>
+            <input id="search" type="text" placeholder="Search title, claim, chain, files, finding id (e.g. 00#0)…" autocomplete="off">
+            <span class="kbd">/</span>
+          </div>
+          <div class="filters" id="filters"></div>
+          <div class="toolbar2">
+            <div class="resultcount" id="resultcount"></div>
+            <div class="controls">
+              <button class="linkbtn" id="clearbtn">Clear</button>
+              <button class="linkbtn" id="expandbtn">Expand all</button>
+              <select id="sortsel">
+                <option value="severity">Sort: severity</option>
+                <option value="replication">Sort: replication</option>
+                <option value="id">Sort: finding id</option>
+              </select>
+              <select id="groupsel">
+                <option value="subsystem">Group: subsystem</option>
+                <option value="status">Group: status</option>
+                <option value="impact">Group: impact</option>
+                <option value="none">Group: none</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div id="findings-list"></div>
+      </section>
+
+      <!-- ===== SUBSYSTEMS ===== -->
+      <section class="tab" id="tab-subsystems"><div class="prose">{{SUBSYSTEMS}}</div></section>
+      <!-- ===== PATTERNS ===== -->
+      <section class="tab" id="tab-patterns"><div class="prose">{{PATTERNS}}</div></section>
+      <!-- ===== RECOMMENDATIONS ===== -->
+      <section class="tab" id="tab-recommendations"><div class="prose">{{RECOMMENDATIONS}}</div></section>
+      <!-- ===== WHATS FINE ===== -->
+      <section class="tab" id="tab-whats-fine"><div class="prose">{{WHATSFINE}}</div></section>
+      <!-- ===== COVERAGE ===== -->
+      <section class="tab" id="tab-coverage"><div class="prose">{{COVERAGE}}</div></section>
+
+      <!-- ===== KEY & GLOSSARY ===== -->
+      <section class="tab" id="tab-key">
+        <div class="prose"><h1>Key &amp; glossary</h1></div>
+        <p class="keylede">Every finding is scored on two independent axes — <strong>status</strong> (how alive the problem is) and <strong>impact</strong> (what's at stake) — then carries an adversarial-verification <strong>verdict</strong>, a <strong>complexity</strong> verdict, and a <strong>replication</strong> count. Here is what each term means.</p>
+
+        <div class="keyblock">
+          <div class="keyblock-h"><h3>Status</h3><span class="q">How alive is it — does it bite now, later, or just rot?</span></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-broken">BROKEN-NOW</span><span class="keycount" data-axis="status" data-key="BROKEN-NOW"></span></div>
+            <div class="kdef"><b>Reachable and failing today.</b> A live route, UI control, or agent tool hits this path right now and it produces wrong behavior. No special conditions required.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-latent">LATENT</span><span class="keycount" data-axis="status" data-key="LATENT"></span></div>
+            <div class="kdef"><b>A real defect that hasn't fired yet.</b> It needs a specific trigger to surface — a race, a multi-tenant workspace, a TTL expiry, an error path, an upstream change — but when that condition occurs, it bites.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-debt">DEBT</span><span class="keycount" data-axis="status" data-key="DEBT"></span></div>
+            <div class="kdef"><b>Not actively wrong, but structural rot.</b> Dead code, the same truth implemented N different ways, missing tests, drift that hasn't broken anything yet. It raises the cost and risk of every future change.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-cosmetic">COSMETIC</span><span class="keycount" data-axis="status" data-key="COSMETIC"></span></div>
+            <div class="kdef"><b>Minor and low-impact.</b> Naming residue, stale docstrings, small UI imperfections. Worth recording, not worth an incident.</div></div>
+        </div>
+
+        <div class="keyblock">
+          <div class="keyblock-h"><h3>Impact</h3><span class="q">If it fires, what is at stake?</span></div>
+          <div class="keyrow"><div class="kterm"><span class="imp imp-data-loss">data-loss</span><span class="keycount" data-axis="impact" data-key="data-loss"></span></div>
+            <div class="kdef">Destroys or corrupts data — e.g. dropping a database schema that still holds rows.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="imp imp-security">security</span><span class="keycount" data-axis="impact" data-key="security"></span></div>
+            <div class="kdef">Authentication, authorization, tenant isolation, or information disclosure.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="imp imp-correctness">correctness</span><span class="keycount" data-axis="impact" data-key="correctness"></span></div>
+            <div class="kdef">Produces wrong results or wrong behavior, without destroying data.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="imp imp-cost-perf">cost-perf</span><span class="keycount" data-axis="impact" data-key="cost-perf"></span></div>
+            <div class="kdef">Costs money or latency — LLM bill, redundant requests, slow paths, unbounded growth.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="imp imp-velocity">velocity</span><span class="keycount" data-axis="impact" data-key="velocity"></span></div>
+            <div class="kdef">Slows development down — confusing code, fragile contracts, missing guardrails.</div></div>
+        </div>
+
+        <div class="keyblock">
+          <div class="keyblock-h"><h3>Verdict</h3><span class="q">Adversarial verification — every claim was independently re-traced by a verifier whose job was to refute it.</span></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-confirmed">CONFIRMED</span><span class="keycount" data-axis="verdict" data-key="CONFIRMED"></span></div>
+            <div class="kdef"><b>The verifier re-traced the path and the claim holds</b> as stated.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-partial">PARTIAL</span><span class="keycount" data-axis="verdict" data-key="PARTIAL"></span></div>
+            <div class="kdef"><b>True, but narrower than first claimed.</b> The verifier corrected the severity or reach; the narrowed claim is what is shown here.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="badge b-refuted">REFUTED</span><span class="keycount" data-axis="verdict" data-key="REFUTED"></span></div>
+            <div class="kdef"><b>The claim was overturned on trace.</b> The two refuted findings are retained in Appendix B for the record, not in the body.</div></div>
+        </div>
+
+        <div class="keyblock">
+          <div class="keyblock-h"><h3>Complexity</h3><span class="q">Is the difficulty inherent to the domain, or self-inflicted?</span></div>
+          <div class="keyrow"><div class="kterm"><span class="cx">accidental</span><span class="keycount" data-axis="complexity" data-key="accidental"></span></div>
+            <div class="kdef"><b>Avoidable.</b> Drift, rename residue, a fix applied only where it bit, N parallel implementations of one truth. The dominant verdict — most issues are fixable rot, not hard problems.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="cx">mixed</span><span class="keycount" data-axis="complexity" data-key="mixed"></span></div>
+            <div class="kdef">Some inherent difficulty, some avoidable.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="cx">essential</span><span class="keycount" data-axis="complexity" data-key="essential"></span></div>
+            <div class="kdef"><b>Inherent domain difficulty</b> — genuinely hard regardless of design choices.</div></div>
+        </div>
+
+        <div class="keyblock">
+          <div class="keyblock-h"><h3>Replication</h3><span class="q">A free confidence signal.</span></div>
+          <div class="keyrow"><div class="kterm"><span class="rep">r<i>K</i></span></div>
+            <div class="kdef"><b>How many of the independent reviewers found this same issue on their own.</b> Higher means more confident it is real: 23 findings were found by ≥5 reviewers, and all 23 survived verification. Security and data-loss findings additionally got two independent verifiers.</div></div>
+          <div class="keyrow"><div class="kterm"><span class="card-id" style="margin:0">NN#i</span></div>
+            <div class="kdef"><b>Finding id.</b> <code>NN</code> is the source batch file (<code>findings/batch-NN.json</code>) and <code>i</code> is the array index — e.g. <code>00#0</code> is the refresh data-loss finding. These ids appear as clickable links throughout the narrative.</div></div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<script>
+const DATA = {{DATA_JSON}};
+const F = DATA.findings;
+const byId = Object.fromEntries(F.map(f => [f.id, f]));
+
+const STATUS_ORDER = ['BROKEN-NOW','LATENT','DEBT','COSMETIC'];
+const IMPACT_ORDER = ['data-loss','security','correctness','cost-perf','velocity'];
+const VERDICT_ORDER = ['CONFIRMED','PARTIAL','REFUTED'];
+const CPLX_ORDER = ['accidental','mixed','essential'];
+const SEV = {'BROKEN-NOW':0,'LATENT':1,'DEBT':2,'COSMETIC':3};
+const slug = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g,'-');
+
+/* tooltip definitions */
+const DEFS = {
+  status:{'BROKEN-NOW':'Reachable and failing today — a live route/UI/tool hits this path and it misbehaves now.',
+          'LATENT':'A real defect that needs a specific trigger (race, multi-tenant, TTL, error path) to fire.',
+          'DEBT':'Not actively wrong, but structural rot that raises the cost/risk of future change.',
+          'COSMETIC':'Minor, low-impact — naming, docstrings, small UI imperfections.'},
+  impact:{'data-loss':'Destroys or corrupts data.','security':'Auth, authz, tenant isolation, or disclosure.',
+          'correctness':'Wrong results/behavior, without losing data.','cost-perf':'Costs money or latency.','velocity':'Slows development down.'},
+  verdict:{'CONFIRMED':'Independently re-traced; the claim holds as stated.',
+           'PARTIAL':'True but narrower than first claimed; severity/reach corrected.',
+           'REFUTED':'Overturned on trace (kept in Appendix B, not the body).'},
+  complexity:{'accidental':'Avoidable — drift, rename residue, fix-applied-only-where-it-bit.',
+              'mixed':'Some inherent difficulty, some avoidable.','essential':'Inherent domain difficulty.'},
+};
+
+const state = {
+  tab:'overview',
+  filters:{status:new Set(),impact:new Set(),complexity:new Set(),verdict:new Set()},
+  search:'', sort:'severity', group:'subsystem',
+  expanded:new Set(), collapsedGroups:new Set(),
+};
+
+/* ---------- badges ---------- */
+const tip = t => t ? ` title="${t.replace(/"/g,'&quot;')}"` : '';
+function statusBadge(s){ return `<span class="badge b-${slug(s)}"${tip(DEFS.status[s])}>${s}</span>`; }
+function verdictBadge(v){ return `<span class="badge b-${slug(v)}"${tip(DEFS.verdict[v])}>${v}</span>`; }
+function impactBadge(i){ return `<span class="imp imp-${slug(i)}"${tip(DEFS.impact[i])}>${i}</span>`; }
+function cplxBadge(c){ return c ? `<span class="cx"${tip(DEFS.complexity[c])}>${c}</span>` : ''; }
+function repBadge(r){ return `<span class="rep" title="Found independently by ${r} reviewer${r>1?'s':''} — a confidence signal">r${r}</span>`; }
+
+/* ---------- stats ---------- */
+function countBy(key){ const m={}; F.forEach(f=>{const k=f[key]; m[k]=(m[k]||0)+1;}); return m; }
+function renderStats(){
+  const byStatus=countBy('status'), byVerdict=countBy('verdict'), byImpact=countBy('impact');
+  const broken=byStatus['BROKEN-NOW']||0;
+  const sec=byImpact['security']||0, dl=byImpact['data-loss']||0;
+  const cells=[
+    {n:F.length, l:'<b>adjudicated</b> findings'},
+    {n:byVerdict['CONFIRMED']||0, l:'<b>CONFIRMED</b> by adversarial verifier'},
+    {n:broken, l:'<b>BROKEN-NOW</b> — reachable &amp; failing today'},
+    {n:sec+dl, l:'<b>security + data-loss</b> impact'},
+    {n:'43', l:'independent <b>reviewers</b>'},
+    {n:'477', l:'files <b>deep-read</b> at least once'},
+  ];
+  document.getElementById('statgrid').innerHTML = cells.map(c=>
+    `<div class="stat"><div class="n">${c.n}</div><div class="l">${c.l}</div></div>`).join('');
+
+  chart('chart-status', STATUS_ORDER.map(k=>[k,byStatus[k]||0]), 'status', k=>`var(--${slug(k)==='broken-now'?'broken':slug(k)})`);
+  chart('chart-impact', IMPACT_ORDER.map(k=>[k,byImpact[k]||0]), 'impact', k=>`var(--imp-${slug(k)})`);
+  chart('chart-verdict', VERDICT_ORDER.map(k=>[k,byVerdict[k]||0]), 'verdict', k=>`var(--${slug(k)})`);
+  const byC=countBy('complexity');
+  chart('chart-complexity', CPLX_ORDER.map(k=>[k,byC[k]||0]), 'complexity', k=> k==='accidental'?'var(--debt)':k==='mixed'?'var(--latent)':'var(--imp-security)');
+}
+function chart(elId, pairs, group, colorFn){
+  const max=Math.max(1,...pairs.map(p=>p[1]));
+  document.getElementById(elId).innerHTML = pairs.map(([k,v])=>{
+    const pct=Math.round(v/max*100);
+    return `<div class="bar" data-group="${group}" data-key="${k}">
+      <div class="bar-top"><span>${k}</span><span class="v">${v}</span></div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${colorFn(k)}"></div></div>
+    </div>`;
+  }).join('');
+  document.querySelectorAll(`#${elId} .bar`).forEach(b=>b.addEventListener('click',()=>{
+    const g=b.dataset.group, k=b.dataset.key;
+    Object.values(state.filters).forEach(s=>s.clear());
+    if(state.filters[g]) state.filters[g].add(k);
+    state.search=''; document.getElementById('search').value='';
+    go('findings'); syncChips(); renderFindings();
+  }));
+}
+
+/* ---------- key counts ---------- */
+function renderKeyCounts(){
+  const counts={status:countBy('status'),impact:countBy('impact'),verdict:countBy('verdict'),complexity:countBy('complexity')};
+  document.querySelectorAll('.keycount[data-axis]').forEach(el=>{
+    const n=(counts[el.dataset.axis]||{})[el.dataset.key]||0;
+    el.innerHTML = `<b>${n}</b> finding${n===1?'':'s'}`;
+  });
+}
+
+/* ---------- legend ---------- */
+function renderLegend(){
+  const axes=[
+    {l:'Status',d:DEFS.status,order:STATUS_ORDER,b:k=>`<span class="badge b-${slug(k)==='broken-now'?'broken':slug(k)}">${k}</span>`},
+    {l:'Impact',d:DEFS.impact,order:IMPACT_ORDER,b:k=>`<span class="imp imp-${slug(k)}">${k}</span>`},
+    {l:'Verdict',d:DEFS.verdict,order:VERDICT_ORDER,b:k=>`<span class="badge b-${slug(k)}">${k}</span>`},
+    {l:'Complexity',d:DEFS.complexity,order:CPLX_ORDER,b:k=>`<span class="cx">${k}</span>`},
+  ];
+  document.getElementById('legend').innerHTML =
+    `<div class="legend-grid">`+axes.map(a=>
+      `<div class="legend-ax"><div class="legend-ax-l">${a.l}</div>`+
+      a.order.map(k=>`<div class="legend-item"><span class="ls">${a.b(k)}</span><span>${a.d[k]}</span></div>`).join('')+
+      `</div>`).join('')+`</div>`+
+    `<div class="legend-more"><a href="#key" class="ref" data-tab-link="key" style="cursor:pointer">Open the full Key &amp; glossary →</a></div>`;
+}
+
+/* ---------- filtering ---------- */
+function buildFilters(){
+  const groups=[
+    {key:'status', label:'Status', order:STATUS_ORDER, cls:s=>'c-'+(slug(s)==='broken-now'?'broken':slug(s)), d:DEFS.status},
+    {key:'impact', label:'Impact', order:IMPACT_ORDER, cls:s=>'c-'+slug(s), d:DEFS.impact},
+    {key:'complexity', label:'Complexity', order:CPLX_ORDER, cls:()=> 'c-generic', d:DEFS.complexity},
+    {key:'verdict', label:'Verdict', order:VERDICT_ORDER, cls:s=>'c-'+slug(s), d:DEFS.verdict},
+  ];
+  document.getElementById('filters').innerHTML = groups.map(g=>
+    `<div class="fgroup"><span class="lbl">${g.label}</span>`+
+    g.order.map(o=>`<span class="chip ${g.cls(o)}" data-fg="${g.key}" data-fv="${o}"${tip(g.d[o])}>${o}</span>`).join('')+
+    `</div>`).join('');
+  document.querySelectorAll('#filters .chip').forEach(c=>c.addEventListener('click',()=>{
+    const g=c.dataset.fg, v=c.dataset.fv, set=state.filters[g];
+    set.has(v)?set.delete(v):set.add(v);
+    syncChips(); renderFindings();
+  }));
+}
+function syncChips(){
+  document.querySelectorAll('#filters .chip').forEach(c=>{
+    c.classList.toggle('on', state.filters[c.dataset.fg].has(c.dataset.fv));
+  });
+}
+
+function matches(f){
+  for(const g of ['status','impact','complexity','verdict']){
+    const set=state.filters[g];
+    if(set.size && !set.has(f[g])) return false;
+  }
+  if(state.search){
+    const q=state.search.toLowerCase();
+    const hay=(f.id+' '+f.title+' '+f.claim+' '+f.chain+' '+(f.files||[]).join(' ')+' '+(f.reviewers||[]).join(' ')+' '+f.subsystem).toLowerCase();
+    if(!hay.includes(q)) return false;
+  }
+  return true;
+}
+function sortFindings(arr){
+  const s=state.sort;
+  return arr.slice().sort((a,b)=>{
+    if(s==='severity'){ if(SEV[a.status]!==SEV[b.status]) return SEV[a.status]-SEV[b.status]; return b.replication-a.replication; }
+    if(s==='replication'){ if(b.replication!==a.replication) return b.replication-a.replication; return SEV[a.status]-SEV[b.status]; }
+    return a.id.localeCompare(b.id, undefined, {numeric:true});
+  });
+}
+
+/* ---------- finding card ---------- */
+function chainHtml(chain){ if(!chain) return ''; return esc(chain).replace(/-&gt;|→/g,'<span class="arrow">→</span>'); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function cardHtml(f){
+  const open=state.expanded.has(f.id);
+  const badges = statusBadge(f.status)+impactBadge(f.impact)+verdictBadge(f.verdict)+cplxBadge(f.complexity)+repBadge(f.replication);
+  let body='';
+  if(open){
+    const votes=(f.votes||[]).map((v,i)=>{
+      let corr='';
+      if(v.corrected_status||v.corrected_impact){
+        corr=`<div class="vote-correct">↳ corrected → ${[v.corrected_status,v.corrected_impact].filter(Boolean).join(' / ')}</div>`;
+      }
+      const notes = v.notes ? `<div class="vote-correct" style="color:var(--text-faint)">note: ${esc(v.notes)}</div>` : '';
+      return `<div class="vote"><div class="vote-meta">${verdictBadge(v.verdict)}<span class="vn" style="color:var(--text-faint);font-family:var(--mono);font-size:11px">verifier ${i+1}</span></div>${corr}${notes}<div class="vote-evidence">${esc(v.evidence||'').trim()}</div></div>`;
+    }).join('');
+    body=`<div class="card-body">
+      <div class="field"><div class="field-l">Claim &amp; mechanism</div><div class="field-claim">${esc(f.claim)}</div></div>
+      ${f.chain?`<div class="field"><div class="field-l">Evidence chain — entry point → consequence</div><div class="chain">${chainHtml(f.chain)}</div></div>`:''}
+      ${(f.files&&f.files.length)?`<div class="field"><div class="field-l">Files</div><div class="filelist">${f.files.map(x=>`<code>${esc(x)}</code>`).join('')}</div></div>`:''}
+      <div class="field"><div class="field-l">Found independently by ${f.reviewers.length} reviewer${f.reviewers.length>1?'s':''} (r${f.replication})</div><div class="revchips">${f.reviewers.map(r=>`<span class="revchip">${esc(r)}</span>`).join('')}</div></div>
+      <div class="field"><div class="field-l">Adversarial verification — ${f.verdict}</div><div class="vbox"><div class="vbox-h">${verdictBadge(f.verdict)}<span class="vn">${(f.votes||[]).length} independent verifier${(f.votes||[]).length===1?'':'s'}</span></div>${votes}</div></div>
+    </div>`;
+  }
+  return `<div class="card ${open?'open':''}" id="card-${cssid(f.id)}" data-fid="${f.id}">
+    <div class="card-head">
+      <span class="card-id">${f.id}</span>
+      <div class="card-main"><div class="card-title">${esc(f.title)}</div><div class="card-badges">${badges}</div></div>
+      <span class="card-tw">▶</span>
+    </div>${body}</div>`;
+}
+function cssid(id){ return id.replace('#','-'); }
+
+/* ---------- render list ---------- */
+function groupKeyFor(f){
+  if(state.group==='subsystem') return f.subsystem;
+  if(state.group==='status') return f.status;
+  if(state.group==='impact') return f.impact;
+  return '__all__';
+}
+function groupOrder(keys){
+  if(state.group==='status') return STATUS_ORDER.filter(k=>keys.includes(k));
+  if(state.group==='impact') return IMPACT_ORDER.filter(k=>keys.includes(k));
+  if(state.group==='subsystem') return DATA.subsystemsOrder.filter(k=>keys.includes(k)).concat(keys.filter(k=>!DATA.subsystemsOrder.includes(k)));
+  return keys;
+}
+function renderFindings(){
+  const filtered=F.filter(matches);
+  document.getElementById('resultcount').innerHTML = `<b>${filtered.length}</b> of ${F.length} findings`;
+  const list=document.getElementById('findings-list');
+  if(!filtered.length){ list.innerHTML=`<div class="empty">No findings match these filters.</div>`; return; }
+  if(state.group==='none'){
+    list.innerHTML = sortFindings(filtered).map(cardHtml).join('');
+  } else {
+    const groups={};
+    filtered.forEach(f=>{ const k=groupKeyFor(f); (groups[k]=groups[k]||[]).push(f); });
+    const order=groupOrder(Object.keys(groups));
+    list.innerHTML = order.map(k=>{
+      const items=sortFindings(groups[k]);
+      const collapsed=state.collapsedGroups.has(k);
+      return `<div class="subgroup">
+        <div class="subgroup-h ${collapsed?'collapsed':''}" data-grp="${esc(k)}">
+          <span class="tw">▼</span><h3>${esc(k)}</h3><span class="gc">${items.length}</span><span class="gline"></span>
+        </div>
+        <div class="subgroup-body" style="${collapsed?'display:none':''}">${items.map(cardHtml).join('')}</div>
+      </div>`;
+    }).join('');
+  }
+  wireCards();
+}
+function wireCards(){
+  document.querySelectorAll('.card-head').forEach(h=>h.addEventListener('click',()=>{
+    const fid=h.parentElement.dataset.fid;
+    state.expanded.has(fid)?state.expanded.delete(fid):state.expanded.add(fid);
+    renderFindings();
+  }));
+  document.querySelectorAll('.subgroup-h').forEach(h=>h.addEventListener('click',()=>{
+    const g=h.dataset.grp;
+    state.collapsedGroups.has(g)?state.collapsedGroups.delete(g):state.collapsedGroups.add(g);
+    renderFindings();
+  }));
+}
+
+/* ---------- in-page section index for narrative tabs ---------- */
+const NARRATIVE=['subsystems','patterns','recommendations','whats-fine','coverage','methodology'];
+function buildToc(tab){
+  const sec=document.getElementById('tab-'+tab);
+  if(!sec || sec.querySelector('.toc')) return; // once
+  // Use h2 when present, otherwise fall back to h3 (some sections only have ### sub-heads).
+  // Scan the whole section: methodology has an intro .prose plus a content .prose.
+  let heads=[...sec.querySelectorAll('.prose h2')];
+  if(heads.length<2) heads=[...sec.querySelectorAll('.prose h3')];
+  if(heads.length<2) return;
+  heads.forEach((h,i)=>{ if(!h.id) h.id = tab+'-h-'+i; });
+  const label=t=>t.replace(/^\d+(\.\d+)*[.)]?\s*/,'').replace(/\s*\(.*?\)\s*$/,'');
+  const toc=document.createElement('div');
+  toc.className='toc';
+  toc.innerHTML=`<span class="toc-l">On this page</span>`+
+    heads.map(h=>`<a href="#${h.id}" data-anchor="${h.id}">${label(h.textContent)}</a>`).join('');
+  const firstProse=sec.querySelector('.prose');
+  const h1=firstProse.querySelector('h1');
+  if(h1) h1.insertAdjacentElement('afterend', toc); else firstProse.insertBefore(toc, firstProse.firstChild);
+  toc.querySelectorAll('a').forEach(a=>a.addEventListener('click',e=>{
+    e.preventDefault();
+    const el=document.getElementById(a.dataset.anchor);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  }));
+}
+
+/* ---------- navigation ---------- */
+const TABS=['overview','methodology','findings','subsystems','patterns','recommendations','whats-fine','coverage','key'];
+function go(tab){
+  if(!TABS.includes(tab)) tab='overview';
+  state.tab=tab;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  const sec=document.getElementById('tab-'+tab); sec.classList.remove('active'); void sec.offsetWidth; sec.classList.add('active');
+  document.querySelectorAll('.navlink[data-tab]').forEach(n=>n.classList.toggle('active', n.dataset.tab===tab));
+  if(NARRATIVE.includes(tab)) buildToc(tab);
+  if(history.replaceState) history.replaceState(null,'', '#'+tab);
+  window.scrollTo(0,0);
+}
+function openFinding(fid){
+  if(!byId[fid]) return;
+  go('findings');
+  Object.values(state.filters).forEach(s=>s.clear());
+  state.collapsedGroups.clear();
+  state.search=''; document.getElementById('search').value='';
+  state.expanded.add(fid);
+  syncChips(); renderFindings();
+  setTimeout(()=>{
+    const el=document.getElementById('card-'+cssid(fid));
+    if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('hl'); setTimeout(()=>el.classList.remove('hl'),2200); }
+  },70);
+}
+
+/* ---------- methodology widgets ---------- */
+function renderPipeline(){
+  const steps=[
+    {n:'0',t:'Cartography',d:'One agent maps every module, the git churn / fix-chain clusters, every user-facing surface, the process seams, and harvests known incident symptoms. Proposes the reviewer roster. Generalists do NOT see this map.'},
+    {n:'1',t:'Review fleet (parallel, independent)',d:'3 fresh-eyes generalists · 10 feature verticals · 10 failure-class lenses · 5 seam reviewers · 3 journey tracers · 1 git historian. Each emits structured findings, a coverage log, and a full report.'},
+    {n:'2',t:'Adjudication',d:'Dedup & cluster findings (recording replication count) → an independent adversarial verifier re-traces each one to refute it → a contradiction pass resolves cross-report disagreements against the code.'},
+    {n:'3',t:'Gap loop',d:'A completeness critic reads the coverage matrix + verified findings and spawns targeted round-2 reviewers (including a runtime verifier that executed code against a live stack). Repeat until dry (≤2 new confirmed/round).'},
+    {n:'4',t:'Synthesis + red-team',d:'One synthesizer builds the canonical report from the verified-findings DB, cartography, and the architecture maps; a red-team pass checks it against the records for overclaiming or dropped qualifiers.'},
+  ];
+  document.getElementById('pipeline').innerHTML = steps.map(s=>
+    `<div class="pstep"><div class="rail"><div class="dot">${s.n}</div><div class="line"></div></div>
+     <div class="pbody"><div class="pt">${s.t}</div><div class="pd">${s.d}</div></div></div>`).join('');
+}
+function renderRoster(){
+  const r=[
+    {n:'3',l:'Generalists',k:'fresh eyes, no map'},
+    {n:'10',l:'Feature verticals',k:'own one feature end-to-end'},
+    {n:'10',l:'Failure-class lenses',k:'hunt one defect class everywhere'},
+    {n:'5',l:'Seam reviewers',k:'own a contract, not a component'},
+    {n:'3',l:'Journey tracers',k:'follow a user, not a module'},
+    {n:'1',l:'Git historian',k:'fixed-where-it-bit sweeps'},
+    {n:'8',l:'Gap-round reviewers',k:'targeted + 1 runtime verifier'},
+    {n:'~80',l:'Adversarial verifiers',k:'2 for security / data-loss'},
+  ];
+  document.getElementById('roster').innerHTML = r.map(x=>
+    `<div class="rcard"><div class="rn">${x.n}</div><div class="rl">${x.l}</div><div class="rk">${x.k}</div></div>`).join('');
+}
+
+/* ---------- wire up ---------- */
+function init(){
+  renderStats(); buildFilters(); renderLegend(); renderKeyCounts(); renderFindings(); renderPipeline(); renderRoster();
+  document.querySelectorAll('.navlink[data-tab]').forEach(n=>n.addEventListener('click',e=>{e.preventDefault();go(n.dataset.tab);}));
+  document.getElementById('search').addEventListener('input',e=>{state.search=e.target.value.trim();renderFindings();});
+  document.getElementById('sortsel').addEventListener('change',e=>{state.sort=e.target.value;renderFindings();});
+  document.getElementById('groupsel').addEventListener('change',e=>{state.group=e.target.value;renderFindings();});
+  document.getElementById('clearbtn').addEventListener('click',()=>{Object.values(state.filters).forEach(s=>s.clear());state.search='';document.getElementById('search').value='';syncChips();renderFindings();});
+  document.getElementById('legendToggle').addEventListener('click',e=>{
+    const open=document.getElementById('legend').classList.toggle('open');
+    e.currentTarget.classList.toggle('open',open);
+  });
+  let allExpanded=false;
+  document.getElementById('expandbtn').addEventListener('click',e=>{
+    allExpanded=!allExpanded;
+    if(allExpanded){ F.filter(matches).forEach(f=>state.expanded.add(f.id)); e.target.textContent='Collapse all'; }
+    else { state.expanded.clear(); e.target.textContent='Expand all'; }
+    renderFindings();
+  });
+  // theme
+  const tb=document.getElementById('themebtn');
+  function setTheme(t){ document.documentElement.dataset.theme=t; localStorage.setItem('arch-theme',t);
+    document.getElementById('themelbl').textContent= t==='dark'?'Light mode':'Dark mode';
+    document.getElementById('themeico').textContent= t==='dark'?'☀':'◐'; }
+  tb.addEventListener('click',()=>setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark'));
+  setTheme(localStorage.getItem('arch-theme')|| (matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'));
+  // delegated clicks: ref links + tab links
+  document.body.addEventListener('click',e=>{
+    const tl=e.target.closest('[data-tab-link]'); if(tl){ e.preventDefault(); go(tl.dataset.tabLink); return; }
+    const a=e.target.closest('a.ref'); if(a && a.dataset.fid){ e.preventDefault(); openFinding(a.dataset.fid); }
+  });
+  // "/" focuses search
+  document.addEventListener('keydown',e=>{
+    if(e.key==='/' && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)){
+      e.preventDefault(); if(state.tab!=='findings') go('findings'); document.getElementById('search').focus();
+    }
+  });
+  // initial route
+  const h=(location.hash||'#overview').slice(1);
+  if(h.startsWith('finding=')) openFinding(h.slice(8)); else go(h);
+}
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

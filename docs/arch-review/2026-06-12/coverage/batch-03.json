@@ -1,0 +1,474 @@
+[
+  {
+    "reviewer": "journey-failure-paths",
+    "coverage": {
+      "deep": [
+        "apps/workspaces/tasks.py",
+        "apps/workspaces/api/materialization_views.py",
+        "apps/workspaces/api/jobs_cancel.py",
+        "apps/workspaces/api/jobs_views.py",
+        "config/procrastinate.py",
+        "mcp_server/server.py",
+        "mcp_server/services/materializer.py (lines 1-510 + grep map of all writer DROP/CREATE sites)",
+        "apps/workspaces/services/schema_manager.py (lines 1-245)",
+        "apps/users/services/credential_resolver.py",
+        "apps/users/services/token_refresh.py",
+        "mcp_server/context.py",
+        "mcp_server/loaders/connect_base.py",
+        "mcp_server/loaders/ocs_base.py",
+        "mcp_server/loaders/commcare_base.py",
+        "mcp_server/loaders/ocs_messages.py",
+        "apps/chat/models.py",
+        "apps/agents/mcp_client.py",
+        "apps/agents/graph/base.py (lines 55-115, 390-610, 668-725)",
+        "apps/workspaces/api/views.py (lines 300-460)",
+        "frontend/src/hooks/useWorkspaceJobs.ts",
+        "frontend/src/components/MaterializationStatus/MaterializationProgressBanner.tsx",
+        "frontend/src/pages/DataDictionaryPage/DataDictionaryPage.tsx (lines 1-105)",
+        "config/deploy-worker.yml"
+      ],
+      "skimmed": [
+        "apps/chat/stream.py (header + timeout constant only)",
+        "mcp_server/loaders/commcare_cases.py (grep of shape handling)",
+        "frontend/src/store/dictionarySlice.ts (grep)",
+        "pyproject.toml (procrastinate version pin)",
+        "git history around 2026-05-30 and zombie/orphan/cancel fix commits",
+        "apps/workspaces/models.py (state enums via grep)"
+      ],
+      "not_examined": [
+        "The other ~13 loaders in detail (connect_visits/users/payments/invoices/assessments/completed_*, ocs_sessions/participants/experiments, commcare_forms/metadata) - id semantics and dedup-on-replay siblings of f26c1a0/2587158",
+        "materializer.py writer bodies lines 510-1972 beyond grep (OCS/CommCare writer id handling; _run_transform_phase / dbt failure isolation)",
+        "schema_manager.py build_view_schema body (lines 245-449) and teardown_view_schema",
+        "apps/chat/views.py and thread_views.py in full (client-disconnect mid-SSE behavior asserted only from the dangling-tool-call repair in base.py)",
+        "config/deploy.yml (API/MCP deploy plane); Kamal stop_wait defaults not verified against Kamal docs; procrastinate library source not read (doing-job-forever semantics is strong-inference)",
+        "expire_inactive_schemas vs provision TTL race (covered by PRs #227-#232; those fixes not re-verified here)",
+        "Recipes runner and artifacts failure paths; MaterializationFailure.tsx retry UX detail; tests/qa scenarios; workspace_service.py; mcp_server/envelope.py tool_context internals",
+        "Whether any external client/ops tooling still calls materialization_cancel_view (no frontend caller found; QA scripts not audited)",
+        "Concurrent-materialization contention (two threads/workspaces materializing the same shared tenant schema simultaneously - acknowledged unguarded in server.py:576-585 comment; not traced)"
+      ]
+    }
+  },
+  {
+    "reviewer": "git-historian",
+    "coverage": {
+      "deep": [
+        "mcp_server/services/materializer.py (orchestration 96-400, load/commit 632-830, writers 1390-1960)",
+        "apps/workspaces/tasks.py (refresh 100-200, resume-defer 355-420, janitors/teardown 518-645)",
+        "apps/workspaces/services/schema_manager.py (1-60, provision 60-130, view prefix/build 214-360, 425-445, sanitizer 625-631)",
+        "config/procrastinate.py",
+        "mcp_server/loaders/ocs_base.py",
+        "mcp_server/loaders/connect_base.py (retry/pagination regions)",
+        "mcp_server/loaders/commcare_base.py (pagination/auth regions)",
+        "pipelines/connect_sync.yml",
+        "frontend/src/store/domainSlice.ts",
+        "apps/workspaces/api/views.py (refresh view 330-375)",
+        "mcp_server/__main__.py",
+        "fix-commit diffs in full: f26c1a0, 2587158, 2aaf4fb, f0ed483, ef42b4e, d45b77e, 28b6647, 00c423d, bc82ab8, ab4b426 context"
+      ],
+      "skimmed": [
+        "full git log (680 non-merge commits, subjects + fix-commit bodies)",
+        "mcp_server/server.py (grep level)",
+        "mcp_server/services/metadata.py",
+        "mcp_server/services/sql_validator.py",
+        "apps/agents/prompts/base_system.py",
+        "mcp_server/context.py",
+        "apps/workspaces/api/jobs_views.py",
+        "config/urls.py",
+        "config/settings/base.py",
+        "frontend/src/store/* slices (grep)",
+        "frontend RecipesPage/KnowledgePage/DataDictionaryPage (effect wiring only)",
+        "mcp_server/pipeline_registry.py"
+      ],
+      "not_examined": [
+        "2026-02/03 fix bursts in detail (transformations authz chain 2d791ab/a19ce46 sibling sweep NOT done)",
+        "apps/users/services/merge.py and OAuth/allauth signal chain",
+        "apps/agents/graph/base.py internals (panic-loop breaker, tool schema rewriting)",
+        "apps/chat/stream.py, views.py, checkpointer",
+        "apps/artifacts/* (views, export, sandbox, widget.js)",
+        "apps/recipes/services/runner.py",
+        "apps/transformations/* and dbt runner",
+        "individual OCS/CommCare/Connect loader files beyond base classes",
+        "management commands (purge_synced_data, backfill_readonly_roles, merge_duplicate_users)",
+        "mcp_server/envelope.py and auth.py",
+        "deploy configs (config/deploy*.yml, .kamal/secrets churn)",
+        "tests-as-architecture (what mocks hide)",
+        "frontend beyond named files",
+        "workspaces/permissions.py dead-code claim (seed taken at face value, not re-verified)",
+        "exhaustive bare-except sweep on rescue/janitor paths (H9 pattern)",
+        "whether any workspace-switch path leaves RecipesPage mounted (H7 severity)"
+      ]
+    }
+  },
+  {
+    "reviewer": "extra-vertical-provider-data-loaders",
+    "coverage": {
+      "deep": [
+        "mcp_server/loaders/ (all 19 files: commcare_base/cases/forms/metadata, connect_base/visits/users/payments/invoices/assessments/completed_works/completed_modules/metadata, ocs_base/sessions/messages/participants/experiments/metadata)",
+        "mcp_server/services/materializer.py (all 1,973 lines, all 13 writer functions, run_pipeline orchestration, cursor/resume machinery)",
+        "pipelines/commcare_sync.yml, pipelines/connect_sync.yml, pipelines/ocs_sync.yml",
+        "mcp_server/pipeline_registry.py",
+        "mcp_server/services/metadata.py",
+        "apps/workspaces/services/schema_manager.py (provision, create_refresh_schema, _sanitize_schema_name regions)",
+        "apps/workspaces/tasks.py lines ~90-300 (refresh_tenant_schema, materialize_workspace call paths)",
+        "git commits f26c1a0, 2587158, 8774864 (full messages + stats)"
+      ],
+      "skimmed": [
+        "mcp_server/context.py (state-filter line 58 and search_path/statement_timeout line 159 only)",
+        "mcp_server/services/sql_validator.py (grep-level: schema allowlist exists, no table-state gating)",
+        "tests/test_connect_data_loaders.py and tests/test_ocs_data_loaders.py (test names/structure only)",
+        "frontend/src/store/dictionarySlice.ts and DataDictionaryPage.tsx (refresh wiring only)",
+        "apps/workspaces/api/views.py (refresh endpoint region only) and api/urls.py",
+        "apps/workspaces/models.py (field max_lengths only)"
+      ],
+      "not_examined": [
+        "mcp_server/server.py (11 tool definitions, fire-and-ack run_materialization, cancel paths)",
+        "mcp_server/envelope.py, mcp_server/auth.py, mcp_server/services/query.py internals, mcp_server/services/dbt_runner.py",
+        "apps/transformations/ (executor, commcare_staging, lineage — the TRANSFORM phase consumers of loaded tables)",
+        "test bodies of tests/test_materializer.py (31 tests), test_ocs_materializer.py, test_commcare_* loader tests — coverage quality of mocks not assessed",
+        "apps/workspaces/tasks.py lines 300+ (janitors, resume_thread_after_materialization, teardown, view-schema rebuild internals)",
+        "schema_manager.py view-schema build functions (only provision/teardown regions read)",
+        "upstream provider source (commcare-connect data_export serializers, open-chat-studio API, CommCare HQ Case API v2) — all upstream response-shape claims are inferred from this repo's code/comments/fix messages, not verified against provider code; specifically: whether Case API v2 can return relative next URLs (F7 trigger), whether Connect serializers might gain per-row id (F4 trigger), OCS /api/participants real behavior",
+        "mcp_server/context.py full file (highest fix density per line in repo — only two lines checked)",
+        "OAuth token expiry behavior during multi-hour loads (credential is resolved once at task start and never refreshed in loaders — noted but not traced through token_refresh.py)"
+      ]
+    }
+  },
+  {
+    "reviewer": "extra-seam-django-state-vs-procrastinate",
+    "coverage": {
+      "deep": [
+        "apps/workspaces/tasks.py",
+        "config/procrastinate.py",
+        "apps/chat/models.py",
+        "apps/workspaces/models.py",
+        "apps/workspaces/api/jobs_views.py",
+        "apps/workspaces/api/jobs_cancel.py",
+        "apps/workspaces/api/materialization_views.py",
+        "mcp_server/server.py (lines 400-700: run_materialization, get_materialization_status, get_schema_status)",
+        "config/deploy-worker.yml",
+        "procrastinate 3.8.1 library sources: worker.py (abort/shutdown/concurrency), contrib/django/procrastinate_app.py, contrib/django/apps.py, jobs.py Status enum, manager.py stalled/heartbeat API, sql/queries.sql prune queries"
+      ],
+      "skimmed": [
+        "apps/workspaces/services/schema_manager.py (ORM/connection survey, teardown body)",
+        "mcp_server/services/materializer.py (MaterializationRun state writes only, via grep + spot reads)",
+        "tests/test_threadjob_janitor.py (assertion survey)",
+        "tests/test_worker_db_resilience.py (first 60 lines + intent)",
+        "docker-compose.yml (service list only)",
+        "Procfile.dev",
+        "tasks.py (repo root - invoke shortcuts)",
+        "frontend/src/hooks/useWorkspaceJobs.ts (poll interval only)",
+        "~/Code/dimagi/scout-materialization-orphan-jobs.md (prior incident report, claims re-verified against HEAD)",
+        "docs/arch-review/2026-06-12/cartography.md",
+        "docs/arch-review-methodology.md"
+      ],
+      "not_examined": [
+        "mcp_server/services/materializer.py beyond run-state writes (1,972 lines: loaders, cursor watermarks, catalog reconciliation)",
+        "apps/agents/graph/base.py and memory/checkpointer.py (resume ainvoke treated as black box)",
+        "apps/chat/views.py and stream.py (streaming side of ThreadJob lifecycle)",
+        "apps/workspaces/api/views.py refresh endpoint internals beyond the defer call",
+        "config/taskbadger.py (a third observer of task lifecycle - completely unexamined)",
+        "Kamal's actual stop/kill timeout behavior (asserted only as 'no override present')",
+        "procrastinate periodic-deferrer catch-up semantics after long worker outages (missed cron ticks)",
+        "tests/test_resume_thread_task.py (1,016 lines)",
+        "tests/test_materialize_workspace_task.py, tests/test_run_materialization_fire_and_ack.py, tests/test_jobs_endpoints.py",
+        "mcp_server/context.py touch/last_accessed_at paths",
+        "frontend rendering of failure cards / retry affordances",
+        "mcp_server cancel_materialization tool body",
+        ".claude/worktrees/integration-incident-fixes/* (stale worktree copies, ignored)"
+      ]
+    }
+  },
+  {
+    "reviewer": "extra-lens-async-sync-boundary",
+    "coverage": {
+      "deep": [
+        "config/procrastinate.py",
+        "apps/workspaces/tasks.py",
+        "apps/chat/checkpointer.py",
+        "apps/chat/views.py",
+        "apps/chat/helpers.py",
+        "apps/chat/stream.py",
+        "apps/chat/rate_limiting.py",
+        "apps/chat/thread_views.py (lines 1-190)",
+        "apps/agents/memory/checkpointer.py",
+        "apps/agents/mcp_client.py",
+        "apps/workspaces/services/schema_manager.py",
+        "apps/workspaces/services/workspace_service.py",
+        "apps/workspaces/workspace_resolver.py",
+        "apps/workspaces/api/jobs_views.py",
+        "mcp_server/context.py",
+        "mcp_server/services/query.py",
+        "mcp_server/__main__.py",
+        "apps/users/views.py",
+        "apps/users/decorators.py",
+        "apps/users/services/credential_resolver.py",
+        "apps/users/services/token_refresh.py",
+        "apps/recipes/services/runner.py",
+        "config/asgi.py",
+        "config/settings/base.py (DATABASES/CACHES sections)"
+      ],
+      "skimmed": [
+        "mcp_server/server.py (~300/982 lines: run_materialization, get_schema_status header, setup/main)",
+        "mcp_server/services/materializer.py (lines 96-295, 600-760, 1060-1110 of 2030)",
+        "apps/agents/graph/base.py (signature region 480-570 + function/ORM grep map)",
+        "apps/agents/tools/* (grep-level: async ORM only)",
+        "apps/users/auth_views.py (providers_view region 195-274)",
+        "apps/users/signals.py (grep-level)",
+        "apps/users/services/tenant_resolution.py (grep-level)",
+        "apps/artifacts/views.py (ArtifactDataView/ArtifactQueryDataView only)",
+        "apps/workspaces/api/views.py (structure map + refresh path)",
+        "apps/transformations/views.py (trigger action)",
+        "apps/transformations/services/executor.py (imports/tempdir usage)",
+        "mcp_server/services/dbt_runner.py (grep-level)",
+        "mcp_server/services/metadata.py (grep-level)",
+        "apps/recipes/api/views.py (structure map + run action)",
+        "tests/test_worker_db_resilience.py (header + first two tests)",
+        "Procfile.dev",
+        "config/deploy.yml + deploy-worker.yml (cmd lines only)",
+        "procrastinate 3.8.1 package (stalled/heartbeat API presence only)",
+        "AST scan of all 142 async functions in apps/, mcp_server/, config/ for sync ORM calls"
+      ],
+      "not_examined": [
+        "frontend/ entirely",
+        "apps/users/services/merge.py, ocs_team.py, api_key_providers/, adapters.py, allauth provider code",
+        "mcp_server/loaders/* (19 files; HTTP client behavior inside to_thread not audited)",
+        "mcp_server/services/sql_validator.py, envelope.py, pipeline_registry.py",
+        "materializer table writers (lines ~1110-2030) and discover phase internals",
+        "apps/artifacts/services/export.py and sandbox rendering paths",
+        "apps/knowledge/ entirely",
+        "apps/recipes models and views beyond the run action",
+        "apps/transformations models/lineage/commcare_staging/dbt_project",
+        "apps/chat/message_converter.py and models.py details",
+        "apps/workspaces/api/workspace_views.py, materialization_views.py, jobs_cancel.py, permissions.py, management commands",
+        "config/urls.py and middleware list",
+        "all tests except test_worker_db_resilience.py header (what mocks hide elsewhere unverified)",
+        "apps/agents/tracing.py (whether Langfuse flushes block the event loop)",
+        "MCP streamable-http client timeout/reconnect behavior (affects F4 blast radius)",
+        "procrastinate Django connector behavior on dead connections in the defer direction from API/MCP processes",
+        "lazy-FK attribute loads in async contexts outside the hand-checked hot spots (AST scan cannot detect them)"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap1-infra-network-topology",
+    "coverage": {
+      "deep": [
+        "infra/scout-stack.yml",
+        "config/deploy.yml",
+        "config/deploy-mcp.yml",
+        "config/deploy-worker.yml",
+        "config/deploy-frontend.yml",
+        ".kamal/secrets",
+        ".kamal/hooks/pre-connect",
+        ".kamal/hooks/pre-deploy",
+        "scripts/resolve-database-url.sh",
+        "scripts/fetch-deploy-env.sh",
+        "docker-compose.yml",
+        "frontend/nginx.prod.conf",
+        "frontend/nginx.prod-kamal.conf",
+        ".github/workflows/deploy.yml",
+        ".github/workflows/deploy-labs.yml"
+      ],
+      "skimmed": [
+        "docs/arch-review/2026-06-12/cartography.md",
+        "docs/arch-review-methodology.md"
+      ],
+      "not_examined": [
+        "Dockerfile and Dockerfile.frontend (image build, base image, migrate-on-start entrypoint, envsubst for CSP, whether frontend image sets nginx access_log)",
+        "scripts/resolve-secrets.sh (referenced by .kamal/secrets but not located/opened)",
+        "registry_password.sh (referenced by every deploy*.yml registry.password)",
+        ".github/workflows/ci.yml, claude.yml, docs.yml (did not verify what CI runs; 'deploys not gated' rests on absence of needs: in deploy.yml which I did verify)",
+        "Labs ECS infrastructure itself (task definitions, LABS_SECURITY_GROUP, LABS_SUBNET, ALB/target groups, labs log retention) - not in repo, flagged in INFRA-4",
+        "Runtime/live-stack verification: could not confirm deployed SG/IMDS/retention matches committed template, nor that the container actually routes to 169.254.169.254 on the scout_shared user-defined bridge (INFRA-1 IMDS reach is strong-inference, not verified-by-trace)",
+        "MCP auth.py/query.py/loader next-URL source (relied on existing reported loader-SSRF finding for INFRA-1 app-side entry point rather than re-reading source)"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap1-admin-privileged-write-paths",
+    "coverage": {
+      "deep": [
+        "apps/knowledge/admin.py",
+        "apps/recipes/admin.py",
+        "apps/artifacts/admin.py",
+        "apps/workspaces/admin.py",
+        "apps/users/admin.py",
+        "apps/transformations/admin.py",
+        "apps/workspaces/management/commands/backfill_readonly_roles.py",
+        "apps/workspaces/management/commands/purge_synced_data.py",
+        "apps/users/management/commands/merge_duplicate_users.py",
+        "apps/users/management/commands/setup_oauth_apps.py",
+        "config/settings/production.py",
+        "config/urls.py",
+        "apps/users/migrations/0003_convert_empty_emails_to_null.py",
+        "apps/users/migrations/0004_deduplicate_tenant_memberships.py",
+        "apps/users/rate_limiting.py",
+        "apps/workspaces/services/schema_manager.py (lines 25-60, 360-410, 520-650)",
+        "apps/workspaces/tasks.py (lines 518-554, expire_inactive_schemas)",
+        "mcp_server/services/query.py (lines 20-80)",
+        "apps/workspaces/models.py (TenantSchema/MaterializationRun/WorkspaceTenant/TenantMetadata definitions)",
+        "apps/recipes/models.py (Recipe/RecipeStep/RecipeRun field lists)",
+        "apps/artifacts/models.py (managers/soft-delete block)",
+        "vendored procrastinate/contrib/django/admin.py",
+        "vendored allauth/socialaccount/admin.py (registration lines)"
+      ],
+      "skimmed": [
+        "config/settings/base.py (INSTALLED_APPS, AUTHENTICATION_BACKENDS, allauth settings, CACHES)",
+        "apps/users/auth_views.py (rate-limit call sites only)",
+        "apps/users/models.py (create_superuser, membership related_names)",
+        "apps/users/services/merge.py (lines 235-240 only)",
+        "apps/recipes/services/runner.py (prompt consumption only)",
+        "config/deploy.yml + DEPLOYMENT.md (OAuth env var names only)",
+        "docs/arch-review/2026-06-12/cartography.md (first ~100 lines)",
+        "git history of all six admin.py files (provenance only)"
+      ],
+      "not_examined": [
+        "admin template/static overrides (none suspected, not verified)",
+        "stock allauth /accounts/ URL surface mounted at config/urls.py:83 — which allauth views are live in prod beyond admin login (flag for another reviewer)",
+        "infra/scout-stack.yml — whether any proxy layer restricts /admin/ (only deploy.yml grepped)",
+        "apps/users/migrations/0005 and 0006 bodies (declared reviewed/schema-only; trusted, not re-read)",
+        "non-RunPython operations in all other migrations (swept for RunPython/RunSQL only)",
+        "seed data / fixtures that might grant Django model permissions or groups (grep found none; not exhaustive)",
+        "apps/users/services/merge.py beyond lines 235-240",
+        "runtime production state (which staff/superuser accounts actually exist)",
+        "mcp_server/services/query.py callers of _execute_async_parameterized (noted it lacks SET ROLE; consumer audit left to MCP reviewers)"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap1-test-suite-mock-audit",
+    "coverage": {
+      "deep": [
+        "tests/test_resume_thread_task.py (all 1,016 lines)",
+        "tests/test_jobs_endpoints.py (all 788 lines)",
+        "tests/test_mcp_tenant_tools.py (all 989 lines)",
+        "tests/test_sql_validator.py (all 540 lines)",
+        "tests/test_connect_data_loaders.py (all 462 lines)",
+        "tests/test_ocs_data_loaders.py (all 269 lines)",
+        "tests/test_workspace_permissions.py (all 106 lines)",
+        "tests/test_transformation_api.py (all 503 lines)",
+        "tests/test_merge_users_service.py (all 452 lines)",
+        "tests/conftest.py (all 92 lines)",
+        "apps/workspaces/permissions.py (full, plus repo-wide importer grep)",
+        "apps/agents/prompts/base_system.py (all 194 lines)",
+        "mcp_server/services/sql_validator.py (all 401 lines)",
+        "apps/workspaces/api/jobs_views.py (full)",
+        ".github/workflows/ci.yml (test job)"
+      ],
+      "skimmed": [
+        "tests/test_materializer.py (lines 1-120, 745-1080, 1173-1290 read; middle write-helper sections grepped only)",
+        "apps/workspaces/tasks.py (lines 600-820 read; reconciler + status helper; rest grepped)",
+        "mcp_server/server.py (targeted greps + lines around 200-280 and 420-490; not a full read)",
+        "apps/workspaces/api/jobs_cancel.py (grep-level: import and call sites confirmed)",
+        "apps/workspaces/models.py (field greps for TenantSchema/TenantMetadata)",
+        "git show f26c1a0 (diff only)"
+      ],
+      "not_examined": [
+        "tests/test_merge_duplicate_users_command.py (email-verification merge gate lives here; unread)",
+        "tests/test_connect_base_loader.py, tests/test_ocs_base_loader*.py, tests/test_commcare_forms_loader.py bodies (loader-family completeness beyond the two data-loader suites)",
+        "tests/test_transformation_executor.py / any executor-level transformation tests (only the API suite read)",
+        "tests/test_materializer.py write-helper test classes between lines ~120-745 (TestWriteCases/TestWriteForms bodies; skip-guard confirmed by grep only)",
+        "tests/qa/ scenario suites",
+        "frontend test coverage entirely",
+        "tests/test_refresh_endpoint.py body (only the role test at line 61 confirmed by grep)",
+        "whether any developer/staging pipeline outside .github/workflows/ci.yml runs the real-DB suites"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap1-seam-mcp-tool-output-contract",
+    "coverage": {
+      "deep": [
+        "mcp_server/server.py",
+        "mcp_server/envelope.py",
+        "mcp_server/services/metadata.py",
+        "mcp_server/services/query.py",
+        "apps/chat/stream.py",
+        "apps/chat/message_converter.py",
+        "apps/chat/thread_views.py",
+        "frontend/src/components/ChatMessage/ToolOutput.tsx (full file incl. lines 120+)",
+        "frontend/src/components/ChatMessage/ChatMessage.tsx (full file)",
+        "apps/agents/graph/base.py:1-130,396-545",
+        "apps/agents/mcp_client.py",
+        ".venv langchain_mcp_adapters/tools.py (result conversion)",
+        ".venv mcp/server/fastmcp/utilities/func_metadata.py (convert_result/_convert_to_content, plus empirical func_metadata test for bare dict return)",
+        ".venv langchain_core/messages/content.py (create_text_block)",
+        "frontend/node_modules/ai/dist/index.mjs (tool-input/output-available chunk handling, spot-read)"
+      ],
+      "skimmed": [
+        "frontend/src/components/ChatPanel/ChatPanel.tsx:40-140",
+        "docs/arch-review/2026-06-12/cartography.md",
+        ".venv langgraph/prebuilt/tool_node.py (grep for handle_tool_errors only)",
+        "uv.lock / frontend/package.json (version extraction)"
+      ],
+      "not_examined": [
+        "apps/chat/views.py (chat POST handler / SSE response assembly)",
+        "checkpointer serde round-trip verified against a real DB (content-shape survival reasoned from JSON serde, not observed live)",
+        "public/shared thread page components (assumed to reuse ChatMessage)",
+        "ai SDK zod schema acceptance of the backend's finish/finish-step chunk fields (chat demonstrably works, not re-verified)",
+        "exact ToolNode handle_tool_errors error-message template in langgraph-prebuilt 1.0.8",
+        "legacy production checkpoints written by pre-0.2 adapter versions (whether single-quote repr content exists in real data)",
+        "tests/qa scenarios covering tool cards",
+        "frontend/src/components/ChatMessage/SqlHighlighter.tsx",
+        "run_materialization card behavior (excluded by mandate)",
+        "recipes/widget surfaces that may also render tool parts"
+      ]
+    }
+  },
+  {
+    "reviewer": "gap1-upstream-provider-contract-verifier",
+    "coverage": {
+      "deep": [
+        "mcp_server/loaders/connect_base.py",
+        "mcp_server/loaders/connect_visits.py",
+        "mcp_server/loaders/commcare_base.py",
+        "mcp_server/loaders/commcare_cases.py",
+        "mcp_server/loaders/commcare_forms.py",
+        "mcp_server/loaders/ocs_base.py",
+        "mcp_server/loaders/ocs_participants.py",
+        "mcp_server/loaders/ocs_sessions.py",
+        "mcp_server/loaders/ocs_messages.py",
+        "pipelines/connect_sync.yml",
+        "pipelines/commcare_sync.yml",
+        "pipelines/ocs_sync.yml",
+        "UPSTREAM(verbatim curl): commcare-connect data_export/pagination.py",
+        "UPSTREAM(verbatim curl): commcare-connect data_export/serializer.py (visits/users/works/payments/invoices/assessments sections)",
+        "UPSTREAM(verbatim curl): commcare-connect data_export/urls.py",
+        "UPSTREAM(verbatim curl): commcare-connect data_export/views.py (UserVisitDataView section)",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/api/views/participants.py",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/api/views/sessions.py",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/api/serializers.py",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/api/pagination.py",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/api/urls.py (via fetch)",
+        "UPSTREAM(verbatim curl): open-chat-studio config/settings.py REST_FRAMEWORK block",
+        "UPSTREAM(verbatim curl): open-chat-studio apps/chat/models.py message_iterator",
+        "UPSTREAM(verbatim curl): commcare-hq corehq/apps/api/resources/v0_4.py (XFormInstanceResource)",
+        "UPSTREAM(verbatim curl): commcare-hq corehq/apps/api/resources/meta.py",
+        "UPSTREAM(verbatim curl): commcare-hq corehq/apps/api/decorators.py (api_throttle)",
+        "UPSTREAM(verbatim curl): commcare-hq corehq/apps/hqcase/views.py (case_api decorators)",
+        "UPSTREAM(verbatim curl): commcare-hq corehq/util/view_utils.py + dimagi/utils/web.py"
+      ],
+      "skimmed": [
+        "mcp_server/services/materializer.py (watermark plumbing, page_total consumption, Connect/CommCare/OCS INSERT SQL only)",
+        "mcp_server/loaders/connect_users.py, connect_payments.py, connect_invoices.py, connect_assessments.py, connect_completed_modules.py, connect_completed_works.py (endpoint-suffix lines only)",
+        "UPSTREAM: commcare-connect data_export/views.py full file (summarizing fetch)",
+        "UPSTREAM: commcare-hq hqcase/api/get_list.py (summarizing fetch, key lines quoted)",
+        "UPSTREAM docs: commcare-hq.readthedocs.io/api/cases-v2.html",
+        "UPSTREAM: corehq/apps/es/{client,es_query,utils}.py (grep only)",
+        "docs/arch-review-methodology.md",
+        "docs/arch-review/2026-06-12/cartography.md"
+      ],
+      "not_examined": [
+        "mcp_server/loaders/connect_metadata.py, commcare_metadata.py, ocs_metadata.py, ocs_experiments.py and their upstream counterparts (Connect SingleOpportunityDataView/opp_org_program_list shapes, OCS experiments endpoint, HQ application-structure API) — metadata-path shape drift unverified",
+        "Deployed upstream versions vs main/master HEAD — all verification is against default branches on 2026-06-12; production Connect/HQ/OCS may lag (notably OCS first-page count and participants endpoint deployment status)",
+        "HQ ES track_total_hits / exact-total behavior (matching_records >10k) — left as hypothesis",
+        "tastypie Paginator._generate_uri source (relative-next claim rests on stock library behavior + absence of HQ override, not a quoted tastypie line)",
+        "requests rebuild_auth redirect Authorization semantics — asserted from library knowledge, not re-traced",
+        "Connect CompletedModuleDataSerializer exact field list (two consistent fetch summaries, not in verbatim curl window)",
+        "OCS Participant model uniqueness constraint (inferred from get_or_create usage; model file not opened)",
+        "Scout-side consumers of participant_platform / images columns beyond the writers (dbt models, prompts, knowledge)",
+        "mcp_server/services/materializer.py outside the targeted sections; resumability registry internals (_RESUMABLE_CONNECT_SOURCES) beyond what known findings already cover"
+      ]
+    }
+  }
+]
