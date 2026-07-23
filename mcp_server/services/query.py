@@ -176,6 +176,9 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
             "Schema configuration error. Please contact an administrator.",
         )
 
+    if isinstance(exc, (psycopg.errors.NotSupportedError, psycopg.errors.ProgrammingError)):
+        return VALIDATION_ERROR, f"Query error: {exc}"
+
     if isinstance(exc, psycopg.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
