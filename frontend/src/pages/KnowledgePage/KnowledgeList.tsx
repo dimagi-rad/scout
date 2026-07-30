@@ -58,7 +58,6 @@ export function KnowledgeList({
 }: KnowledgeListProps) {
   return (
     <div className="space-y-4">
-      {/* Search and Filters */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -83,7 +82,6 @@ export function KnowledgeList({
         </div>
       </div>
 
-      {/* Knowledge Items */}
       {items.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center">
           <p className="text-muted-foreground">No knowledge items found</p>
@@ -127,7 +125,6 @@ export function KnowledgeList({
                   </p>
                 )}
 
-                {/* Related Tables */}
                 {relatedTables.length > 0 && (
                   <div className="flex flex-wrap gap-1 mb-3">
                     {relatedTables.slice(0, 3).map((table) => (
@@ -143,7 +140,6 @@ export function KnowledgeList({
                   </div>
                 )}
 
-                {/* Tags for entries */}
                 {item.type === "entry" && item.tags && item.tags.length > 0 && (
                   <div className="flex flex-wrap gap-1 mb-3">
                     {item.tags.slice(0, 3).map((tag) => (
@@ -159,7 +155,6 @@ export function KnowledgeList({
                   </div>
                 )}
 
-                {/* Actions */}
                 <div className="mt-auto flex items-center gap-2 pt-2 border-t">
                   <Button
                     variant="ghost"

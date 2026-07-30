@@ -1,5 +1,3 @@
-// frontend/src/components/ChatEmptyState/starterQuestions.ts
-
 type Provider = "commcare" | "commcare_connect" | "ocs" | "default"
 
 export const STARTER_QUESTIONS: Record<Provider, readonly string[]> = {

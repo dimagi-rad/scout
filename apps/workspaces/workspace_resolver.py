@@ -1,35 +1,31 @@
-"""Shared workspace resolution for workspace-scoped API views."""
+"""Shared workspace resolution for workspace-scoped API views.
+
+Thin adapters over the single authorizer in ``apps.workspaces.access``: they only
+translate its access result into each view layer's expected error shape. The
+access decision — WorkspaceMembership AND a live tenant — lives solely in
+``access.py``, which also builds the 403 body (generic vs. lost-upstream-access).
+"""
 
 from django.http import JsonResponse
 from rest_framework import status
 from rest_framework.response import Response
 
-from apps.workspaces.models import WorkspaceMembership
-
-_ACCESS_DENIED = {"error": "Workspace not found or access denied."}
+from apps.workspaces.access import (
+    access_denied_body,
+    aresolve_workspace_access_ex,
+    resolve_workspace_access_ex,
+)
 
 
 def resolve_workspace_drf(request, workspace_id):
     """Resolve Workspace from workspace_id URL path parameter (DRF views).
 
-    workspace_id is the Workspace.id (UUID) and the requesting user must be a member.
     Returns (workspace, membership, None) on success or (None, None, Response(403)) on error.
     """
-    try:
-        membership = WorkspaceMembership.objects.select_related("workspace").get(
-            workspace_id=workspace_id,
-            user=request.user,
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return (
-            None,
-            None,
-            Response(
-                _ACCESS_DENIED,
-                status=status.HTTP_403_FORBIDDEN,
-            ),
-        )
-    return membership.workspace, membership, None
+    result = resolve_workspace_access_ex(request.user, workspace_id)
+    if not result.granted:
+        return None, None, Response(access_denied_body(result), status=status.HTTP_403_FORBIDDEN)
+    return result.workspace, result.membership, None
 
 
 def resolve_workspace(user, workspace_id):
@@ -37,13 +33,10 @@ def resolve_workspace(user, workspace_id):
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
-    try:
-        membership = WorkspaceMembership.objects.select_related("workspace").get(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return None, JsonResponse(_ACCESS_DENIED, status=403)
-    return membership.workspace, None
+    result = resolve_workspace_access_ex(user, workspace_id)
+    if not result.granted:
+        return None, JsonResponse(access_denied_body(result), status=403)
+    return result.workspace, None
 
 
 async def aresolve_workspace(user, workspace_id):
@@ -51,10 +44,7 @@ async def aresolve_workspace(user, workspace_id):
 
     Returns (workspace, None) on success or (None, JsonResponse(403)) on error.
     """
-    try:
-        membership = await WorkspaceMembership.objects.select_related("workspace").aget(
-            workspace_id=workspace_id, user=user
-        )
-    except WorkspaceMembership.DoesNotExist:
-        return None, JsonResponse(_ACCESS_DENIED, status=403)
-    return membership.workspace, None
+    result = await aresolve_workspace_access_ex(user, workspace_id)
+    if not result.granted:
+        return None, JsonResponse(access_denied_body(result), status=403)
+    return result.workspace, None

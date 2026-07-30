@@ -12,7 +12,7 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 
-from mcp_server.loaders.commcare_base import CommCareBaseLoader
+from mcp_server.loaders.commcare_base import CommCareBaseLoader, CommCareExportError
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,15 @@ class CommCareFormLoader(CommCareBaseLoader):
         first_page = True
         first_meta_total: int | None = None
         while url:
-            data = self._get(url, params=params).json()
-            forms = [_normalize_form(raw) for raw in data.get("objects", [])]
+            data = self._get_json(url, params=params)
+            if "objects" not in data:
+                # TastyPie always returns ``"objects": []`` for an empty page;
+                # a missing key signals an envelope change — fail rather than
+                # silently completing the source empty (arch #252, finding 03#6).
+                raise CommCareExportError(
+                    f"CommCare Form API response missing 'objects' key for {url}"
+                )
+            forms = [_normalize_form(raw) for raw in data["objects"]]
             page_total: int | None = None
             if first_page:
                 meta_total = data.get("meta", {}).get("total_count")

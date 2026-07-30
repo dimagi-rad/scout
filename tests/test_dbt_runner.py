@@ -41,6 +41,25 @@ class TestGenerateProfilesYml:
         assert profile["user"] == "myuser"
         assert profile["dbname"] == "analytics"
 
+    def test_percent_encoded_password_is_decoded(self, tmp_path):
+        """resolve-database-url.sh URL-encodes the RDS password; the profile must
+        decode it so dbt authenticates like psycopg/Django do (SCOUT-DJANGO-1T)."""
+        from urllib.parse import quote
+
+        from mcp_server.services.dbt_runner import generate_profiles_yml
+
+        raw_password = "p(a<s>s?[word"
+        db_url = f"postgresql://plat%40form:{quote(raw_password, safe='')}@h:5432/db"
+
+        path = tmp_path / "profiles.yml"
+        generate_profiles_yml(output_path=path, schema_name="s", db_url=db_url)
+
+        import yaml
+
+        profile = yaml.safe_load(path.read_text())["data_explorer"]["outputs"]["tenant_schema"]
+        assert profile["password"] == raw_password
+        assert profile["user"] == "plat@form"
+
     def test_search_path_confined_to_target_schema(self, tmp_path):
         """The profile must pin search_path to the tenant schema only (issue #241,
         04#4): without it dbt creates the relation in the tenant schema but runs
@@ -149,6 +168,35 @@ class TestRunDbt:
 
         assert result["success"] is False
         assert "error" in result
+
+    def test_surfaces_node_error_when_no_exception(self, tmp_path):
+        """Node-level model failures (success=False, exception=None) must surface
+        the per-node message, not the opaque 'dbt run failed' (SCOUT-DJANGO-1T)."""
+        from mcp_server.services.dbt_runner import run_dbt
+
+        node = MagicMock()
+        node.name = "stg_visits"
+        failed = MagicMock(node=node, status="error")
+        failed.message = 'column "user_id" does not exist'
+
+        mock_result = MagicMock()
+        mock_result.success = False
+        mock_result.exception = None
+        mock_result.result = [failed]
+
+        mock_runner = MagicMock()
+        mock_runner.invoke.return_value = mock_result
+
+        with patch("mcp_server.services.dbt_runner.dbtRunner", return_value=mock_runner):
+            result = run_dbt(
+                dbt_project_dir=str(tmp_path),
+                profiles_dir=str(tmp_path),
+                models=["stg_visits"],
+            )
+
+        assert result["success"] is False
+        assert "stg_visits" in result["error"]
+        assert 'column "user_id" does not exist' in result["error"]
 
     def test_passes_correct_cli_args(self, tmp_path):
         from mcp_server.services.dbt_runner import run_dbt

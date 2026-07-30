@@ -6,7 +6,9 @@ the real tool input and parse-safe JSON output, so progress / Stop / failure
 cards and rich rendering work LIVE -- not only after a page reload.
 """
 
+import asyncio
 import json
+from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -429,6 +431,52 @@ async def test_tool_runtime_in_input_does_not_crash_stream():
     # The injected, non-serializable runtime must not surface in the card.
     assert "runtime" not in start["input"]
     assert "workspace_id" not in start["input"]
+
+
+class _StallingStream:
+    """An event stream that never yields — models a hung LLM/tool call."""
+
+    def __init__(self):
+        self.aclosed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()  # hang forever
+
+    async def aclose(self):
+        self.aclosed = True
+
+
+class _StallingAgent:
+    def __init__(self, stream_obj):
+        self._stream = stream_obj
+
+    def astream_events(self, input_state, *, config, version):
+        return self._stream
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stalled_stream_closes_generator():
+    """The SSE bridge has no execution deadline, but client cancellation must
+    still close the abandoned event generator and upstream model call."""
+    stalling = _StallingStream()
+    agent = _StallingAgent(stalling)
+    output = stream.langgraph_to_ui_stream(
+        agent, {}, {"configurable": {"thread_id": "t1"}}
+    )
+    await anext(output)
+    await anext(output)
+
+    pending = asyncio.create_task(anext(output))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await output.aclose()
+
+    assert stalling.aclosed is True
 
 
 def test_sse_survives_non_serializable_values():

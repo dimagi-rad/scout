@@ -14,8 +14,7 @@ class OCSMetadataLoader(OCSBaseLoader):
 
     def load(self) -> dict:
         url = f"{self.base_url}/api/experiments/{self.experiment_id}/"
-        resp = self._get(url)
-        detail = resp.json()
+        detail = self._get_json(url)
         logger.info(
             "Loaded metadata for OCS experiment %s: %s",
             self.experiment_id,

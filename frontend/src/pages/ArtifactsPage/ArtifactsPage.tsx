@@ -51,7 +51,6 @@ export function ArtifactsPage() {
         </p>
       </div>
 
-      {/* Loading state */}
       {artifactsStatus === "loading" && (
         <div className="flex items-center gap-2 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
@@ -59,14 +58,12 @@ export function ArtifactsPage() {
         </div>
       )}
 
-      {/* Error state */}
       {artifactsStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load artifacts. Please try again.
         </div>
       )}
 
-      {/* List */}
       {artifactsStatus === "loaded" && (
         <ArtifactList
           items={artifacts}

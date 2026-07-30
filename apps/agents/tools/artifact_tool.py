@@ -41,7 +41,6 @@ class UpdateArtifactInput(BaseModel):
     semantic_queries: list[dict[str, Any]] | None = Field(default=None)
 
 
-# Valid artifact types that can be created
 VALID_ARTIFACT_TYPES = frozenset(
     {
         "react",
@@ -57,21 +56,9 @@ VALID_ARTIFACT_TYPES = frozenset(
 def create_artifact_tools(
     workspace: "Workspace", user: "User | None", conversation_id: str | None = None
 ) -> list:
-    """
-    Factory function to create artifact creation tools for a specific workspace.
+    """Create the [create_artifact, update_artifact] tools scoped to a workspace.
 
-    Creates two tools:
-    1. create_artifact: Create a new artifact with code and optional data
-    2. update_artifact: Create a new version of an existing artifact
-
-    Args:
-        workspace: The Workspace model instance for scoping artifacts.
-        user: The User model instance who triggered the conversation.
-              Used to track artifact ownership.
-        conversation_id: The conversation/thread ID for tracking artifact provenance.
-
-    Returns:
-        A list of LangChain tool functions [create_artifact, update_artifact].
+    ``conversation_id`` is recorded on created artifacts for provenance.
     """
 
     @tool(args_schema=CreateArtifactInput)
@@ -140,7 +127,6 @@ def create_artifact_tools(
         from apps.chat.artifact_links import link_artifact_to_thread
         from apps.chat.models import ThreadArtifact
 
-        # Validate artifact type
         if artifact_type not in VALID_ARTIFACT_TYPES:
             return {
                 "artifact_id": None,
@@ -175,7 +161,6 @@ def create_artifact_tools(
                 "message": "Code is required. Please provide the artifact source code.",
             }
 
-        # Validate title
         if not title or not title.strip():
             return {
                 "artifact_id": None,
@@ -214,8 +199,6 @@ def create_artifact_tools(
                 title,
             )
 
-            # Build render URL pointing at the real sandbox route
-            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
             render_url = f"/api/workspaces/{workspace.id}/artifacts/{artifact.id}/sandbox/"
 
             return {
@@ -277,8 +260,18 @@ def create_artifact_tools(
         from apps.chat.artifact_links import link_artifact_to_thread
         from apps.chat.models import ThreadArtifact
 
+        if not code or not code.strip():
+            return {
+                "artifact_id": None,
+                "previous_version_id": artifact_id,
+                "status": "error",
+                "version": None,
+                "title": None,
+                "render_url": None,
+                "message": "Code is required. Please provide the updated artifact source code.",
+            }
+
         try:
-            # Find the existing artifact
             try:
                 original = await Artifact.objects.aget(id=artifact_id, workspace=workspace)
             except Artifact.DoesNotExist:
@@ -316,22 +309,52 @@ def create_artifact_tools(
                     "message": "Code is required. Please provide the updated artifact source code.",
                 }
 
-            # Create a new version linked to the original
+            # Fall back to the original when the caller omitted a field.
+            new_title = title.strip() if title is not None else original.title
+            new_data = data if data is not None else original.data
+            new_semantic_queries = (
+                semantic_queries
+                if semantic_queries is not None
+                else original.semantic_queries
+            )
+
+            # No-op guard (arch #254, finding 09#9): each update copies the full
+            # code into a new row, so "updates" with no change accrete copies
+            # indefinitely. Return the existing artifact instead.
+            if (
+                code == original.code
+                and new_title == original.title
+                and new_data == original.data
+                and new_semantic_queries == original.semantic_queries
+            ):
+                logger.info(
+                    "update_artifact no-op for %s (no change) — skipping version copy",
+                    original.id,
+                )
+                render_url = f"/api/workspaces/{workspace.id}/artifacts/{original.id}/sandbox/"
+                return {
+                    "artifact_id": str(original.id),
+                    "previous_version_id": artifact_id,
+                    "status": "updated",
+                    "version": original.version,
+                    "title": original.title,
+                    "render_url": render_url,
+                    "message": f"Artifact '{original.title}' is already up to date.",
+                }
+
             new_artifact = Artifact(
                 workspace=workspace,
                 created_by=user,
-                title=title.strip() if title is not None else original.title,
+                title=new_title,
                 description=original.description,
                 artifact_type=original.artifact_type,
-                code=code if code is not None else original.code,
-                data=data if data is not None else original.data,
+                code=code,
+                data=new_data,
                 version=original.version + 1,
                 parent_artifact=original,
                 conversation_id=conversation_id or original.conversation_id,
                 source_queries=[],
-                semantic_queries=semantic_queries
-                if semantic_queries is not None
-                else original.semantic_queries,
+                semantic_queries=new_semantic_queries,
             )
             await new_artifact.asave()
             await link_artifact_to_thread(
@@ -349,8 +372,6 @@ def create_artifact_tools(
                 workspace.id,
             )
 
-            # Build render URL pointing at the real sandbox route
-            # (/api/workspaces/<wsid>/artifacts/<id>/sandbox/).
             render_url = f"/api/workspaces/{workspace.id}/artifacts/{new_artifact.id}/sandbox/"
 
             return {
@@ -377,7 +398,6 @@ def create_artifact_tools(
                 "message": f"Failed to update artifact: {e!s}",
             }
 
-    # Set tool names explicitly
     create_artifact.name = "create_artifact"
     update_artifact.name = "update_artifact"
 

@@ -34,6 +34,9 @@ env:
     - DB_CREDENTIAL_KEY
     - DJANGO_SECRET_KEY
     - SENTRY_DSN
+    # Shared-secret caller auth (arch #253, 01#6). MUST match the value the API
+    # (deploy.yml) and worker (deploy-worker.yml) send in X-Scout-MCP-Secret.
+    - MCP_SHARED_SECRET
 
 ssh:
   user: scout

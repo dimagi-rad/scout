@@ -67,8 +67,7 @@ def test_add_tenant_user_lacks_tenant_membership_is_rejected(api_client, user, w
 
 
 def test_add_tenant_already_in_workspace_is_idempotent(api_client, user, workspace, tenant):
-    # tenant is already in workspace; user must also hold TenantMembership
-    TenantMembership.objects.create(user=user, tenant=tenant)
+    # user already holds a live TenantMembership for `tenant` (via the workspace fixture)
     api_client.force_login(user)
     resp = api_client.post(
         f"/api/workspaces/{workspace.id}/tenants/",

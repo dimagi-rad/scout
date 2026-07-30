@@ -33,7 +33,6 @@ def write_dbt_project(
     models_dir = output_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    # dbt_project.yml
     project_config = {
         "name": project_name,
         "version": "1.0.0",
@@ -45,11 +44,10 @@ def write_dbt_project(
     }
     (output_dir / "dbt_project.yml").write_text(yaml.dump(project_config, default_flow_style=False))
 
-    # Model SQL files
     for asset in assets:
         (models_dir / f"{asset.name}.sql").write_text(asset.sql_content)
 
-    # Merge test YAML fragments into a single schema.yml
+    # Merge per-asset test YAML fragments into a single schema.yml.
     merged_models = []
     for asset in assets:
         if not asset.test_yaml:

@@ -95,7 +95,7 @@ async def test_run_materialization_rolls_back_dispatch_when_threadjob_create_fai
     with (
         patch("mcp_server.server.materialize_workspace") as mw,
         patch("mcp_server.server.ThreadJob.objects.acreate", side_effect=Exception("DB down")),
-        patch("mcp_server.server._procrastinate_app") as proc_app,
+        patch("mcp_server.server.procrastinate_app") as proc_app,
     ):
         mw.defer_async = AsyncMock(return_value=job_mock)
         proc_app.job_manager.cancel_job_by_id_async = cancel_mock

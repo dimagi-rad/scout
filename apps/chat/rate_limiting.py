@@ -12,8 +12,8 @@ from django.core.cache import cache
 from django.http import JsonResponse
 
 # Defaults — override via Django settings if needed.
-CHAT_RATE_LIMIT = 20  # max requests per window
-CHAT_RATE_WINDOW = 60  # window in seconds
+CHAT_RATE_LIMIT = 20  # requests per window
+CHAT_RATE_WINDOW = 60  # seconds
 
 
 def _get_settings():

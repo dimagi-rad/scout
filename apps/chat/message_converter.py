@@ -23,7 +23,6 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
     ]
 
     ui_messages: list[dict] = []
-    # Collect tool results keyed by tool_call_id for pairing
     tool_results: dict[str, ToolMessage] = {}
     for msg in visible:
         if isinstance(msg, ToolMessage):
@@ -42,10 +41,8 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
         elif isinstance(msg, AIMessage):
             parts: list[dict] = []
 
-            # Reasoning (extended-thinking) content. Emitted FIRST and as its
-            # own part so the Thinking card survives reload / the
-            # post-materialization refetch (arch #246, 13#5). The live stream
-            # emits reasoning before text; mirror that ordering here.
+            # Reasoning emitted FIRST as its own part so the Thinking card survives
+            # reload / post-materialization refetch (arch #246, 13#5); mirrors live-stream order.
             reasoning = ""
             text = ""
             if isinstance(msg.content, str):
@@ -63,7 +60,6 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
             if text:
                 parts.append({"type": "text", "text": text})
 
-            # Tool calls
             for tc in getattr(msg, "tool_calls", []) or []:
                 tool_part = {
                     "type": f"tool-{tc['name']}",
@@ -72,7 +68,6 @@ def langchain_messages_to_ui(lc_messages) -> list[dict]:
                     "input": _redact_tool_input(tc.get("args", {})),
                     "state": "output-available",
                 }
-                # Pair with tool result if available
                 tr = tool_results.get(tc["id"])
                 output_text = None
                 if tr:

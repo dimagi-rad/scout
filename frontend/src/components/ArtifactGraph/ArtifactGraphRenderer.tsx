@@ -20,7 +20,7 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
   )
   const ctx = useMemo<StoryRuntimeContext>(
     () => ({
-      runQuery: (query, _options) => runSemanticQuery(workspaceId, query),
+      runQuery: (query) => runSemanticQuery(workspaceId, query),
     }),
     [workspaceId],
   )

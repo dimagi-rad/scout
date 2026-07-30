@@ -1,9 +1,4 @@
-"""
-Artifact export service for HTML, PNG, and PDF output.
-
-This module provides the ArtifactExporter class which can export artifacts
-to various formats for download or sharing.
-"""
+"""Artifact export service for HTML, PNG, and PDF output."""
 
 from __future__ import annotations
 
@@ -19,7 +14,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Allowed SVG tags and attributes for sanitization
 ALLOWED_SVG_TAGS = [
     "svg",
     "g",
@@ -138,21 +132,12 @@ ALLOWED_SVG_ATTRIBUTES = {
 
 
 def sanitize_svg(svg_code: str) -> str:
-    """
-    Sanitize SVG code to prevent XSS attacks.
-
-    Args:
-        svg_code: Raw SVG code from artifact
-
-    Returns:
-        Sanitized SVG code with only allowed tags and attributes
-    """
+    """Strip SVG to the allowed tags/attributes, preventing XSS."""
     return bleach.clean(
         svg_code, tags=ALLOWED_SVG_TAGS, attributes=ALLOWED_SVG_ATTRIBUTES, strip=True
     )
 
 
-# Standalone HTML template with embedded libraries (from CDN)
 STANDALONE_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -300,23 +285,11 @@ class ArtifactExporter:
     """
 
     def __init__(self, artifact: Artifact):
-        """
-        Initialize the exporter with an artifact.
-
-        Args:
-            artifact: The Artifact instance to export
-        """
         self.artifact = artifact
 
     def export_html(self) -> str:
-        """
-        Export the artifact as a standalone HTML file.
-
-        Returns:
-            HTML string with embedded libraries and data
-        """
+        """Export the artifact as a standalone HTML file with embedded libs and data."""
         artifact = self.artifact
-        # Escape title to prevent XSS
         safe_title = html.escape(artifact.title or "Artifact")
 
         if artifact.artifact_type == "markdown":
@@ -326,7 +299,7 @@ class ArtifactExporter:
             )
 
         if artifact.artifact_type == "plotly":
-            # For plotly, the code contains the plot specification
+            # code holds the plot spec (JSON)
             return PLOTLY_HTML_TEMPLATE.format(
                 title=html.escape(artifact.title or "Chart"),
                 plotly_json=artifact.code,
@@ -363,7 +336,6 @@ class ArtifactExporter:
 </html>
 """
 
-        # Default: React/JSX artifact
         return STANDALONE_HTML_TEMPLATE.format(
             title=safe_title,
             data_json=json.dumps(artifact.data or {}),
@@ -371,18 +343,7 @@ class ArtifactExporter:
         )
 
     async def export_png(self, width: int = 1200, height: int = 800) -> bytes:
-        """
-        Export the artifact as a PNG image.
-
-        Requires playwright to be installed.
-
-        Args:
-            width: Image width in pixels
-            height: Image height in pixels
-
-        Returns:
-            PNG image bytes
-        """
+        """Export the artifact as a PNG image. Requires playwright."""
         try:
             from playwright.async_api import async_playwright
         except ImportError as e:
@@ -396,13 +357,10 @@ class ArtifactExporter:
             browser = await p.chromium.launch()
             page = await browser.new_page(viewport={"width": width, "height": height})
 
-            # Load the HTML content
             await page.set_content(html_content)
-
-            # Wait for any JavaScript to render
+            # Give CDN libs and the React render time to settle.
             await page.wait_for_timeout(1000)
 
-            # Take screenshot
             screenshot = await page.screenshot(type="png", full_page=False)
 
             await browser.close()
@@ -410,18 +368,7 @@ class ArtifactExporter:
         return screenshot
 
     async def export_pdf(self, width: int = 1200, height: int = 800) -> bytes:
-        """
-        Export the artifact as a PDF.
-
-        Requires playwright to be installed.
-
-        Args:
-            width: Page width in pixels
-            height: Page height in pixels
-
-        Returns:
-            PDF bytes
-        """
+        """Export the artifact as a PDF. Requires playwright."""
         try:
             from playwright.async_api import async_playwright
         except ImportError as e:
@@ -435,13 +382,10 @@ class ArtifactExporter:
             browser = await p.chromium.launch()
             page = await browser.new_page(viewport={"width": width, "height": height})
 
-            # Load the HTML content
             await page.set_content(html_content)
-
-            # Wait for any JavaScript to render
+            # Give CDN libs and the React render time to settle.
             await page.wait_for_timeout(1000)
 
-            # Generate PDF
             pdf = await page.pdf(
                 format="A4",
                 print_background=True,
@@ -453,17 +397,8 @@ class ArtifactExporter:
         return pdf
 
     def get_download_filename(self, format: str) -> str:
-        """
-        Get an appropriate filename for the export.
-
-        Args:
-            format: Export format (html, png, pdf)
-
-        Returns:
-            Filename string
-        """
+        """Build a filesystem-safe download filename from the artifact title."""
         title = self.artifact.title or "artifact"
-        # Clean the title for use as a filename
         clean_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)
         clean_title = clean_title.strip().replace(" ", "_")[:50]
         return f"{clean_title}.{format}"

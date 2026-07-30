@@ -1,10 +1,10 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
-import { workspaceApi, type WorkspaceListItem } from "@/api/workspaces"
+import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 
 // TenantMembership kept as alias so existing imports continue to work
 export type TenantMembership = WorkspaceListItem & {
-  // Legacy compat fields — kept so code referencing these doesn't break at compile time
+  // Legacy compat fields, kept so referencing code still typechecks
   provider?: string
   tenant_id?: string
   tenant_name?: string
@@ -36,11 +36,17 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
       try {
         const domains = await workspaceApi.list()
         const activeDomainId = get().activeDomainId
+        // Default to the first workspace the user can still access, never an
+        // orphaned one whose upstream access was removed — landing there would
+        // just show the lost-access modal. A deep link to an orphan still works
+        // (the URL→store sync adopts it); this only governs the no-URL default.
+        const defaultId =
+          (domains.find(workspaceHasAccess) ?? domains[0])?.id ?? null
         set({
           domains,
           domainsStatus: "loaded",
           domainsError: null,
-          activeDomainId: activeDomainId ?? (domains[0]?.id ?? null),
+          activeDomainId: activeDomainId ?? defaultId,
         })
       } catch (error) {
         set({
@@ -51,15 +57,13 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     },
 
     setActiveDomain: (id: string) => {
-      // Switching workspaces must NOT carry the current thread over: the thread
-      // belongs to the previous workspace, and grafting its id onto the new
-      // workspace's URL produces a "Thread not found" chat. Reset to a fresh
-      // client-generated thread id. For deep links (URL → store), the sync hook
-      // calls selectThread(urlThreadId) immediately after, which overwrites this.
+      // Switching workspaces must NOT carry the thread over: grafting the old
+      // workspace's thread id onto the new URL produces a "Thread not found"
+      // chat. Reset to a fresh id. Deep links (URL → store) overwrite this via
+      // the sync hook's selectThread(urlThreadId) immediately after.
       if (id !== get().activeDomainId) {
         // `threadId` lives in the UI slice; cast so this cross-slice write
-        // typechecks (the slices share one store, mirroring uiSlice's read of
-        // `activeDomainId`).
+        // typechecks (the slices share one store).
         ;(set as (partial: { activeDomainId: string; threadId: string }) => void)({
           activeDomainId: id,
           threadId: crypto.randomUUID(),
@@ -80,16 +84,14 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
           provider,
           tenant_id: tenantId,
         })
-        // Set the workspace ID before fetchDomains so it's preserved
+        // Set before fetchDomains so it's preserved as the active id
         if (result.workspace_id) {
           set({ activeDomainId: result.workspace_id })
         }
         await get().domainActions.fetchDomains()
       } catch (error) {
-        // A failed ensure-tenant must surface an error state, not silently
-        // console.error and leave the user on an empty data-sources page that
-        // reads as "no opportunities" (07#6). Flag it so the UI can show a
-        // distinct "couldn't load your workspace" message + retry.
+        // Surface an error state rather than leaving the user on an empty
+        // data-sources page that reads as "no opportunities" (07#6).
         console.error("[Scout] Failed to ensure tenant:", error)
         set({
           domainsStatus: "error",

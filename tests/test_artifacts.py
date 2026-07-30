@@ -13,7 +13,7 @@ from django.test import AsyncClient, Client
 
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
     WorkspaceMembership,
@@ -567,6 +567,34 @@ class TestArtifactTools:
         assert result2["version"] == original_version + 2
 
     @pytest.mark.asyncio
+    async def test_update_artifact_noop_does_not_copy_full_code(
+        self, user, workspace, artifact, tenant_membership
+    ):
+        """A no-op update (identical code/title/data/queries) must NOT write a
+        full-code copy as a new version (arch #254, finding 09#9 — versioning
+        copies the entire React code per update, accreting indefinitely)."""
+        tools = create_artifact_tools(workspace, user)
+        update_artifact_tool = tools[1]
+
+        before = await Artifact.all_objects.acount()
+
+        # Identical code/title/data; source_queries omitted (keeps existing).
+        result = await update_artifact_tool.ainvoke(
+            {
+                "artifact_id": str(artifact.id),
+                "code": artifact.code,  # unchanged
+                "title": artifact.title,
+                "data": artifact.data,
+            }
+        )
+
+        after = await Artifact.all_objects.acount()
+        # No new row accreted, and the same artifact id is returned.
+        assert after == before
+        assert result["artifact_id"] == str(artifact.id)
+        assert result["version"] == artifact.version
+
+    @pytest.mark.asyncio
     async def test_create_artifact_threads_conversation_id(self, user, workspace):
         """create_artifact must persist the conversation_id it was built with.
 
@@ -627,6 +655,8 @@ class TestArtifactQueryDataRouting:
                 provider="commcare", external_id=ext, canonical_name=ext
             )
             await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+        # user needs a live TenantMembership for one tenant to pass the access gate
+        await TenantMembership.objects.acreate(user=user, tenant=t)
         art = await Artifact.objects.acreate(
             workspace=ws,
             created_by=user,

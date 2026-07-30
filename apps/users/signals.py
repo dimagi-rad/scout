@@ -9,12 +9,24 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+from django.utils import timezone
 
 from apps.users.services.merge import merge_users
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
+)
+from apps.workspaces.access import _live_tenant_ids, _shares_live_tenant
+from apps.workspaces.models import (
+    LIVE_INVITE_STATUSES,
+    WorkspaceInvite,
+    WorkspaceInviteStatus,
+    WorkspaceMembership,
+)
+from apps.workspaces.services.invite_notifications import (
+    notify_awaiting_access,
+    notify_invite_accepted,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,14 +124,12 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     token = sociallogin.token
     if not token or not token.token:
         logger.warning("No access token available after OAuth for %s", sociallogin.user)
-        return
-
     # A resolution failure must NOT break login (we can't 500 the OAuth
     # callback), but it must be surfaced loudly: log at ERROR via
     # logger.exception so Sentry pages. Logging at WARNING left the user with
     # zero TenantMembership rows and an empty data-sources page that looked
     # identical to "account has no opportunities", with nobody told (07#6).
-    if provider == "commcare_connect":
+    elif provider == "commcare_connect":
         try:
             async_to_sync(resolve_connect_opportunities)(sociallogin.user, token.token)
         except Exception:
@@ -134,6 +144,61 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
             async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
         except Exception:
             logger.exception("Failed to resolve CommCare domains after OAuth")
+
+    # Runs last, after tenant resolution and any B-merge (pre_social_login), so it
+    # sees the user's fresh tenant access and all verified emails. Must not break
+    # login on failure, same as the resolvers above.
+    try:
+        resolve_pending_invites_on_login(sociallogin.user)
+    except Exception:
+        logger.exception("Failed to resolve pending workspace invites after login")
+
+
+def resolve_pending_invites_on_login(user):
+    """Materialize any live WorkspaceInvite addressed to *user* into a membership.
+
+    An invite is pure pre-authorization — it carries no data access (Root Cause
+    A's access.py is the sole gate). This flips it into a real WorkspaceMembership
+    only once the user has live upstream access for the workspace's tenant(s), and
+    matches strictly on VERIFIED emails so an unverified address can't claim one.
+    """
+    emails = {
+        e.lower()
+        for e in EmailAddress.objects.filter(user=user, verified=True).values_list(
+            "email", flat=True
+        )
+    }
+    if user.email:
+        emails.add(user.email.lower())
+    if not emails:
+        return
+
+    invites = WorkspaceInvite.objects.filter(
+        email__in=emails, status__in=LIVE_INVITE_STATUSES
+    ).select_related("workspace")
+    for invite in invites:
+        if invite.is_expired:
+            invite.status = WorkspaceInviteStatus.EXPIRED
+            invite.save(update_fields=["status", "updated_at"])
+            continue
+
+        if _shares_live_tenant(user, _live_tenant_ids(invite.workspace)):
+            membership, _ = WorkspaceMembership.objects.get_or_create(
+                workspace=invite.workspace,
+                user=user,
+                defaults={"role": invite.role, "invited_by": invite.invited_by},
+            )
+            invite.status = WorkspaceInviteStatus.ACCEPTED
+            invite.resolved_at = timezone.now()
+            invite.resolved_membership = membership
+            invite.save(
+                update_fields=["status", "resolved_at", "resolved_membership", "updated_at"]
+            )
+            notify_invite_accepted(invite, user)
+        elif invite.status != WorkspaceInviteStatus.AWAITING_ACCESS:
+            invite.status = WorkspaceInviteStatus.AWAITING_ACCESS
+            invite.save(update_fields=["status", "updated_at"])
+            notify_awaiting_access(invite, user)
 
 
 def reconcile_existing_user_on_login(sender, request, sociallogin, **kwargs):

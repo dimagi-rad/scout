@@ -1,11 +1,8 @@
 """
 PostgreSQL checkpointer for LangGraph conversation persistence.
 
-This module provides async-compatible PostgreSQL-based checkpoint storage
-for LangGraph agents, enabling conversation state persistence across sessions.
-
-The checkpointer uses the platform's Django database configuration and
-falls back to MemorySaver for testing or when PostgreSQL connection fails.
+Async-compatible Postgres checkpoint storage for LangGraph agents, falling back
+to MemorySaver in tests or when the Postgres connection fails.
 """
 
 from __future__ import annotations
@@ -25,27 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def get_database_url() -> str:
+    """Resolve the Postgres URL: DATABASE_URL, then DB_* env vars, then Django
+    DATABASES['default']. Raises ValueError if none yield a valid config.
     """
-    Get the PostgreSQL connection URL from environment or Django settings.
-
-    Attempts to get the connection URL in this order:
-    1. DATABASE_URL environment variable
-    2. Individual DB_* environment variables
-    3. Django DATABASES['default'] settings
-
-    Returns:
-        PostgreSQL connection URL string.
-
-    Raises:
-        ValueError: If no valid database configuration is found.
-    """
-    # Try DATABASE_URL first
     database_url = os.environ.get("DATABASE_URL")
     if database_url:
         logger.debug("Using DATABASE_URL environment variable")
         return database_url
 
-    # Try individual environment variables
     db_host = os.environ.get("DB_HOST")
     db_name = os.environ.get("DB_NAME")
     db_user = os.environ.get("DB_USER")
@@ -58,7 +42,6 @@ def get_database_url() -> str:
         logger.debug("Using individual DB_* environment variables")
         return url
 
-    # Fall back to Django settings
     try:
         from django.conf import settings
 
@@ -88,27 +71,11 @@ def get_database_url() -> str:
 
 @asynccontextmanager
 async def get_postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, None]:
+    """Async context manager yielding an AsyncPostgresSaver (running setup() to
+    create tables) connected to the platform DB. Falls back to MemorySaver in
+    test mode (TESTING env var), when the connection fails, or when
+    langgraph-checkpoint-postgres is unavailable.
     """
-    Create an async PostgreSQL checkpointer for LangGraph.
-
-    This async context manager creates an AsyncPostgresSaver instance
-    connected to the platform database. It handles setup (creating tables
-    if needed) and proper connection cleanup.
-
-    Falls back to MemorySaver if:
-    - PostgreSQL connection fails
-    - Running in test mode (TESTING=1 environment variable)
-    - langgraph-checkpoint-postgres is not available
-
-    Yields:
-        BaseCheckpointSaver: Either an AsyncPostgresSaver or MemorySaver instance.
-
-    Example:
-        async with get_postgres_checkpointer() as checkpointer:
-            graph = build_agent_graph(project, checkpointer=checkpointer)
-            result = await graph.ainvoke(...)
-    """
-    # Check if we're in test mode
     if os.environ.get("TESTING", "").lower() in ("1", "true", "yes"):
         logger.info("Test mode detected, using MemorySaver")
         yield MemorySaver()
@@ -121,7 +88,6 @@ async def get_postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, Non
         logger.info("Connecting to PostgreSQL for checkpointing")
 
         async with AsyncPostgresSaver.from_conn_string(database_url) as checkpointer:
-            # Setup creates the checkpoint tables if they don't exist
             await checkpointer.setup()
             logger.info("PostgreSQL checkpointer initialized successfully")
             yield checkpointer
@@ -146,14 +112,8 @@ async def get_postgres_checkpointer() -> AsyncGenerator[BaseCheckpointSaver, Non
 
 
 def get_sync_checkpointer() -> BaseCheckpointSaver:
-    """
-    Get a synchronous checkpointer for non-async contexts.
-
-    For synchronous usage (e.g., management commands, testing), this returns
-    a MemorySaver. For production async usage, use get_postgres_checkpointer().
-
-    Returns:
-        MemorySaver instance for synchronous operations.
+    """Return a MemorySaver for sync contexts (management commands, tests).
+    Production async usage should use get_postgres_checkpointer().
     """
     logger.debug("Creating synchronous MemorySaver checkpointer")
     return MemorySaver()

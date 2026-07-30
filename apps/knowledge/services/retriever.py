@@ -28,6 +28,17 @@ def _sanitize_prompt_content(value: str) -> str:
     return _SQL_STATEMENT_LINE_RE.sub(_SQL_REDACTION, value)
 
 
+# Char budget for the knowledge context injected into the system prompt, which
+# is re-billed on every LLM call (arch #254, finding 01#4). Mirrors the graph's
+# schema budget; bounding it keeps the cacheable prompt prefix small and stable.
+KNOWLEDGE_CONTEXT_CHAR_BUDGET = 6000
+
+_TRUNCATION_NOTICE = (
+    "\n\n*(Knowledge context truncated to fit the prompt budget — "
+    "open the Knowledge page to see the full set.)*"
+)
+
+
 class KnowledgeRetriever:
     """
     Retrieves and formats knowledge context for an agent's system prompt.
@@ -44,7 +55,13 @@ class KnowledgeRetriever:
         self.workspace = workspace
 
     async def retrieve(self, user_question: str = "") -> str:
-        """Retrieve and format all relevant knowledge as markdown."""
+        """Retrieve and format all relevant knowledge as markdown.
+
+        Output is bounded by ``KNOWLEDGE_CONTEXT_CHAR_BUDGET`` (arch #254, 01#4).
+        ``user_question`` is accepted for API compatibility only; with no
+        relevance index, entries are included in stable order until the budget
+        is exhausted.
+        """
         sections: list[str] = []
 
         entries_section = await self._format_knowledge_entries()
@@ -59,7 +76,11 @@ class KnowledgeRetriever:
         if learnings_section:
             sections.append(learnings_section)
 
-        return "\n\n".join(sections)
+        combined = "\n\n".join(sections)
+        if len(combined) > KNOWLEDGE_CONTEXT_CHAR_BUDGET:
+            keep = KNOWLEDGE_CONTEXT_CHAR_BUDGET - len(_TRUNCATION_NOTICE)
+            combined = combined[: max(0, keep)].rstrip() + _TRUNCATION_NOTICE
+        return combined
 
     async def _format_knowledge_entries(self) -> str:
         """Format knowledge entries as markdown sections."""
@@ -147,10 +168,8 @@ class KnowledgeRetriever:
                 lines.append(f"  - *Tables: {tables_str}*")
 
             if learning.confidence_score >= 0.8:
-                # Only claim a usage count when the learning has actually been
-                # applied. times_applied effectively never increments today
-                # (arch #262, finding 05#9), so rendering "(applied 0 times)"
-                # implies usage that never happened.
+                # times_applied effectively never increments today (arch #262,
+                # finding 05#9), so only show a count when it's actually nonzero.
                 if learning.times_applied > 0:
                     lines.append(
                         f"  - *Confidence: {learning.confidence_score:.0%} "

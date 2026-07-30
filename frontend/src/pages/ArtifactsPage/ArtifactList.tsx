@@ -31,7 +31,6 @@ export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete
 
   return (
     <div className="space-y-4">
-      {/* Search */}
       <div className="relative max-w-sm">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
@@ -51,7 +50,6 @@ export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete
         </div>
       )}
 
-      {/* Card grid */}
       <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-4">
         {items.map((item) => (
           <ArtifactCard

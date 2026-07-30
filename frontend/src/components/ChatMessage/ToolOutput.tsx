@@ -1,7 +1,5 @@
 import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash } from "lucide-react"
 
-// ---- shared helpers ----
-
 function Badge({
   children,
   variant = "default",
@@ -38,16 +36,15 @@ function formatCell(cell: unknown): string {
   return String(cell)
 }
 
-// Standard MCP error-envelope error object (mcp_server/envelope.py).
+// MCP error-envelope error object (mcp_server/envelope.py).
 export interface ToolError {
   code: string
   message: string
   detail?: string
 }
 
-// Shared failure row so error-envelope fields (code / message / detail) are
-// surfaced by every rich card instead of being silently discarded (arch #246,
-// 13#6). Falls back to a generic label when the tool gave no structured error.
+// Surfaces error-envelope fields (code / message / detail) instead of silently
+// discarding them (arch #246, 13#6); falls back to a generic label.
 function ToolErrorRow({ error, fallback }: { error?: ToolError; fallback: string }) {
   return (
     <div className="space-y-1">
@@ -60,8 +57,6 @@ function ToolErrorRow({ error, fallback }: { error?: ToolError; fallback: string
     </div>
   )
 }
-
-// ---- query tool ----
 
 export interface QueryOutput {
   success: boolean
@@ -86,7 +81,6 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
 
   return (
     <div className="space-y-3">
-      {/* Status row */}
       <div className="flex items-center gap-2 flex-wrap">
         <CheckCircle className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
         <span className="text-xs text-muted-foreground font-medium">Query succeeded</span>
@@ -122,7 +116,6 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
         </div>
       ))}
 
-      {/* Results table */}
       {rows.length > 0 && (
         <div className="overflow-x-auto rounded border border-border/50">
           <table className="w-full text-xs">
@@ -377,8 +370,6 @@ export function DescribeTableOutput({ output }: { output: DescribeTableOutput })
   )
 }
 
-// ---- list_tables tool ----
-
 export interface ListTablesOutput {
   success: boolean
   data?: {
@@ -434,8 +425,6 @@ export function ListTablesOutput({ output }: { output: ListTablesOutput }) {
     </div>
   )
 }
-
-// ---- get_metadata tool ----
 
 export interface Relationship {
   from_table: string

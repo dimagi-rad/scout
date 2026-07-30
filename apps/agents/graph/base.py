@@ -1,20 +1,9 @@
 """
 LangGraph agent graph builder for the Scout data agent platform.
 
-This module provides the `build_agent_graph` function which assembles the
-agent graph. The graph uses a simple loop: agent -> tools -> agent, relying
-on the LLM to self-correct from error ToolMessages naturally. A recursion
-limit prevents runaway loops.
-
-Graph Architecture:
-    START -> agent -> should_continue? -> tools -> agent
-                   |
-                   +-> END
-
-The graph uses:
-- ChatAnthropic as the LLM backend
-- ToolNode for tool execution
-- Optional checkpointer for conversation persistence
+`build_agent_graph` assembles a loop (agent -> tools -> agent) that relies on
+the LLM to self-correct from error ToolMessages; a recursion limit bounds runaway
+loops and a panic-loop detector escalates after repeated schema errors.
 """
 
 from __future__ import annotations
@@ -34,7 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from apps.agents.graph.state import AgentState
+from apps.agents.graph.state import AgentState, prune_messages
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from apps.agents.subagents.events import (
@@ -87,6 +76,10 @@ MCP_TOOL_NAMES = frozenset(
         "run_materialization",
         "get_schema_status",
         "get_lineage",
+        # workspace_id is injected into these so an LLM-supplied run_id is scoped
+        # to the calling workspace (arch #253, 01#6).
+        "get_materialization_status",
+        "cancel_materialization",
     }
 )
 
@@ -137,19 +130,23 @@ INJECTED_TOOL_PARAMS = frozenset(
 
 DEFAULT_MAX_TOKENS = 4096
 
-# Circuit-breaker thresholds for the escalation node. If the last N tool
-# messages all carry one of these error codes, the agent has drifted from
-# self-correction into a panic loop — route to the escalation node so the
-# turn ends with an explicit ask instead of consuming the recursion budget.
-#
-# These are the bare ``error.code`` values from the MCP envelope
-# (mcp_server.envelope), matched against the parsed JSON ``error.code`` field —
-# NOT a substring search. The previous implementation substring-matched
-# ``'"code": "NOT_FOUND"'`` (with a space after the colon), which only worked
-# because FastMCP serialized with ``indent=2``; a switch to compact separators
-# would have silently disabled the breaker (06#1). They are also the single
-# source of truth shared with the base system prompt's "When the Schema is
-# Broken" rule (see apps/agents/prompts/base_system.py).
+# Anthropic prompt-caching breakpoint (arch #254, finding 02#3).
+# Default 5-min ephemeral TTL breaks even at ~2 reads, which a single agent turn
+# (K+1 LLM calls sharing one prefix) clears immediately. A 1h TTL
+# ({"type": "ephemeral", "ttl": "1h"}) costs 2x to write / ~3 reads to pay off —
+# use only for bursty traffic with multi-minute idle gaps. langchain-anthropic
+# renders tools -> system -> messages, so a breakpoint on the last system block
+# caches tool schemas + frozen system prefix together; a second breakpoint via
+# the ``cache_control`` kwarg to ``ainvoke`` caches the replayed history.
+PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+# Panic-loop circuit breaker: if the last N tool messages all carry one of these
+# error codes, route to the escalation node so the turn ends with an explicit ask
+# instead of burning the recursion budget. These are bare ``error.code`` values
+# from the MCP envelope, matched against the parsed JSON field — NOT a substring
+# search: substring-matching ``'"code": "NOT_FOUND"'`` only worked under
+# FastMCP's indent=2 and would silently break under compact separators (06#1).
+# Single source of truth shared with base_system.py's "When the Schema is Broken".
 ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
 ESCALATION_TRIGGER_COUNT = 3
 ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
@@ -158,14 +155,12 @@ ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 def _tool_message_error_code(content: Any) -> str | None:
     """Extract the MCP envelope ``error.code`` from a ToolMessage's content.
 
-    Tool content may be a JSON string, a list of content blocks (the shape
-    langchain_mcp_adapters emits), or already-parsed structures. We parse the
-    JSON and read ``error.code`` so the panic-loop detector keys off the
-    structured field rather than a whitespace-sensitive substring (06#1).
+    Content may be a JSON string, a list of content blocks (the
+    langchain_mcp_adapters shape), or already-parsed structures. Reads the
+    structured ``error.code`` rather than a whitespace-sensitive substring (06#1).
     Returns None when the content isn't a recognizable error envelope.
     """
     if isinstance(content, list):
-        # Content-block list: try each text block until one parses to an error.
         for block in content:
             text = None
             if isinstance(block, dict) and block.get("type") == "text":
@@ -203,15 +198,9 @@ ESCALATION_MESSAGE = (
 
 
 def _should_escalate(messages: list) -> bool:
-    """Detect a panic loop: last N tool messages all returned an error code.
-
-    Looks only at trailing ``ToolMessage``s — a successful tool call in
-    between resets the streak. Parses each tool message's JSON envelope and
-    matches the structured ``error.code`` value against
-    ``ESCALATION_ERROR_CODES`` (06#1) rather than substring-searching the raw
-    text, so a serialization/whitespace change can't silently disable the
-    breaker and an unrelated row containing the literal "NOT_FOUND" can't
-    falsely trip it.
+    """Detect a panic loop: last N trailing tool messages all returned an
+    escalation error code. A successful tool call in between resets the streak.
+    Matches the structured ``error.code`` (06#1), not a substring.
     """
     streak: list[ToolMessage] = []
     for msg in reversed(messages):
@@ -234,9 +223,8 @@ def _should_escalate(messages: list) -> bool:
     return True
 
 
-# Simple TTL cache for system prompts
 _system_prompt_cache: dict[str, tuple[str, float]] = {}
-_SYSTEM_PROMPT_TTL = 60  # 60 seconds — short to limit staleness from knowledge/schema changes
+_SYSTEM_PROMPT_TTL = 60  # short, to limit staleness from knowledge/schema changes
 
 
 def _system_prompt_cache_key(
@@ -343,11 +331,10 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
         )
 
 
-# Guidance injected for HEADLESS (non-interactive) runs — e.g. recipe execution.
-# Such runs have no chat Thread/checkpointer and no async-resume path, so the
-# agent must NOT "end its turn and wait": the headless run_materialization tool
-# BLOCKS and returns when loading finishes, and the agent continues in the same
-# run. (Deliberately avoids the substring "end your turn".)
+# HEADLESS (non-interactive, e.g. recipe) guidance. No Thread/checkpointer/resume
+# path, so the agent must NOT "end its turn and wait" — the headless
+# run_materialization tool BLOCKS and the agent continues in the same run.
+# (Deliberately avoids the substring "end your turn".)
 _HEADLESS_MATERIALIZE_GUIDANCE = (
     "No data has been loaded yet. Call `run_materialization` to load it. This "
     "tool BLOCKS and returns a status summary once loading finishes — keep "
@@ -355,11 +342,9 @@ _HEADLESS_MATERIALIZE_GUIDANCE = (
     "`status: completed`, continue with the requested analysis; the data is ready."
 )
 
-# Headless guidance when a materialization is ALREADY in progress. The headless
-# `run_materialization` tool waits for the in-flight load rather than starting a
-# parallel one, so we still route the agent to it — but we must NOT say "no data
-# loaded" (that would read as "start one"), matching the interactive path's
-# "don't trigger another" intent.
+# Headless guidance when a materialization is ALREADY in progress. The tool waits
+# for the in-flight load rather than starting a parallel one, so we route to it —
+# but must NOT say "no data loaded" (reads as "start one").
 _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "A data load is already in progress for this workspace. Call "
     "`run_materialization` to ensure fresh data — it WAITS for the in-progress "
@@ -388,11 +373,9 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     if ts is None:
         if not interactive:
             return _HEADLESS_MATERIALIZE_GUIDANCE
-        # NB: no `pipeline=` argument — run_materialization takes no pipeline
-        # parameter (routing moved into materialize_workspace per-provider) and
-        # all of its real params are injected server-side and hidden, so the
-        # LLM-facing schema is empty. Emitting `pipeline="..."` here told the
-        # agent to send an argument the tool can't accept (finding 02#6).
+        # No `pipeline=` arg: run_materialization's LLM-facing schema is empty
+        # (all params injected server-side); naming an argument it can't accept
+        # confused the agent (finding 02#6).
         return (
             "No data has been loaded yet. Call `run_materialization` to start "
             "loading. This tool returns IMMEDIATELY with `status: started` — do "
@@ -412,11 +395,10 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
             "when the current materialization completes."
         )
 
-    # Schema is active: fetch table list
     if pipeline_config is None:
         pipeline_config = registry.get("commcare_sync")
 
-    # Try transformation-aware listing (prefers terminal models over replaced ones)
+    # transformation-aware listing prefers terminal models over replaced ones
     from apps.transformations.services.lineage import aget_terminal_assets
 
     terminal_assets = await aget_terminal_assets(tenant_ids=[tenant.id])
@@ -529,13 +511,9 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
 
 
 def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
-    """Build tool definitions for the LLM with parameters hidden from the schema.
-
-    MCP tools require context IDs (tenant_id, tenant_membership_id, etc.) but
-    the LLM shouldn't provide them — they're injected from state.  We give the
-    LLM schemas that omit those parameters so it can't hallucinate wrong values.
-
-    Non-MCP tools are returned unchanged.
+    """Build LLM tool definitions with the injected context-ID params omitted from
+    the schema, so the LLM can't supply (and hallucinate) values that are injected
+    from state. Non-MCP tools are returned unchanged.
     """
     hidden = set(hidden_params)
     result: list = []
@@ -632,17 +610,31 @@ def _synthesize_artifact_manager_task(messages: list[Any]) -> str:
     )
 
 
+def _build_cached_system_message(stable: str, volatile: str) -> SystemMessage:
+    """Build a list-content SystemMessage with an Anthropic cache breakpoint.
+
+    A ``cache_control`` breakpoint on the stable prefix's last block caches tool
+    schemas + frozen system prefix together (langchain renders tools -> system ->
+    messages; arch #254, finding 02#3). The volatile suffix follows WITHOUT a
+    breakpoint, so a new materialization changes only post-breakpoint bytes and
+    leaves the cached prefix intact.
+    """
+    blocks: list[dict] = [{"type": "text", "text": stable, "cache_control": PROMPT_CACHE_CONTROL}]
+    if volatile and volatile.strip():
+        blocks.append({"type": "text", "text": volatile})
+    return SystemMessage(content=blocks)
+
+
 def _make_injecting_tool_node(
     base_tool_node: ToolNode,
     injections: dict[str, str],
 ) -> Any:
-    """Create a graph node that injects state values into MCP tool call args.
+    """Wrap a ToolNode so MCP tool calls get context IDs from agent state.
 
-    Before the ToolNode executes, this node copies the last AI message and
-    injects values from the agent state into every MCP tool call's args.
-    ``injections`` maps tool-arg-name → state-field-name.  This ensures the
-    MCP server always receives the correct context IDs regardless of what the
-    LLM generated.
+    Copies the last AI message and injects state values into every MCP tool
+    call's args before execution. ``injections`` maps tool-arg-name →
+    state-field-name, so the MCP server always gets correct IDs regardless of
+    what the LLM generated.
     """
 
     async def injecting_node(
@@ -732,7 +724,6 @@ async def build_agent_graph(
     user: User | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     mcp_tools: list | None = None,
-    oauth_tokens: dict | None = None,
     conversation_id: str | None = None,
     *,
     interactive: bool = True,
@@ -746,7 +737,6 @@ async def build_agent_graph(
         user: Optional User model instance.
         checkpointer: Optional LangGraph checkpointer for conversation persistence.
         mcp_tools: List of MCP tools to include.
-        oauth_tokens: Optional OAuth tokens for tool authentication.
         conversation_id: Optional thread/conversation id. Threaded through to the
             artifact tools so chat-created artifacts record their originating
             conversation (so shared/public thread pages can find them).
@@ -786,21 +776,17 @@ async def build_agent_graph(
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
-    # --- Inject workspace_id and user_id into MCP tool calls from agent state ---
     injections = {
         "workspace_id": "workspace_id",
         "user_id": "user_id",
         "thread_id": "thread_id",
     }
-    # tool_call_id is injected per-call (from the LangChain tool_call dict's
-    # own id), not from agent state, so it can't live in `injections`.
-    # INJECTED_TOOL_PARAMS is the single source of truth for the LLM-facing
-    # hidden set (also used to redact tool input in the SSE stream).
+    # tool_call_id is injected per-call (from the tool_call's own id), not from
+    # state, so it can't live in `injections`. INJECTED_TOOL_PARAMS is the single
+    # source of truth for the hidden set (also redacts tool input in the SSE stream).
     hidden_params = list(INJECTED_TOOL_PARAMS)
 
-    # --- Build LLM with tools ---
-    # Opus 4.7+ removed the sampling params (temperature/top_p/top_k);
-    # sending any of them returns a 400.
+    # Opus 4.7+ removed sampling params (temperature/top_p/top_k); sending any 400s.
     llm = ChatAnthropic(
         model=settings.DEFAULT_LLM_MODEL,
         max_tokens=DEFAULT_MAX_TOKENS,
@@ -808,36 +794,39 @@ async def build_agent_graph(
     llm_tool_schemas = _llm_tool_schemas(tools, hidden_params=hidden_params)
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
-    # --- Build system prompt ---
-    system_prompt = await _build_system_prompt(
-        workspace, user, interactive=interactive, canvas_write=canvas_write
+    stable_prompt, volatile_prompt = await _build_system_prompt(
+        workspace,
+        user,
+        interactive=interactive,
+        canvas_write=canvas_write,
     )
     logger.debug(
-        "System prompt assembled: %d characters for workspace %s",
-        len(system_prompt),
+        "System prompt assembled: %d stable + %d volatile chars for workspace %s",
+        len(stable_prompt),
+        len(volatile_prompt),
         workspace.id,
     )
 
-    # --- Create tool node with context ID injection ---
     base_tool_node = ToolNode(tools)
     tool_node = _make_injecting_tool_node(base_tool_node, injections)
 
-    # --- Define graph nodes ---
-
     async def agent_node(state: AgentState) -> dict[str, Any]:
-        """
-        Call the LLM with the current conversation and system prompt.
+        """Prepend the system prompt and invoke the LLM.
 
-        This node prepends the system prompt to the messages and invokes
-        the LLM. The LLM may respond with text, tool calls, or both.
+        ``prune_messages`` bounds replayed history so per-turn input tokens don't
+        grow without limit as a thread ages — recursion_limit caps tool iterations,
+        not conversation length, and large query results were otherwise replayed
+        verbatim every call (arch #254, finding 01#3). Cache breakpoints bill the
+        static prefix and bounded history at cache-read rates (02#3).
         """
         state_messages = list(state["messages"])
-        # Filter out any prior system messages to avoid duplicates across cycles
+        # Drop prior system messages to avoid duplicates across cycles
         state_messages = [m for m in state_messages if not isinstance(m, SystemMessage)]
+        state_messages = prune_messages(state_messages)
 
-        # Defensive guard: ensure every AIMessage with tool_calls is followed
-        # by matching ToolMessages. If not, inject synthetic error ToolMessages
-        # so Anthropic never receives an invalid tool_use/tool_result sequence.
+        # Ensure every AIMessage with tool_calls is followed by matching
+        # ToolMessages, injecting synthetic ones if not, so Anthropic never gets
+        # an invalid tool_use/tool_result sequence.
         answered_ids: set[str] = {
             m.tool_call_id for m in state_messages if isinstance(m, ToolMessage) and m.tool_call_id
         }
@@ -866,24 +855,19 @@ async def build_agent_graph(
                         )
                         answered_ids.add(tc_id)
 
-        messages = [SystemMessage(content=system_prompt), *repaired]
-        response = await llm_with_tools.ainvoke(messages)
+        messages = [_build_cached_system_message(stable_prompt, volatile_prompt), *repaired]
+        # cache_control lands on the last eligible message block, caching the
+        # (pruned) conversation-history prefix (arch #254, 02#3).
+        response = await llm_with_tools.ainvoke(messages, cache_control=PROMPT_CACHE_CONTROL)
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
-        """
-        Determine if the agent should call tools or end the conversation.
-
-        Checks the last message for tool calls. If present, route to tools.
-        Otherwise, end the conversation.
-        """
+        """Route to tools if the last message has tool calls, else end."""
         messages = state.get("messages", [])
         if not messages:
             return END
 
         last_message = messages[-1]
-
-        # Check if the LLM wants to call tools
         if hasattr(last_message, "tool_calls") and last_message.tool_calls:
             return "tools"
 
@@ -909,19 +893,14 @@ async def build_agent_graph(
         """Terminal node that emits a fixed escalation message and ends the turn."""
         return {"messages": [AIMessage(content=ESCALATION_MESSAGE)]}
 
-    # --- Build the graph ---
     graph = StateGraph(AgentState)
 
-    # Add nodes
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tool_node)
     graph.add_node("escalate", escalation_node)
 
-    # Set entry point
     graph.set_entry_point("agent")
 
-    # Add edges
-    # agent -> should_continue? -> tools or END
     graph.add_conditional_edges(
         "agent",
         should_continue,
@@ -931,7 +910,7 @@ async def build_agent_graph(
         },
     )
 
-    # tools -> agent (normal) or -> escalate (panic loop detected, terminal)
+    # tools -> agent (normal) or -> escalate (panic loop, terminal)
     graph.add_conditional_edges(
         "tools",
         post_tools_router,
@@ -942,7 +921,6 @@ async def build_agent_graph(
     )
     graph.add_edge("escalate", END)
 
-    # --- Compile and return ---
     compiled = graph.compile(checkpointer=checkpointer)
 
     logger.info(
@@ -963,29 +941,8 @@ def _build_tools(
     job_id: int | None = None,
     canvas_write: bool = False,
 ) -> list:
-    """
-    Build the tool list for the agent.
-
-    MCP tools (from the Scout MCP server):
-    - list_workspaces: List accessible workspaces and tenant/profile metadata
-    - list_datasets: Page through business-facing datasets across workspaces
-    - describe_dataset: Get dataset dimensions, measures, and relationships
-    - semantic_query: Run structured measure/dimension queries
-
-    Local tools (always included):
-    - save_learning: For persisting discovered corrections
-    - artifact_manager: For semantic graph/story artifact work
-    - save_as_recipe: For creating replayable analysis workflows
-
-    Args:
-        workspace: The Workspace model instance.
-        user: Optional User for tracking learning discovery.
-        mcp_tools: LangChain tools loaded from the MCP server.
-        conversation_id: Optional thread/conversation id, recorded on artifacts
-            the agent creates so shared/public thread pages can find them.
-
-    Returns:
-        List of LangChain tool functions.
+    """Build the tool list: MCP data tools plus local artifact/recipe/learning
+    tools, and a blocking materialization tool in headless mode.
     """
     # Drop any MCP tool the server advertises but that must not reach the LLM
     # (e.g. the destructive ``teardown_schema`` — see AGENT_EXCLUDED_MCP_TOOLS).
@@ -1033,24 +990,21 @@ def _build_tools(
 
 
 async def _build_system_prompt(
-    workspace: Workspace, user, interactive: bool = True, canvas_write: bool = False
-) -> str:
-    """
-    Assemble the complete system prompt for a workspace.
+    workspace: Workspace,
+    user,
+    interactive: bool = True,
+    canvas_write: bool = False,
+) -> tuple[str, str]:
+    """Assemble the workspace system prompt as a (stable, volatile) split.
 
-    The prompt is built from:
-    1. BASE_SYSTEM_PROMPT: Core agent behavior and formatting
-    2. ARTIFACT_PROMPT_ADDITION: Instructions for creating artifacts
-    3. Workspace system prompt: Workspace-specific instructions
-    4. Knowledge retriever output: Metrics, rules, learnings
-    5. Runtime discovery guidance and query config
+    Stable = base prompt + artifact additions + workspace instructions +
+    knowledge + dataset/canvas guidance. Volatile = runtime data availability,
+    which may change after every materialization.
 
-    Args:
-        workspace: The Workspace model instance.
-        user: The User model instance (used to scope tenant metadata lookup).
-
-    Returns:
-        Complete system prompt string.
+    Splitting lets the agent node put the ``cache_control`` breakpoint on the
+    stable prefix while the volatile block sits after it, so a new materialization
+    no longer rewrites cached prefix bytes and defeats every cache hit (arch #254,
+    finding 02#3). ``volatile_suffix`` may be "".
     """
     cache_key = _system_prompt_cache_key(workspace, user, interactive, canvas_write)
     cached = _system_prompt_cache.get(cache_key)
@@ -1059,21 +1013,26 @@ async def _build_system_prompt(
         if time.monotonic() - timestamp < _SYSTEM_PROMPT_TTL:
             return value
 
-    sections = [BASE_SYSTEM_PROMPT]
-    sections.append(ARTIFACT_PROMPT_ADDITION)
+    # Stable sections (cacheable prefix)
+    stable_sections = [BASE_SYSTEM_PROMPT, ARTIFACT_PROMPT_ADDITION]
 
     if workspace.system_prompt:
-        sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
+        stable_sections.append(f"\n## Workspace Instructions\n\n{workspace.system_prompt}\n")
 
     retriever = KnowledgeRetriever(workspace)
     knowledge_context = await retriever.retrieve()
     if knowledge_context:
-        sections.append(f"\n## Knowledge Base\n\n{knowledge_context}\n")
+        # Retriever already emits a ``## Knowledge Base`` heading; don't double it
+        # (arch #254, finding 01#4).
+        stable_sections.append(f"\n{knowledge_context}\n")
+
+    # Volatile sections (after the cache breakpoint)
+    volatile_sections: list[str] = []
 
     tenant_count = await workspace.tenants.acount()
 
     if tenant_count > 0:
-        sections.append("""
+        stable_sections.append("""
 ## Workspace And Dataset Discovery
 
 Semantic datasets are the primary objects users see and ask about. A dataset
@@ -1110,10 +1069,10 @@ When results are truncated, suggest adding filters or using aggregations to redu
 """)
 
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
-        sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
+        volatile_sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
 
     if interactive and canvas_write:
-        sections.append("""
+        stable_sections.append("""
 ## Semantic Canvas (dataset editing)
 
 This conversation has a canvas — a draft changeset over the workspace's
@@ -1131,7 +1090,7 @@ For value format requests, tell `canvas_manager` to set field metadata `format`
 and optional `currency`.
 """)
     elif interactive:
-        sections.append("""
+        stable_sections.append("""
 ## Semantic Canvas (read-only)
 
 This conversation has a canvas showing draft dataset changes in the side
@@ -1141,11 +1100,12 @@ ask to update dataset labels, descriptions, fields, relationships, formats, or
 currency, explain that a read-write workspace role is required.
 """)
 
-    result = "\n".join(sections)
+    stable = "\n".join(stable_sections)
+    volatile = "\n".join(volatile_sections)
+    result = (stable, volatile)
 
     _system_prompt_cache[cache_key] = (result, time.monotonic())
 
-    # Evict expired entries to prevent unbounded growth
     if len(_system_prompt_cache) > 256:
         now = time.monotonic()
         expired = [

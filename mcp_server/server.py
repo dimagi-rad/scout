@@ -27,12 +27,13 @@ import sys
 import uuid
 from datetime import UTC, datetime
 
+import uvicorn
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.exceptions import ValidationError as _ValidationError
 from django.db.models import Q
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from procrastinate.contrib.django.procrastinate_app import current_app as _procrastinate_app
 
 from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import SemanticDataset
@@ -57,6 +58,8 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.tasks import materialize_workspace
+from config.procrastinate import app as procrastinate_app
+from mcp_server.auth import SharedSecretMiddleware
 from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
@@ -93,15 +96,12 @@ async def _resolve_mcp_context(workspace_id: str):
 async def _resolve_pipeline_config(ts, last_run):
     """Pick the right PipelineConfig for a TenantSchema.
 
-    Prefers the pipeline of the last completed materialization run; falls back
-    to the pipeline registered for the tenant's provider; falls back to
-    ``commcare_sync`` as a last resort to preserve historical behavior.
+    Prefers the last run's pipeline, then the tenant provider's, then
+    ``commcare_sync`` (preserves historical behavior).
 
-    ``ts`` may be ``None`` when the workspace is multi-tenant and the caller is
-    looking at a workspace view schema (``ws_*``) rather than a tenant schema.
-    In that case we can't infer a tenant-specific pipeline, so just fall back
-    to commcare_sync for pipeline-derived metadata (per-tenant routing happens
-    at load time, not at metadata-describe time).
+    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``); we
+    can't infer a tenant-specific pipeline there, so fall back to commcare_sync
+    (per-tenant routing happens at load time, not metadata-describe time).
     """
     registry = get_registry()
     if last_run:
@@ -114,9 +114,6 @@ async def _resolve_pipeline_config(ts, last_run):
         if cfg:
             return cfg
     return registry.get("commcare_sync")
-
-
-# --- Tools ---
 
 
 @mcp.tool()
@@ -140,8 +137,8 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             tc["result"] = error_response(VALIDATION_ERROR, str(e))
             return tc["result"]
 
-        # For multi-tenant workspaces, the context points at a WorkspaceViewSchema
-        # (namespaced views). Use information_schema directly instead of MaterializationRun.
+        # Multi-tenant workspaces point at a WorkspaceViewSchema (namespaced
+        # views): use information_schema directly instead of MaterializationRun.
         if workspace_id:
             is_view_schema = await WorkspaceViewSchema.objects.filter(
                 schema_name=ctx.schema_name, state=SchemaState.ACTIVE
@@ -781,7 +778,6 @@ async def describe_dataset(
         )
         return tc["result"]
 
-
 @mcp.tool()
 async def semantic_query(
     measures: list[str] | None = None,
@@ -891,7 +887,7 @@ async def list_pipelines() -> dict:
 
 
 @mcp.tool()
-async def get_materialization_status(run_id: str) -> dict:
+async def get_materialization_status(run_id: str, workspace_id: str = "") -> dict:
     """Retrieve the status of a materialization run by ID.
 
     Primarily a fallback for reconnection scenarios — live progress is delivered
@@ -899,13 +895,22 @@ async def get_materialization_status(run_id: str) -> dict:
 
     Args:
         run_id: UUID of the MaterializationRun to look up.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+            The run is scoped to this workspace (arch #253, 01#6) so a run in
+            another workspace cannot be inspected from here.
     """
-    async with tool_context("get_materialization_status", run_id) as tc:
+    async with tool_context("get_materialization_status", run_id, workspace_id=workspace_id) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        if not await _run_belongs_to_workspace(run, workspace_id):
+            # Same NOT_FOUND as a genuinely missing run so a caller can't probe
+            # the existence of runs in other workspaces.
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
@@ -929,7 +934,7 @@ async def get_materialization_status(run_id: str) -> dict:
 
 
 @mcp.tool()
-async def cancel_materialization(run_id: str) -> dict:
+async def cancel_materialization(run_id: str, workspace_id: str = "") -> dict:
     """Cancel a running materialization pipeline.
 
     Marks the run as CANCELLED in the database. This is a best-effort
@@ -938,13 +943,20 @@ async def cancel_materialization(run_id: str) -> dict:
 
     Args:
         run_id: UUID of the MaterializationRun to cancel.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+            The run is scoped to this workspace (arch #253, 01#6) so a run in
+            another workspace cannot be cancelled from here.
     """
-    async with tool_context("cancel_materialization", run_id) as tc:
+    async with tool_context("cancel_materialization", run_id, workspace_id=workspace_id) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
+            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            return tc["result"]
+
+        if not await _run_belongs_to_workspace(run, workspace_id):
             tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
             return tc["result"]
 
@@ -962,15 +974,27 @@ async def cancel_materialization(run_id: str) -> dict:
             return tc["result"]
 
         previous_state = run.state
-        # Write the dedicated CANCELLED state (not FAILED) so a deliberately
-        # cancelled run is distinguishable from a genuine failure in any
-        # state-based reporting — matching the user-facing cancel path
+        # Dedicated CANCELLED state (not FAILED) keeps a deliberate cancel
+        # distinguishable from a real failure, matching the user-facing path
         # (apps/workspaces/api/jobs_cancel.py::cancel_thread_job). The
         # result.cancelled flag is retained for back-compat (#290).
         run.state = MaterializationRun.RunState.CANCELLED
         run.completed_at = datetime.now(UTC)
         run.result = {**(run.result or {}), "cancelled": True}
         await run.asave(update_fields=["state", "completed_at", "result"])
+
+        # The DB flip above is the stop signal, but alone it left the procrastinate
+        # job running and the ThreadJob spinning. Mirror the HTTP cancel path: abort
+        # the job and flip its ThreadJob so a mid-load cancel unwinds (arch #255 01#1).
+        if run.procrastinate_job_id is not None:
+            with contextlib.suppress(Exception):
+                await procrastinate_app.job_manager.cancel_job_by_id_async(
+                    run.procrastinate_job_id, abort=True
+                )
+            await ThreadJob.objects.filter(
+                procrastinate_job_id=run.procrastinate_job_id,
+                state__in=list(ThreadJob.ACTIVE_STATES),
+            ).aupdate(state=ThreadJob.State.CANCELLED, completed_at=datetime.now(UTC))
 
         tenant_id = run.tenant_schema.tenant.external_id
         schema = run.tenant_schema.schema_name
@@ -985,7 +1009,17 @@ async def cancel_materialization(run_id: str) -> dict:
 
 
 async def _resolve_workspace_memberships(workspace_id, user_id):
-    """Resolve TenantMemberships for all tenants in a workspace."""
+    """Resolve a user's TenantMemberships within a workspace.
+
+    Entitlement guard (arch #253, 01#6): ``user_id`` is REQUIRED. An empty
+    ``user_id`` previously skipped the user filter and returned every membership
+    in the workspace, so the membership guard passed for any/no user. We now
+    reject an empty ``user_id`` outright — a server-injected acting user is the
+    whole point of the check.
+    """
+    if not user_id:
+        return None, "user_id is required"
+
     workspace = await Workspace.objects.filter(id=workspace_id).afirst()
     if workspace is None:
         return None, f"Workspace '{workspace_id}' not found"
@@ -997,15 +1031,31 @@ async def _resolve_workspace_memberships(workspace_id, user_id):
     if not tenant_ids:
         return None, "Workspace has no tenants configured"
 
-    qs = TenantMembership.objects.select_related("user", "tenant").filter(tenant_id__in=tenant_ids)
-    if user_id:
-        qs = qs.filter(user_id=user_id)
-
-    memberships = [tm async for tm in qs]
+    memberships = [
+        tm
+        async for tm in TenantMembership.objects.select_related("user", "tenant").filter(
+            tenant_id__in=tenant_ids, user_id=user_id
+        )
+    ]
     if not memberships:
         return None, "No tenant memberships found for this user in this workspace"
 
     return memberships, None
+
+
+async def _run_belongs_to_workspace(run, workspace_id) -> bool:
+    """Return True if a MaterializationRun's tenant is part of ``workspace_id``.
+
+    Scopes LLM-supplied ``run_id``s to the calling workspace (arch #253, 01#6)
+    so a run in another workspace cannot be inspected or cancelled from a chat
+    scoped elsewhere.
+    """
+    if not workspace_id:
+        return False
+    return await WorkspaceTenant.objects.filter(
+        workspace_id=workspace_id,
+        tenant_id=run.tenant_schema.tenant_id,
+    ).aexists()
 
 
 @mcp.tool()
@@ -1057,8 +1107,7 @@ async def run_materialization(
             )
             return tc["result"]
 
-        # Authorization guard: confirms the user has at least one tenant
-        # membership in this workspace before we dispatch a job.
+        # Confirm the user has a tenant membership here before dispatching.
         _, err = await _resolve_workspace_memberships(workspace_id, user_id)
         if err:
             tc["result"] = error_response(NOT_FOUND, err)
@@ -1076,20 +1125,14 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        # Guard against concurrent dispatch in the SAME thread: if this chat
-        # already has a materialization in flight, return its identity so the
-        # agent can tell the user to wait. We scope the guard by thread_id
-        # (not workspace) because the chained resume task only fires once
-        # against the original ThreadJob — a second caller in a different
-        # thread would otherwise get no follow-up message when the worker
-        # finishes (resume defers to a single thread_job_id). Note: this lets
-        # two threads in the same workspace dispatch parallel materializations
-        # that share tenant_schemas. This is not new: the prior workspace-
-        # scoped guard already permitted parallel runs across *different*
-        # workspaces sharing a tenant (multi-workspace tenants), and the
-        # materializer has no advisory lock per tenant_schema. If we ever add
-        # tenant-level dedupe we should add it here with a tenant_id filter
-        # rather than the workspace_id we removed.
+        # Dedupe concurrent dispatch by thread_id (not workspace): the chained
+        # resume task fires once against a single thread_job_id, so a second
+        # caller in another thread would get no follow-up when the worker
+        # finishes. Consequence: two threads in one workspace can run parallel
+        # materializations sharing tenant_schemas — unchanged from the prior
+        # workspace-scoped guard, and the materializer has no per-tenant_schema
+        # lock. Tenant-level dedupe, if ever added, belongs here with a
+        # tenant_id filter.
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
@@ -1137,7 +1180,7 @@ async def run_materialization(
         except Exception:
             logger.exception("Failed to create ThreadJob; rolling back dispatch")
             with contextlib.suppress(Exception):
-                await _procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
+                await procrastinate_app.job_manager.cancel_job_by_id_async(job_id, abort=True)
             tc["result"] = error_response(INTERNAL_ERROR, "Failed to track job")
             return tc["result"]
 
@@ -1202,7 +1245,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             return tc["result"]
 
         if tenant_count == 1:
-            # Single-tenant: check TenantSchema directly
             tenant = await workspace.tenants.afirst()
             ts = await TenantSchema.objects.filter(
                 tenant=tenant,
@@ -1249,7 +1291,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             )
             return tc["result"]
 
-        # Multi-tenant: check WorkspaceViewSchema + per-tenant materialization
+        # Multi-tenant: WorkspaceViewSchema + per-tenant materialization.
         vs = await WorkspaceViewSchema.objects.filter(
             workspace_id=workspace_id,
             state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
@@ -1281,7 +1323,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = not_provisioned
             return tc["result"]
 
-        # Collect last materialization time across all tenant schemas
         tenant_ids = [t.id async for t in workspace.tenants.all()]
         last_run = (
             await MaterializationRun.objects.filter(
@@ -1298,7 +1339,6 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         if last_run and last_run.completed_at:
             last_materialized_at = last_run.completed_at.isoformat()
 
-        # List tables from the view schema via information_schema
         ctx = await _resolve_mcp_context(workspace_id)
         tables = await workspace_list_tables(ctx)
 
@@ -1360,7 +1400,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
         mgr = SchemaManager()
         dropped = []
 
-        # Tear down the workspace view schema if it exists
         vs = (
             await WorkspaceViewSchema.objects.filter(
                 workspace=workspace,
@@ -1372,7 +1411,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             await mgr.ateardown_view_schema(vs)
             dropped.append(vs.schema_name)
 
-        # Tear down all tenant schemas for this workspace
         tenant_ids = [t.id async for t in workspace.tenants.all()]
         async for ts in TenantSchema.objects.filter(
             tenant_id__in=tenant_ids,
@@ -1387,9 +1425,6 @@ async def teardown_schema(confirm: bool = False, workspace_id: str = "") -> dict
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
-
-
-# --- Server setup ---
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -1426,16 +1461,39 @@ def _run_server(args: argparse.Namespace) -> None:
     logger.info("Starting Scout MCP server (transport=%s)", args.transport)
 
     if args.transport == "streamable-http":
-        mcp.settings.host = args.host
-        mcp.settings.port = args.port
-        # Allow internal Docker network hostname in addition to loopback defaults.
-        # The MCP server is internal-only; DNS rebinding protection is still on.
-        mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
-        )
+        _run_streamable_http(args)
+        return
 
     mcp.run(transport=args.transport)
+
+
+def _run_streamable_http(args: argparse.Namespace) -> None:
+    """Serve the streamable-HTTP transport with shared-secret caller auth.
+
+    We build the Starlette app ourselves (rather than calling ``mcp.run``) so we
+    can wrap it in ``SharedSecretMiddleware`` (arch #253, 01#6) — the secret
+    check then fires ahead of any MCP session/tool dispatch. DNS-rebinding Host
+    protection stays on as a second layer.
+    """
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+    # Allow internal Docker network hostname in addition to loopback defaults.
+    # The MCP server is internal-only; DNS rebinding protection is still on.
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
+    )
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(SharedSecretMiddleware, secret=settings.MCP_SHARED_SECRET)
+
+    config = uvicorn.Config(
+        app,
+        host=args.host,
+        port=args.port,
+        log_level=("debug" if args.verbose else "info"),
+    )
+    uvicorn.Server(config).run()
 
 
 def _run_with_reload(args: argparse.Namespace) -> None:

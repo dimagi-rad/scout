@@ -17,7 +17,6 @@ export function DataDictionaryPage() {
   const { status: networkStatus } = useNetworkStatus()
   const [isRefreshing, setIsRefreshing] = useState(false)
 
-  // Fetch dictionary when domain is available
   useEffect(() => {
     if (!activeDomainId) return
     fetchDictionary()
@@ -39,7 +38,6 @@ export function DataDictionaryPage() {
     }
   }
 
-  // Loading state
   if (dictionaryStatus === "loading" && !dataDictionary) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -53,7 +51,6 @@ export function DataDictionaryPage() {
     )
   }
 
-  // No data materialized yet
   if (dictionaryStatus === "not_materialized") {
     return (
       <div className="flex h-full items-center justify-center" data-testid="dictionary-empty-state">
@@ -68,7 +65,6 @@ export function DataDictionaryPage() {
     )
   }
 
-  // Error state
   if (dictionaryStatus === "error" && networkStatus === "online") {
     return (
       <div className="flex h-full items-center justify-center">
@@ -88,7 +84,6 @@ export function DataDictionaryPage() {
 
   return (
     <div className="flex h-full">
-      {/* Left Panel - Schema Tree */}
       <div className="w-64 flex-shrink-0 border-r bg-muted/30" data-testid="schema-panel">
         <div className="flex items-center justify-between border-b p-3">
           <h2 className="text-sm font-medium">Tables</h2>
@@ -118,7 +113,6 @@ export function DataDictionaryPage() {
         )}
       </div>
 
-      {/* Right Panel - Table Detail */}
       <div className="flex-1 overflow-hidden" data-testid="table-detail-panel">
         {selectedTable ? (
           <TableDetail

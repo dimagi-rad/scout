@@ -79,7 +79,6 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
           aria-hidden="true"
         />
 
-        {/* Progress text block */}
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2 flex-wrap">
             <span
@@ -128,7 +127,6 @@ export function MaterializationProgressBanner({ job, workspaceId }: Props) {
           </div>
         </div>
 
-        {/* Stop button — restrained by default, reveals a red destructive tone on hover */}
         <button
           type="button"
           onClick={handleCancel}

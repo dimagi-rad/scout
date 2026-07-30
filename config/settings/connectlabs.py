@@ -19,9 +19,8 @@ SECURE_SSL_REDIRECT = False
 # Scout is served under /scout/ path prefix on the ALB
 FORCE_SCRIPT_NAME = env("FORCE_SCRIPT_NAME", default="/scout")
 
-# After OAuth login, return to the connect-labs embed page (not the Scout
-# standalone app). The embed iframe detects the session cookie automatically
-# since everything is same-origin.
+# After OAuth, return to the connect-labs embed page (not the standalone app);
+# the iframe picks up the session cookie since everything is same-origin.
 LOGIN_REDIRECT_URL = "/labs/scout/"
 LOGOUT_REDIRECT_URL = "/labs/scout/"
 

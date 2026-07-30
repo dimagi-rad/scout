@@ -4,12 +4,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
+from procrastinate.contrib.django.procrastinate_app import FutureApp
 from procrastinate.manager import JobManager
 
 from apps.chat.models import Thread, ThreadJob
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.api import jobs_cancel
 from apps.workspaces.api.jobs_cancel import cancel_thread_job
 from apps.workspaces.models import (
@@ -41,6 +43,7 @@ async def test_active_jobs_returns_pending_job_with_progress():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="s_t1",
@@ -375,6 +378,7 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
         canonical_name="Test Tenant",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_t1")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     tj = await ThreadJob.objects.acreate(
@@ -393,7 +397,7 @@ async def test_cancel_job_flips_state_and_aborts_procrastinate():
     client = AsyncClient()
     await client.alogin(email="a@b.c", password="x")
 
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         resp = await client.post(f"/api/workspaces/{ws.id}/jobs/{tj.id}/cancel/")
     assert resp.status_code == 200
@@ -484,7 +488,7 @@ async def test_cancel_does_not_overwrite_terminal_threadjob():
         state=ThreadJob.State.COMPLETED,  # Already terminal — resume just finished
     )
     # Call cancel_thread_job directly to exercise the race window
-    with patch("apps.workspaces.api.jobs_cancel.current_app") as mock_app:
+    with patch("apps.workspaces.api.jobs_cancel.app") as mock_app:
         mock_app.job_manager.cancel_job_by_id_async = AsyncMock(return_value=None)
         await cancel_thread_job(tj)
 
@@ -514,6 +518,7 @@ async def test_active_jobs_exposes_rows_total_for_percentage():
         canonical_name="Connect Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ccc_999")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -572,6 +577,7 @@ async def test_active_jobs_passes_through_progress_unit():
         canonical_name="OCS Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_ocs_unit")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -624,6 +630,7 @@ async def test_active_jobs_percent_null_when_rows_total_missing():
         canonical_name="CommCare Test",
     )
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)  # live-tenant access gate
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_cc_x")
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     await ThreadJob.objects.acreate(
@@ -791,6 +798,31 @@ async def test_active_jobs_does_not_reconcile_fresh_jobs():
     assert body["jobs"][0]["state"] == "pending"
 
 
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_active_jobs_throttles_reconcile_across_rapid_polls():
+    """The stale-job reconcile sweep is throttled per-workspace so a 3s poll
+    loop doesn't run ~5 reconcile DB queries on every tick (arch #254, 05#6).
+    The first poll reconciles; a rapid second poll skips the sweep.
+    """
+    cache.clear()
+    _user, ws, _tj = await _make_stale_pending_job("throttle@b.c", 50009)
+
+    with patch(
+        "apps.workspaces.api.jobs_views.workspace_tasks.reconcile_stale_thread_job",
+        new=AsyncMock(return_value=None),
+    ) as reconcile_mock:
+        client = AsyncClient()
+        await client.alogin(email="throttle@b.c", password="x")
+        await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+        first_calls = reconcile_mock.await_count
+        await client.get(f"/api/workspaces/{ws.id}/jobs/active/")
+        second_calls = reconcile_mock.await_count
+
+    assert first_calls >= 1, "first poll should reconcile the stale job"
+    assert second_calls == first_calls, "rapid second poll must skip the reconcile sweep"
+
+
 # ---------------------------------------------------------------------------
 # 12#0 item 1: the RUNNING false-failure reconcile branch
 #
@@ -894,25 +926,21 @@ async def test_reconcile_leaves_fresh_running_resume_alone_even_when_job_termina
 
 
 # ---------------------------------------------------------------------------
-# 12#0 item 2: exercise the REAL current_app binding in cancel_thread_job
+# 12#0 item 2 / arch #255 02#5: exercise the REAL app binding in cancel_thread_job
 #
-# The other cancel tests patch apps.workspaces.api.jobs_cancel.current_app,
-# replacing the module-level import-time binding. That masks the risk the
-# finding names: jobs_cancel does `from ...procrastinate_app import current_app`
-# (a surviving sibling of the binding that broke the worker-side janitor before
-# it moved to the ORM). If that binding ever resolved to procrastinate's
-# FutureApp blueprint, `current_app.job_manager` would raise AttributeError and
-# the abort would be silently swallowed by cancel_thread_job's try/except.
+# jobs_cancel now imports the lazy ProxyApp (not an import-time FutureApp binding),
+# so an import-order regression can't silently disable the abort (arch #255 02#5).
 #
 # These tests leave the binding intact and patch the abort at the JobManager
 # CLASS level, so the real binding must resolve for the abort to fire.
 # ---------------------------------------------------------------------------
 
 
-def test_jobs_cancel_current_app_binding_is_live_not_a_blueprint():
-    """The surviving-sibling binding must resolve to a real App exposing a
-    usable job_manager — not procrastinate's not-ready FutureApp blueprint."""
-    job_manager = jobs_cancel.current_app.job_manager
+def test_jobs_cancel_app_binding_is_live_not_a_blueprint():
+    """The abort binding must resolve to a real App exposing a usable
+    job_manager — not procrastinate's not-ready FutureApp blueprint."""
+    assert not isinstance(jobs_cancel.app, FutureApp)
+    job_manager = jobs_cancel.app.job_manager
     assert hasattr(job_manager, "cancel_job_by_id_async")
 
 

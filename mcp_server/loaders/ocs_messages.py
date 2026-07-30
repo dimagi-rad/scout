@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.ocs_base import OCSBaseLoader
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,10 @@ class OCSMessageLoader(OCSBaseLoader):
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         list_url = f"{self.base_url}/api/sessions/"
-        params = {"experiment": self.experiment_id}
+        # Max page size for the session-list walk to cut its request volume
+        # ~10-15x (arch #254, finding 13#1); the per-session detail fetches
+        # (the N+1) are unavoidable and dominate regardless.
+        params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         session_ids: list[str] = []
         for session_page, _session_total in self._paginate(list_url, params=params):
             for session in session_page:
@@ -45,8 +48,10 @@ class OCSMessageLoader(OCSBaseLoader):
         total_messages = 0
         for session_id in session_ids:
             detail_url = f"{self.base_url}/api/sessions/{session_id}/"
-            detail_resp = self._get(detail_url)
-            messages = detail_resp.json().get("messages") or []
+            # A session with no messages legitimately omits/empties the key, so
+            # a missing ``messages`` is treated as empty (not an error) — but the
+            # JSON parse itself is validated via _get_json (finding 03#6).
+            messages = self._get_json(detail_url).get("messages") or []
             rows = [_map_message(session_id, idx, msg) for idx, msg in enumerate(messages)]
             total_messages += len(rows)
             yield rows, total_sessions

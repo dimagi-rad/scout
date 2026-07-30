@@ -64,9 +64,8 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
       if (justCompleted.length > 0) {
         setRecentlyCompletedThreadIds(justCompleted)
       } else {
-        // Functional updater so React skips the re-render when the value
-        // is already empty (every clean poll would otherwise churn the
-        // ChatPanel reload effect).
+        // Functional updater so React skips the re-render when already empty;
+        // otherwise every clean poll churns the ChatPanel reload effect.
         setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
       }
     } catch (e) {
@@ -76,21 +75,46 @@ export function useWorkspaceJobsImpl(workspaceId: string | null): UseWorkspaceJo
 
   useEffect(() => {
     if (!workspaceId) return
-    // Reset cross-workspace state: prevThreadIdsRef would otherwise carry
-    // thread ids from the previous workspace and the first poll in the new
-    // workspace would falsely report them as "just completed". Clear
-    // recentlyCompletedThreadIds for the same reason.
+    // Reset cross-workspace state, else the new workspace's first poll falsely
+    // reports the previous workspace's thread ids as "just completed".
     prevThreadIdsRef.current = new Set()
     setRecentlyCompletedThreadIds((prev) => (prev.length === 0 ? prev : []))
     let cancelled = false
-    const interval = setInterval(() => {
-      if (!cancelled) void fetchOnce()
-    }, POLL_INTERVAL_MS)
+    let interval: ReturnType<typeof setInterval> | null = null
+
+    // Gate polling on tab visibility (arch #254, 05#6): a hidden tab needs no
+    // live job status, and each poll triggers an API-side janitor reconciliation.
+    // Pausing while hidden removes that idle load; resume catches up immediately.
+    const startPolling = () => {
+      if (interval !== null) return
+      interval = setInterval(() => {
+        if (!cancelled) void fetchOnce()
+      }, POLL_INTERVAL_MS)
+    }
+    const stopPolling = () => {
+      if (interval !== null) {
+        clearInterval(interval)
+        interval = null
+      }
+    }
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        if (!cancelled) void fetchOnce()
+        startPolling()
+      } else {
+        stopPolling()
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibility)
     // Fire immediately on mount so the UI populates without waiting one tick.
     void fetchOnce()
+    if (document.visibilityState === "visible") startPolling()
+
     return () => {
       cancelled = true
-      clearInterval(interval)
+      stopPolling()
+      document.removeEventListener("visibilitychange", handleVisibility)
     }
   }, [workspaceId, fetchOnce])
 

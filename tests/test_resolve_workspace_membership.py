@@ -32,7 +32,7 @@ async def test_single_tenant_workspace_with_membership_is_accessible():
 @pytest.mark.asyncio
 @pytest.mark.django_db
 async def test_single_tenant_workspace_without_membership_is_inaccessible():
-    """Single-tenant workspace returns None tm when user lacks TenantMembership."""
+    """No live TenantMembership ⇒ no access at all (authorizer denies the workspace)."""
     from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await User.objects.acreate_user(email="resolve-nomem@example.com", password="pass")
@@ -45,14 +45,15 @@ async def test_single_tenant_workspace_without_membership_is_inaccessible():
     # no TenantMembership created
 
     workspace, tm, _is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
-    assert workspace is not None
+    assert workspace is None  # WorkspaceMembership alone no longer grants access
     assert tm is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db
-async def test_multi_tenant_workspace_is_accessible():
-    """Multi-tenant workspaces return None tm (caller re-checks count for access)."""
+async def test_multi_tenant_workspace_without_live_tenant_is_inaccessible():
+    """Closes the old hole: a multi-tenant workspace no longer grants access on
+    WorkspaceMembership alone — the user must share at least one live tenant."""
     from apps.chat.helpers import _resolve_workspace_and_membership
 
     user = await User.objects.acreate_user(email="resolve-multi@example.com", password="pass")
@@ -66,11 +67,11 @@ async def test_multi_tenant_workspace_is_accessible():
     await WorkspaceMembership.objects.acreate(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t1)
     await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t2)
+    # no TenantMembership for either tenant
 
-    workspace, tm, is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
-    assert workspace is not None
+    workspace, tm, _is_multi_tenant = await _resolve_workspace_and_membership(user, ws.id)
+    assert workspace is None  # multi-tenant hole closed
     assert tm is None
-    assert is_multi_tenant is True
 
 
 @pytest.mark.asyncio

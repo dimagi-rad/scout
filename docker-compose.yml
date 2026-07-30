@@ -31,6 +31,9 @@ services:
       - CUBE_API_URL=http://cube:4000
       - CUBE_VALIDATOR_URL=http://cube:4010
       - CUBEJS_API_SECRET=${CUBEJS_API_SECRET:-dev-cube-secret-change-me}
+      # Shared-secret caller auth (must match the API's value below). Unset =
+      # check disabled (dev default).
+      - MCP_SHARED_SECRET=${MCP_SHARED_SECRET:-}
     expose:
       - "8100"
     depends_on:
@@ -88,6 +91,8 @@ services:
       - DEFAULT_LLM_MODEL=${DEFAULT_LLM_MODEL:-claude-opus-4-8}
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-dev-secret-key-change-in-production}
       - MCP_SERVER_URL=http://mcp-server:8100/mcp
+      # Must match the mcp-server's value above so the API can authenticate.
+      - MCP_SHARED_SECRET=${MCP_SHARED_SECRET:-}
       - MAX_CONNECTIONS_PER_PROJECT=5
       - CUBE_API_URL=http://cube:4000
       - CUBE_VALIDATOR_URL=http://cube:4010

@@ -1,14 +1,8 @@
 """
-Agent state definition for Scout data agent platform.
+Agent state definition for the Scout data agent platform.
 
-This module defines the AgentState TypedDict that flows through the LangGraph
-conversation graph. The state maintains conversation history, user context,
-and error correction metadata needed for the agent's self-healing capabilities.
-
-The state is designed to be:
-- Serializable: All fields can be persisted to Postgres checkpoints
-- Immutable: LangGraph manages state updates through reducers
-- Type-safe: Full type hints for IDE support and runtime validation
+Defines the AgentState TypedDict that flows through the LangGraph conversation
+graph. All fields are JSON-serializable for Postgres checkpoint persistence.
 """
 
 from typing import Annotated
@@ -17,7 +11,6 @@ from langchain_core.messages import BaseMessage, SystemMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-# Default maximum number of messages to keep in conversation history
 DEFAULT_MAX_MESSAGES = 20
 
 
@@ -25,33 +18,12 @@ def prune_messages(
     messages: list[BaseMessage],
     max_messages: int = DEFAULT_MAX_MESSAGES,
 ) -> list[BaseMessage]:
-    """
-    Prune old messages when the conversation gets too long.
-
-    This function implements a message pruning strategy that:
-    1. Always preserves system messages at the start
-    2. Keeps the most recent N messages (default 20)
-    3. Ensures we don't break tool call/response pairs
-
-    Args:
-        messages: The full list of conversation messages.
-        max_messages: Maximum number of messages to keep (excluding system messages).
-            Default is 20 messages.
-
-    Returns:
-        A pruned list of messages that fits within the limit while
-        preserving conversation coherence.
-
-    Example:
-        >>> messages = [SystemMessage(...), HumanMessage(...), AIMessage(...), ...]
-        >>> pruned = prune_messages(messages, max_messages=10)
-        >>> len(pruned) <= 11  # 1 system + 10 messages max
-        True
+    """Keep system messages plus the most recent ``max_messages`` conversation
+    messages, without breaking tool call/response pairs.
     """
     if len(messages) <= max_messages:
         return messages
 
-    # Separate system messages from conversation messages
     system_messages: list[BaseMessage] = []
     conversation_messages: list[BaseMessage] = []
 
@@ -61,88 +33,33 @@ def prune_messages(
         else:
             conversation_messages.append(msg)
 
-    # If conversation is within limits, return as-is
     if len(conversation_messages) <= max_messages:
         return system_messages + conversation_messages
 
-    # Keep only the most recent messages
     pruned_conversation = conversation_messages[-max_messages:]
 
-    # Ensure we don't start with a ToolMessage (orphaned from its AIMessage)
-    # ToolMessages should always follow an AIMessage with tool_calls
+    # Drop leading ToolMessages orphaned from their (now-pruned) parent AIMessage.
     while pruned_conversation and hasattr(pruned_conversation[0], "tool_call_id"):
-        # This is a ToolMessage - remove it as its parent AIMessage was pruned
         pruned_conversation = pruned_conversation[1:]
 
     return system_messages + pruned_conversation
 
 
 class AgentState(TypedDict):
-    """
-    State object that flows through the Scout agent graph.
+    """State that flows through the Scout agent graph and is checkpointed to the DB.
 
-    This TypedDict defines all the data that persists across conversation turns
-    and gets checkpointed to the database. LangGraph uses this state to:
-    - Track conversation history with automatic message deduplication
-    - Maintain user and tenant context for permission scoping
-
-    Attributes
-    ----------
-    messages : Annotated[list[BaseMessage], add_messages]
-        The conversation history. Uses LangGraph's add_messages reducer
-        which handles message deduplication by ID. Includes:
-        - HumanMessage: User questions
-        - AIMessage: Agent responses (may include tool calls)
-        - ToolMessage: Results from tool execution (SQL results, errors)
-        - SystemMessage: Dynamic context injection
-
-    workspace_id : str
-        UUID of the current workspace. Injected into every MCP tool call so tools
-        can route to the correct schema (single-tenant or view schema for multi-tenant).
-
-    user_id : str
-        UUID of the current user (as string for serialization).
-        Used for audit logging and permission checks.
-
-    user_role : str
-        The user's role within this project. Controls:
-        - 'viewer': Read-only access, no data modifications
-        - 'analyst': Can run queries and create artifacts
-        - 'admin': Full access including knowledge management
-
-    thread_id : str
-        UUID of the active chat thread (as string). Injected into MCP tool calls
-        that need to associate background jobs (ThreadJob) with the conversation.
-
-    Example
-    -------
-    Initial state for a new conversation::
-
-        state = AgentState(
-            messages=[],
-            workspace_id="ws-uuid-123",
-            user_id="user-123",
-            user_role="analyst",
-            thread_id="thread-uuid-456",
-        )
-
-    Notes
-    -----
-    - The add_messages annotation is critical: it enables LangGraph's
-      automatic message list management with deduplication by message ID.
-    - All UUID fields are stored as strings because TypedDict values
-      must be JSON-serializable for checkpoint persistence.
+    All UUID fields are strings because TypedDict values must be JSON-serializable
+    for checkpoint persistence.
     """
 
-    # Conversation history with automatic deduplication
+    # add_messages reducer deduplicates by message ID
     messages: Annotated[list[BaseMessage], add_messages]
 
-    # Workspace context - primary routing key for all MCP tool calls
+    # Injected into every MCP tool call to route to the correct schema
     workspace_id: str
 
-    # User context - for permissions and audit
     user_id: str
-    user_role: str
+    user_role: str  # viewer | analyst | admin
 
-    # Thread context - for associating background jobs with the conversation
+    # Injected into MCP tool calls that associate background jobs (ThreadJob)
     thread_id: str

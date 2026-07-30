@@ -11,7 +11,9 @@ from apps.chat.urls import workspace_thread_urlpatterns
 from apps.chat.views import chat_view
 from apps.recipes.api.views import PublicRecipeRunView
 from apps.workspaces.api.workspace_views import (
+    MyInvitesView,
     WorkspaceDetailView,
+    WorkspaceInviteDetailView,
     WorkspaceListView,
     WorkspaceMemberDetailView,
     WorkspaceMemberListView,
@@ -65,12 +67,16 @@ workspace_urlpatterns = [
     path("", include("apps.semantic.urls")),
     path("threads/", include((workspace_thread_urlpatterns, "chat_threads"))),
     path("", include("apps.workspaces.api.urls")),
-    # Workspace management
     path("members/", WorkspaceMemberListView.as_view(), name="workspace_members"),
     path(
         "members/<int:membership_id>/",
         WorkspaceMemberDetailView.as_view(),
         name="workspace_member_detail",
+    ),
+    path(
+        "invites/<uuid:invite_id>/",
+        WorkspaceInviteDetailView.as_view(),
+        name="workspace_invite_detail",
     ),
     path("tenants/", WorkspaceTenantView.as_view(), name="workspace_tenants"),
     path("tenants/<uuid:wt_id>/", WorkspaceTenantView.as_view(), name="workspace_tenant_detail"),
@@ -86,7 +92,7 @@ urlpatterns = [
     # password reset, email management) is deliberately NOT mounted — see
     # apps/users/allauth_urls.py (arch #258, finding 13#9).
     path("accounts/", include("apps.users.allauth_urls")),
-    # Workspace-scoped content APIs
+    path("api/invites/", MyInvitesView.as_view(), name="my_invites"),
     path("api/workspaces/", WorkspaceListView.as_view(), name="workspace_list"),
     path(
         "api/workspaces/<uuid:workspace_id>/",
@@ -97,12 +103,11 @@ urlpatterns = [
         "api/workspaces/<uuid:workspace_id>/",
         include(workspace_urlpatterns),
     ),
-    # Transformation assets and runs
     path("api/transformations/", include("apps.transformations.urls")),
-    # Chat streaming (workspace_id in body)
+    # workspace_id comes from the request body, not the URL
     path("api/chat/", chat_view, name="chat"),
     path("api/auth/", include("apps.users.auth_urls")),
-    # Public share links (no auth required)
+    # Public share links, no auth required
     path(
         "api/recipes/runs/shared/<str:share_token>/",
         PublicRecipeRunView.as_view(),

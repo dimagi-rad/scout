@@ -28,6 +28,10 @@ export function KnowledgePage() {
   const knowledgeStatus = useAppStore((s) => s.knowledgeStatus)
   const knowledgeFilter = useAppStore((s) => s.knowledgeFilter)
   const knowledgeSearch = useAppStore((s) => s.knowledgeSearch)
+  const knowledgePagination = useAppStore((s) => s.knowledgePagination)
+  // Surface server-side pagination so items beyond page 1 are reachable
+  // (arch #254, 05#7 — the backend now paginates in the DB query).
+  const [page, setPage] = useState(1)
   const {
     fetchKnowledge,
     createKnowledge,
@@ -48,12 +52,17 @@ export function KnowledgePage() {
   const isNew = location.pathname.endsWith("/new")
 
   useEffect(() => {
+    setPage(1)
+  }, [knowledgeFilter, knowledgeSearch, activeDomainId])
+
+  useEffect(() => {
     if (!activeDomainId) return
     fetchKnowledge({
       type: knowledgeFilter ?? undefined,
       search: knowledgeSearch || undefined,
+      page,
     })
-  }, [activeDomainId, knowledgeFilter, knowledgeSearch, fetchKnowledge])
+  }, [activeDomainId, knowledgeFilter, knowledgeSearch, page, fetchKnowledge])
 
   useEffect(() => {
     if (isNew) {
@@ -137,7 +146,6 @@ export function KnowledgePage() {
 
   return (
     <div className="container mx-auto px-8 py-8">
-      {/* Header */}
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Knowledge Base</h1>
@@ -173,19 +181,16 @@ export function KnowledgePage() {
         </div>
       </div>
 
-      {/* Loading state */}
       {knowledgeStatus === "loading" && (
         <div className="text-muted-foreground">Loading knowledge items...</div>
       )}
 
-      {/* Error state */}
       {knowledgeStatus === "error" && networkStatus === "online" && (
         <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-destructive">
           Failed to load knowledge items. Please try again.
         </div>
       )}
 
-      {/* List */}
       {knowledgeStatus === "loaded" && (
         <KnowledgeList
           items={filteredItems}
@@ -198,7 +203,43 @@ export function KnowledgePage() {
         />
       )}
 
-      {/* Create/Edit Form Dialog */}
+      {/* Pagination controls (arch #254, 05#7): without these, items beyond the
+          first page were unreachable. */}
+      {knowledgeStatus === "loaded" &&
+        knowledgePagination &&
+        knowledgePagination.total_pages > 1 && (
+          <div
+            className="mt-4 flex items-center justify-between text-sm text-muted-foreground"
+            data-testid="knowledge-pagination"
+          >
+            <span data-testid="knowledge-pagination-status">
+              Page {knowledgePagination.page} of {knowledgePagination.total_pages}
+              {" · "}
+              {knowledgePagination.total_count} items
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="knowledge-page-prev"
+                disabled={!knowledgePagination.has_previous}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                data-testid="knowledge-page-next"
+                disabled={!knowledgePagination.has_next}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+
       <KnowledgeForm
         open={formOpen}
         onOpenChange={handleFormClose}
@@ -206,7 +247,6 @@ export function KnowledgePage() {
         onSave={handleSave}
       />
 
-      {/* Delete Confirmation Dialog */}
       <AlertDialog open={!!deleteItem} onOpenChange={(open) => !isDeleting && !open && setDeleteItem(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>

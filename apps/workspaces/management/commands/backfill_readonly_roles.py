@@ -42,12 +42,11 @@ class Command(BaseCommand):
         ok = 0
         failed = 0
         try:
-            # Backfill tenant schemas. MATERIALIZING is a dead state (the live
-            # pipeline never persists it), so only ACTIVE rows are selected.
+            # MATERIALIZING is a dead state (never persisted), so only ACTIVE rows.
             tenant_schemas = TenantSchema.objects.filter(state=SchemaState.ACTIVE)
             for ts in tenant_schemas:
-                # Per-schema isolation: drift (physical schema missing) on one row
-                # must not strand every later schema's _ro role (fail-closed outage).
+                # Per-schema isolation: drift on one row must not strand every
+                # later schema's _ro role.
                 try:
                     if not dry_run:
                         self._backfill_schema(cursor, mgr, ts.schema_name)
@@ -63,7 +62,6 @@ class Command(BaseCommand):
                         self.style.ERROR(f"  SKIP (error) tenant schema: {ts.schema_name}")
                     )
 
-            # Backfill view schemas
             view_schemas = WorkspaceViewSchema.objects.filter(
                 state=SchemaState.ACTIVE,
             ).select_related("workspace")
@@ -94,7 +92,7 @@ class Command(BaseCommand):
     def _backfill_schema(self, cursor, mgr, schema_name: str) -> None:
         """Create role and grants for a single schema."""
         mgr._create_readonly_role(cursor, schema_name)
-        # Also grant on existing tables (ALTER DEFAULT PRIVILEGES only covers future tables)
+        # ALTER DEFAULT PRIVILEGES only covers future tables — grant on existing ones too.
         role = readonly_role_name(schema_name)
         cursor.execute(
             psycopg.sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA {} TO {}").format(

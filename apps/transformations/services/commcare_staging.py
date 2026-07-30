@@ -15,7 +15,6 @@ from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
 
-# ── Type-casting map ────────────────────────────────────────────────────────
 # CommCare question type → PostgreSQL cast suffix (None means TEXT / no cast).
 _TYPE_CAST: dict[str, str | None] = {
     "Text": None,
@@ -41,9 +40,6 @@ _CASE_CORE_COLUMNS = [
     ("last_modified::timestamp", "last_modified"),
     ("closed", None),
 ]
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def slugify_model_name(name: str) -> str:
@@ -95,9 +91,6 @@ def _typed_expression(expr: str, question_type: str | None) -> str:
     return f"NULLIF({expr}, ''){cast}"
 
 
-# ── Case-type asset ────────────────────────────────────────────────────────
-
-
 def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
     """Walk app_definitions to collect all properties for a case type."""
     props: set[str] = set()
@@ -147,9 +140,6 @@ def _generate_case_type_asset(
     )
 
 
-# ── Form asset ──────────────────────────────────────────────────────────────
-
-
 def _generate_form_asset(
     tenant, form_xmlns: str, form_def: dict, model_name_slug: str
 ) -> TransformationAsset:
@@ -174,7 +164,7 @@ def _generate_form_asset(
     }
 
     for q in questions:
-        # Skip questions inside repeat groups — handled separately
+        # Questions inside repeat groups are staged separately.
         if q.get("repeat"):
             continue
         value_path = q.get("value", "")
@@ -199,9 +189,6 @@ def _generate_form_asset(
         sql_content="\n".join(lines),
         created_by=None,
     )
-
-
-# ── Repeat-group asset ─────────────────────────────────────────────────────
 
 
 def _generate_repeat_group_asset(
@@ -250,9 +237,6 @@ def _generate_repeat_group_asset(
     )
 
 
-# ── Public API ──────────────────────────────────────────────────────────────
-
-
 def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     """Generate unsaved TransformationAsset instances for all system staging models.
 
@@ -265,7 +249,6 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     """
     assets: list[TransformationAsset] = []
 
-    # ── Case types ──────────────────────────────────────────────────────────
     for ct in metadata.get("case_types", []):
         name = ct.get("name", "")
         if not name:
@@ -273,7 +256,6 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
         props = _collect_case_properties(name, metadata)
         assets.append(_generate_case_type_asset(tenant, name, props, metadata))
 
-    # ── Forms + repeat groups ───────────────────────────────────────────────
     seen_form_slugs: dict[str, int] = {}  # slug → count for disambiguation
     form_definitions = metadata.get("form_definitions", {})
 
@@ -287,8 +269,8 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
         app_name = form_def.get("app_name", "")
         base_slug = slugify_model_name(form_name)
 
-        # Disambiguate duplicate form names across apps.
-        # Always incorporate the counter so 3+ collisions stay unique.
+        # Disambiguate duplicate form names across apps; always incorporate the
+        # counter so 3+ collisions stay unique.
         if base_slug in seen_form_slugs:
             count = seen_form_slugs[base_slug]
             app_suffix = f"_{slugify_model_name(app_name)}" if app_name else ""
@@ -299,7 +281,6 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
 
         assets.append(_generate_form_asset(tenant, xmlns, form_def, slug))
 
-        # Collect repeat groups
         repeat_groups: dict[str, list[dict]] = {}
         for q in form_def.get("questions", []):
             repeat_path = q.get("repeat")

@@ -18,13 +18,12 @@ def parse_frontmatter(text: str) -> tuple[str, list[str], str]:
     """
     text = text.strip()
     if not text.startswith("---"):
-        # No frontmatter - use first line as title
+        # No frontmatter: fall back to first line as title.
         lines = text.split("\n", 1)
         title = lines[0].lstrip("# ").strip()
         body = lines[1].strip() if len(lines) > 1 else ""
         return title, [], body
 
-    # Find closing ---
     end_idx = text.find("---", 3)
     if end_idx == -1:
         raise ValueError("Frontmatter is missing a closing '---' fence.")

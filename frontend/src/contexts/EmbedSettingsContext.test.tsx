@@ -6,10 +6,9 @@ import {
   useEmbedSettings,
 } from "@/contexts/EmbedSettingsContext"
 
-// Issue #248, finding 06#6: the embed widget's setMode()/theme were no-ops —
-// mode was read once from a memoized hook and the set-mode handler only
-// console.logged; theme was parsed but never applied. These tests pin live,
-// settable mode + applied theme.
+// Issue #248, 06#6: the embed widget's setMode()/theme were no-ops (mode read
+// once from a memoized hook, theme parsed but never applied). Pin live, settable
+// mode + applied theme.
 
 describe("applyTheme", () => {
   beforeEach(() => {

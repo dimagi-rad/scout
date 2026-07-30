@@ -33,6 +33,10 @@ env:
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
     # Langfuse host for resume-task agent traces (keys come via secrets below).
     LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+    # Base URL for the invite sign-in links built in the send_email task.
+    SCOUT_BASE_URL: "https://scout.dimagi.com"
+    # From-address for the send_email task; matches the verified SES domain.
+    DEFAULT_FROM_EMAIL: "Scout <noreply@dimagi.com>"
   secret:
     - DATABASE_URL
     - MANAGED_DATABASE_URL
@@ -48,6 +52,15 @@ env:
     # Worker executes tasks and updates their Task Badger status; it also chains
     # the resume task, so it defers (creates) Task Badger records too.
     - TASKBADGER_API_KEY
+    # The resume task's get_mcp_tools call authenticates to the MCP server with
+    # this shared secret (arch #253, 01#6). MUST match deploy-mcp.yml.
+    - MCP_SHARED_SECRET
+    # Dedicated send-only SES keys (IAM user scout-ses-worker). The worker sends
+    # invite email but its scout_shared bridge container can't reach the instance
+    # role under IMDS hop limit 1 (arch #329), so it authenticates to SES with
+    # these instead. Only the worker gets them — see production.py ANYMAIL.
+    - AWS_SES_ACCESS_KEY_ID
+    - AWS_SES_SECRET_ACCESS_KEY
 
 ssh:
   user: scout

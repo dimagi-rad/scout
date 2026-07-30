@@ -5,6 +5,8 @@ Provides views for rendering artifacts in a sandboxed iframe,
 fetching artifact data via API, and executing live queries.
 """
 
+import asyncio
+import hashlib
 import json
 import logging
 import secrets
@@ -14,6 +16,7 @@ from typing import Any
 from uuid import UUID
 
 from asgiref.sync import sync_to_async
+from django.core.cache import cache
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -33,17 +36,31 @@ from .services.graph_manifest import (
 
 logger = logging.getLogger(__name__)
 
+# Short TTL for live-artifact query results (arch #254, finding 09#9). Live
+# artifacts re-executed ALL their source queries serially on every open with no
+# caching, so each viewer opening a 5-query dashboard cost 5 sequential
+# connect+validate+execute cycles. A brief shared cache collapses repeat opens
+# (the common case: a dashboard reloaded / shared with several viewers) onto one
+# execution. The key includes the artifact version + a hash of the source
+# queries, so an update invalidates it immediately.
+ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
+
+
+def _artifact_query_cache_key(artifact: Artifact) -> str:
+    payload = json.dumps(
+        {
+            "semantic_queries": artifact.semantic_queries,
+            "source_queries": artifact.source_queries,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    digest = hashlib.md5(payload.encode(), usedforsecurity=False).hexdigest()[:12]
+    return f"artifact_qdata:{artifact.id}:{artifact.version}:{digest}"
+
 
 def generate_csp_with_nonce(nonce: str) -> str:
-    """
-    Generate Content Security Policy with nonce for inline scripts.
-
-    Args:
-        nonce: A cryptographically secure random nonce.
-
-    Returns:
-        CSP header string with nonce for script-src.
-    """
+    """Build the sandbox CSP header allowing only nonce'd inline scripts."""
     return (
         "default-src 'none'; "
         f"script-src 'nonce-{nonce}' 'unsafe-eval' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com; "
@@ -802,12 +819,10 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
             return HttpResponse("Access denied", status=403)
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
-        # Generate CSP nonce for inline scripts
         csp_nonce = secrets.token_urlsafe(16)
 
         has_live_queries = bool(artifact.semantic_queries)
 
-        # Serialize artifact data for embedding in the template
         artifact_json = json.dumps(
             {
                 "id": str(artifact.id),
@@ -828,7 +843,6 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
         # the in-iframe fetch builds "<prefix>/api/..." without a double slash.
         api_base = request.META.get("SCRIPT_NAME", "").rstrip("/")
 
-        # Inject the nonce, base prefix, and artifact data into the template.
         html_content = SANDBOX_HTML_TEMPLATE.replace("{{CSP_NONCE}}", csp_nonce)
         html_content = html_content.replace("{{API_BASE}}", api_base)
         html_content = html_content.replace("{{ARTIFACT_DATA}}", artifact_json)
@@ -849,7 +863,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
     """
 
     def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
-        """Fetch artifact data for rendering."""
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
@@ -857,7 +870,6 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:
-        """Serialize artifact for JSON response."""
         return {
             "id": str(artifact.id),
             "title": artifact.title,
@@ -928,15 +940,37 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
-        results = []
-        for i, entry in enumerate(artifact.semantic_queries):
+        static_data = artifact.data or {}
+
+        # Serve repeat opens of the same artifact version from a short-lived
+        # cache so we don't re-run every source query on every open (09#9).
+        cache_key = _artifact_query_cache_key(artifact)
+        cached = await cache.aget(cache_key)
+        if cached is not None:
+            return JsonResponse(
+                {
+                    "queries": cached,
+                    "static_data": static_data,
+                    "semantic_query_manifest": artifact.semantic_query_manifest or {},
+                }
+            )
+
+        async def _run_one(i: int, entry: dict) -> dict:
             name = entry.get("name", f"semantic_query_{i}")
             query_spec = {k: v for k, v in entry.items() if k != "name"}
-            result = await run_semantic_query(
-                artifact.workspace,
-                query_spec,
-                user_id=str(user.id),
-            )
+            try:
+                result = await run_semantic_query(
+                    artifact.workspace,
+                    query_spec,
+                    user_id=str(user.id),
+                )
+            except Exception:
+                logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
+                return {
+                    "name": name,
+                    "semantic_query": query_spec,
+                    "error": "Semantic query failed",
+                }
 
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
@@ -945,18 +979,24 @@ class ArtifactQueryDataView(View):
                     if isinstance(error_info, dict)
                     else str(error_info)
                 )
-                results.append({"name": name, "semantic_query": query_spec, "error": msg})
-            else:
-                results.append(
-                    {
-                        "name": name,
-                        "semantic_query": result.get("semantic_query", query_spec),
-                        "columns": result.get("columns", []),
-                        "rows": result.get("rows", []),
-                        "row_count": result.get("row_count", 0),
-                        "truncated": result.get("truncated", False),
-                    }
+                return {"name": name, "semantic_query": query_spec, "error": msg}
+            return {
+                "name": name,
+                "semantic_query": result.get("semantic_query", query_spec),
+                "columns": result.get("columns", []),
+                "rows": result.get("rows", []),
+                "row_count": result.get("row_count", 0),
+                "truncated": result.get("truncated", False),
+            }
+
+        results = list(
+            await asyncio.gather(
+                *(
+                    _run_one(i, entry)
+                    for i, entry in enumerate(artifact.semantic_queries)
                 )
+            )
+        )
 
         for i, entry in enumerate(artifact.source_queries):
             name = entry.get("name", f"query_{i}")
@@ -970,10 +1010,13 @@ class ArtifactQueryDataView(View):
                 }
             )
 
+        if not any("error" in result for result in results):
+            await cache.aset(cache_key, results, ARTIFACT_QUERY_CACHE_TTL)
+
         return JsonResponse(
             {
                 "queries": results,
-                "static_data": artifact.data or {},
+                "static_data": static_data,
                 "semantic_query_manifest": artifact.semantic_query_manifest or {},
             }
         )
@@ -1134,24 +1177,12 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
     def get(
         self, request: HttpRequest, workspace_id, artifact_id: str, format: str
     ) -> HttpResponse:
-        """
-        Export artifact to the specified format.
-
-        Args:
-            request: HTTP request
-            workspace_id: UUID of the TenantMembership
-            artifact_id: UUID of the artifact
-            format: Export format (html, png, pdf)
-
-        Returns:
-            HttpResponse with the exported content
-        """
+        """Export artifact to the given format (html, png, pdf)."""
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
 
-        # Validate format
         if format not in ("html", "png", "pdf"):
             return JsonResponse(
                 {"error": f"Invalid format: {format}. Supported formats: html, png, pdf"},
@@ -1167,8 +1198,7 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response
 
-        # PNG and PDF require async - return error for now
-        # In production, this would use async views or background tasks
+        # PNG/PDF need an async endpoint or background task; not served here.
         if format in ("png", "pdf"):
             return JsonResponse(
                 {

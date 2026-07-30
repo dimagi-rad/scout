@@ -22,7 +22,6 @@ interface TableDetailProps {
   table: TableDetailType
 }
 
-// Debounce hook
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value)
 
@@ -124,18 +123,16 @@ function SourceMetadataPanel({ metadata }: { metadata: SourceMetadata }) {
 export function TableDetail({ table }: TableDetailProps) {
   const updateAnnotations = useAppStore((s) => s.dictionaryActions.updateAnnotations)
 
-  // Local state for form fields
   const [useCases, setUseCases] = useState("")
   const [dataQualityNotes, setDataQualityNotes] = useState("")
   const [refreshFrequency, setRefreshFrequency] = useState("")
   const [owner, setOwner] = useState("")
   const [columnNotes, setColumnNotes] = useState<Record<string, string>>({})
 
-  // Track which table we've initialized form state for
   const [initializedForTable, setInitializedForTable] = useState<string | null>(null)
   const tableKey = `${table.schema}.${table.table}`
 
-  // Render-time state adjustment when table changes (React recommended pattern)
+  // Render-time state adjustment when table changes (React recommended pattern).
   if (initializedForTable !== tableKey) {
     setInitializedForTable(tableKey)
     const annotations = table.annotations
@@ -146,14 +143,12 @@ export function TableDetail({ table }: TableDetailProps) {
     setColumnNotes(annotations?.column_notes ?? {})
   }
 
-  // Debounced values for auto-save
   const debouncedUseCases = useDebounce(useCases, 1000)
   const debouncedDataQualityNotes = useDebounce(dataQualityNotes, 1000)
   const debouncedRefreshFrequency = useDebounce(refreshFrequency, 1000)
   const debouncedOwner = useDebounce(owner, 1000)
   const debouncedColumnNotes = useDebounce(columnNotes, 1000)
 
-  // Auto-save when debounced values change
   const saveAnnotations = useCallback(async () => {
     if (initializedForTable !== tableKey) return
 
@@ -183,26 +178,23 @@ export function TableDetail({ table }: TableDetailProps) {
     updateAnnotations,
   ])
 
-  // Track if any debounced value has changed from the initial value
   const hasChangedRef = useRef(false)
-  // Track the table key when we first started editing to prevent cross-table saves
+  // Table key at edit start, to prevent cross-table saves.
   const savedForTableRef = useRef<string | null>(null)
 
   useEffect(() => {
-    // Reset change tracking when table changes
     if (savedForTableRef.current !== tableKey) {
       hasChangedRef.current = false
       savedForTableRef.current = tableKey
       return
     }
 
-    // Skip first render after initialization
+    // Skip the first render after initialization (no real edit yet).
     if (!hasChangedRef.current) {
       hasChangedRef.current = true
       return
     }
 
-    // Only save if we're still on the same table we started editing
     if (initializedForTable === tableKey) {
       saveAnnotations()
     }
@@ -217,7 +209,6 @@ export function TableDetail({ table }: TableDetailProps) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* Header */}
       <div className="border-b p-4">
         <div className="flex items-center gap-2">
           <Badge variant="outline">{table.schema}</Badge>
@@ -234,7 +225,6 @@ export function TableDetail({ table }: TableDetailProps) {
           <SourceMetadataPanel metadata={table.sourceMetadata} />
         )}
 
-        {/* Columns Table */}
         <div className="mb-6">
           <h3 className="mb-3 text-sm font-medium">Columns</h3>
           <div className="rounded-md border">
@@ -281,7 +271,6 @@ export function TableDetail({ table }: TableDetailProps) {
           </div>
         </div>
 
-        {/* Annotation Fields */}
         <div className="space-y-4">
           <h3 className="text-sm font-medium">Notes</h3>
 

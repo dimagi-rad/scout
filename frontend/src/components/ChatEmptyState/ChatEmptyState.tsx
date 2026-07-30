@@ -1,4 +1,3 @@
-// frontend/src/components/ChatEmptyState/ChatEmptyState.tsx
 import { useState } from "react"
 import { ArrowUp, ArrowRight } from "lucide-react"
 import { useAppStore } from "@/store/store"

@@ -8,7 +8,6 @@ import {
   PanelsTopLeft,
   RefreshCw,
   X,
-  type LucideIcon,
 } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -177,7 +176,7 @@ function ArtifactListItem({
   artifact: ThreadArtifactSummary
   onOpen: () => void
 }) {
-  const Icon = artifactIcon(artifact.artifact_type)
+  const icon = artifactIcon(artifact.artifact_type)
 
   return (
     <button
@@ -186,7 +185,7 @@ function ArtifactListItem({
       className="group flex w-full items-start gap-3 rounded-md px-2.5 py-2.5 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/35"
     >
       <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground transition-colors group-hover:border-primary/30 group-hover:text-primary">
-        <Icon className="h-4 w-4" />
+        {icon}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">
@@ -226,8 +225,10 @@ function PanelState({
   )
 }
 
-function artifactIcon(type: string): LucideIcon {
-  if (type === "story" || type === "plotly") return FileBarChart
-  if (type === "react" || type === "html" || type === "svg") return PanelsTopLeft
-  return FileText
+function artifactIcon(type: string): ReactNode {
+  if (type === "story" || type === "plotly") return <FileBarChart className="h-4 w-4" />
+  if (type === "react" || type === "html" || type === "svg") {
+    return <PanelsTopLeft className="h-4 w-4" />
+  }
+  return <FileText className="h-4 w-4" />
 }

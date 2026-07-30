@@ -61,7 +61,9 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
                 external_id=desc.external_id,
                 defaults={"canonical_name": desc.canonical_name},
             )
-            tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)
+            # all_objects: re-adding an API key after its memberships were archived
+            # must reuse the tombstone, not create a duplicate (unique(user,tenant)).
+            tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)
             tm.connection = conn
             tm.team_slug = team_slug
             tm.team_name = team_name
@@ -87,7 +89,6 @@ async def tenant_list_view(request):
     """
     user = request._authenticated_user
 
-    # Refresh domains from CommCare if the user has an OAuth token
     commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
     if not await cache.aget(commcare_cache_key):
         access_token = await _aget_token_value(user, "commcare")
@@ -98,7 +99,6 @@ async def tenant_list_view(request):
             except Exception:
                 logger.warning("Failed to refresh CommCare domains", exc_info=True)
 
-    # Refresh opportunities from Connect if the user has a Connect OAuth token
     connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
     if not await cache.aget(connect_cache_key):
         connect_token = await _aget_token_value(user, "commcare_connect")
@@ -109,7 +109,6 @@ async def tenant_list_view(request):
             except Exception:
                 logger.warning("Failed to refresh Connect opportunities", exc_info=True)
 
-    # Refresh chatbots from OCS if the user has an OCS OAuth token
     ocs_cache_key = f"tenant_refresh:{user.id}:ocs"
     if not await cache.aget(ocs_cache_key):
         ocs_token = await _aget_token_value(user, "ocs")
@@ -217,7 +216,6 @@ async def tenant_credential_list_view(request):
             )
         return JsonResponse(results, safe=False)
 
-    # POST — create an API-key connection via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -304,7 +302,6 @@ async def connection_detail_view(request, connection_id):
         await _archive_and_delete_connection(conn)
         return JsonResponse({"status": "removed"})
 
-    # PATCH — rotate API key via strategy registry
     try:
         body = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -373,7 +370,6 @@ async def tenant_ensure_view(request):
     if not provider or not tenant_id:
         return JsonResponse({"error": "provider and tenant_id are required"}, status=400)
 
-    # Try to find existing membership
     try:
         tm = await TenantMembership.objects.select_related("tenant").aget(
             user=user, tenant__provider=provider, tenant__external_id=tenant_id
@@ -402,7 +398,6 @@ async def tenant_ensure_view(request):
     tm.last_selected_at = timezone.now()
     await tm.asave(update_fields=["last_selected_at"])
 
-    # Find the auto-created workspace for this tenant
     workspace = await Workspace.objects.filter(
         workspace_tenants__tenant=tm.tenant,
         memberships__user=user,

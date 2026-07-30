@@ -5,8 +5,10 @@ dimagi/open-chat-studio#3334) to fetch rich participant records — including
 ``name`` and per-chatbot custom ``data`` — rather than deriving a minimal
 participant list from the session endpoint.
 
-The endpoint is cursor-paginated (``{"next": ..., "previous": ...,
-"results": [...]}``) and returns ``ParticipantDetail`` objects shaped as::
+The endpoint is cursor-paginated (``{"count": ..., "next": ..., "previous":
+..., "results": [...]}``) — the first page now carries a ``count`` total (arch
+#254, finding 13#1), so participant progress is determinate. It returns
+``ParticipantDetail`` objects shaped as::
 
     {
         "id": "<participant public uuid>",
@@ -37,7 +39,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.ocs_base import OCSBaseLoader
+from mcp_server.loaders.ocs_base import OCS_MAX_PAGE_SIZE, OCSBaseLoader
 
 logger = logging.getLogger(__name__)
 
@@ -47,19 +49,17 @@ class OCSParticipantLoader(OCSBaseLoader):
 
     def load_pages(self) -> Iterator[tuple[list[dict], int | None]]:
         url = f"{self.base_url}/api/participants"
-        # Scope to this tenant's chatbot so the participant list and each
-        # participant's per-chatbot ``data`` array are limited to it. The OCS
-        # ParticipantView filters on the ``experiment`` query param; ``chatbot``
-        # is silently ignored and leaks the whole team roster (arch #245).
-        params = {"experiment": self.experiment_id}
+        # Must scope by ``experiment`` (not ``chatbot``, silently ignored) or the
+        # whole team roster leaks (arch #245). Max page_size cuts request volume
+        # ~10-15x vs the OCS default of 100 (arch #254, finding 13#1).
+        params = {"experiment": self.experiment_id, "page_size": OCS_MAX_PAGE_SIZE}
         total = 0
-        # Cursor pagination — no ``count`` field, so totals are always None.
-        for raw_page, _page_total in self._paginate(url, params=params):
+        for raw_page, page_total in self._paginate(url, params=params):
             rows = [_map_participant(item) for item in raw_page]
             if not rows:
                 continue
             total += len(rows)
-            yield rows, None
+            yield rows, page_total
         logger.info(
             "Fetched %d participants for experiment %s",
             total,

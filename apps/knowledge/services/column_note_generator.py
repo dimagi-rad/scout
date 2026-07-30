@@ -34,10 +34,9 @@ async def sync_column_notes(workspace, table_name: str, form_definitions: dict) 
         label = question.get("label", col_name)
         qtype = question.get("type", "")
 
-        # Build note string: "label — type" (optionally "; values: a, b, c")
         note = f"{label} — {qtype}"
 
-        # Accept either "options" or "choices" key (tolerate missing / None)
+        # Forms use either "options" or "choices"; tolerate missing/None.
         raw_choices = question.get("options") or question.get("choices")
         if raw_choices:
             values_str = ", ".join(str(c) for c in raw_choices)

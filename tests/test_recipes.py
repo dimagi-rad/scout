@@ -617,9 +617,8 @@ class TestRecipeRunner:
     @pytest.mark.asyncio
     @patch("apps.recipes.services.runner.build_agent_graph", new_callable=AsyncMock)
     @patch("apps.recipes.services.runner.get_mcp_tools", new_callable=AsyncMock)
-    @patch("apps.recipes.services.runner.get_user_oauth_tokens", new_callable=AsyncMock)
     async def test_recipe_runner_builds_headless_graph(
-        self, mock_oauth, mock_mcp, mock_build, recipe, user, recipe_step_1
+        self, mock_mcp, mock_build, recipe, user, recipe_step_1
     ):
         """The runner must build the agent graph in HEADLESS mode (interactive=
         False), with no checkpointer, passing its job_id — so the agent gets the
@@ -627,7 +626,6 @@ class TestRecipeRunner:
         crash on the recipe's synthetic thread_id."""
         values = {"region": "North", "limit": 10, "start_date": "2024-01-01"}
         mock_mcp.return_value = []
-        mock_oauth.return_value = {}
         stub_graph = Mock()
         stub_graph.ainvoke = AsyncMock(return_value={"messages": []})
         mock_build.return_value = stub_graph

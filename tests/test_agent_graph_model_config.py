@@ -27,7 +27,8 @@ async def test_llm_model_comes_from_settings():
         patch("apps.agents.graph.base._build_tools", return_value=[]),
         patch(
             "apps.agents.graph.base._build_system_prompt",
-            new=AsyncMock(return_value="prompt"),
+            # Returns a (stable, volatile) split since arch #254 (02#3).
+            new=AsyncMock(return_value=("prompt", "")),
         ),
     ):
         await build_agent_graph(workspace, user)

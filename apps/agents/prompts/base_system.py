@@ -1,5 +1,4 @@
-"""
-Base system prompt for Scout data agent.
+"""Base system prompt for the Scout data agent.
 
 This module defines the foundational system prompt that establishes the agent's
 core behavior, response formatting, error handling, and security constraints.

@@ -1,6 +1,7 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { workspaceApi, type AwaitingInvite } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { CreateWorkspaceModal } from "@/components/CreateWorkspaceModal"
 import { RoleBadge } from "@/components/RoleBadge"
@@ -79,6 +80,40 @@ function WorkspaceRow({ workspace, onClick }: { workspace: TenantMembership; onC
   )
 }
 
+function AwaitingInvitesBanner() {
+  const [invites, setInvites] = useState<AwaitingInvite[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    // Best-effort: a failure here must not block the workspaces list.
+    workspaceApi
+      .getMyInvites()
+      .then((data) => {
+        if (!cancelled) setInvites(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  if (invites.length === 0) return null
+
+  return (
+    <div className="mb-6 space-y-2" data-testid="awaiting-invites-banner">
+      {invites.map((invite) => (
+        <div
+          key={invite.id}
+          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300"
+          data-testid={`awaiting-invite-${invite.id}`}
+        >
+          {invite.message}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function WorkspacesPage() {
   const navigate = useNavigate()
   const domains = useAppStore((s) => s.domains)
@@ -86,7 +121,6 @@ export function WorkspacesPage() {
   const fetchDomains = useAppStore((s) => s.domainActions.fetchDomains)
   const [showCreate, setShowCreate] = useState(false)
 
-  // Search and filter state
   const [search, setSearch] = useState("")
   const [activeFilters, setActiveFilters] = useState<Record<string, string | null>>({
     role: null,
@@ -95,11 +129,9 @@ export function WorkspacesPage() {
 
   const isLoading = domainsStatus === "loading" || domainsStatus === "idle"
 
-  // Derive filter groups from workspace data
   const filterGroups = useMemo((): FilterGroup[] => {
     const groups: FilterGroup[] = []
 
-    // Role filter
     const roleCounts = new Map<string, number>()
     for (const ws of domains) {
       roleCounts.set(ws.role, (roleCounts.get(ws.role) ?? 0) + 1)
@@ -122,7 +154,6 @@ export function WorkspacesPage() {
       })
     }
 
-    // Provider filter
     const providerCounts = new Map<string, number>()
     for (const ws of domains) {
       const tenants = ws.tenants ?? []
@@ -150,7 +181,6 @@ export function WorkspacesPage() {
     return groups
   }, [domains])
 
-  // Filtered workspaces
   const filtered = useMemo(() => {
     const lowerSearch = search.toLowerCase()
     return domains.filter((ws) => {
@@ -181,6 +211,8 @@ export function WorkspacesPage() {
           New workspace
         </Button>
       </div>
+
+      <AwaitingInvitesBanner />
 
       {isLoading ? (
         <div className="space-y-3">

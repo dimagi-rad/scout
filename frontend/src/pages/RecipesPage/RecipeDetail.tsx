@@ -114,7 +114,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <Button variant="ghost" size="sm" onClick={onBack}>
@@ -144,7 +143,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </div>
       </div>
 
-      {/* Basic Info */}
       <Card>
         <CardHeader>
           <CardTitle>Basic Information</CardTitle>
@@ -172,7 +170,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardContent>
       </Card>
 
-      {/* Prompt */}
       <Card>
         <CardHeader>
           <CardTitle>Prompt</CardTitle>
@@ -192,7 +189,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardContent>
       </Card>
 
-      {/* Sharing */}
       <Card>
         <CardHeader>
           <CardTitle>Sharing</CardTitle>
@@ -221,7 +217,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardContent>
       </Card>
 
-      {/* Variables */}
       <Card>
         <CardHeader>
           <CardTitle>Variables</CardTitle>
@@ -268,7 +263,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
         </CardContent>
       </Card>
 
-      {/* Run History */}
       <Card>
         <CardHeader className="pb-0">
           <Accordion type="single" collapsible className="w-full">
@@ -327,7 +321,6 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
                           </div>
                         </button>
 
-                        {/* Run sharing controls */}
                         <div className="flex items-center gap-4 border-t pt-2">
                           <label className="flex items-center gap-1.5 cursor-pointer text-xs">
                             <input

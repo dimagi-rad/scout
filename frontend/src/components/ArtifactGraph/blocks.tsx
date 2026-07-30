@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components */
+
 import { CalendarDays, CalendarRange } from "lucide-react"
 import type React from "react"
 import Markdown from "react-markdown"
@@ -229,15 +231,9 @@ function GraphComponent({ block, config, engine }: BlockComponentProps) {
 }
 
 function GraphBuildBoundary({ rows, tree, height }: { rows: Row[]; tree: RechartsNode; height: number }) {
+  let chart: React.ReactNode
   try {
-    const chart = buildRechartsTree(tree, rows)
-    return (
-      <div data-block-type="graph" style={{ width: "100%", height }}>
-        <ResponsiveContainer width="100%" height="100%">
-          {chart}
-        </ResponsiveContainer>
-      </div>
-    )
+    chart = buildRechartsTree(tree, rows)
   } catch (error) {
     return (
       <div className="flex min-h-48 items-center justify-center rounded-md border border-destructive/30 px-4 text-sm text-destructive">
@@ -245,6 +241,14 @@ function GraphBuildBoundary({ rows, tree, height }: { rows: Row[]; tree: Rechart
       </div>
     )
   }
+
+  return (
+    <div data-block-type="graph" style={{ width: "100%", height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        {chart}
+      </ResponsiveContainer>
+    </div>
+  )
 }
 
 function TableComponent({ block, config, engine }: BlockComponentProps) {

@@ -41,9 +41,7 @@ export function ChatPanel() {
     useState<"idle" | "loading" | "loaded" | "error">("idle")
   const [threadArtifactsError, setThreadArtifactsError] = useState<string | null>(null)
   const prevStatusRef = useRef<string>("")
-  // Transient-overload auto-retry (see ./overloadRetry):
-  //   hitRetryableRef — a retryable-error data part arrived during this turn
-  //   retriedRef      — we've already auto-retried this turn once
+  // Transient-overload auto-retry bookkeeping; see ./overloadRetry.
   const hitRetryableRef = useRef(false)
   const retriedRef = useRef(false)
   const prevRetryStatusRef = useRef<string>("")
@@ -82,7 +80,6 @@ export function ChatPanel() {
     },
   })
 
-  // Clear auto-retry bookkeeping at the start of each user-initiated turn.
   function resetOverloadState() {
     hitRetryableRef.current = false
     retriedRef.current = false
@@ -127,14 +124,9 @@ export function ChatPanel() {
     setThreadPanelOpen(true)
   }
 
-  // Load messages from backend when threadId changes (or after a background job
-  // completes). On success — including an empty array for a brand-new thread —
-  // persist this (workspace, thread) pair so a later bare /chat visit can
-  // restore it. We persist ONLY here so a stale/foreign thread (which 404s
-  // below) never gets stamped into this workspace's localStorage. A 404 means
-  // the thread exists but isn't ours / isn't this workspace's: drop the saved
-  // id and start a fresh thread so the user lands in a clean chat instead of a
-  // haunted one.
+  // Persist the (workspace, thread) pair ONLY on a successful load, so a
+  // stale/foreign thread (which 404s below) never gets stamped into this
+  // workspace's localStorage; a 404 instead drops the saved id and starts fresh.
   useEffect(() => {
     if (!threadId || !activeDomainId) return
     let cancelled = false
@@ -200,7 +192,7 @@ export function ChatPanel() {
     }
   }, [threadId, recentlyCompletedThreadIds, isStreaming])
 
-  // Refresh thread list when streaming finishes (so new threads appear)
+  // Refresh thread list when streaming finishes so new threads appear.
   useEffect(() => {
     if (prevStatusRef.current === "streaming" && status === "ready" && activeDomainId) {
       fetchThreads(activeDomainId)
@@ -241,7 +233,6 @@ export function ChatPanel() {
     }
   }, [status, regenerate])
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight

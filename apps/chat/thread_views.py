@@ -159,18 +159,22 @@ async def _get_thread_artifacts(thread_id):
 
 
 async def _list_threads(user, *, workspace_id):
-    """Return recent threads for a workspace/user."""
+    """Return ``(threads, error_response)`` for a workspace/user.
+
+    ``error_response`` is a ready-to-return 403 ``JsonResponse`` (generic, or the
+    lost-upstream-access variant) when access is denied; ``None`` on success.
+    """
     from apps.workspaces.workspace_resolver import aresolve_workspace
 
-    workspace, _err = await aresolve_workspace(user, workspace_id)
-    if workspace is None:
-        return None
+    workspace, err = await aresolve_workspace(user, workspace_id)
+    if err is not None:
+        return None, err
 
     summaries = []
     queryset = Thread.objects.filter(user=user, workspace=workspace).order_by("-updated_at")[:50]
     async for thread in queryset:
         summaries.append(await _thread_summary_for_response(thread))
-    return summaries
+    return summaries, None
 
 
 async def _load_thread_messages(thread_id) -> list[dict]:
@@ -209,9 +213,9 @@ async def thread_list_view(request, workspace_id):
 
     user = request._authenticated_user
 
-    threads = await _list_threads(user, workspace_id=workspace_id)
-    if threads is None:
-        return JsonResponse({"error": "Workspace not found or access denied"}, status=403)
+    threads, err = await _list_threads(user, workspace_id=workspace_id)
+    if err is not None:
+        return err
     return JsonResponse(threads, safe=False)
 
 
@@ -273,12 +277,10 @@ async def thread_messages_view(request, workspace_id, thread_id):
 
     thread = await _get_thread(thread_id, user, workspace_id=workspace_id)
     if thread is None:
-        # Distinguish a brand-new chat from a stale/foreign one. New chats use
-        # client-generated UUIDs with no Thread row until the first POST, so a
-        # missing row must keep returning [] 200. But if a row *exists* and just
-        # doesn't belong to this (user, workspace), it's a stale/cross-workspace
-        # thread — return 404 so the client can recover instead of silently
-        # showing an empty, "haunted" chat.
+        # New chats use client-generated UUIDs with no row until first POST, so a
+        # missing row returns [] 200. A row that exists but isn't this (user, workspace)
+        # is stale/cross-workspace — 404 so the client recovers instead of showing
+        # an empty "haunted" chat.
         if await Thread.objects.filter(id=thread_id).aexists():
             return JsonResponse({"error": "Thread not found"}, status=404)
         return JsonResponse([], safe=False)
@@ -286,8 +288,7 @@ async def thread_messages_view(request, workspace_id, thread_id):
     try:
         ui_messages = await _load_thread_messages(thread_id)
     except CheckpointerUnavailable:
-        # A checkpointer/DB blip — surface it as a retryable error instead of an
-        # empty list that reads as "conversation deleted" (07#7).
+        # Retryable error, not an empty list that reads as "conversation deleted" (07#7).
         return JsonResponse(
             {"error": "Conversation history is temporarily unavailable. Please try again."},
             status=503,
@@ -402,7 +403,6 @@ async def public_thread_view(request, share_token):
     if thread is None:
         return JsonResponse({"error": "Thread not found"}, status=404)
 
-    # Load messages from checkpointer
     try:
         messages = await _load_thread_messages(thread.id)
     except CheckpointerUnavailable:
@@ -411,7 +411,6 @@ async def public_thread_view(request, share_token):
             status=503,
         )
 
-    # Load associated artifacts
     artifacts = await _get_thread_artifacts(thread.id)
 
     return JsonResponse(

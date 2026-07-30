@@ -24,7 +24,6 @@ export function useAutoResize() {
       }
     }
 
-    // Report initial height
     reportHeight()
 
     const observer = new ResizeObserver(() => {

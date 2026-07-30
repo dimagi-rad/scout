@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 
-from mcp_server.loaders.commcare_base import CommCareAuthError, CommCareBaseLoader  # noqa: F401
+from mcp_server.loaders.commcare_base import (  # noqa: F401
+    CommCareAuthError,
+    CommCareBaseLoader,
+    CommCareExportError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +47,22 @@ class CommCareCaseLoader(CommCareBaseLoader):
         subsequent pages yield ``None``. (Case API v2 has no tastypie
         ``meta`` envelope — the total lives in ``matching_records``.)
         """
-        url = f"{_BASE_URL}/a/{self.domain}/api/case/v2/"
+        initial_url = f"{_BASE_URL}/a/{self.domain}/api/case/v2/"
+        url: str | None = initial_url
         params: dict = {"limit": self.page_size}
         total_loaded = 0
         first_page = True
         while url:
-            data = self._get(url, params=params).json()
-            cases = [_normalize_case(c) for c in data.get("cases", [])]
+            data = self._get_json(url, params=params)
+            if "cases" not in data:
+                # A well-formed empty page still carries ``"cases": []``; a
+                # missing key means the envelope changed under us — fail loudly
+                # rather than silently completing the source with 0 rows
+                # (arch #252, finding 03#6).
+                raise CommCareExportError(
+                    f"CommCare Case API response missing 'cases' key for {url}"
+                )
+            cases = [_normalize_case(c) for c in data["cases"]]
             page_total: int | None = None
             if first_page:
                 matching = data.get("matching_records")
@@ -65,7 +78,10 @@ class CommCareCaseLoader(CommCareBaseLoader):
                     self.domain,
                 )
                 yield cases, page_total
-            url = data.get("next")
+            # Case API v2 may return a relative ``next`` cursor; resolve it
+            # against the base URL like forms/metadata do (8774864) so a
+            # non-absolute value doesn't raise MissingSchema (finding 03#6).
+            url = self._resolve_next_url(initial_url, data.get("next"))
             params = {}
 
     def load(self) -> list[dict]:

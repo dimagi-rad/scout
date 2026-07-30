@@ -27,7 +27,6 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    // Log error to console for debugging
     console.error("ErrorBoundary caught an error:", error, errorInfo)
   }
 
@@ -37,12 +36,10 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.hasError) {
-      // Custom fallback if provided
       if (this.props.fallback) {
         return this.props.fallback
       }
 
-      // Default error UI
       return (
         <div className="flex min-h-[400px] flex-col items-center justify-center p-8">
           <div className="mx-auto max-w-md text-center">

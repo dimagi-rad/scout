@@ -22,6 +22,7 @@ from mcp_server.envelope import (
     VALIDATION_ERROR,
     error_response,
 )
+from mcp_server.services.pool import get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,13 @@ logger = logging.getLogger(__name__)
 async def _execute_async_parameterized(
     ctx: QueryContext, sql: str, params: tuple, timeout_seconds: int
 ) -> dict[str, Any]:
-    """Run a trusted parameterized SQL query asynchronously under the read-only role."""
-    async with (
-        await psycopg.AsyncConnection.connect(**ctx.connection_params, autocommit=True) as conn,
-        conn.cursor() as cursor,
-    ):
+    """Run a parameterized SQL query asynchronously. No validation or LIMIT injection.
+
+    Uses the shared managed-DB pool (arch #253, 10#1). RESETs the connection's
+    per-query state before returning it to the pool.
+    """
+    pool = await get_pool(ctx.connection_params)
+    async with pool.connection() as conn, conn.cursor() as cursor:
         await cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
         try:
             await cursor.execute(
@@ -56,6 +59,7 @@ async def _execute_async_parameterized(
             }
         finally:
             await cursor.execute("RESET ROLE")
+            await cursor.execute("RESET ALL")
 
 
 async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()) -> dict[str, Any]:

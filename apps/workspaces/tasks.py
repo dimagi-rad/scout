@@ -15,7 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from procrastinate.contrib.django.models import ProcrastinateJob
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
@@ -69,14 +69,31 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
+# Substrings that mark a per-source failure as an expired/revoked-credential
+# problem so the user is told to reconnect rather than just "check the
+# connection" (arch #252, finding 14#4). Loader auth errors carry both the
+# class-name suffix and the actionable "reconnect your ... account" guidance;
+# an HTTP 401 anywhere on the seam is the underlying signal.
+_AUTH_FAILURE_MARKERS = ("AuthError", "reconnect your", "HTTP 401")
+_REAUTH_GUIDANCE = (
+    "This looks like an expired or revoked sign-in — reconnect the affected "
+    "account (Settings → Connections) and re-run materialization."
+)
+
+
+def _looks_like_auth_failure(error: str | None) -> bool:
+    """True when a per-source error string reads as a credential/401 failure."""
+    if not error:
+        return False
+    return any(marker in error for marker in _AUTH_FAILURE_MARKERS)
+
+
 def _no_pipeline_error(registry, provider: str) -> str:
     """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
 
-    A genuinely-unconfigured provider and a provider whose pipeline YAML failed
-    to parse both surfaced as the same "No pipeline for provider X" message,
-    which pointed at workspace config when the real cause was a broken deploy.
-    When the registry recorded load errors, say so explicitly so the failure
-    points at the deploy, not the workspace.
+    An unconfigured provider and a pipeline YAML that failed to parse used to
+    share one message that wrongly pointed at workspace config; when the registry
+    recorded load errors, say so explicitly so blame lands on the deploy.
     """
     load_errors = registry.load_errors
     if load_errors:
@@ -90,15 +107,11 @@ def _no_pipeline_error(registry, provider: str) -> str:
 
 
 def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
-    """Compose a human-readable failure summary from MaterializationRun results.
+    """Compose a human-readable failure summary for ``ThreadJob.error_summary``.
 
-    Used to populate ``ThreadJob.error_summary`` so the frontend can render an
-    inline failure card after the spinner clears. Reads the per-source state
-    map in ``run.result["sources"]`` (post-#198 shape) and produces a short
-    string that names what failed and what (if anything) loaded.
-
-    Returns "" when there are no runs or the result map is empty — callers
-    should fall back to a generic message in that case.
+    Reads the per-source state map in ``run.result["sources"]`` (post-#198 shape).
+    Returns "" when there is nothing to summarize — callers fall back to a generic
+    message.
     """
     if not runs:
         return ""
@@ -146,11 +159,13 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         parts.append(f"cancelled: {', '.join(cancelled_sources)}")
 
     if not parts:
-        # No per-source detail (e.g. failure before any source ran). Surface
-        # the run state so the message is non-empty.
+        # No per-source detail (failure before any source ran) — surface run state.
         states = sorted({r.state for r in runs})
         return f"Materialization {'/'.join(states)}."
-    return ". ".join(parts) + "."
+    summary = ". ".join(parts) + "."
+    if any(_looks_like_auth_failure(err) for _, err in failed_sources):
+        summary += " " + _REAUTH_GUIDANCE
+    return summary
 
 
 @task
@@ -175,7 +190,6 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         await new_schema.asave(update_fields=["state"])
         return {"error": "Membership not found"}
 
-    # Step 1: Create the physical schema in the managed database
     manager = SchemaManager()
     try:
         await asyncio.to_thread(manager.create_physical_schema, new_schema)
@@ -185,16 +199,13 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         await new_schema.asave(update_fields=["state"])
         return {"error": "Failed to create schema"}
 
-    # Step 2: Resolve credential and run materialization pipeline. This task
-    # runs as an async job, so it must use the async resolver — the sync one
-    # issues ORM queries that raise SynchronousOnlyOperation here.
+    # Async job: must use the async resolver — the sync one raises
+    # SynchronousOnlyOperation here.
     try:
         credential = await aresolve_credential(membership)
     except CredentialResolutionError as e:
-        # Actionable credential failure (e.g. token scoped to a different team).
         # Surface the distinct message + code so the user is told to re-connect
-        # rather than seeing the generic "No credential available"
-        # (arch #245 finding 07#3).
+        # rather than the generic "No credential available" (arch #245 finding 07#3).
         await _drop_schema_and_fail(new_schema)
         return {"error": e.message, "error_code": e.code}
     if credential is None:
@@ -211,11 +222,9 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
                 "error": _no_pipeline_error(registry, membership.tenant.provider),
             }
         pipeline_config = registry.get(pipeline_name)
-        # Load into the new "_r" schema this task created — NOT the tenant's
-        # base schema. Without target_schema, run_pipeline re-resolves the base
-        # (old active) schema via provision() and the data lands there; we then
-        # activate this empty new schema and tear down the data-bearing old one.
-        await asyncio.to_thread(
+        # target_schema forces the load into the new "_r" schema; without it
+        # run_pipeline re-resolves the old active base schema and data lands there.
+        await _to_thread_fresh_db(
             run_pipeline, membership, credential, pipeline_config, target_schema=new_schema
         )
     except Exception:
@@ -223,21 +232,16 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         await _drop_schema_and_fail(new_schema)
         return {"error": "Materialization failed"}
 
-    # Step 3: Mark new schema as active. Set last_accessed_at to now so the
-    # freshly materialized schema starts with a clean inactivity TTL —
-    # otherwise expire_inactive_schemas could drop it before it is ever used.
+    # Reset last_accessed_at so the fresh schema starts with a clean inactivity
+    # TTL — otherwise expire_inactive_schemas could drop it before first use.
     new_schema.state = SchemaState.ACTIVE
     new_schema.last_accessed_at = timezone.now()
     await new_schema.asave(update_fields=["state", "last_accessed_at"])
 
-    # Step 3b: The tenant data schema is SHARED across workspaces, and this refresh
-    # swapped in a NEW physical schema. Every multi-tenant WorkspaceViewSchema that
-    # includes this tenant still points its namespaced views at the OLD schema
-    # (about to be torn down), so defer a rebuild for each so their views are
-    # recreated against the new ACTIVE schema — mirroring the sibling rebuild
-    # materialize_workspace performs (PR #230). Without this the views keep serving
-    # stale data until teardown drops the old schema, after which they'd be left
-    # empty (and falsely marked FAILED by teardown_schema).
+    # The tenant data schema is SHARED across workspaces; this refresh swapped in a
+    # NEW physical schema. Dependent multi-tenant view schemas still point at the OLD
+    # (about-to-be-torn-down) schema, so rebuild them against the new ACTIVE schema —
+    # mirroring the sibling rebuild materialize_workspace performs (PR #230).
     await _rebuild_dependent_view_schemas([new_schema.tenant_id])
 
     # Step 3c: Single-tenant workspaces query the tenant schema directly (no
@@ -247,8 +251,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     # or removed columns, which only a semantic-model rebuild picks up.
     await _rebuild_single_tenant_semantic_models([new_schema.tenant_id])
 
-    # Step 4: Schedule teardown of previously active schemas with a delay to allow
-    # in-flight queries against the old schema to complete before it is dropped.
+    # Delay teardown of previously active schemas so in-flight queries can drain.
     old_schemas = TenantSchema.objects.filter(
         tenant=new_schema.tenant,
         state=SchemaState.ACTIVE,
@@ -362,13 +365,10 @@ async def materialize_workspace_core(
             tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
         except MaterializationCancelled:
             tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
-            # Stop processing remaining tenants — the user has cancelled.
             break
         except ConnectExportError as e:
-            # Upstream Connect failure after retry exhaustion. Capture
-            # the response's sentry-trace header so support can correlate
-            # with Connect's Sentry in a single hop. sentry_sdk.set_tag
-            # is a no-op when the SDK was never initialised (no DSN).
+            # Capture the sentry-trace header so support can correlate with
+            # Connect's Sentry in one hop. set_tag is a no-op without a DSN.
             logger.exception(
                 "Materialization failed for tenant %s on pipeline %s: "
                 "connect status=%s after %d attempts (last_id=%s, sentry-trace=%s)",
@@ -388,25 +388,19 @@ async def materialize_workspace_core(
 
     all_succeeded = all(r.get("success") for r in tenant_results)
 
-    # Multi-tenant workspaces query through a WorkspaceViewSchema that
-    # UNION ALLs the per-tenant tables. build_view_schema requires every
-    # tenant to have an ACTIVE TenantSchema, so we can only attempt this
-    # after the per-tenant loop completes successfully. This must run
-    # *before* the resume task fires (deferred by the task wrapper) so
-    # the agent's first list_tables call after materialization returns
-    # the namespaced view instead of "No active view schema for workspace".
+    # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
+    # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
+    # unconditionally (not only on full success) before the resume fires (arch #255 03#1).
     view_schema_outcome: dict | None = None
     workspace_tenant_count = await workspace.workspace_tenants.acount()
-    if workspace_tenant_count > 1 and all_succeeded:
+    if workspace_tenant_count > 1:
         try:
-            await asyncio.to_thread(SchemaManager().build_view_schema, workspace)
+            await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
             view_schema_outcome = {"ok": True, "error": None}
         except Exception as exc:
-            # Don't re-raise — the resume task should still fire so the
-            # user gets *some* agent response. The failure is recorded on
-            # the WorkspaceViewSchema row (state=FAILED, last_error) and is
-            # surfaced to the agent by the resume task, which inspects the
-            # row directly rather than relying on this return value.
+            # Don't re-raise — the resume task must still fire. The failure is
+            # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
+            # which the resume task reads directly.
             logger.exception(
                 "Post-materialization view schema rebuild failed for workspace %s",
                 workspace_id,
@@ -437,14 +431,10 @@ async def materialize_workspace_core(
             logger.exception("Semantic Cube schema build failed for workspace %s", workspace_id)
             cube_schema_outcome = {"ok": False, "error": str(exc)[:500]}
 
-    # Tenant data schemas (t_<id>) are SHARED across workspaces. Re-materializing
-    # a tenant from THIS workspace drops & recreates its raw_* tables, which
-    # cascade-drops the namespaced views inside every OTHER workspace's view
-    # schema — leaving those WorkspaceViewSchema rows ACTIVE but empty. Defer a
-    # rebuild for each sibling multi-tenant workspace that shares any tenant we
-    # just (re)materialized so their views are recreated against the new tables.
-    # Failures of individual rebuilds are handled inside rebuild_workspace_view_schema;
-    # we never block the resume on them.
+    # Tenant data schemas (t_<id>) are SHARED. Re-materializing drops & recreates
+    # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
+    # view schema (leaving them ACTIVE but empty). Rebuild each sibling multi-tenant
+    # workspace's views against the new tables.
     await _rebuild_dependent_view_schemas(
         [tm.tenant_id for tm in memberships],
         exclude_workspace_id=str(workspace.id),
@@ -473,9 +463,8 @@ async def _await_in_progress_materializations(
     ]
     if not tenant_ids:
         return
-    # Poll the cross-process MaterializationRun state (another worker owns the
-    # in-flight run, so there is no in-process Event to await). Bounded for-loop
-    # rather than `while True` to keep a hard ceiling on the wait.
+    # Poll cross-process MaterializationRun state (another worker owns the run,
+    # so no in-process Event to await). Bounded to keep a ceiling on the wait.
     max_polls = max(1, int(max_wait_seconds / poll_interval))
     for _ in range(max_polls):
         in_progress = await MaterializationRun.objects.filter(
@@ -532,17 +521,12 @@ async def materialize_workspace(
 async def _defer_resume_for_job(job_id: int) -> None:
     """Find the ThreadJob bound to ``job_id`` and defer the resume task.
 
-    MCP commits the ThreadJob row *after* defer_async returns the procrastinate
-    job id (see mcp_server.server.run_materialization), so under load the
-    worker may finish before the row is visible. Hedge with a bounded backoff:
-    total budget ~3.75s, which is acceptable because procrastinate workers
-    handle one task at a time per slot. If the row still is not visible after
-    retries, the janitor (expire_stale_thread_jobs) catches up eventually.
+    MCP commits the ThreadJob row *after* defer_async returns the job id, so under
+    load the worker may finish before the row is visible — hedge with a bounded
+    backoff (~3.75s). If still not visible, the janitor catches up eventually.
 
-    TODO: a cleaner fix is to let MCP write a placeholder ThreadJob *before*
-    defer_async, then patch in the procrastinate_job_id after dispatch. That
-    requires making procrastinate_job_id nullable (a migration we are
-    skipping for this PR).
+    TODO: cleaner fix is for MCP to write a placeholder ThreadJob before
+    defer_async, then patch in procrastinate_job_id (needs a nullable migration).
     """
     try:
         tj = None
@@ -636,6 +620,23 @@ async def _rebuild_dependent_view_schemas(tenant_ids, *, exclude_workspace_id=No
             )
 
 
+async def _to_thread_fresh_db(func, /, *args, **kwargs):
+    """Run a sync ORM-touching callable on a to_thread pool thread, closing
+    stale/dead DB connections on that SAME thread first (arch #253, 08#0).
+
+    Pool threads are reused across jobs and the worker's connection cleanup only
+    reaches the async-ORM thread, so a connection that died since this pool
+    thread's last run would otherwise poison the call. The cleanup runs inside
+    the threaded callable so it never touches the caller thread's connection.
+    """
+
+    def _guarded():
+        close_old_connections()
+        return func(*args, **kwargs)
+
+    return await asyncio.to_thread(_guarded)
+
+
 def _run_pipeline_with_progress(
     tenant_membership,
     credential: dict,
@@ -644,15 +645,11 @@ def _run_pipeline_with_progress(
 ) -> dict:
     """Synchronous entry point invoked under ``asyncio.to_thread``.
 
-    Builds the ``progress_updater`` closure that mirrors progress to the DB
-    and surfaces cancellation, then runs the pipeline. Exceptions propagate
-    to the caller.
+    Builds the ``progress_updater`` closure (mirrors progress to the DB and
+    surfaces cancellation), then runs the pipeline.
     """
-    # This runs on an asyncio.to_thread executor thread, which has its own
-    # thread-local Django connection that the task decorator's close_old_connections (which
-    # cleans the async-ORM thread) cannot reach. Pool threads are reused
-    # across jobs, so a connection that died since the last pipeline run here
-    # would otherwise poison every progress update.
+    # Pool thread's connection is unreachable by the worker's async-ORM cleanup
+    # and may have died since the last job here — close it so the first use reopens.
     close_old_connections()
 
     def updater(progress: dict) -> None:
@@ -707,10 +704,9 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
     """
     cutoff = timezone.now() - timedelta(hours=settings.SCHEMA_TTL_HOURS)
 
-    # Expire stale tenant schemas. Log the decision WITH last_accessed_at BEFORE
-    # flipping the row — that timestamp is the exact forensic input the
-    # 2026-06-10 incident review could not recover, because teardown/provision
-    # later overwrites it (arch #257, finding 08#9).
+    # Log last_accessed_at BEFORE flipping — teardown/provision later overwrites
+    # it, and that timestamp was the forensic input the 2026-06-10 incident review
+    # could not recover (arch #257, finding 08#9).
     async for schema in TenantSchema.objects.filter(
         state=SchemaState.ACTIVE,
         last_accessed_at__lt=cutoff,
@@ -762,11 +758,11 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
 
     manager = SchemaManager()
     try:
-        vs = await asyncio.to_thread(manager.build_view_schema, workspace)
+        vs = await _to_thread_fresh_db(manager.build_view_schema, workspace)
     except Exception:
-        # build_view_schema already saves state=FAILED before re-raising;
-        # no need to write it again here (doing so risks overwriting a
-        # concurrent state transition, e.g. TEARDOWN set by expire_inactive_schemas).
+        # build_view_schema owns the row state (marks it FAILED on any failure), so
+        # don't re-write state here and risk clobbering a concurrent transition —
+        # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
         return {"error": "Failed to build view schema"}
 
@@ -862,9 +858,8 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         logger.exception("teardown_view_schema_task: view schema %s not found", view_schema_id)
         return
 
-    # State CAS (arch #237, finding 03#0): abort the DROP if the row is no longer
-    # TEARDOWN — it may have been reactivated (rebuild → ACTIVE) after this
-    # teardown was queued, in which case the physical schema is live again.
+    # State CAS (arch #237, finding 03#0): abort if no longer TEARDOWN — a
+    # rebuild → ACTIVE after queueing means the physical schema is live again.
     if vs.state != SchemaState.TEARDOWN:
         logger.info(
             "teardown_view_schema_task: view schema %s is %s (not TEARDOWN) — "
@@ -883,8 +878,7 @@ async def teardown_view_schema_task(view_schema_id: str) -> None:
         await vs.asave(update_fields=["state"])
         raise
 
-    # Log the successful drop — a destructive op must leave a trace (arch #257,
-    # finding 08#9).
+    # Destructive op must leave a trace (arch #257, finding 08#9).
     logger.info(
         "teardown_view_schema_task: DROP SCHEMA CASCADE succeeded for view schema %s (%s) — "
         "last_accessed_at=%s",
@@ -906,12 +900,9 @@ async def teardown_schema(schema_id: str) -> None:
         logger.exception("teardown_schema: schema %s not found", schema_id)
         return
 
-    # State CAS (arch #237, finding 03#0): this task is enqueued against a row
-    # that was TEARDOWN at dispatch time, but provision() resurrects EXPIRED/
-    # TEARDOWN rows back to ACTIVE (the 2026-06-10 incident-b fix). If a
-    # resurrection raced ahead of this queued teardown, the row is ACTIVE again
-    # and its (re-provisioned) data must be preserved — abort the DROP. Only a
-    # row still in TEARDOWN is safe to drop.
+    # State CAS (arch #237, finding 03#0): provision() resurrects EXPIRED/TEARDOWN
+    # rows to ACTIVE (2026-06-10 incident-b fix). If that raced ahead of this queued
+    # teardown the re-provisioned data must be preserved — abort unless still TEARDOWN.
     if schema.state != SchemaState.TEARDOWN:
         logger.info(
             "teardown_schema: schema %s is %s (not TEARDOWN) — aborting drop; "
@@ -925,20 +916,15 @@ async def teardown_schema(schema_id: str) -> None:
     try:
         await asyncio.to_thread(manager.teardown, schema)
     except Exception:
-        # teardown() only raises when DROP SCHEMA itself fails — role-cleanup
-        # failures are logged and swallowed there — so reaching this branch
-        # means the physical schema is still present and the record should go
-        # back to ACTIVE rather than being stranded in TEARDOWN. The
-        # data-bearing runs are deliberately left in their terminal
-        # COMPLETED/PARTIAL state: the physical tables still exist, so the
-        # catalog must keep surfacing them once the schema is ACTIVE again.
+        # teardown() only raises when DROP SCHEMA itself fails, so the physical
+        # schema (and its tables) still exists — revert to ACTIVE rather than
+        # stranding it in TEARDOWN, and leave the data-bearing runs terminal so
+        # the catalog keeps surfacing them.
         schema.state = SchemaState.ACTIVE
         await schema.asave(update_fields=["state"])
         raise
 
-    # A successful DROP SCHEMA CASCADE of data-bearing tables previously emitted
-    # zero log lines, so a destructive operation left no forensic trace (arch
-    # #257, finding 08#9). Record it explicitly.
+    # Destructive op must leave a forensic trace (arch #257, finding 08#9).
     logger.info(
         "teardown_schema: DROP SCHEMA CASCADE succeeded for tenant schema %s (%s) — "
         "last_accessed_at=%s",
@@ -947,12 +933,9 @@ async def teardown_schema(schema_id: str) -> None:
         schema.last_accessed_at.isoformat() if schema.last_accessed_at else None,
     )
 
-    # The physical schema (and its tables) is now dropped. Flip the data-bearing
-    # runs to STALE so pipeline_list_tables stops returning ghost entries for
-    # tables that no longer exist. This is done here — after the DROP succeeds —
-    # rather than at TEARDOWN-flip time, so a failed DROP never strands intact
-    # data as invisible. CANCELLED/FAILED runs are already terminal and excluded
-    # from the catalog query, so they're left alone.
+    # Tables are now dropped: flip data-bearing runs to STALE so
+    # pipeline_list_tables stops returning ghosts. Done after the DROP succeeds
+    # (not at TEARDOWN-flip) so a failed DROP never strands intact data as invisible.
     await MaterializationRun.objects.filter(
         tenant_schema=schema,
         state__in=[
@@ -961,12 +944,9 @@ async def teardown_schema(schema_id: str) -> None:
         ],
     ).aupdate(state=MaterializationRun.RunState.STALE)
 
-    # The tenant schema (t_<id>) is SHARED across workspaces. DROP SCHEMA ... CASCADE
-    # just cascade-dropped the namespaced views inside every dependent multi-tenant
-    # workspace's view schema (ws_<hash>). What to do next depends on whether the
-    # tenant still has data: a refresh swaps in a NEW ACTIVE schema before tearing
-    # down the old one (data intact → rebuild), whereas pure TTL expiry leaves the
-    # tenant with nothing (data gone → fail). _reconcile handles both.
+    # The DROP CASCADE just cascade-dropped the namespaced views in every dependent
+    # multi-tenant view schema; _reconcile rebuilds (if the tenant has a surviving
+    # ACTIVE schema) or fails them (pure TTL expiry left no data).
     await _reconcile_dependent_view_schemas_after_teardown(schema)
 
     try:
@@ -983,20 +963,12 @@ async def teardown_schema(schema_id: str) -> None:
 async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
     """Reconcile dependent multi-tenant view schemas after ``schema`` is dropped.
 
-    DROP SCHEMA ... CASCADE just cascade-dropped the namespaced views inside every
-    dependent multi-tenant workspace's view schema. The correct follow-up depends
-    on whether the tenant still has data:
+    If the tenant has another ACTIVE schema (refresh path), rebuild the views
+    against it; if none survives (pure TTL expiry), flip them FAILED so the catalog
+    reports the truth instead of serving an empty view.
 
-    - If the tenant has ANOTHER ACTIVE schema (the refresh path: a fresh schema was
-      swapped in before this old one was torn down), the data is NOT gone and the
-      views are rebuildable — defer a rebuild so they point at the new schema.
-    - If the tenant has NO surviving ACTIVE schema (pure TTL expiry), the data is
-      gone; flip the dependent ACTIVE view schemas to FAILED so the catalog reports
-      the truth rather than serving an empty view.
-
-    The ``exclude(id=schema.id)`` matters: production callers flip ``schema`` to
-    TEARDOWN before dispatching teardown, but a direct caller may pass an ACTIVE
-    row — excluding it makes "another ACTIVE schema?" correct either way.
+    ``exclude(id=schema.id)`` matters: a direct caller may pass an ACTIVE row, so
+    excluding it makes the "another ACTIVE schema?" check correct either way.
     """
     tenant_has_surviving_active_schema = (
         await TenantSchema.objects.filter(
@@ -1009,9 +981,8 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
     if tenant_has_surviving_active_schema:
         await _rebuild_dependent_view_schemas([schema.tenant_id])
     else:
-        # The count of sibling workspaces whose views were just broken was
-        # previously discarded — log it so a cascade that silently degrades N
-        # multi-tenant workspaces is visible (arch #257, finding 08#9).
+        # Log the count so a cascade that silently degrades N workspaces is
+        # visible (arch #257, finding 08#9).
         failed_count = await _fail_dependent_view_schemas(schema.tenant_id)
         if failed_count:
             logger.warning(
@@ -1025,16 +996,10 @@ async def _reconcile_dependent_view_schemas_after_teardown(schema) -> None:
 
 
 async def _fail_dependent_view_schemas(tenant_id) -> int:
-    """Flip every ACTIVE WorkspaceViewSchema that depends on ``tenant_id`` to FAILED.
+    """Flip every ACTIVE WorkspaceViewSchema depending on ``tenant_id`` to FAILED.
 
-    A view schema depends on a tenant when its workspace is multi-tenant (>= 2
-    tenants) and contains that tenant: its namespaced views were just
-    cascade-dropped by the tenant-schema DROP. We only touch ACTIVE rows — rows
-    already in TEARDOWN/FAILED/EXPIRED must not be clobbered out of their
-    lifecycle state. A single annotated subquery scopes the update to the right
-    workspaces, so cost is independent of how many workspaces share the tenant.
-
-    Returns the number of rows flipped.
+    Only ACTIVE rows — TEARDOWN/FAILED/EXPIRED must not be clobbered out of their
+    lifecycle state. Returns the number of rows flipped.
     """
     dependent_workspace_ids = (
         Workspace.objects.filter(workspace_tenants__tenant_id=tenant_id)
@@ -1042,12 +1007,9 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
         .filter(num_tenants__gte=2)
         .values("id")
     )
-    # Write a truthful last_error describing the teardown cascade (07#9). Without
-    # it, get_schema_status returns the generic fallback "View schema build
-    # failed." and the resume prompt tells the agent "do NOT re-run
-    # materialization; a system-side fix is required" — wrong advice, since
-    # re-materializing the torn-down tenant IS the fix. The marker lets the
-    # resume logic give correct, cause-specific recovery advice.
+    # Truthful last_error for the cascade (07#9): the marker lets the resume logic
+    # advise a re-run, instead of the generic "system-side fix required" — wrong
+    # here, since re-materializing the torn-down tenant IS the fix.
     return await WorkspaceViewSchema.objects.filter(
         workspace_id__in=dependent_workspace_ids,
         state=SchemaState.ACTIVE,
@@ -1063,15 +1025,10 @@ STALE_JOB_THRESHOLD = timedelta(minutes=10)
 def _staleness_anchor(tj: ThreadJob):
     """Timestamp from which a ThreadJob's staleness is measured.
 
-    For a RUNNING job (a resume task has claimed it) we measure from the RESUME
-    phase: ``started_at``. created_at includes the full materialization + queue
-    time, so a healthy long materialization (>10 min) followed by a fresh resume
-    would otherwise look stale the instant the resume began — the false-positive
-    the reconciler used to hit (finding 02#9).
-
-    For PENDING/other states (or a legacy RUNNING row predating ``started_at``)
-    we fall back to ``created_at`` so a job that was never claimed still ages
-    out and a never-recorded resume is not stranded forever.
+    RUNNING jobs measure from the RESUME phase (``started_at``); created_at
+    includes the full materialization, so a long materialization + fresh resume
+    would otherwise look instantly stale (finding 02#9). Everything else falls
+    back to ``created_at`` so an unclaimed job still ages out.
     """
     if tj.state == ThreadJob.State.RUNNING and tj.started_at is not None:
         return tj.started_at
@@ -1079,14 +1036,11 @@ def _staleness_anchor(tj: ThreadJob):
 
 
 def _stale_active_jobs_q(cutoff) -> Q:
-    """Predicate matching active ThreadJobs whose effective staleness anchor is
-    older than ``cutoff`` (see :func:`_staleness_anchor`).
+    """Predicate matching active ThreadJobs whose staleness anchor is older than
+    ``cutoff`` (see :func:`_staleness_anchor`).
 
-    A RUNNING job with a recorded ``started_at`` is stale only when that resume
-    phase is older than the cutoff; everything else (PENDING, or a legacy
-    RUNNING row with no ``started_at``) is measured from ``created_at``. Keeping
-    this as a single ORM-side predicate means the janitor never even SELECTs a
-    healthy in-flight resume, avoiding the 02#9 false-positive at the source.
+    Single ORM-side predicate so the janitor never even SELECTs a healthy
+    in-flight resume, avoiding the 02#9 false-positive at the source.
     """
     running_stale = Q(
         state=ThreadJob.State.RUNNING,
@@ -1104,22 +1058,14 @@ def _stale_active_jobs_q(cutoff) -> Q:
 async def _procrastinate_job_status(job_id: int) -> str | None:
     """Return the raw procrastinate job status string, or None when unknown.
 
-    Reads the status directly from the ``procrastinate_jobs`` table via the
-    Django contrib ORM model rather than ``current_app.job_manager``. The
-    module-level ``current_app`` reference resolves to procrastinate's
-    ``FutureApp`` blueprint proxy at import time; ``AppConfig.ready()`` rebinds
-    the name in procrastinate's own module to the real ``App``, but our
-    already-imported reference keeps pointing at the unresolved ``FutureApp``,
-    which has no ``job_manager`` (it is a ``Blueprint``). In the worker that
-    raised ``AttributeError`` on every call, so the janitor treated every
-    lookup as "couldn't tell" and never reconciled. The ORM model sidesteps the
-    app lifecycle entirely and is async-native.
+    Reads the ``procrastinate_jobs`` table via the ORM model, not
+    ``current_app.job_manager``: our import-time ``current_app`` stays bound to the
+    unresolved ``FutureApp`` Blueprint (which has no ``job_manager``), so that path
+    raised AttributeError on every call. The ORM model sidesteps the app lifecycle.
 
-    Returning a sentinel on exception would conflate "not active" with
-    "couldn't tell" — the janitor would then misclassify actively-running jobs
-    as candidates for cleanup during a transient DB blip. Callers must treat
-    ``None`` as "don't touch this row this tick" (also returned for an unknown
-    job id, where there is nothing to reconcile against).
+    Callers must treat ``None`` (exception or unknown id) as "don't touch this row
+    this tick" — a sentinel would conflate "not active" with "couldn't tell" and
+    let a transient DB blip clean up running jobs.
     """
     try:
         return (
@@ -1134,6 +1080,13 @@ async def _procrastinate_job_status(job_id: int) -> str | None:
             exc_info=True,
         )
         return None
+
+
+# Explicit status allowlists so an unknown/future procrastinate status can't fall
+# into an "act" branch; "aborting" is transitional, so treat it as in-flight (arch #255 10#0).
+_PROCRASTINATE_INFLIGHT_STATUSES = frozenset({"todo", "doing", "aborting"})
+_PROCRASTINATE_FAILED_STATUSES = frozenset({"failed", "aborted", "cancelled"})
+_PROCRASTINATE_SUCCEEDED_STATUS = "succeeded"
 
 
 async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
@@ -1152,25 +1105,18 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
     """
     status = await _procrastinate_job_status(tj.procrastinate_job_id)
     if status is None:
-        # Status unknown (probably a transient DB error). Don't touch the
-        # row this tick — the next invocation will retry. This prevents
-        # incorrectly cleaning up jobs that may still be running.
         return None
-    if status in {"todo", "doing"}:
+    if status in _PROCRASTINATE_INFLIGHT_STATUSES:
         return None
     if tj.state == ThreadJob.State.RUNNING:
-        # A RUNNING ThreadJob means a resume task claimed it. The materialize
-        # job's status is irrelevant here (it has long since succeeded for any
-        # >10 min materialization). Measure staleness from the RESUME phase
-        # (started_at) so we only flip a resume that has genuinely been stuck
-        # past the threshold — NOT a healthy resume that just started after a
-        # long materialization (finding 02#9). A fresh resume is left alone.
+        # A resume task claimed it. Measure staleness from the RESUME phase so we
+        # only flip a genuinely stuck resume, not a healthy one that just started
+        # after a long materialization (finding 02#9).
         anchor = _staleness_anchor(tj)
         if anchor is not None and timezone.now() - anchor < STALE_JOB_THRESHOLD:
             return None
-        # A worker started a resume and presumably crashed mid-ainvoke.
-        # Marking FAILED directly avoids deferring a duplicate resume that
-        # could race with a still-running first invocation.
+        # Worker crashed mid-ainvoke. Mark FAILED directly rather than deferring a
+        # duplicate resume that could race with a still-running first invocation.
         updated = await ThreadJob.objects.filter(
             id=tj.id,
             state=ThreadJob.State.RUNNING,
@@ -1188,16 +1134,12 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             "Reconcile: ThreadJob %s stuck in RUNNING (worker crash?); marked FAILED",
             tj.id,
         )
-        # Surface the crash to the user via a synthetic AIMessage; the
-        # checkpointer write tolerates failure so a sick worker
-        # doesn't block the FAILED transition.
         await _persist_synthetic_failure_message(tj, RESUME_STUCK_RUNNING_MESSAGE)
         return "failed"
-    if status in {"failed", "aborted"}:
-        # The task itself raised (e.g. the worker's DB connection died before
-        # any pipeline ran) — there is no result for an agent resume to
-        # narrate. Flip straight to FAILED so the failure reaches the user
-        # instead of waiting on a resume that has nothing to say.
+    if status in _PROCRASTINATE_FAILED_STATUSES:
+        # The task itself failed/was aborted/cancelled — no result for a resume to
+        # narrate, so flip straight to FAILED instead of deferring a resume with
+        # nothing to say.
         summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
         updated = await ThreadJob.objects.filter(
             id=tj.id,
@@ -1217,9 +1159,18 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         )
         await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
         return "failed"
-    # PENDING stuck job whose materialization finished (succeeded/cancelled)
-    # — never claimed by any worker. Safe to defer a fresh resume so the user
-    # gets an agent follow-up; the resume task flips the state.
+    if status != _PROCRASTINATE_SUCCEEDED_STATUS:
+        # Unknown/future procrastinate status: never fall into the resume act
+        # branch on a status we don't understand — leave the row for the next tick
+        # (arch #255, 10#0).
+        logger.warning(
+            "Reconcile: unrecognized procrastinate status %r for job %s; skipping",
+            status,
+            tj.procrastinate_job_id,
+        )
+        return None
+    # PENDING job whose materialization SUCCEEDED but was never claimed — safe to
+    # defer a fresh resume; the resume task flips the state.
     try:
         await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
@@ -1255,6 +1206,162 @@ async def expire_stale_thread_jobs(timestamp: int = 0) -> dict:
     return {"flipped": flipped}
 
 
+# A hard worker death (SIGKILL/OOM/host crash) leaves the procrastinate job 'doing'
+# and its MaterializationRun stuck ACTIVE, and the ThreadJob janitor can't see it
+# (None for a zombie job; /refresh/ runs have no ThreadJob). Detect it via
+# procrastinate's heartbeat stalled-job query and fail the run truthfully (arch #255 03#9).
+MATERIALIZATION_STALLED_HEARTBEAT_SECONDS = 300
+
+# Terminal procrastinate statuses for a materialization job: the job is finished,
+# so a MaterializationRun still ACTIVE is a zombie the worker never closed out.
+_MATERIALIZATION_TERMINAL_STATUSES = frozenset({"succeeded", "failed", "aborted", "cancelled"})
+
+
+async def _stalled_procrastinate_job_ids() -> set[int]:
+    """Best-effort set of procrastinate job ids whose worker heartbeat is stale.
+
+    Wrapped: if the heartbeat query is unavailable (older schema, connector blip)
+    we degrade to the job-status signal alone rather than failing the whole tick.
+    """
+    try:
+        stalled = await app.job_manager.get_stalled_jobs(
+            seconds_since_heartbeat=MATERIALIZATION_STALLED_HEARTBEAT_SECONDS
+        )
+    except Exception:
+        logger.warning(
+            "reconcile_materialization: get_stalled_jobs failed; relying on the "
+            "job-status signal only this tick",
+            exc_info=True,
+        )
+        return set()
+    return {j.id for j in stalled if j.id is not None}
+
+
+async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) -> None:
+    """Fail any active ThreadJob(s) owning a dead materialization job, with a
+    truthful summary + synthetic chat message so the UI spinner clears.
+
+    The ThreadJob janitor can't do this for a hard worker death: it returns None
+    for a 'doing' zombie job (correct per-tick, permanent for zombies).
+    """
+    summary = (
+        await _build_failure_summary_for_job(procrastinate_job_id) or MATERIALIZATION_FAILED_MESSAGE
+    )
+    async for tj in ThreadJob.objects.select_related("thread__workspace", "thread__user").filter(
+        procrastinate_job_id=procrastinate_job_id,
+        state__in=list(ThreadJob.ACTIVE_STATES),
+    ):
+        updated = await ThreadJob.objects.filter(
+            id=tj.id,
+            state__in=list(ThreadJob.ACTIVE_STATES),
+        ).aupdate(
+            state=ThreadJob.State.FAILED,
+            completed_at=timezone.now(),
+            error_summary=summary,
+        )
+        if updated:
+            await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+
+
+async def _fail_zombie_materialization_run(run: MaterializationRun, reason: str) -> bool:
+    """CAS-flip an ACTIVE MaterializationRun to FAILED and fail its ThreadJob(s).
+
+    Returns True if this call performed the flip (False if another writer got
+    there first). Truthful: records the reason in result so the resume/aggregate
+    path narrates a real failure instead of a silent "still loading".
+    """
+    now = timezone.now()
+    result = run.result if isinstance(run.result, dict) else {}
+    updated = await MaterializationRun.objects.filter(
+        id=run.id,
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ).aupdate(
+        state=MaterializationRun.RunState.FAILED,
+        completed_at=now,
+        result={**result, "error": reason, "reconciled_stale": True},
+    )
+    if not updated:
+        return False
+    logger.warning(
+        "reconcile_materialization: MaterializationRun %s (tenant_schema %s) flipped to "
+        "FAILED — %s",
+        run.id,
+        run.tenant_schema_id,
+        reason,
+    )
+    if run.procrastinate_job_id is not None:
+        await _fail_thread_jobs_for_dead_materialization(run.procrastinate_job_id)
+    return True
+
+
+@app.periodic(cron="*/15 * * * *")
+@task
+async def reconcile_stale_materialization_runs(timestamp: int = 0) -> dict:
+    """Fail MaterializationRuns stuck in an ACTIVE state after a hard worker death.
+
+    A run is a zombie when its procrastinate job is stalled (worker heartbeat gone)
+    or already terminal while the run row never reached a terminal state. A run
+    whose job is still legitimately in flight (live heartbeat, todo/doing) or whose
+    status can't be read this tick is left untouched.
+    """
+    stalled_ids = await _stalled_procrastinate_job_ids()
+    failed = 0
+    async for run in MaterializationRun.objects.filter(
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ):
+        job_id = run.procrastinate_job_id
+        if job_id is None:
+            continue
+        status = await _procrastinate_job_status(job_id)
+        if status is None:
+            # Transient read failure — can't tell, so don't touch it this tick.
+            continue
+        is_stalled = job_id in stalled_ids
+        is_terminal = status in _MATERIALIZATION_TERMINAL_STATUSES
+        if not (is_stalled or is_terminal):
+            continue
+        reason = (
+            "The materialization worker stopped responding before the run finished "
+            "(stalled or crashed)."
+            if is_stalled
+            else f"The materialization job ended ({status}) without recording a terminal run state."
+        )
+        if await _fail_zombie_materialization_run(run, reason):
+            failed += 1
+    return {"failed": failed}
+
+
+# procrastinate_jobs / procrastinate_events grow unbounded otherwise: ~144 janitor
+# jobs/day plus every materialization/teardown/rebuild/resume. Keep finalized jobs
+# for a week (forensics + idempotency headroom) then prune (arch #255, 10#0).
+JOB_RETENTION_HOURS = 24 * 7
+
+
+@app.periodic(cron="17 3 * * *")
+@task
+async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
+    """Delete old finalized procrastinate jobs (and their events) so the queue
+    tables don't grow without bound.
+
+    Only 'succeeded' jobs are pruned (delete_old_jobs' default — failed/cancelled/
+    aborted are retained): the reconciler treats an unknown job id as "can't tell,
+    don't touch", so pruning a job still referenced by an active ThreadJob/
+    MaterializationRun would strand it. The 7-day horizon is far longer than the
+    15-minute stale-job janitor's window, so any active row referencing a succeeded
+    job has long since been reconciled before its job becomes prunable (arch #255,
+    10#0, reconciler↔retention coupling).
+    """
+    try:
+        await app.job_manager.delete_old_jobs(nb_hours=JOB_RETENTION_HOURS)
+    except Exception:
+        logger.warning("prune_old_procrastinate_jobs: delete_old_jobs failed", exc_info=True)
+        return {"pruned": False}
+    logger.info(
+        "prune_old_procrastinate_jobs: pruned succeeded jobs older than %sh", JOB_RETENTION_HOURS
+    )
+    return {"pruned": True}
+
+
 async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
     """Read MaterializationRuns for this job and compose a user-facing summary."""
     runs = [
@@ -1267,22 +1374,16 @@ async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
 
 
 async def _build_agent_for_resume(workspace, user, conversation_id=None):
-    """Build the LangGraph agent + load oauth_tokens for runtime config.
-
-    Returns (agent, oauth_tokens).
-    """
+    """Build the LangGraph agent for the resume task."""
     mcp_tools = await get_mcp_tools()
-    oauth_tokens = await get_user_oauth_tokens(user)
     checkpointer = await ensure_checkpointer()
-    agent = await build_agent_graph(
+    return await build_agent_graph(
         workspace=workspace,
         user=user,
         checkpointer=checkpointer,
         mcp_tools=mcp_tools,
-        oauth_tokens=oauth_tokens,
         conversation_id=conversation_id,
     )
-    return agent, oauth_tokens
 
 
 def _resume_langfuse_span(*, thread_job_id: str, thread_id: str, status: str):
@@ -1326,7 +1427,7 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
     not a correctness invariant.
     """
     try:
-        agent, _ = await _build_agent_for_resume(
+        agent = await _build_agent_for_resume(
             thread_job.thread.workspace,
             thread_job.thread.user,
             conversation_id=str(thread_job.thread.id),
@@ -1395,19 +1496,15 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
-                # Expose ``cursor_state.last_id`` so the resume prompt can
-                # tell the agent "completed_works partially loaded up to
-                # id=X — the next materialization will continue from there"
-                # (issue #187).
+                # Expose cursor_state.last_id so the resume prompt can tell the
+                # agent where a partial load will continue from (issue #187).
                 cursor_state = info.get("cursor_state")
                 if isinstance(cursor_state, dict) and isinstance(cursor_state.get("last_id"), int):
                     detail["resume_last_id"] = cursor_state["last_id"]
                 sources_detail[source] = detail
-            # Surface a failed transform phase (issue #241, 04#4). The run state
-            # stays COMPLETED because transform failures are isolated from the
-            # raw load, but a failed transform means staging/derived tables are
-            # stale — the agent must disclose this rather than present them as
-            # fresh. ``result["transforms"]`` was previously never read here.
+            # Surface a failed transform phase (issue #241, 04#4): run state stays
+            # COMPLETED (transform failures are isolated from the raw load), but
+            # staging/derived tables are stale and the agent must disclose that.
             transforms = r.result.get("transforms")
             if isinstance(transforms, dict):
                 if transforms.get("status") == TransformationRunStatus.FAILED:
@@ -1443,12 +1540,10 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
     elif all_completed:
         status = "completed"
     elif any_partial:
-        # At least one tenant has some sources committed; the agent can answer
-        # questions about what loaded and must disclose what didn't.
         status = "partial"
     else:
-        # Runs still in flight (LOADING/TRANSFORMING) — surface as partial so
-        # the agent does not falsely claim "all data loaded".
+        # Runs still in flight (LOADING/TRANSFORMING) — partial so the agent
+        # does not falsely claim "all data loaded".
         status = "partial"
     return status, summary
 
@@ -1502,17 +1597,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         # Already resumed (idempotent retry); cancellation still gets one resume.
         return {"status": "already_terminal", "state": tj.state}
 
-    # CLAIMABLE_STATES excludes RUNNING because aupdate() returns the count of
-    # rows MATCHED (not changed). Including RUNNING would let a second
-    # concurrent invocation re-claim an already-running ThreadJob and produce
-    # a duplicate agent.ainvoke() against the same LangGraph thread.
-    # CANCELLED is intentionally included so the agent can compose a follow-up
-    # message even for cancelled materializations.
+    # Excludes RUNNING: aupdate() counts rows MATCHED not changed, so including
+    # RUNNING would let a concurrent invocation re-claim a running job and double
+    # agent.ainvoke(). CANCELLED is included so the agent can still follow up.
     CLAIMABLE_STATES = [ThreadJob.State.PENDING, ThreadJob.State.CANCELLED]
-    # Record started_at on the claim so the reconciler can measure staleness
-    # from the RESUME phase, not from created_at (which includes the full
-    # materialization + queue time). Without this a healthy long materialization
-    # (>10 min) followed by a fresh resume would be falsely flipped to FAILED.
+    # Record started_at so the reconciler measures staleness from the RESUME
+    # phase, not created_at (which includes the full materialization). See 02#9.
     resume_started_at = timezone.now()
     claimed = await ThreadJob.objects.filter(
         id=tj.id,
@@ -1521,30 +1611,30 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     if not claimed:
         logger.info("resume: ThreadJob %s already claimed; no-op", thread_job_id)
         return {"status": "already_claimed"}
-    # Keep the in-memory instance consistent for any later reads in this task.
     tj.started_at = resume_started_at
 
+    # _aggregate_materialization_state is the source of truth for status (not a
+    # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
+    # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    # No in-memory tj.state override: the prior `if tj.state == CANCELLED:
-    # status = "cancelled"` block used a snapshot taken *before* the CAS,
-    # which produced the wrong message when the user clicked Stop after
-    # runs had already finished — the data IS loaded but the agent said
-    # "cancelled" and the user's request was abandoned.
-    # _aggregate_materialization_state is now the source of truth: if any
-    # MaterializationRun is CANCELLED it returns status="cancelled"; if all
-    # COMPLETED it returns "completed". A user whose Stop click raced with
-    # completion sees the truthful "completed" — their data is intact.
+    auth_failure = any(
+        _looks_like_auth_failure(str(src.get("error")))
+        for tenant in summary
+        for src in (tenant.get("sources") or {}).values()
+    )
+    reauth_line = (
+        f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
+        f"user explicitly to reconnect the affected account."
+        if auth_failure
+        else ""
+    )
 
     workspace = tj.thread.workspace
     user = tj.thread.user
 
-    # Multi-tenant workspaces query through a WorkspaceViewSchema that UNION
-    # ALLs the per-tenant tables. The per-tenant runs can all complete while
-    # build_view_schema fails (a system-side defect), leaving the workspace
-    # with NO queryable surface. Detect that here so the agent is told the
-    # truth — re-running materialization cannot fix a view-schema build
-    # failure, so we must stop it from looping and tell the user a system fix
-    # is needed.
+    # Per-tenant runs can all complete while build_view_schema fails, leaving a
+    # multi-tenant workspace with NO queryable surface. Detect it so the agent is
+    # told the truth (re-running materialization can't fix a build failure).
     view_schema_failed = False
     view_schema_error = ""
     if status in ("completed", "partial"):
@@ -1568,11 +1658,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     if view_schema_failed:
         if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
-            # 07#9: the view schema is FAILED because a tenant schema it depends
-            # on was torn down (TTL/teardown), cascade-dropping the namespaced
-            # views — NOT because build_view_schema itself failed. Re-running
-            # materialization IS the fix here (it rebuilds the tenant data and the
-            # view schema), so the advice must invite a re-run, not forbid it.
+            # 07#9: FAILED from a cascade teardown, not a build defect — re-running
+            # materialization IS the fix, so the advice must invite a re-run.
             body = (
                 f"{SYSTEM_RESUME_MARKER} The per-tenant runs reported success, but "
                 f"the workspace query layer (the combined view schema that UNION "
@@ -1628,7 +1715,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"failed or skipped. A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
-            f"as if it were complete. Per-tenant: {summary}"
+            f"as if it were complete.{reauth_line} Per-tenant: {summary}"
         )
     elif status == "failed":
         body = (
@@ -1640,7 +1727,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"explicitly verify their provenance and last successful materialization "
             f"time. Suggest checking the workspace connection only when the actual "
             f"error points to authentication or authorization. Do NOT silently re-run "
-            f"materialization. Per-tenant: {summary}"
+            f"silently re-run materialization.{reauth_line} Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (
@@ -1682,9 +1769,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     start = time.monotonic()
     try:
-        agent, oauth_tokens = await _build_agent_for_resume(
-            workspace, user, conversation_id=str(tj.thread.id)
-        )
+        agent = await _build_agent_for_resume(workspace, user, conversation_id=str(tj.thread.id))
         input_state = {
             "messages": [HumanMessage(content=body)],
             "workspace_id": str(workspace.id),
@@ -1695,7 +1780,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         config = {
             "configurable": {"thread_id": str(tj.thread.id)},
             "recursion_limit": settings.AGENT_RESUME_RECURSION_LIMIT,
-            "oauth_tokens": oauth_tokens,
         }
         with _resume_langfuse_span(
             thread_job_id=thread_job_id,
@@ -1757,10 +1841,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         data={"thread_job_id": str(tj.id), "elapsed_s": time.monotonic() - start},
     )
 
-    # Bump Thread.updated_at so the sidebar's "newer than last_viewed" check
-    # fires the green-dot indicator after a successful background resume.
-    # Isolated try/except: a DB failure here must not contaminate the
-    # success path (the agent message was already persisted via ainvoke).
+    # Bump Thread.updated_at so the sidebar's green-dot indicator fires after a
+    # background resume. Isolated: a failure here must not contaminate the success
+    # path (the agent message was already persisted via ainvoke).
     try:
         await Thread.objects.filter(id=tj.thread_id).aupdate(updated_at=timezone.now())
     except Exception:
@@ -1790,8 +1873,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
         if view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
-            # 07#9: cascade teardown, not a build defect — re-running
-            # materialization IS the fix, so the summary must say so.
+            # 07#9: cascade teardown — re-running materialization IS the fix.
             error_summary = (
                 "The workspace query layer (view schema) is unavailable because a "
                 f"tenant schema it depends on was torn down: {view_schema_error}. "
@@ -1818,12 +1900,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
             if not error_summary:
                 error_summary = "Materialization did not complete successfully."
-    # CAS-scoped to state=RUNNING (the value we set when claiming the job).
-    # If a concurrent cancel landed during agent.ainvoke (which can take 30s+),
-    # the row is already CANCELLED and we must NOT clobber it back to a
-    # success terminal. The filter returns zero rows; we then re-read the
-    # actual persisted state so the return value reflects reality, not the
-    # value we *would have* written.
+    # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
+    # row CANCELLED, so this matches zero rows rather than clobbering it back to a
+    # success terminal; we then re-read the actual persisted state below.
     updated = await ThreadJob.objects.filter(
         id=tj.id,
         state=ThreadJob.State.RUNNING,

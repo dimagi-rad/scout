@@ -13,12 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 async def _check_database() -> None:
-    """Probe the platform database with a trivial query.
+    """Probe the platform database with ``SELECT 1``; raises on failure.
 
-    Raises on any failure so the caller surfaces a non-200 readiness response.
-    ``SELECT 1`` on the default connection is an inherently-sync DB operation
-    (not an async-ORM query), so wrapping it in ``sync_to_async`` is the correct
-    bridge here rather than an async ORM call.
+    A raw-cursor query is an inherently-sync DB op (not an async-ORM query), so
+    ``sync_to_async`` is the correct bridge here.
     """
 
     @sync_to_async
@@ -40,13 +38,9 @@ async def _check_queue() -> None:
 
 
 async def health_check(request):
-    """Readiness check: verify the platform DB and the task queue are reachable.
-
-    Returns 200 only when every dependency probe succeeds; otherwise 503 with a
-    per-check breakdown. A static 200 (the old behavior) let a crash-looping
-    container with a dead DB connection or unreachable queue report healthy,
-    which is exactly the blind spot finding 08#7 (arch #257) calls out. Load
-    balancers and the deploy pipeline can gate on a real signal now.
+    """Readiness check: 200 only when every dependency probe succeeds, else 503
+    with a per-check breakdown. A static 200 let a container with a dead DB or
+    unreachable queue report healthy — the blind spot in arch #257, finding 08#7.
     """
     checks: dict[str, str] = {}
     healthy = True

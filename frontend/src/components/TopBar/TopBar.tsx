@@ -1,4 +1,3 @@
-// frontend/src/components/TopBar/TopBar.tsx
 import { useState } from "react"
 import type { ReactNode } from "react"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"

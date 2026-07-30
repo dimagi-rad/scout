@@ -1,14 +1,9 @@
 """
 Learning tool for the Scout data agent platform.
 
-This module provides a factory function to create a tool that allows the agent
-to save discovered corrections and patterns as AgentLearning records. These
-learnings are automatically injected into future prompts via the KnowledgeRetriever,
-enabling the agent to improve over time without retraining.
-
-This implements the "GPU-poor continuous learning" pattern described in the
-architecture - the agent learns from its mistakes and shares that knowledge
-across all future conversations.
+Factory for a tool that saves discovered corrections as AgentLearning records,
+which KnowledgeRetriever injects into future prompts so the agent improves
+without retraining (the "GPU-poor continuous learning" pattern).
 """
 
 from __future__ import annotations
@@ -27,7 +22,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Valid categories for agent learnings
 VALID_CATEGORIES = frozenset(
     {
         "type_mismatch",
@@ -127,7 +121,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
             - message: Confirmation or error message
             - tables_affected: List of tables the learning applies to
         """
-        # Validate inputs
         if not description or len(description.strip()) < 20:
             return {
                 "status": "error",
@@ -154,15 +147,11 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 "tables_affected": [],
             }
 
-        # Validate tables against a LIVE source of known table names.
-        #
-        # The previous implementation read the dead ``Workspace.data_dictionary``
-        # field, which is never written, so ``known_tables`` was always empty and
-        # this validation was permanently skipped (arch #262, finding 05#9). We
-        # instead consult the logical table names the knowledge layer actually
-        # tracks (TableKnowledge is keyed by logical table name after #262's
-        # 01#5 fix). This is a soft warning only — we never reject the learning,
-        # since a table may be valid without yet having an annotation row.
+        # Validate tables against a LIVE source: TableKnowledge's logical table
+        # names. The old code read the never-written ``Workspace.data_dictionary``,
+        # so this check was always skipped (arch #262, finding 05#9; TableKnowledge
+        # keyed by logical name after 01#5). Soft warning only — never rejects, as
+        # a table may be valid without an annotation row yet.
         known_tables = {
             name
             async for name in TableKnowledge.objects.filter(workspace=workspace).values_list(
@@ -178,9 +167,7 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                     unknown_tables,
                     list(known_tables)[:5],
                 )
-                # Don't fail - the table might be valid but not yet annotated.
 
-        # Check for duplicate learnings (same description for same tables)
         existing = await AgentLearning.objects.filter(
             workspace=workspace,
             is_active=True,
@@ -188,7 +175,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
         ).afirst()
 
         if existing:
-            # Update the existing learning instead of creating a duplicate
             existing.confidence_score = min(1.0, existing.confidence_score + 0.1)
             existing.times_applied += 1
             await existing.asave(update_fields=["confidence_score", "times_applied"])
@@ -207,7 +193,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 "tables_affected": existing.applies_to_tables,
             }
 
-        # Create the new learning
         try:
             learning = await AgentLearning.objects.acreate(
                 workspace=workspace,
@@ -246,7 +231,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 "tables_affected": [],
             }
 
-    # Set the tool name explicitly
     save_learning.name = "save_learning"
 
     return save_learning

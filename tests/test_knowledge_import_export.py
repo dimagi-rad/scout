@@ -163,3 +163,22 @@ def test_import_duplicate_titles_in_zip_does_not_500(auth_client, workspace):
     buf = _zip({"dup.md": render_frontmatter("Dup", [], "New body")})
     resp = _import(auth_client, workspace, buf)
     assert resp.status_code != 500
+
+
+# ── decompressed-size (zip-bomb) guard ───────────────────────────────────────
+
+
+@pytest.mark.django_db
+def test_import_rejects_decompression_bomb(auth_client, workspace):
+    """A small zip that decompresses to a huge payload is rejected, not loaded
+    verbatim into the (re-billed-every-call) knowledge context (arch #254, 01#4).
+    """
+    # ~50 MB of highly-compressible content in a tiny zip member.
+    bomb = render_frontmatter("Bomb", [], "A" * (50 * 1024 * 1024))
+    buf = _zip({"bomb.md": bomb})
+
+    resp = _import(auth_client, workspace, buf)
+
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+    # Nothing was imported.
+    assert KnowledgeEntry.objects.filter(workspace=workspace).count() == 0

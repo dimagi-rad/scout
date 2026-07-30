@@ -16,7 +16,6 @@ export function SchemaTree({ dictionary, selectedTable, onSelectTable }: SchemaT
 
   const schemas = useMemo(() => dictionary?.schemas ?? {}, [dictionary?.schemas])
 
-  // Filter tables based on search query
   const filteredSchemas = useMemo(() => {
     if (!searchQuery.trim()) {
       return schemas

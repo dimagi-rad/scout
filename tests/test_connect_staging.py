@@ -49,6 +49,19 @@ def connect_tenant(db):
 
 
 @pytest.mark.django_db(transaction=True)
+def test_stg_visits_selects_only_real_raw_visits_columns(connect_tenant):
+    """Base columns must match the raw_visits DDL (materializer.py): the loader
+    emits `username`, not `user_id`. Guards against the mismatch that made every
+    stg_visits build fail with 'column "user_id" does not exist'."""
+    assets = generate_connect_assets(FORM_DEFS, connect_tenant)
+    sql = {a.name: a for a in assets}["stg_visits"].sql_content
+
+    assert "username" in sql
+    # user_id is not a raw_visits column and must never be selected.
+    assert "user_id" not in sql
+
+
+@pytest.mark.django_db(transaction=True)
 def test_generates_visit_staging_with_typed_columns(connect_tenant):
     assets = generate_connect_assets(FORM_DEFS, connect_tenant)
     by_name = {a.name: a for a in assets}

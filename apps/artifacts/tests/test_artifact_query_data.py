@@ -1,10 +1,12 @@
-"""Tests for ArtifactQueryDataView semantic live-data execution."""
+"""Tests for ArtifactQueryDataView — live query execution via MCP service."""
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth.models import update_last_login
 from django.contrib.auth.signals import user_logged_in
+from django.core.cache import cache
 from django.test import AsyncClient
 
 from apps.artifacts.models import Artifact, ArtifactType
@@ -281,3 +283,63 @@ async def test_individual_query_failure_continues(live_artifact, member_client, 
     assert data["queries"][0]["name"] == "submissions"
     assert data["queries"][1]["name"] == "daily"
     assert "error" not in data["queries"][1]
+
+
+# parallel execution + result caching (arch #254, finding 09#9)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_semantic_queries_run_concurrently(live_artifact, member_client, membership):
+    """The semantic queries execute concurrently, not strictly serially (09#9).
+
+    Each execute_query waits on a shared barrier: if they ran serially the
+    second would never start until the first returned, and the barrier (which
+    needs both) would deadlock. Completing proves they overlap.
+    """
+    cache.clear()
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
+
+    started = asyncio.Event()
+    in_flight = {"n": 0, "max": 0}
+
+    async def slow_execute(workspace, query_spec, *, user_id):
+        in_flight["n"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["n"])
+        # Yield so the other coroutine can start before we return.
+        await asyncio.sleep(0.05)
+        in_flight["n"] -= 1
+        started.set()
+        return MOCK_DAILY_RESULT if query_spec.get("time_dimension") else MOCK_SUBMISSIONS_RESULT
+
+    with patch("apps.artifacts.views.run_semantic_query", new=slow_execute):
+        response = await member_client.get(url)
+
+    assert response.status_code == 200
+    data = response.json()
+    # Both queries overlapped at least once → ran concurrently.
+    assert in_flight["max"] >= 2
+    # Results are still assembled in semantic_queries order.
+    assert [q["name"] for q in data["queries"]] == ["submissions", "daily"]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_query_results_cached_across_opens(live_artifact, member_client, membership):
+    """A second open within the cache TTL must not re-execute the semantic
+    queries (09#9 — live artifacts re-ran every query on every open)."""
+    cache.clear()
+    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
+
+    exec_mock = AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT])
+    with patch("apps.artifacts.views.run_semantic_query", new=exec_mock):
+        first = await member_client.get(url)
+        calls_after_first = exec_mock.await_count
+        second = await member_client.get(url)
+        calls_after_second = exec_mock.await_count
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["queries"] == second.json()["queries"]
+    # No re-execution on the cached second open.
+    assert calls_after_second == calls_after_first

@@ -1,9 +1,4 @@
-"""
-Recipe Runner service for the Scout data agent platform.
-
-Executes a recipe by rendering its prompt template with variable values,
-sending it to the agent, and collecting results.
-"""
+"""Executes a recipe: renders its prompt with variable values, runs the agent, collects results."""
 
 from __future__ import annotations
 
@@ -15,7 +10,7 @@ from django.utils import timezone
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.agents.graph.base import build_agent_graph
-from apps.agents.mcp_client import get_mcp_tools, get_user_oauth_tokens
+from apps.agents.mcp_client import get_mcp_tools
 from apps.recipes.models import Recipe, RecipeRun, RecipeRunStatus
 from apps.workspaces.models import Workspace
 
@@ -42,16 +37,7 @@ class VariableValidationError(RecipeRunnerError):
 
 
 class RecipeRunner:
-    """
-    Executes a recipe by sending its rendered prompt to the agent.
-
-    The runner:
-    1. Validates that all required variables are provided
-    2. Creates a RecipeRun record to track execution
-    3. Renders the prompt template with variable values
-    4. Sends the prompt to the agent and captures results
-    5. Updates the RecipeRun with results and final status
-    """
+    """Executes a recipe by sending its rendered prompt to the agent."""
 
     def __init__(
         self,
@@ -76,7 +62,6 @@ class RecipeRunner:
         # materialization tool for MaterializationRun traceability.
         self._job_id: int | None = job_id
         self._thread_id: str = ""
-        self._oauth_tokens: dict = {}
 
     @staticmethod
     def validate_and_default(recipe: Recipe, variable_values: dict[str, Any]) -> dict[str, Any]:
@@ -116,13 +101,11 @@ class RecipeRunner:
             # SynchronousOnlyOperation under async (root of Sentry #276).
             workspace = await Workspace.objects.aget(id=self.recipe.workspace_id)
             mcp_tools = await get_mcp_tools()
-            self._oauth_tokens = await get_user_oauth_tokens(self.user)
             self._graph = await build_agent_graph(
                 workspace=workspace,
                 user=self.user,
                 checkpointer=None,
                 mcp_tools=mcp_tools,
-                oauth_tokens=self._oauth_tokens,
                 conversation_id=self._thread_id or None,
                 # A recipe is a HEADLESS run: no chat Thread, no checkpointer, no
                 # async-resume path. interactive=False gives the agent the
@@ -180,8 +163,7 @@ class RecipeRunner:
         """Execute the recipe asynchronously."""
         self.validate_variables()
 
-        # The run is always created by the caller (the run_recipe task); mark it
-        # RUNNING as execution begins.
+        # The run is always created by the caller (the run_recipe task).
         self._run.status = RecipeRunStatus.RUNNING
         self._run.started_at = timezone.now()
         await self._run.asave(update_fields=["status", "started_at"])
@@ -192,7 +174,6 @@ class RecipeRunner:
         config = {
             "configurable": {"thread_id": self._thread_id},
             "recursion_limit": 50,
-            "oauth_tokens": self._oauth_tokens,
         }
 
         prompt = self.recipe.render_prompt(self.variable_values)

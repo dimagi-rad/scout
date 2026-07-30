@@ -246,7 +246,6 @@ async def langgraph_to_ui_stream(
     # the parent tool output is emitted.
     pending_subagent_events: list[dict[str, Any]] = []
 
-    # Preamble
     yield _sse({"type": "start"})
     yield _sse({"type": "start-step"})
 
@@ -297,7 +296,6 @@ async def langgraph_to_ui_stream(
 
             event_type = event.get("event")
 
-            # ── on_chat_model_stream ───────────────────────────────────────────
             if event_type == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")
                 if not chunk or not hasattr(chunk, "content") or not chunk.content:
@@ -343,7 +341,6 @@ async def langgraph_to_ui_stream(
                         text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": t})
 
-            # ── on_tool_start ──────────────────────────────────────────────────
             elif event_type == "on_tool_start":
                 # Emit the loading-state input part LIVE so loading affordances
                 # (and run_materialization's Stop/progress) can render before
@@ -386,7 +383,6 @@ async def langgraph_to_ui_stream(
                     }
                 )
 
-            # ── on_tool_end ────────────────────────────────────────────────────
             elif event_type == "on_tool_end":
                 run_id = event.get("run_id")
                 if run_id and run_id in tool_calls_processed:
@@ -469,7 +465,6 @@ async def langgraph_to_ui_stream(
                     }
                 )
 
-            # ── escalation node output ─────────────────────────────────────────
             elif event_type == "on_chain_end" and event.get("name") == "escalate":
                 # The terminal ``escalate`` node returns a hardcoded AIMessage
                 # rather than calling the LLM, so it emits no on_chat_model_stream
@@ -546,13 +541,15 @@ async def langgraph_to_ui_stream(
             parent_pump.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await parent_pump
+        # Close the generator on every exit so an abandoned run and its
+        # upstream model call are cancelled instead of waiting for GC.
+        with contextlib.suppress(Exception):
+            await event_stream.aclose()
 
-    # Close any open parts
     if reasoning_started:
         yield _sse({"type": "reasoning-end", "id": reasoning_id})
     if text_started:
         yield _sse({"type": "text-end", "id": text_id})
 
-    # Finish markers
     yield _sse({"type": "finish-step"})
     yield _sse({"type": "finish", "finishReason": "stop"})

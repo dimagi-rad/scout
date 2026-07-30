@@ -1,5 +1,3 @@
-// frontend/src/lib/relativeTime.ts
-
 const SECOND = 1
 const MINUTE = 60
 const HOUR = 60 * MINUTE

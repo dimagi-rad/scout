@@ -5,9 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-import requests
 
-from mcp_server.loaders.ocs_base import OCSAuthError
+from mcp_server.loaders.ocs_base import OCSAuthError, OCSExportError
 from mcp_server.loaders.ocs_experiments import OCSExperimentLoader
 from mcp_server.loaders.ocs_messages import OCSMessageLoader
 from mcp_server.loaders.ocs_participants import OCSParticipantLoader
@@ -277,7 +276,9 @@ def test_participant_loader_queries_chatbot_scoped_endpoint():
         list(loader.load_pages())
     args, kwargs = mock_get.call_args
     assert args[0] == f"{BASE_URL}/api/participants"
-    assert kwargs["params"] == {"experiment": "exp-1"}
+    # Scoped to the experiment (the security-relevant filter); page_size is a
+    # perf knob (arch #254, 13#1).
+    assert kwargs["params"]["experiment"] == "exp-1"
     # Guard against a regression to the ignored param name.
     assert "chatbot" not in kwargs["params"]
 
@@ -302,24 +303,23 @@ def test_experiment_loader_raises_auth_error_on_403():
 
 
 def test_experiment_loader_raises_on_server_error():
-    """A 5xx (no retry policy in OCS) propagates via raise_for_status rather
-    than being swallowed into an empty page."""
+    """A 5xx that survives the retry policy surfaces as a typed OCSExportError
+    rather than being swallowed into an empty page (arch #252, finding 03#6)."""
     loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     resp = MagicMock(status_code=500)
-    resp.raise_for_status.side_effect = requests.HTTPError("500 Server Error")
     with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(requests.HTTPError):
+        with pytest.raises(OCSExportError):
             list(loader.load_pages())
 
 
 def test_experiment_loader_raises_on_malformed_json():
-    """A 200 with a non-JSON body must raise (ValueError from .json()), not
-    yield a partial/empty row set."""
+    """A 200 with a non-JSON body must raise OCSExportError (wrapping the
+    ValueError from .json()), not yield a partial/empty row set."""
     loader = OCSExperimentLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
     resp = MagicMock(status_code=200)
     resp.json.side_effect = ValueError("No JSON object could be decoded")
     with patch.object(loader._session, "get", return_value=resp):
-        with pytest.raises(ValueError):
+        with pytest.raises(OCSExportError):
             list(loader.load_pages())
 
 
@@ -331,3 +331,51 @@ def test_session_loader_raises_auth_error_on_401():
     with patch.object(loader._session, "get", return_value=resp):
         with pytest.raises(OCSAuthError):
             list(loader.load_pages())
+
+
+# ── page_size + first-page count (arch #254, finding 13#1) ───────────────────
+
+
+def _captured_params(loader, page_json):
+    """Run load_pages once and return the params dict sent on the first request."""
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = page_json
+    captured = {}
+
+    def _get(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return resp
+
+    with patch.object(loader._session, "get", side_effect=_get):
+        list(loader.load_pages())
+    return captured["params"]
+
+
+def test_session_loader_requests_max_page_size():
+    """OCS list walks default to page_size=100 (max 1500); set the max to cut
+    list-request volume ~10-15x (finding 13#1)."""
+    loader = OCSSessionLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    params = _captured_params(loader, {"results": [], "next": None})
+    assert params.get("page_size") == 1500
+
+
+def test_participant_loader_requests_max_page_size():
+    loader = OCSParticipantLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    params = _captured_params(loader, {"results": [], "next": None})
+    assert params.get("page_size") == 1500
+
+
+def test_participant_loader_yields_first_page_count():
+    """ocs_participants must surface the first-page 'count' (upstream now provides
+    it) instead of always yielding None — its docstring was stale (finding 13#1)."""
+    loader = OCSParticipantLoader(experiment_id="exp-1", credential=CREDENTIAL, base_url=BASE_URL)
+    page = MagicMock(status_code=200)
+    page.json.return_value = {
+        "count": 42,
+        "results": [{"id": "p1", "identifier": "part1", "name": "John", "platform": "api"}],
+        "next": None,
+    }
+    with patch.object(loader._session, "get", return_value=page):
+        pages = list(loader.load_pages())
+    assert [total for _, total in pages] == [42]

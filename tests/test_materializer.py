@@ -88,6 +88,11 @@ class TestRunPipeline:
         assert result["status"] == "completed"
         assert result["run_id"] == "run-1"
         assert "cases" in result["sources"]
+        # arch #255, 04#0: completion refreshes last_accessed_at to ~now so a long
+        # load does not persist the stale provision-time snapshot and rewind the TTL.
+        assert isinstance(schema.last_accessed_at, timezone.datetime)
+        assert timezone.now() - schema.last_accessed_at < timedelta(seconds=30)
+        schema.save.assert_called_with(update_fields=["state", "last_accessed_at"])
 
     def test_progress_updater_called_full_sequence(self):
         """Progress updater must be called for each phase transition with a

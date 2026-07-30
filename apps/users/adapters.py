@@ -52,7 +52,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             return ""
 
     def serialize_instance(self, instance):
-        """Encrypt token fields before serialization (storage)."""
         data = super().serialize_instance(instance)
         if isinstance(instance, SocialToken):
             if data.get("token"):
@@ -62,7 +61,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
         return data
 
     def deserialize_instance(self, model, data):
-        """Decrypt token fields after deserialization (retrieval)."""
         if model is SocialToken:
             data = dict(data)  # don't mutate the original
             if data.get("token"):
@@ -93,8 +91,6 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
 
         allowed_lower = [d.lower() for d in allowed]
         email = (sociallogin.user.email or "").strip().lower()
-        # A configured allow-list means this provider is restricted; a no-email
-        # login can't be confirmed to satisfy it, so reject rather than bypass.
         domain = email.rpartition("@")[2] if email else ""
         if domain and domain in allowed_lower:
             return
@@ -107,6 +103,23 @@ class EncryptingSocialAccountAdapter(DefaultSocialAccountAdapter):
             f"Login using '{provider_name}' is restricted to {', '.join('@' + d for d in allowed_lower)} addresses.",
         )
         raise ImmediateHttpResponse(redirect("account_login"))
+
+    def get_connect_redirect_url(self, request, socialaccount):
+        """Where allauth sends the browser after a ``?process=connect`` round-trip.
+
+        allauth's default reverses ``socialaccount_connections``, a name that
+        lives in ``allauth.socialaccount.urls`` — which Scout deliberately does
+        NOT mount (see apps/users/allauth_urls.py). That reverse raises
+        NoReverseMatch and, because allauth evaluates it eagerly (before the
+        ``or sociallogin.get_redirect_url(...)`` fallback), the connect flow 500s
+        even when the SPA passes a valid ``?next=`` (prod SCOUT-DJANGO-25).
+
+        Point at the SPA connections page instead, honoring any mount prefix
+        (FORCE_SCRIPT_NAME → SCRIPT_NAME in request meta) the same way the
+        artifact sandbox does.
+        """
+        script_name = request.META.get("SCRIPT_NAME", "").rstrip("/")
+        return f"{script_name}/settings/connections"
 
 
 def encrypt_credential(plaintext: str) -> str:

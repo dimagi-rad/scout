@@ -38,7 +38,6 @@ class TransformationAssetViewSet(viewsets.ModelViewSet):
             models.Q(tenant_id__in=tenant_ids) | models.Q(workspace_id__in=workspace_ids)
         )
 
-        # Optional filters
         scope = self.request.query_params.get("scope")
         if scope:
             qs = qs.filter(scope=scope)

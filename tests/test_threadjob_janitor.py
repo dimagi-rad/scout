@@ -247,7 +247,7 @@ async def test_janitor_persists_synthetic_message_on_stuck_running():
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume,
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
-            new=AsyncMock(return_value=(mock_agent, {})),
+            new=AsyncMock(return_value=mock_agent),
         ),
     ):
         resume.defer_async = AsyncMock(return_value=None)

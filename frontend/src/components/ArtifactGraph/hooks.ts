@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react"
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from "react"
 
 import { StoryEngine } from "./engine"
 import {
@@ -35,16 +35,13 @@ const EMPTY_RESOLVED: ResolvedBlockInputs = {
 }
 
 export function useBlockInputs(engine: StoryEngineApi, block: StoryBlock): ResolvedBlockInputs {
-  const bindings = block.inputs ?? {}
-  const bindingsKey = JSON.stringify(bindings)
+  const bindings = useMemo(() => block.inputs ?? {}, [block.inputs])
   const cache = useRef<ResolvedBlockInputs | null>(null)
-  const bindingsRef = useRef(bindings)
-  bindingsRef.current = bindings
 
   const subscribe = useCallback(
     (callback: () => void) => {
       cache.current = null
-      const refs = Object.values(bindingsRef.current)
+      const refs = Object.values(bindings)
         .filter(isRefBinding)
         .map((binding) => binding.$ref)
       const unsubscribes = refs.map((ref) =>
@@ -55,16 +52,16 @@ export function useBlockInputs(engine: StoryEngineApi, block: StoryBlock): Resol
       )
       return () => unsubscribes.forEach((unsubscribe) => unsubscribe())
     },
-    [engine, bindingsKey],
+    [bindings, engine],
   )
 
   const getSnapshot = useCallback(() => {
-    if (Object.keys(bindingsRef.current).length === 0) return EMPTY_RESOLVED
+    if (Object.keys(bindings).length === 0) return EMPTY_RESOLVED
     if (!cache.current) {
-      cache.current = computeResolvedInputs(engine, bindingsRef.current)
+      cache.current = computeResolvedInputs(engine, bindings)
     }
     return cache.current
-  }, [engine, bindingsKey])
+  }, [bindings, engine])
 
   return useSyncExternalStore(subscribe, getSnapshot)
 }
@@ -80,13 +77,9 @@ export function useStoryEngine(
   ctx: StoryRuntimeContext,
   doc: StoryDoc,
 ): StoryEngine | null {
-  const [engine, setEngine] = useState<StoryEngine | null>(null)
+  const engine = useMemo(() => new StoryEngine(registry, ctx), [registry, ctx])
 
-  useEffect(() => {
-    const created = new StoryEngine(registry, ctx)
-    setEngine(created)
-    return () => created.destroy()
-  }, [registry, ctx])
+  useEffect(() => () => engine.destroy(), [engine])
 
   useEffect(() => {
     engine?.loadDoc(doc)

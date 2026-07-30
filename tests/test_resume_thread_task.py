@@ -101,7 +101,7 @@ async def test_resume_appends_system_message_and_invokes_agent():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
             None,
@@ -119,11 +119,9 @@ async def test_resume_appends_system_message_and_invokes_agent():
     assert messages[0].content.startswith("[__system_resume__]")
     assert "completed" in messages[0].content
     # Pin the runtime config's REAL, consumed contract: the checkpointer routes
-    # the resume to the right conversation via configurable.thread_id. (We do not
-    # assert on `oauth_tokens` — it is currently dead plumbing: build_agent_graph
-    # accepts the kwarg and the resume forwards it into config, but nothing in the
-    # graph reads it. Pinning it would codify dead plumbing as contract — 12#0
-    # item 4.)
+    # the resume to the right conversation via configurable.thread_id. The dead
+    # OAuth-token plumbing that used to ride along in this config was removed
+    # (arch #253, finding 01#0).
     config = call_args.args[1]
     assert config["configurable"]["thread_id"] == str(thread.id)
 
@@ -167,7 +165,7 @@ async def test_resume_failed_or_cancelled_prompt_is_honest(
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -245,7 +243,7 @@ async def test_resume_no_runs_still_invokes_agent_with_explanation():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -297,7 +295,7 @@ async def test_resume_partial_maps_to_failed():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -331,7 +329,7 @@ async def test_resume_semantic_build_failure_maps_to_failed():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -376,7 +374,7 @@ async def test_resume_semantic_stale_appends_note_and_stays_completed():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -424,7 +422,7 @@ async def test_resume_invokes_agent_for_cancelled_threadjob():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
             None,
@@ -477,7 +475,7 @@ async def test_resume_bumps_thread_updated_at_on_success():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -533,7 +531,7 @@ async def test_resume_does_not_clobber_concurrent_cancel_during_ainvoke():
     mock_agent.ainvoke = AsyncMock(side_effect=flip_to_cancelled_then_return)
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -585,7 +583,7 @@ async def test_resume_does_not_force_cancelled_status_when_runs_completed():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -648,7 +646,7 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -761,7 +759,7 @@ async def test_resume_cas_rejects_already_running_threadjob():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(
             None,
@@ -805,7 +803,7 @@ async def test_resume_recursion_limit_is_lowered_from_default():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -848,7 +846,7 @@ async def test_ainvoke_timeout_marks_failed_and_persists_message():
 
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -887,7 +885,7 @@ async def test_ainvoke_exception_marks_failed_and_persists_message():
 
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -921,7 +919,7 @@ async def test_successful_ainvoke_logs_bookends(caplog):
     caplog.set_level(logging.INFO, logger="apps.workspaces.tasks")
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -956,7 +954,7 @@ async def test_resume_emits_langfuse_span_on_each_outcome():
     with (
         patch(
             "apps.workspaces.tasks._build_agent_for_resume",
-            AsyncMock(return_value=(mock_agent, {})),
+            AsyncMock(return_value=mock_agent),
         ),
         patch(
             "apps.workspaces.tasks._resume_langfuse_span",
@@ -1009,7 +1007,7 @@ async def test_resume_agent_failure_sets_error_summary():
     mock_agent.ainvoke = AsyncMock(side_effect=RuntimeError("LLM 503"))
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1069,7 +1067,7 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1106,7 +1104,7 @@ async def test_resume_no_runs_sets_helpful_error_summary():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1181,7 +1179,7 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1222,7 +1220,7 @@ async def test_resume_cascade_teardown_view_schema_advises_rerun():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 
@@ -1257,7 +1255,7 @@ async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
         "apps.workspaces.tasks._build_agent_for_resume",
-        AsyncMock(return_value=(mock_agent, {})),
+        AsyncMock(return_value=mock_agent),
     ):
         result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
 

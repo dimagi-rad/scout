@@ -2,14 +2,8 @@
 Langfuse tracing helper for the Scout agent.
 
 Provides a LangChain CallbackHandler and a trace context manager for per-request
-session/user attribution. Returns None / nullcontext gracefully when Langfuse
-environment variables are absent.
-
-Langfuse v3 architecture:
-- Credentials are passed to Langfuse() to initialize the SDK global client.
-- CallbackHandler() hooks into LangChain/LangGraph pipelines for automatic tracing.
-- propagate_attributes() is a context manager that stamps session_id/user_id onto
-  every span created within its scope.
+session/user attribution. Returns None / nullcontext when Langfuse env vars are
+absent, so tracing is fully optional.
 """
 
 from __future__ import annotations
@@ -37,17 +31,10 @@ def get_langfuse_callback(
     user_id: str,
     metadata: dict | None = None,
 ):
-    """
-    Create a Langfuse CallbackHandler for LangGraph tracing.
+    """Create a Langfuse CallbackHandler for LangGraph's config["callbacks"].
 
-    Initializes the Langfuse global client with credentials from Django settings,
-    then returns a CallbackHandler ready to pass into LangGraph's config["callbacks"].
-
-    Call langfuse_trace_context() alongside this to attach session_id/user_id to
-    the trace — use it as a context manager wrapping the astream_events call.
-
-    Returns None when LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY, or LANGFUSE_BASE_URL
-    are not configured, so Langfuse is fully optional.
+    Pair with langfuse_trace_context() (wrapping the astream_events call) to attach
+    session_id/user_id. Returns None when Langfuse credentials are unconfigured.
     """
     secret_key, public_key, host = _get_langfuse_settings()
     if not all([secret_key, public_key, host]):
@@ -70,13 +57,9 @@ def langfuse_trace_context(
     user_id: str,
     metadata: dict | None = None,
 ) -> contextlib.AbstractContextManager:
-    """
-    Return a context manager that stamps session_id/user_id onto Langfuse traces.
-
-    Use this to wrap the astream_events call in chat_view so every span within
-    that streaming response is tagged with the correct session and user.
-
-    Returns a no-op nullcontext when Langfuse is not configured.
+    """Context manager that stamps session_id/user_id onto every Langfuse span in
+    its scope. Wrap the astream_events call with it. Returns a no-op nullcontext
+    when Langfuse is not configured.
     """
     secret_key, public_key, host = _get_langfuse_settings()
     if not all([secret_key, public_key, host]):
