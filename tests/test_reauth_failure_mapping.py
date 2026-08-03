@@ -59,8 +59,6 @@ def test_summary_omits_reauth_guidance_for_non_auth_failure():
     assert "reconnect" not in summary.lower()
 
 
-# --- 403 must NOT be routed to the reauth advice (#372) --------------------
-
 _DENIED_ERROR = (
     "OCSAccessDeniedError: Your Open Chat Studio account no longer has access to "
     "chatbot 514e2e67 (HTTP 403). Your sign-in is still valid, so reconnecting "
