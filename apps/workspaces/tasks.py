@@ -67,21 +67,42 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Substrings that mark a per-source failure as an expired/revoked-credential
-# problem so the user is told to reconnect rather than just "check the
-# connection" (arch #252, finding 14#4). Loader auth errors carry both the
-# class-name suffix and the actionable "reconnect your ... account" guidance;
-# an HTTP 401 anywhere on the seam is the underlying signal.
-_AUTH_FAILURE_MARKERS = ("AuthError", "reconnect your", "HTTP 401")
+# Substrings that mark a per-source failure as a credential problem so the user
+# gets actionable advice rather than just "check the connection" (arch #252,
+# finding 14#4). Matching is on the serialized string because _summarize_error
+# persists "{ClassName}: {message}" into MaterializationRun.result — the class
+# name is the half that survives the JSON round-trip, so it anchors each set.
+_AUTH_FAILURE_MARKERS = ("AuthError", "TokenExpiredError", "reconnect your", "HTTP 401")
+_ACCESS_DENIED_MARKERS = ("AccessDeniedError", "HTTP 403")
 _REAUTH_GUIDANCE = (
     "This looks like an expired or revoked sign-in — reconnect the affected "
     "account (Settings → Connections) and re-run materialization."
 )
+_ACCESS_DENIED_GUIDANCE = (
+    "This is access that was removed upstream, not an expired sign-in — "
+    "reconnecting will NOT restore it, because it mints a token with exactly the "
+    "same access. Ask an admin on the affected provider to restore access, or "
+    "remove that data source from the workspace."
+)
+
+
+def _looks_like_access_denied(error: str | None) -> bool:
+    """True when a per-source error reads as an upstream 403 (access removed)."""
+    if not error:
+        return False
+    return any(marker in error for marker in _ACCESS_DENIED_MARKERS)
 
 
 def _looks_like_auth_failure(error: str | None) -> bool:
-    """True when a per-source error string reads as a credential/401 failure."""
+    """True when a per-source error reads as a dead *credential* (401).
+
+    A 403 is deliberately excluded. There the credential is valid, so reconnect
+    guidance is not merely unhelpful but wrong — it mints an identically-scoped
+    token that fails the same way, and the user loops (#372).
+    """
     if not error:
+        return False
+    if _looks_like_access_denied(error):
         return False
     return any(marker in error for marker in _AUTH_FAILURE_MARKERS)
 
@@ -158,8 +179,12 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         states = sorted({r.state for r in runs})
         return f"Materialization {'/'.join(states)}."
     summary = ". ".join(parts) + "."
+    # Not mutually exclusive: one tenant's token can be dead while another's
+    # access was revoked, and the two need opposite advice.
     if any(_looks_like_auth_failure(err) for _, err in failed_sources):
         summary += " " + _REAUTH_GUIDANCE
+    if any(_looks_like_access_denied(err) for _, err in failed_sources):
+        summary += " " + _ACCESS_DENIED_GUIDANCE
     return summary
 
 
@@ -1469,15 +1494,26 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    auth_failure = any(
-        _looks_like_auth_failure(str(src.get("error")))
+    source_errors = [
+        str(src.get("error"))
         for tenant in summary
         for src in (tenant.get("sources") or {}).values()
-    )
+    ]
+    auth_failure = any(_looks_like_auth_failure(e) for e in source_errors)
+    access_denied = any(_looks_like_access_denied(e) for e in source_errors)
     reauth_line = (
         f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
         f"user explicitly to reconnect the affected account."
         if auth_failure
+        else ""
+    )
+    # Appended alongside reauth_line, not instead of it — different sources can
+    # fail for different reasons in one run.
+    reauth_line += (
+        f" At least one source was refused because access was removed upstream: "
+        f"{_ACCESS_DENIED_GUIDANCE} Tell the user explicitly that reconnecting will "
+        f"NOT fix this one, and name the affected data source."
+        if access_denied
         else ""
     )
 

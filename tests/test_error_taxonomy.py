@@ -7,11 +7,19 @@ both directions — what gets dropped AND what must keep coming through.
 import pytest
 
 from apps.common.errors import (
+    CommCareAccessDeniedError,
     CommCareAuthError,
+    CommCareTokenExpiredError,
+    ConnectAccessDeniedError,
     ConnectAuthError,
+    ConnectTokenExpiredError,
     ExpectedStateError,
     ExpectedUpstreamError,
+    OCSAccessDeniedError,
     OCSAuthError,
+    OCSTokenExpiredError,
+    UpstreamAccessDenied,
+    UpstreamTokenExpired,
 )
 from apps.users.services.tenant_resolution import CommCareAuthError as resolution_commcare
 from apps.users.services.tenant_resolution import ConnectAuthError as resolution_connect
@@ -100,12 +108,59 @@ class TestBeforeSend:
         [CommCareAuthError, ConnectAuthError, OCSAuthError],
         ids=["commcare", "connect", "ocs"],
     )
-    def test_provider_auth_errors_are_not_yet_classified(self, auth_error):
-        """Scope pin: this PR adds the mechanism, it does not classify anything.
+    def test_provider_base_classes_are_not_classified(self, auth_error):
+        """The bare provider classes must keep reaching Sentry.
 
-        The provider auth errors still reach Sentry exactly as they do today, so
-        this change is a no-op on event volume. Reclassifying them (and
-        splitting 401 from 403) is #371/#372, which inverts this assertion.
+        This is the guard on #371's precondition, and it is deliberate rather
+        than incidental. ``tenant_resolution`` raises these bare from the login
+        signal, whose only failure signal today IS the Sentry event — the user
+        just gets an empty data-sources page. Classifying the base would silence
+        that path without replacing it, so expectedness lives on the leaves.
         """
         event = {"event": 1}
         assert before_send(event, self._hint(auth_error("HTTP 401"))) is event
+
+
+class TestAuthErrorAxes:
+    """Both axes must be catchable: by provider, and by cause."""
+
+    @pytest.mark.parametrize(
+        ("base", "expired", "denied"),
+        [
+            (CommCareAuthError, CommCareTokenExpiredError, CommCareAccessDeniedError),
+            (ConnectAuthError, ConnectTokenExpiredError, ConnectAccessDeniedError),
+            (OCSAuthError, OCSTokenExpiredError, OCSAccessDeniedError),
+        ],
+        ids=["commcare", "connect", "ocs"],
+    )
+    def test_provider_base_catches_both_causes(self, base, expired, denied):
+        """Existing `except <Provider>AuthError` keeps working after the split."""
+        assert issubclass(expired, base)
+        assert issubclass(denied, base)
+
+    @pytest.mark.parametrize(
+        "denied",
+        [CommCareAccessDeniedError, ConnectAccessDeniedError, OCSAccessDeniedError],
+        ids=["commcare", "connect", "ocs"],
+    )
+    def test_access_denied_is_catchable_across_providers(self, denied):
+        """The hook the revocation work (#378/#384) needs: one except for every 403."""
+        assert issubclass(denied, UpstreamAccessDenied)
+
+    @pytest.mark.parametrize(
+        "expired",
+        [CommCareTokenExpiredError, ConnectTokenExpiredError, OCSTokenExpiredError],
+        ids=["commcare", "connect", "ocs"],
+    )
+    def test_expiry_is_catchable_across_providers(self, expired):
+        assert issubclass(expired, UpstreamTokenExpired)
+
+    def test_the_two_causes_do_not_catch_each_other(self):
+        """The whole point of #372 — a 403 must not be handled as an expiry."""
+        assert not issubclass(OCSAccessDeniedError, UpstreamTokenExpired)
+        assert not issubclass(OCSTokenExpiredError, UpstreamAccessDenied)
+
+    def test_provider_is_reported(self):
+        assert OCSAccessDeniedError("x").provider == "ocs"
+        assert CommCareTokenExpiredError("x").provider == "commcare"
+        assert ConnectAccessDeniedError("x").provider == "commcare_connect"
