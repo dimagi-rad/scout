@@ -13,7 +13,13 @@ from apps.common.errors import (
     ExpectedUpstreamError,
     OCSAuthError,
 )
+from apps.users.services.tenant_resolution import CommCareAuthError as resolution_commcare
+from apps.users.services.tenant_resolution import ConnectAuthError as resolution_connect
+from apps.users.services.tenant_resolution import OCSAuthError as resolution_ocs
 from config.sentry import before_send
+from mcp_server.loaders.commcare_base import CommCareAuthError as loader_commcare
+from mcp_server.loaders.connect_base import ConnectAuthError as loader_connect
+from mcp_server.loaders.ocs_base import OCSAuthError as loader_ocs
 
 
 class TestAuthErrorConsolidation:
@@ -24,30 +30,18 @@ class TestAuthErrorConsolidation:
     """
 
     def test_ocs_auth_error_is_one_class(self):
-        from apps.users.services.tenant_resolution import OCSAuthError as resolution_cls
-        from mcp_server.loaders.ocs_base import OCSAuthError as loader_cls
-
-        assert resolution_cls is loader_cls is OCSAuthError
+        assert resolution_ocs is loader_ocs is OCSAuthError
 
     def test_commcare_auth_error_is_one_class(self):
-        from apps.users.services.tenant_resolution import CommCareAuthError as resolution_cls
-        from mcp_server.loaders.commcare_base import CommCareAuthError as loader_cls
-
-        assert resolution_cls is loader_cls is CommCareAuthError
+        assert resolution_commcare is loader_commcare is CommCareAuthError
 
     def test_connect_auth_error_is_one_class(self):
-        from apps.users.services.tenant_resolution import ConnectAuthError as resolution_cls
-        from mcp_server.loaders.connect_base import ConnectAuthError as loader_cls
-
-        assert resolution_cls is loader_cls is ConnectAuthError
+        assert resolution_connect is loader_connect is ConnectAuthError
 
     def test_catching_the_loader_class_catches_the_resolver_raise(self):
         """The bug this consolidation fixes, stated as behaviour."""
-        from apps.users.services.tenant_resolution import OCSAuthError as resolution_cls
-        from mcp_server.loaders.ocs_base import OCSAuthError as loader_cls
-
-        with pytest.raises(loader_cls):
-            raise resolution_cls("raised via the tenant-resolution import path")
+        with pytest.raises(loader_ocs):
+            raise resolution_ocs("raised via the tenant-resolution import path")
 
 
 class TestTaxonomy:
