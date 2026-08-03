@@ -1,8 +1,19 @@
-"""Shared provider errors and the Sentry filter built on them (#371, #386)."""
+"""Shared provider errors and the Sentry filter built on them (#371, #386).
+
+``TestBeforeSend`` is the alerting contract, so it is asserted explicitly in
+both directions — what gets dropped AND what must keep coming through.
+"""
 
 import pytest
 
-from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
+from apps.common.errors import (
+    CommCareAuthError,
+    ConnectAuthError,
+    ExpectedStateError,
+    ExpectedUpstreamError,
+    OCSAuthError,
+)
+from config.sentry import before_send
 
 
 class TestAuthErrorConsolidation:
@@ -37,3 +48,70 @@ class TestAuthErrorConsolidation:
 
         with pytest.raises(loader_cls):
             raise resolution_cls("raised via the tenant-resolution import path")
+
+
+class TestTaxonomy:
+    def test_upstream_errors_are_expected_states(self):
+        assert issubclass(ExpectedUpstreamError, ExpectedStateError)
+
+    def test_provider_defaults_to_none(self):
+        assert ExpectedUpstreamError("boom").provider is None
+
+    def test_subclasses_name_their_provider_without_a_constructor_change(self):
+        """Class-attribute ``provider`` keeps ``raise Err("msg")`` call sites working."""
+
+        class FakeProviderError(ExpectedUpstreamError):
+            provider = "ocs"
+
+        assert FakeProviderError("boom").provider == "ocs"
+        assert str(FakeProviderError("boom")) == "boom"
+
+
+class TestBeforeSend:
+    def _hint(self, exc):
+        return {"exc_info": (type(exc), exc, None)}
+
+    def test_drops_expected_states(self):
+        assert before_send({"event": 1}, self._hint(ExpectedStateError("routine"))) is None
+
+    def test_drops_expected_upstream_states(self):
+        assert before_send({"event": 1}, self._hint(ExpectedUpstreamError("routine"))) is None
+
+    def test_keeps_unclassified_exceptions(self):
+        event = {"event": 1}
+        assert before_send(event, self._hint(ValueError("a real bug"))) is event
+
+    def test_keeps_events_with_no_exception(self):
+        """A bare ``logger.error`` has nothing to classify, so it is never dropped."""
+        event = {"event": 1}
+        assert before_send(event, {}) is event
+
+    def test_does_not_walk_the_exception_chain(self):
+        """A bug raised *while handling* an expected state is still a bug.
+
+        Walking ``__cause__``/``__context__`` would swallow it, so ``before_send``
+        deliberately inspects only the exception that was raised.
+        """
+        try:
+            try:
+                raise ExpectedStateError("routine")
+            except ExpectedStateError as e:
+                raise ValueError("bug in the handler") from e
+        except ValueError as bug:
+            event = {"event": 1}
+            assert before_send(event, self._hint(bug)) is event
+
+    @pytest.mark.parametrize(
+        "auth_error",
+        [CommCareAuthError, ConnectAuthError, OCSAuthError],
+        ids=["commcare", "connect", "ocs"],
+    )
+    def test_provider_auth_errors_are_not_yet_classified(self, auth_error):
+        """Scope pin: this PR adds the mechanism, it does not classify anything.
+
+        The provider auth errors still reach Sentry exactly as they do today, so
+        this change is a no-op on event volume. Reclassifying them (and
+        splitting 401 from 403) is #371/#372, which inverts this assertion.
+        """
+        event = {"event": 1}
+        assert before_send(event, self._hint(auth_error("HTTP 401"))) is event
