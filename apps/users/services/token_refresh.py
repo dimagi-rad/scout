@@ -49,14 +49,26 @@ class TokenRefreshError(Exception):
     """Raised when token refresh fails."""
 
 
-def token_needs_refresh(expires_at: timezone.datetime | None) -> bool:
+def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
     """Check if a token needs refreshing based on its expiry time.
 
     Returns True if the token expires within REFRESH_BUFFER.
-    Returns False if expires_at is None (unknown expiry -- assume valid).
+
+    An **unknown** expiry (``None``) used to return False — "assume valid" — which
+    fails open. ``expires_at`` is the only health signal Scout has, so a revoked
+    token with no recorded expiry was never proactively refreshed, was handed
+    straight to the loaders, and reported "connected" in the UI right up until it
+    401'd (#373). Unknown expiry now counts as needing a refresh, which is the one
+    action that can actually establish whether the credential is still alive.
+
+    ``can_refresh`` guards that: with no refresh token there is nothing to
+    attempt, and returning True would only condemn a credential that may well be
+    working. So unknown-expiry-and-unrefreshable keeps the old answer, and its
+    honesty problem is fixed where it is visible instead — ``providers_view``
+    reports such a token as needing reconnection rather than asserting it is fine.
     """
     if expires_at is None:
-        return False
+        return can_refresh
     return timezone.now() + REFRESH_BUFFER >= expires_at
 
 

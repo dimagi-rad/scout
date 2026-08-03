@@ -199,7 +199,12 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
 
     token_value = token_obj.token
-    if token_needs_refresh(token_obj.expires_at):
+    # can_refresh: an unknown expiry is only actionable when there is a refresh
+    # token to test it with, so it does not condemn a credential we cannot check
+    # (#373). With one available we now attempt the refresh, which is what turns
+    # a revoked-but-unexpired token into an up-front "reconnect" rather than a
+    # provisioned schema and a doomed run.
+    if token_needs_refresh(token_obj.expires_at, can_refresh=can_refresh):
         if not can_refresh:
             raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider))
         try:

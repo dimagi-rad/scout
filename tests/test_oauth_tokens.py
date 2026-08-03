@@ -247,10 +247,30 @@ class TestTokenRefresh:
         past = timezone.now() - timedelta(hours=1)
         assert token_needs_refresh(past) is True
 
-    def test_token_needs_refresh_when_none(self):
+    def test_unknown_expiry_needs_refresh_when_a_refresh_token_exists(self):
+        """Fail closed on unknown expiry (#373).
+
+        expires_at is the only health signal Scout has, so treating "unknown" as
+        "valid" meant a revoked token was never checked and never reported.
+        """
         from apps.users.services.token_refresh import token_needs_refresh
 
-        assert token_needs_refresh(None) is False
+        assert token_needs_refresh(None) is True
+        assert token_needs_refresh(None, can_refresh=True) is True
+
+    def test_unknown_expiry_does_not_condemn_an_unrefreshable_token(self):
+        """With nothing to refresh with, returning True would only break it."""
+        from apps.users.services.token_refresh import token_needs_refresh
+
+        assert token_needs_refresh(None, can_refresh=False) is False
+
+    def test_can_refresh_does_not_override_a_known_expiry(self):
+        from apps.users.services.token_refresh import token_needs_refresh
+
+        later = timezone.now() + timedelta(hours=1)
+        past = timezone.now() - timedelta(hours=1)
+        assert token_needs_refresh(later, can_refresh=False) is False
+        assert token_needs_refresh(past, can_refresh=False) is True
 
 
 @pytest.mark.django_db

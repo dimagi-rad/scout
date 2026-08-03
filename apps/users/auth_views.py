@@ -277,9 +277,10 @@ def providers_view(request):
         ).select_related("account", "app")
         for social_token in tokens:
             provider = social_token.account.provider
-            if token_needs_refresh(social_token.expires_at):
-                token_url = get_token_url(provider)
-                if token_url and social_token.token_secret:
+            token_url = get_token_url(provider)
+            can_refresh = bool(token_url and social_token.token_secret)
+            if token_needs_refresh(social_token.expires_at, can_refresh=can_refresh):
+                if can_refresh:
                     try:
                         async_to_sync(refresh_oauth_token)(social_token, token_url)
                         token_status[provider] = "connected"
@@ -287,6 +288,13 @@ def providers_view(request):
                         token_status[provider] = "expired"
                 else:
                     token_status[provider] = "expired"
+            elif social_token.expires_at is None:
+                # Unknown expiry and no refresh token to test it with, so we
+                # cannot vouch for this credential. Reporting "connected" on the
+                # strength of no evidence is exactly how a revoked token showed
+                # as healthy right up until it 401'd (#373). "expired" already
+                # renders as an actionable Reconnect prompt.
+                token_status[provider] = "expired"
             else:
                 token_status[provider] = "connected"
 
