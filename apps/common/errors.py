@@ -60,11 +60,17 @@ class ExpectedUpstreamError(ExpectedStateError):
 # is what survives the JSON round-trip into the user-facing summary.
 
 
-class UpstreamTokenExpired(Exception):
-    """HTTP 401 — the credential is dead. Reconnecting mints a working one."""
+class UpstreamTokenExpired(ExpectedUpstreamError):
+    """HTTP 401 — the credential is dead. Reconnecting mints a working one.
+
+    Expected under the module's four-part test: known (the provider told us),
+    routine (OAuth tokens expire and get revoked in normal operation), surfaced
+    (``_REAUTH_GUIDANCE`` reaches the user in the chat failure summary), and
+    resolved (reconnect, re-run).
+    """
 
 
-class UpstreamAccessDenied(Exception):
+class UpstreamAccessDenied(ExpectedUpstreamError):
     """HTTP 403 — the credential is valid but has no access to this resource.
 
     Distinct from a 401 because **reconnecting cannot fix it**: it mints an
@@ -76,6 +82,11 @@ class UpstreamAccessDenied(Exception):
     Also the authoritative per-tenant revocation signal the access-revocation
     work (#378/#384) needs: ``except UpstreamAccessDenied`` catches every 403
     across all three providers.
+
+    Expected under the module's four-part test — and note rule 3 only started
+    holding for a 403 once the guidance stopped saying "reconnect" (#372).
+    Classifying it before that would have silenced a condition whose only
+    user-facing advice was wrong.
     """
 
 

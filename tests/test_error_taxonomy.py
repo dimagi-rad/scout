@@ -115,6 +115,21 @@ class TestBeforeSend:
         event = {"event": 1}
         assert before_send(event, self._hint(auth_error("HTTP 401"))) is event
 
+    @pytest.mark.parametrize(
+        "leaf",
+        [
+            CommCareTokenExpiredError,
+            CommCareAccessDeniedError,
+            ConnectTokenExpiredError,
+            ConnectAccessDeniedError,
+            OCSTokenExpiredError,
+            OCSAccessDeniedError,
+        ],
+    )
+    def test_loader_leaf_classes_are_dropped(self, leaf):
+        """The loader path is classified: it reaches the user via the chat summary."""
+        assert before_send({"event": 1}, self._hint(leaf("upstream said no"))) is None
+
 
 class TestAuthErrorAxes:
     """Both axes must be catchable: by provider, and by cause."""
