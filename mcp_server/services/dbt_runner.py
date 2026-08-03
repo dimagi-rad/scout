@@ -146,7 +146,12 @@ def run_dbt(
             error_msg = "; ".join(node_errors)
         else:
             error_msg = "dbt run failed"
-        logger.error("dbt run failed: %s", error_msg)
+        # WARNING, not ERROR: this RETURNS the error rather than raising it, and
+        # the caller (transformations.services.executor) re-raises it as
+        # TransformStageError and logs THAT at ERROR. Logging here too minted a
+        # second Sentry group carrying strictly less context — 184 events under
+        # the useless title "dbt run failed: dbt run failed" (#374).
+        logger.warning("dbt run failed: %s", error_msg)
         return {"success": False, "error": error_msg, "models": {}}
 
     model_results = {
@@ -210,7 +215,8 @@ def run_dbt_test(
 
     if not res.success:
         error_msg = str(res.exception) if res.exception else "dbt test failed"
-        logger.error("dbt test failed: %s", error_msg)
+        # WARNING for the same reason as run_dbt above: returned, not raised.
+        logger.warning("dbt test failed: %s", error_msg)
         return {"success": False, "tests": test_results, "error": error_msg}
 
     logger.info(
