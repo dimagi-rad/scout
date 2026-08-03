@@ -347,10 +347,17 @@ def run_pipeline(
                     }
                 raise
             except Exception as e:
-                logger.exception(
+                # WARNING, not ERROR, because this handler RE-RAISES and the
+                # caller logs the same exception at ERROR. Two logger.exception
+                # calls on one failure minted two Sentry groups every time —
+                # confirmed in production as identical pairs differing only in
+                # `logger` (#371). At WARNING this becomes a breadcrumb on the
+                # caller's single event, so the source/schema context survives.
+                logger.warning(
                     "Source %s failed for schema %s; earlier sources stay committed",
                     source.name,
                     schema_name,
+                    exc_info=True,
                 )
                 # Preserve any cursor_state advanced by per-page commits so the
                 # next run resumes from the last durable watermark (#187).
@@ -426,7 +433,13 @@ def run_pipeline(
         # Idempotent w.r.t. the per-source loop handler: if completed_at was
         # already stamped there, leave the recorded state untouched.
         if run.completed_at is None:
-            logger.exception("Materialization run %s failed before any source committed", run.id)
+            # WARNING for the same reason as the per-source handler above: this
+            # path re-raises and the caller logs the single ERROR (#371).
+            logger.warning(
+                "Materialization run %s failed before any source committed",
+                run.id,
+                exc_info=True,
+            )
             now = datetime.now(UTC)
             MaterializationRun.objects.filter(id=run.id, completed_at__isnull=True).update(
                 state=MaterializationRun.RunState.FAILED,
