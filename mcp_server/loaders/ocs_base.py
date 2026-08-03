@@ -9,7 +9,11 @@ import requests
 from django.conf import settings
 from requests.adapters import HTTPAdapter
 
-from apps.common.errors import OCSAuthError
+from apps.common.errors import (
+    OCSAccessDeniedError,
+    OCSAuthError,  # noqa: F401  — re-exported; callers catch the provider base
+    OCSTokenExpiredError,
+)
 from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
@@ -73,11 +77,21 @@ class OCSBaseLoader:
         resp = get_with_auth_refresh(
             self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
         )
-        if resp.status_code in (401, 403):
-            raise OCSAuthError(
+        if resp.status_code == 403:
+            # Reconnecting mints an identically-scoped token and fails the same
+            # way, so do NOT offer that advice here (#372).
+            raise OCSAccessDeniedError(
+                f"Your Open Chat Studio account no longer has access to chatbot "
+                f"{self.experiment_id} (HTTP 403). Your sign-in is still valid, so "
+                f"reconnecting will not help — the chatbot may have moved teams, or "
+                f"your access to it may have been removed. Ask an OCS admin to "
+                f"restore access, or remove this data source."
+            )
+        if resp.status_code == 401:
+            raise OCSTokenExpiredError(
                 f"OCS authentication failed for experiment {self.experiment_id} "
-                f"(HTTP {resp.status_code}). Your Open Chat Studio sign-in has likely "
-                f"expired or been revoked — please reconnect your account and retry."
+                f"(HTTP 401). Your Open Chat Studio sign-in has expired or been "
+                f"revoked — please reconnect your account and retry."
             )
         if resp.status_code >= 400:
             raise OCSExportError(
