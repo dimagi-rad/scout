@@ -16,12 +16,16 @@ Note this covers `run_dbt` only. `run_dbt_test` keeps its ERROR — see #391.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from unittest.mock import Mock, patch
 
 import pytest
+from sentry_sdk.integrations.logging import _IGNORED_LOGGERS as sdk_ignored_loggers
 
+from apps.transformations.services import executor
 from config.sentry import before_send
+from mcp_server.services.dbt_runner import run_dbt, run_dbt_test
 
 
 def _log_hint(logger_name):
@@ -57,10 +61,8 @@ class TestDbtLoggerFiltering:
         relocating it onto the retained TransformStageError event. before_send
         only sees events, so the BreadcrumbHandler path is untouched.
         """
-        from sentry_sdk.integrations.logging import _IGNORED_LOGGERS as sdk_ignored
-
         for name in ("stdout_log", "file_log"):
-            assert name not in sdk_ignored
+            assert name not in sdk_ignored_loggers
 
 
 class TestDbtRunnerLogLevels:
@@ -75,7 +77,6 @@ class TestDbtRunnerLogLevels:
 
     def test_run_dbt_failure_does_not_log_at_error(self, caplog, tmp_path):
         caplog.set_level(logging.DEBUG)
-        from mcp_server.services.dbt_runner import run_dbt
 
         with patch("mcp_server.services.dbt_runner.dbtRunner") as runner:
             runner.return_value.invoke.return_value = self._failed_result()
@@ -91,7 +92,6 @@ class TestDbtRunnerLogLevels:
     def test_the_underlying_error_is_still_reported(self, caplog, tmp_path):
         """Downgrading the level must not lose the diagnostic text."""
         caplog.set_level(logging.DEBUG)
-        from mcp_server.services.dbt_runner import run_dbt
 
         with patch("mcp_server.services.dbt_runner.dbtRunner") as runner:
             runner.return_value.invoke.return_value = self._failed_result(
@@ -112,7 +112,6 @@ class TestDbtRunnerLogLevels:
         it would make test failures silent rather than de-duplicated.
         """
         caplog.set_level(logging.DEBUG)
-        from mcp_server.services.dbt_runner import run_dbt_test
 
         with patch("mcp_server.services.dbt_runner.dbtRunner") as runner:
             runner.return_value.invoke.return_value = self._failed_result()
@@ -124,10 +123,6 @@ class TestDbtRunnerLogLevels:
 
 def test_the_executor_still_logs_the_one_real_error():
     """The kept fingerprint. If this stops being an ERROR, dbt failures go dark."""
-    import inspect
-
-    from apps.transformations.services import executor
-
     source = inspect.getsource(executor)
     assert 'logger.exception("Transformation pipeline failed")' in source, (
         "This is the single Sentry event a dbt failure should produce — it has "
