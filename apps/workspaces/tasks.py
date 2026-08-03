@@ -1501,15 +1501,15 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     ]
     auth_failure = any(_looks_like_auth_failure(e) for e in source_errors)
     access_denied = any(_looks_like_access_denied(e) for e in source_errors)
-    reauth_line = (
+    # Both may apply in one run: different sources can fail for different
+    # reasons, and the two need opposite advice.
+    credential_guidance = (
         f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
         f"user explicitly to reconnect the affected account."
         if auth_failure
         else ""
     )
-    # Appended alongside reauth_line, not instead of it — different sources can
-    # fail for different reasons in one run.
-    reauth_line += (
+    credential_guidance += (
         f" At least one source was refused because access was removed upstream: "
         f"{_ACCESS_DENIED_GUIDANCE} Tell the user explicitly that reconnecting will "
         f"NOT fix this one, and name the affected data source."
@@ -1583,7 +1583,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"failed or skipped. A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
-            f"as if it were complete.{reauth_line} Per-tenant: {summary}"
+            f"as if it were complete.{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "failed":
         body = (
@@ -1594,7 +1594,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"that the data load failed (this is commonly caused by expired or "
             f"revoked credentials), summarize the per-source errors below, and "
             f"suggest checking the workspace's connection before retrying. Do NOT "
-            f"silently re-run materialization.{reauth_line} Per-tenant: {summary}"
+            f"silently re-run materialization.{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (

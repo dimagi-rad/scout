@@ -144,7 +144,7 @@ class ConnectBaseLoader:
             )
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
-        """GET a URL, raising ConnectAuthError on 401 / ConnectAccessDeniedError on 403."""
+        """GET a URL, raising on 401/403 via ``_raise_for_auth``."""
         resp = get_with_auth_refresh(
             self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
         )
@@ -180,7 +180,7 @@ class ConnectBaseLoader:
         ``[]`` so callers can rely on the loop terminating naturally.
 
         Raises:
-            ConnectAuthError: on 401 (credential dead).
+            ConnectTokenExpiredError: on 401 (credential dead).
             ConnectAccessDeniedError: on 403 (credential valid, no access here).
             ConnectExportError: when the response is not valid JSON, is
                 missing the ``results`` key, or returns a non-2xx status
