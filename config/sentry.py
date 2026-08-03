@@ -10,7 +10,30 @@ raises, rather than in a Sentry-side alert filter.
 
 from __future__ import annotations
 
+from sentry_sdk.integrations.logging import ignore_logger
+
 from apps.common.errors import ExpectedStateError
+
+# Third-party loggers whose ERROR records are never Scout defects.
+#
+# dbt owns these two (``dbt_common/events/logger.py``) and writes every event it
+# fires to them at the record's own level, so a failed `dbt run` emits its
+# "Encountered an error:" banner down BOTH — one formatted for stdout, one for
+# its log file. They are not Scout's logger hierarchy and are invisible to
+# config/settings LOGGING (dbt sets ``propagate = False`` and clears handlers),
+# but sentry-sdk patches ``Logger.callHandlers`` itself, so every line became an
+# event regardless. That was 340 events over 90 days for text that is already in
+# the exception Scout raises around the same failure (#374).
+#
+# ``ignore_logger`` stops them minting events; they still arrive as breadcrumbs
+# on the real event, which is where dbt's output is actually useful.
+_IGNORED_LOGGERS = ("stdout_log", "file_log")
+
+
+def install_logger_denylist() -> None:
+    """Stop third-party loggers in ``_IGNORED_LOGGERS`` from creating events."""
+    for name in _IGNORED_LOGGERS:
+        ignore_logger(name)
 
 
 def before_send(event, hint):

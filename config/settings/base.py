@@ -11,7 +11,7 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
-from config.sentry import before_send
+from config.sentry import before_send, install_logger_denylist
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -302,6 +302,7 @@ if SENTRY_DSN:
         send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
         before_send=before_send if SENTRY_SUPPRESS_EXPECTED_STATES else None,
     )
+    install_logger_denylist()
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")
