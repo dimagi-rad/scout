@@ -9,6 +9,7 @@ import requests
 from django.conf import settings
 from requests.adapters import HTTPAdapter
 
+from apps.common.errors import OCSAuthError
 from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,6 @@ HTTP_TIMEOUT: tuple[int, int] = (10, 300)
 # the max cuts list-request volume ~10-15x versus the upstream default — the
 # loaders' Connect/CommCare mental model is 1000/page (arch #254, finding 13#1).
 OCS_MAX_PAGE_SIZE = 1500
-
-
-class OCSAuthError(Exception):
-    """Raised when OCS returns a 401 or 403 response."""
 
 
 class OCSExportError(Exception):
