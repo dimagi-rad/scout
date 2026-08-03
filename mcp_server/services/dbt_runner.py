@@ -215,8 +215,14 @@ def run_dbt_test(
 
     if not res.success:
         error_msg = str(res.exception) if res.exception else "dbt test failed"
-        # WARNING for the same reason as run_dbt above: returned, not raised.
-        logger.warning("dbt test failed: %s", error_msg)
+        # ERROR, unlike run_dbt above. The "returned, not raised" rule does not
+        # apply here: _execute_stage reads only test_results["tests"] and gates
+        # its raise on the *run* result, so nothing downstream ever inspects
+        # this success/error and no TransformStageError is raised for a test
+        # failure. Downgrading would make dbt test failures silent rather than
+        # collapse them into the kept fingerprint. That the executor ignores a
+        # failing test at all is a separate bug — see #391.
+        logger.error("dbt test failed: %s", error_msg)
         return {"success": False, "tests": test_results, "error": error_msg}
 
     logger.info(

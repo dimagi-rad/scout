@@ -10,6 +10,8 @@ four different ways — 662 events, 43% of everything:
 
 Only the last one carries a traceback, the stage, and the underlying dbt error,
 so it is the one kept. The other three are pinned as silenced here.
+
+Note this covers `run_dbt` only. `run_dbt_test` keeps its ERROR — see #391.
 """
 
 from __future__ import annotations
@@ -19,35 +21,46 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from config.sentry import _IGNORED_LOGGERS, install_logger_denylist
+from config.sentry import before_send
 
 
-class TestDbtLoggerDenylist:
+def _log_hint(logger_name):
+    return {"log_record": logging.LogRecord(logger_name, logging.ERROR, "f", 1, "boom", None, None)}
+
+
+class TestDbtLoggerFiltering:
     """dbt's own loggers must not mint Sentry events."""
 
     @pytest.mark.parametrize("logger_name", ["stdout_log", "file_log"])
-    def test_dbt_loggers_are_ignored(self, logger_name):
-        assert logger_name in _IGNORED_LOGGERS
+    def test_dbt_logger_events_are_dropped(self, logger_name):
+        assert before_send({"event": 1}, _log_hint(logger_name)) is None
 
-    @pytest.mark.parametrize("logger_name", ["stdout_log", "file_log"])
-    def test_install_registers_them_with_sentry(self, logger_name):
-        from sentry_sdk.integrations.logging import _IGNORED_LOGGERS as sentry_ignored
-
-        install_logger_denylist()
-        assert logger_name in sentry_ignored
-
-    def test_scout_loggers_are_not_ignored(self):
-        """The denylist must stay narrow — only third-party noise."""
-        from sentry_sdk.integrations.logging import _IGNORED_LOGGERS as sentry_ignored
-
-        install_logger_denylist()
-        for name in (
+    @pytest.mark.parametrize(
+        "logger_name",
+        [
             "apps.workspaces.tasks",
             "mcp_server.services.materializer",
             "apps.transformations.services.executor",
             "mcp_server.services.dbt_runner",
-        ):
-            assert name not in sentry_ignored
+        ],
+    )
+    def test_scout_logger_events_are_kept(self, logger_name):
+        """The filter must stay narrow — only third-party noise."""
+        event = {"event": 1}
+        assert before_send(event, _log_hint(logger_name)) is event
+
+    def test_breadcrumbs_are_deliberately_not_suppressed(self):
+        """We filter in before_send, NOT with ignore_logger.
+
+        ignore_logger disables a logger "both in breadcrumbs and as events"
+        (its own docstring), which would throw dbt's raw output away instead of
+        relocating it onto the retained TransformStageError event. before_send
+        only sees events, so the BreadcrumbHandler path is untouched.
+        """
+        from sentry_sdk.integrations.logging import _IGNORED_LOGGERS as sdk_ignored
+
+        for name in ("stdout_log", "file_log"):
+            assert name not in sdk_ignored
 
 
 class TestDbtRunnerLogLevels:
@@ -90,7 +103,14 @@ class TestDbtRunnerLogLevels:
         warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert any('column "x" does not exist' in m for m in warnings)
 
-    def test_run_dbt_test_failure_does_not_log_at_error(self, caplog, tmp_path):
+    def test_run_dbt_test_failure_still_logs_at_error(self, caplog, tmp_path):
+        """run_dbt_test is NOT downgraded — nothing downstream logs it (#391).
+
+        _execute_stage reads only test_results["tests"] and gates its raise on
+        the *run* result, so a dbt test failure raises nothing and marks the run
+        COMPLETED. This ERROR is currently its only trace anywhere; downgrading
+        it would make test failures silent rather than de-duplicated.
+        """
         caplog.set_level(logging.DEBUG)
         from mcp_server.services.dbt_runner import run_dbt_test
 
@@ -99,7 +119,7 @@ class TestDbtRunnerLogLevels:
             result = run_dbt_test(str(tmp_path), str(tmp_path), ["stg_visits"])
 
         assert result["success"] is False
-        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 def test_the_executor_still_logs_the_one_real_error():
