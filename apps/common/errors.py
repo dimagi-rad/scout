@@ -58,9 +58,7 @@ class ExpectedUpstreamError(ExpectedStateError):
     provider: str | None = None
 
 
-# --- Provider auth errors -------------------------------------------------
-#
-# These were each defined TWICE as unrelated classes — once in
+# These provider auth errors were each defined TWICE as unrelated classes — once in
 # ``apps/users/services/tenant_resolution.py`` and once in the matching
 # ``mcp_server/loaders/*_base.py`` — so an ``except OCSAuthError`` that imported
 # one sailed straight past the other (#371). They are defined here once and
