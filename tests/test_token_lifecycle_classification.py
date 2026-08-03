@@ -15,12 +15,14 @@ Two independent defects in the same module:
 
 from __future__ import annotations
 
+import inspect
 import logging
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
 
+from apps.users.services import token_refresh
 from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_token_sync
 
 
@@ -104,15 +106,9 @@ class TestSyncRefreshLogLevels:
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert errors and any(r.exc_info for r in errors)
 
-    def test_the_sync_path_matches_the_async_twin(self, caplog):
+    def test_the_sync_path_matches_the_async_twin(self):
         """The defect was a divergence between the two, so pin them together."""
-        from apps.users.services import token_refresh
-
-        sync_source = token_refresh.refresh_oauth_token_sync.__doc__ or ""
-        assert sync_source  # sanity
-        # Both branch on 4xx before falling through to logger.exception.
-        import inspect
-
+        # Both must branch on 4xx before falling through to logger.exception.
         for fn in (token_refresh.refresh_oauth_token, token_refresh.refresh_oauth_token_sync):
             body = inspect.getsource(fn)
             assert "400 <= " in body or "<= 499" in body or "< 500" in body, (
