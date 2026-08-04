@@ -73,9 +73,7 @@ def test_archived_tenant_membership_lost_access(client, user):
     ws = Workspace.objects.create(name="Revoked WS", created_by=user)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
-    TenantMembership.all_objects.create(
-        user=user, tenant=tenant, archived_at=timezone.now()
-    )
+    TenantMembership.all_objects.create(user=user, tenant=tenant, archived_at=timezone.now())
 
     client.force_login(user)
     resp = client.get("/api/workspaces/")

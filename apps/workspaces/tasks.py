@@ -30,7 +30,6 @@ from apps.users.services.credential_resolver import (
 )
 from apps.workspaces.models import (
     VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
-    VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -961,7 +960,7 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
         .filter(num_tenants__gte=2)
         .values("id")
     )
-    # Truthful last_error for the cascade (07#9): the marker lets the resume logic
+    # Truthful last_error for the cascade (07#9): the code lets the resume logic
     # advise a re-run, instead of the generic "system-side fix required" — wrong
     # here, since re-materializing the torn-down tenant IS the fix.
     return await WorkspaceViewSchema.objects.filter(
@@ -970,6 +969,7 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
     ).aupdate(
         state=SchemaState.FAILED,
         last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+        last_error_code=ErrorCode.VIEW_SCHEMA_CASCADE_TEARDOWN,
     )
 
 
@@ -1576,6 +1576,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # told the truth (re-running materialization can't fix a build failure).
     view_schema_failed = False
     view_schema_error = ""
+    view_schema_cascaded = False
     if status in ("completed", "partial"):
         tenant_count = await workspace.workspace_tenants.acount()
         if tenant_count > 1:
@@ -1585,9 +1586,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 view_schema_error = (vs.last_error if vs else "") or (
                     "the workspace query layer (view schema) is missing or was never built"
                 )
+                view_schema_cascaded = (
+                    vs is not None and vs.last_error_code == ErrorCode.VIEW_SCHEMA_CASCADE_TEARDOWN
+                )
 
     if view_schema_failed:
-        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        if view_schema_cascaded:
             # 07#9: FAILED from a cascade teardown, not a build defect — re-running
             # materialization IS the fix, so the advice must invite a re-run.
             body = (
@@ -1776,7 +1780,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     error_summary = ""
     credential_failures: list[dict] = []
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        if view_schema_failed and view_schema_cascaded:
             # 07#9: cascade teardown — re-running materialization IS the fix.
             error_summary = (
                 "The workspace query layer (view schema) is unavailable because a "

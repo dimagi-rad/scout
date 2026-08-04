@@ -9,8 +9,10 @@ from django.test import override_settings
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant
 from apps.workspaces.models import (
+    VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
     MaterializationRun,
     SchemaState,
     TenantSchema,
@@ -1039,7 +1041,9 @@ async def test_resume_no_runs_sets_helpful_error_summary():
 # ---------------------------------------------------------------------------
 
 
-async def _make_multi_tenant_job(*, email, ws_name, pj_id, view_schema_state, last_error=""):
+async def _make_multi_tenant_job(
+    *, email, ws_name, pj_id, view_schema_state, last_error="", last_error_code=""
+):
     """Wire a 2-tenant workspace whose per-tenant runs COMPLETED, with a
     WorkspaceViewSchema in the given state, ready to resume."""
     user = await User.objects.acreate_user(email=email, password="x")
@@ -1066,6 +1070,7 @@ async def _make_multi_tenant_job(*, email, ws_name, pj_id, view_schema_state, la
         schema_name=f"ws_{ws_name}".replace("-", "_")[:22],
         state=view_schema_state,
         last_error=last_error,
+        last_error_code=last_error_code,
     )
     thread = await Thread.objects.acreate(workspace=ws, user=user)
     tj = await ThreadJob.objects.acreate(
@@ -1123,15 +1128,17 @@ async def test_resume_surfaces_view_schema_failure_for_multi_tenant():
 async def test_resume_cascade_teardown_view_schema_advises_rerun():
     """07#9: when the view schema is FAILED because a tenant schema it depends on
     was torn down (cascade), re-running materialization IS the fix. The resume
-    prompt must invite a re-run, NOT forbid it / claim a system-side fix."""
-    from apps.workspaces.models import VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR
+    prompt must invite a re-run, NOT forbid it / claim a system-side fix.
 
+    Keyed on last_error_code, not on a sentinel in the prose.
+    """
     tj = await _make_multi_tenant_job(
         email="vsc@b.c",
         ws_name="W-vsc",
         pj_id=20003,
         view_schema_state=SchemaState.FAILED,
         last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+        last_error_code=ErrorCode.VIEW_SCHEMA_CASCADE_TEARDOWN,
     )
 
     mock_agent = MagicMock()

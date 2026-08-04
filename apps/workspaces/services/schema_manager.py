@@ -17,6 +17,7 @@ import psycopg.sql
 from django.conf import settings
 from django.utils import timezone
 
+from apps.common.error_codes import code_of
 from apps.common.identifiers import (
     PG_MAX_IDENTIFIER_BYTES,
     dbt_role_name,
@@ -316,7 +317,8 @@ class SchemaManager:
         except ValueError as exc:
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
-            vs.save(update_fields=["state", "last_error"])
+            vs.last_error_code = code_of(exc)
+            vs.save(update_fields=["state", "last_error", "last_error_code"])
             raise
 
         conn = get_managed_db_connection()
@@ -455,7 +457,8 @@ class SchemaManager:
             # the status API can surface *why* the query layer is unavailable.
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
-            vs.save(update_fields=["state", "last_error"])
+            vs.last_error_code = code_of(exc)
+            vs.save(update_fields=["state", "last_error", "last_error_code"])
             raise
         finally:
             if not conn.closed:
@@ -465,8 +468,9 @@ class SchemaManager:
         # last_accessed_at and expire_inactive_schemas would re-tear-down it (arch #255 03#2).
         vs.state = SchemaState.ACTIVE
         vs.last_error = ""
+        vs.last_error_code = ""
         vs.last_accessed_at = timezone.now()
-        vs.save(update_fields=["state", "last_error", "last_accessed_at"])
+        vs.save(update_fields=["state", "last_error", "last_error_code", "last_accessed_at"])
 
         logger.info(
             "Built view schema '%s' for workspace '%s' (%d tenants, %d views)",

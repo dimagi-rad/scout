@@ -7,6 +7,7 @@ import pytest
 from asgiref.sync import sync_to_async
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
@@ -362,13 +363,12 @@ async def test_teardown_schema_fails_dependent_multitenant_view_schemas(
     assert active_schema.state == SchemaState.EXPIRED
     # B's namespaced views were cascade-dropped; ACTIVE was a lie → now FAILED.
     assert vs_b.state == SchemaState.FAILED
-    # 07#9: the FAILED row must carry a TRUTHFUL last_error explaining the
-    # teardown cascade (marked) — not the empty fallback that get_schema_status
-    # would render as the generic "View schema build failed." and that the resume
-    # prompt would misread as "a system-side fix is required, do NOT re-run".
-    from apps.workspaces.models import VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER
-
-    assert VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in vs_b.last_error
+    # 07#9: the FAILED row must be distinguishable from a genuine build failure —
+    # otherwise get_schema_status renders the generic "View schema build failed."
+    # and the resume prompt misreads it as "a system-side fix is required, do NOT
+    # re-run". Carried by the code; the prose is for humans only.
+    assert vs_b.last_error_code == ErrorCode.VIEW_SCHEMA_CASCADE_TEARDOWN
+    assert "cascade-dropped" in vs_b.last_error
     # C is single-tenant — its view schema must not be clobbered.
     assert vs_c.state == SchemaState.ACTIVE
 

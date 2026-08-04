@@ -32,6 +32,11 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
 
+    # A workspace view schema was cascade-dropped because a tenant schema it
+    # depends on was torn down. Distinct from SCHEMA_BUILD_FAILED because
+    # re-materializing fixes this one and cannot fix a build defect (07#9).
+    VIEW_SCHEMA_CASCADE_TEARDOWN = "VIEW_SCHEMA_CASCADE_TEARDOWN"
+
     # HTTP 401 upstream: the credential is dead and reconnecting mints a working
     # one. Shared deliberately by the loaders and by credential_resolver's
     # pre-flight check — one condition, one code, however it is detected.

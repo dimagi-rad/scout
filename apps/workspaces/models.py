@@ -294,16 +294,15 @@ class WorkspaceInvite(models.Model):
         return self.expires_at < timezone.now()
 
 
-# Sentinel prefix in WorkspaceViewSchema.last_error marking a FAILED-by-cascade-
-# teardown (vs a genuine build failure). Resume-prompt logic keys off it (arch
-# #256, 07#9) to advise re-materializing — which fixes a cascade but not a build
-# failure. Embedded in the human-readable message so get_schema_status surfaces it.
-VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER = "[cascade-teardown]"
+# A cascade teardown and a genuine build failure both leave the row FAILED but
+# need opposite advice: re-materializing fixes a cascade and cannot fix a build
+# defect (arch #256, 07#9). The distinction rides on ``last_error_code``; it used
+# to ride on a "[cascade-teardown]" sentinel embedded in this prose, which the
+# resume logic substring-matched (see the reporting rules in apps/common/errors.py).
 VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR = (
-    f"{VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER} A tenant schema this workspace's "
-    "combined view depends on was torn down (inactivity TTL or teardown), so the "
-    "namespaced views were cascade-dropped. Re-running materialization rebuilds "
-    "the tenant data and the view schema."
+    "A tenant schema this workspace's combined view depends on was torn down "
+    "(inactivity TTL or teardown), so the namespaced views were cascade-dropped. "
+    "Re-running materialization rebuilds the tenant data and the view schema."
 )
 
 
@@ -330,6 +329,15 @@ class WorkspaceViewSchema(models.Model):
         blank=True,
         default="",
         help_text="Most recent build_view_schema failure message; cleared on a successful build.",
+    )
+    last_error_code = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=(
+            "ErrorCode for last_error — what callers branch on. last_error is prose "
+            "and must not be parsed."
+        ),
     )
     last_accessed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
