@@ -36,6 +36,8 @@ nobody is told about is not an expected state — it is a silent failure.**
 
 from __future__ import annotations
 
+from apps.common.error_codes import ErrorCode
+
 
 class ExpectedStateError(Exception):
     """A known, routine operational condition — not a defect.
@@ -49,13 +51,14 @@ class ExpectedStateError(Exception):
 class ExpectedUpstreamError(ExpectedStateError):
     """An expected state whose cause is an upstream provider, not Scout.
 
-    ``provider`` lets a handler or a log line name the system that said no
-    without re-parsing the message. Subclasses set it as a *class* attribute so
-    existing ``raise SomeAuthError("message")`` call sites keep working
-    unchanged.
+    ``provider`` and ``code`` let a handler, a log line, or a serialiser name the
+    system that said no and the condition it reported without re-parsing the
+    message. Both are *class* attributes so existing
+    ``raise SomeAuthError("message")`` call sites keep working unchanged.
     """
 
     provider: str | None = None
+    code: ErrorCode | None = None
 
 
 # These provider auth errors were each defined TWICE as unrelated classes — once in
@@ -66,10 +69,7 @@ class ExpectedUpstreamError(ExpectedStateError):
 #
 # There are two axes, because callers need both:
 #
-#   *provider* — OCS / CommCare / Connect. Load-bearing beyond ``except``:
-#       ``_summarize_error`` serialises ``exc.__class__.__name__`` into
-#       ``MaterializationRun.result``, so the class name is what survives the
-#       JSON round-trip to the user-facing failure summary.
+#   *provider* — OCS / CommCare / Connect.
 #   *cause*    — 401 (the credential is dead) vs 403 (the credential is fine and
 #       has no access to this resource). #372: these need opposite advice, and a
 #       403 is an authoritative per-tenant revocation signal.
@@ -77,6 +77,10 @@ class ExpectedUpstreamError(ExpectedStateError):
 # The leaves inherit from both, so ``except OCSAuthError`` still catches every
 # OCS auth failure and ``except UpstreamAccessDenied`` catches every 403 across
 # providers.
+#
+# The *cause* classes carry the ``code``, because that is the axis consumers
+# branch on. It is what crosses the JSON boundary into
+# ``MaterializationRun.result``; the class name is not a wire value.
 
 
 class UpstreamTokenExpired(ExpectedUpstreamError):
@@ -84,9 +88,14 @@ class UpstreamTokenExpired(ExpectedUpstreamError):
 
     Expected under the module's four-part test: known (the provider told us),
     routine (OAuth tokens expire and get revoked in normal operation), surfaced
-    (``_REAUTH_GUIDANCE`` reaches the user in the chat failure summary), and
+    (the reconnect guidance reaches the user in the chat failure summary), and
     resolved (reconnect, re-run).
+
+    Shares ``AUTH_TOKEN_EXPIRED`` with ``CredentialResolutionError``'s pre-flight
+    check: one condition gets one code however it was detected.
     """
+
+    code = ErrorCode.AUTH_TOKEN_EXPIRED
 
 
 class UpstreamAccessDenied(ExpectedUpstreamError):
@@ -107,6 +116,8 @@ class UpstreamAccessDenied(ExpectedUpstreamError):
     Classifying it before that would have silenced a condition whose only
     user-facing advice was wrong.
     """
+
+    code = ErrorCode.AUTH_ACCESS_DENIED
 
 
 # The provider classes below are deliberately NOT expected states. They are the
