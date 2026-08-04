@@ -692,9 +692,21 @@ def _has_committed_cursor(entry: dict) -> bool:
 def _summarize_error(exc: BaseException) -> str:
     """Return a short, single-line error description for ``result["sources"][n].error``.
 
-    The string is surfaced to the agent in the resume prompt and to the end user,
-    so it must be safe to display: no stack trace, no sensitive headers, just the
-    exception type and message.
+    Two consumers read it verbatim, which is why it must be safe to display — no
+    stack trace, no sensitive headers, just the exception type and message:
+
+    - **The agent.** ``_aggregate_materialization_state`` copies it to
+      ``detail["error"]``, which ``resume_thread_after_materialization``
+      interpolates into the prompt as ``"Per-tenant: {summary}"``.
+    - **The end user.** ``_compose_failure_summary`` embeds it in
+      ``ThreadJob.error_summary``, which ``jobs/active/`` returns under
+      ``recent_terminations`` and ``MaterializationFailure.tsx`` renders.
+
+    Caveat on the user path: only the *first* failed source's message survives —
+    ``_compose_failure_summary`` collapses the rest to bare names.
+
+    Both hops are pinned in ``tests/test_resume_thread_task.py`` (search
+    ``Connect 500``), and the API hop in ``tests/test_jobs_endpoints.py``.
 
     This is the **human** half only. Consumers deciding what to *do* about a
     failure read the sibling ``error_code`` — never this string. The class name
