@@ -1,7 +1,16 @@
 """Scout's error taxonomy: expected operational states vs. defects.
 
-An ``ExpectedStateError`` is dropped by ``config.sentry.before_send``. It is
-still logged — it just stops minting Sentry issues and paging people.
+Scout had no way to say *"this failure is a known state, not a bug."* Every
+condition — a revoked OAuth token, a tenant that has not been materialized yet,
+an LLM emitting a malformed payload — was raised as a bare exception,
+``logger.exception``'d, and escalated into Sentry. Measured over 90 days, 59% of
+Sentry's event volume was routine states (#386). They crowd out real defects and
+page ``#scout-ops`` on every new fingerprint.
+
+``ExpectedStateError`` is the missing distinction. Anything raised as one is
+dropped by ``config.sentry.before_send``. It is still *logged* — the record
+survives in CloudWatch at WARNING — it just stops minting Sentry issues and
+paging people.
 
 Because raising one silences an alert, the bar is deliberately explicit. Raise
 ``ExpectedStateError`` only when **all four** hold:
@@ -15,17 +24,19 @@ Because raising one silences an alert, the bar is deliberately explicit. Raise
 4. **Resolved** — there is a defined next step (the user reconnects, the run
    retries), or the condition is a legitimate no-op.
 
-(3) is the load-bearing one and the easiest to wave through — an expected state
-nobody is told about is a silent failure, not an expected state. It is why the
-login signal path (``apps/users/signals.py``) is deliberately not classified as
-expected: a failed tenant resolution there leaves the user on an empty
-data-sources page indistinguishable from "this account has no data", so the
-Sentry event is the only signal anything went wrong.
+(3) is the load-bearing one and the easiest to wave through. It is why the login
+signal path (``apps/users/signals.py``) is deliberately *not* classified as
+expected: a failed tenant resolution there leaves the user with an empty
+data-sources page indistinguishable from "this account has no data", and the
+Sentry event is the only signal that anything went wrong at all.
 
-If any of the four fail, raise a plain ``Exception``.
+If any of the four fail, raise a plain ``Exception``. **An expected state that
+nobody is told about is not an expected state — it is a silent failure.**
 """
 
 from __future__ import annotations
+
+from apps.common.error_codes import ErrorCode
 
 
 class ExpectedStateError(Exception):
@@ -40,24 +51,36 @@ class ExpectedStateError(Exception):
 class ExpectedUpstreamError(ExpectedStateError):
     """An expected state whose cause is an upstream provider, not Scout.
 
-    ``provider`` lets a handler or a log line name the system that said no
-    without re-parsing the message. It is a *class* attribute so that
-    ``raise SomeAuthError("message")`` call sites need no constructor change.
+    ``provider`` and ``code`` let a handler, a log line, or a serialiser name the
+    system that said no and the condition it reported without re-parsing the
+    message. Both are *class* attributes so existing
+    ``raise SomeAuthError("message")`` call sites keep working unchanged.
     """
 
     provider: str | None = None
+    code: ErrorCode | None = None
 
 
-# Both apps/users/services/tenant_resolution.py and mcp_server/loaders/*_base.py
-# raise these, and each must catch what the other raises — so they live here, as
-# one class per provider rather than a name per module.
+# These provider auth errors were each defined TWICE as unrelated classes — once in
+# ``apps/users/services/tenant_resolution.py`` and once in the matching
+# ``mcp_server/loaders/*_base.py`` — so an ``except OCSAuthError`` that imported
+# one sailed straight past the other (#371). They are defined here once and
+# imported by both: the point is identity, not a shared name.
 #
-# The leaves inherit on two axes, because callers need both: by provider
-# (``except OCSAuthError``) and by cause (``except UpstreamAccessDenied`` catches
-# every 403 across providers — the revocation signal #378/#384 key off). The
-# provider axis is load-bearing beyond ``except``: ``_summarize_error`` serialises
-# ``exc.__class__.__name__`` into ``MaterializationRun.result``, so the class name
-# is what survives the JSON round-trip into the user-facing summary.
+# There are two axes, because callers need both:
+#
+#   *provider* — OCS / CommCare / Connect.
+#   *cause*    — 401 (the credential is dead) vs 403 (the credential is fine and
+#       has no access to this resource). #372: these need opposite advice, and a
+#       403 is an authoritative per-tenant revocation signal.
+#
+# The leaves inherit from both, so ``except OCSAuthError`` still catches every
+# OCS auth failure and ``except UpstreamAccessDenied`` catches every 403 across
+# providers.
+#
+# The *cause* classes carry the ``code``, because that is the axis consumers
+# branch on. It is what crosses the JSON boundary into
+# ``MaterializationRun.result``; the class name is not a wire value.
 
 
 class UpstreamTokenExpired(ExpectedUpstreamError):
@@ -65,9 +88,14 @@ class UpstreamTokenExpired(ExpectedUpstreamError):
 
     Expected under the module's four-part test: known (the provider told us),
     routine (OAuth tokens expire and get revoked in normal operation), surfaced
-    (``_REAUTH_GUIDANCE`` reaches the user in the chat failure summary), and
+    (the reconnect guidance reaches the user in the chat failure summary), and
     resolved (reconnect, re-run).
+
+    Shares ``AUTH_TOKEN_EXPIRED`` with ``CredentialResolutionError``'s pre-flight
+    check: one condition gets one code however it was detected.
     """
+
+    code = ErrorCode.AUTH_TOKEN_EXPIRED
 
 
 class UpstreamAccessDenied(ExpectedUpstreamError):
@@ -88,6 +116,8 @@ class UpstreamAccessDenied(ExpectedUpstreamError):
     Classifying it before that would have silenced a condition whose only
     user-facing advice was wrong.
     """
+
+    code = ErrorCode.AUTH_ACCESS_DENIED
 
 
 # The provider classes below are deliberately NOT expected states. They are the

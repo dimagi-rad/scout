@@ -50,6 +50,7 @@ from asgiref.sync import async_to_sync
 from django.utils import timezone
 from psycopg import sql as psql
 
+from apps.common.error_codes import code_of
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.commcare_staging import upsert_system_assets
@@ -366,6 +367,8 @@ def run_pipeline(
                     "state": "failed",
                     "rows": (source_results.get(source.name) or {}).get("rows", 0),
                     "error": _summarize_error(e),
+                    "error_code": code_of(e),
+                    "provider": getattr(e, "provider", None) or pipeline.provider,
                     "attempts": getattr(e, "attempts", 1),
                     "failed_at": datetime.now(UTC).isoformat(),
                     "cursor_state": prior_cursor,
@@ -448,6 +451,7 @@ def run_pipeline(
                     "pipeline": pipeline.name,
                     "sources": source_results,
                     "error": _summarize_error(e),
+                    "error_code": code_of(e),
                 },
             )
         raise
@@ -688,9 +692,14 @@ def _has_committed_cursor(entry: dict) -> bool:
 def _summarize_error(exc: BaseException) -> str:
     """Return a short, single-line error description for ``result["sources"][n].error``.
 
-    The string is surfaced to the agent in the resume prompt and (eventually)
-    to the end user, so it must be safe to display: no stack trace, no
-    sensitive headers, just the exception type and message.
+    The string is surfaced to the agent in the resume prompt and to the end user,
+    so it must be safe to display: no stack trace, no sensitive headers, just the
+    exception type and message.
+
+    This is the **human** half only. Consumers deciding what to *do* about a
+    failure read the sibling ``error_code`` — never this string. The class name
+    stays on the front for operator legibility in logs and prompts, not as
+    something to match on.
     """
     msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
     if len(msg) > 200:
