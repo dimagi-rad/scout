@@ -4,7 +4,11 @@ A 401 means the credential is dead and reconnecting mints a working one. A 403
 means the credential is *fine* and simply has no access to that resource, so
 reconnecting mints an identically-scoped token and fails the same way — the
 advice loops the user. Every loader raise site is pinned here, in both
-directions, including that the 403 copy does not tell anyone to reconnect.
+directions, by the ``ErrorCode`` it carries.
+
+Also pinned: no loader message contains remediation advice at all. That is the
+presentation layer's job, stated once and keyed by code — see rule 3 in
+``apps/common/errors.py``.
 """
 
 from __future__ import annotations
@@ -13,11 +17,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from apps.common.error_codes import ErrorCode
 from apps.common.errors import (
     CommCareAccessDeniedError,
     CommCareTokenExpiredError,
     ConnectAccessDeniedError,
     ConnectTokenExpiredError,
+    ExpectedUpstreamError,
     OCSAccessDeniedError,
     OCSTokenExpiredError,
 )
@@ -94,7 +100,8 @@ def test_401_raises_token_expired(_label, factory, call, expired_cls, _denied, _
     with patch.object(loader._session, "get", return_value=_response(401)):
         with pytest.raises(expired_cls) as exc:
             call(loader)
-    assert "reconnect" in str(exc.value).lower()
+    assert exc.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert "401" in str(exc.value)
 
 
 @pytest.mark.parametrize(
@@ -106,22 +113,43 @@ def test_403_raises_access_denied(_label, factory, call, _expired, denied_cls, r
         with pytest.raises(denied_cls) as exc:
             call(loader)
     message = str(exc.value)
+    assert exc.value.code == ErrorCode.AUTH_ACCESS_DENIED
     assert resource in message, "the 403 must name the resource the user lost access to"
-    assert "will not help" in message.lower()
+    assert "still valid" in message.lower(), "a 403 must say the credential itself is fine"
 
 
-@pytest.mark.parametrize(
-    ("_label", "factory", "call", "_expired", "denied_cls", "_res"), CASES, ids=IDS
+# Remediation phrasings a loader must never contain. "reconnect" in any form is
+# the one that mattered for #372 — a 403 told the user to reconnect and they
+# looped — but the rule is broader than that one bug: what the user should DO is
+# the presentation layer's to say, once, keyed by code (rule 3 in
+# apps/common/errors.py). While both layers wrote advice the user got it twice in
+# two different phrasings.
+_ADVICE_PHRASES = (
+    "reconnect",
+    "re-connect",
+    "please ",
+    "retry",
+    "ask a",
+    "ask an",
+    "remove this data source",
+    "contact ",
 )
-def test_403_does_not_advise_reconnecting(_label, factory, call, _expired, denied_cls, _res):
-    """The bug in #372: reconnecting mints the same token and the user loops."""
+
+
+@pytest.mark.parametrize("status", [401, 403], ids=["401", "403"])
+@pytest.mark.parametrize(
+    ("_label", "factory", "call", "_expired", "_denied", "_res"), CASES, ids=IDS
+)
+def test_loader_messages_describe_and_never_advise(
+    _label, factory, call, _expired, _denied, _res, status
+):
     loader = factory()
-    with patch.object(loader._session, "get", return_value=_response(403)):
-        with pytest.raises(denied_cls) as exc:
+    with patch.object(loader._session, "get", return_value=_response(status)):
+        with pytest.raises(ExpectedUpstreamError) as exc:
             call(loader)
     message = str(exc.value).lower()
-    assert "reconnect your" not in message
-    assert "please reconnect" not in message
+    found = [phrase for phrase in _ADVICE_PHRASES if phrase in message]
+    assert not found, f"loader message gives remediation advice ({found}): {message}"
 
 
 @pytest.mark.parametrize(

@@ -89,21 +89,19 @@ class CommCareBaseLoader:
         resp = get_with_auth_refresh(
             self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
         )
+        # Describe only; remediation copy belongs to the presentation layer, keyed
+        # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
         if resp.status_code == 403:
-            # Reconnecting mints an identically-scoped token and fails the same
-            # way, so do NOT offer that advice here (#372).
             raise CommCareAccessDeniedError(
-                f"Your CommCare account no longer has access to project space "
-                f"{self.domain} (HTTP 403). Your sign-in is still valid, so "
-                f"reconnecting will not help — your membership or API access for "
-                f"this project space may have been removed. Ask a CommCare project "
-                f"admin to restore access, or remove this data source."
+                f"CommCare HQ denied access to project space {self.domain} "
+                f"(HTTP 403). The sign-in is still valid and has no access to that "
+                f"project space — the membership or API access for it may have been "
+                f"removed."
             )
         if resp.status_code == 401:
             raise CommCareTokenExpiredError(
-                f"CommCare authentication failed for domain {self.domain} "
-                f"(HTTP 401). Your CommCare sign-in has expired or been revoked — "
-                f"please reconnect your CommCare account and retry."
+                f"CommCare HQ rejected the sign-in for project space {self.domain} "
+                f"(HTTP 401): it has expired or been revoked."
             )
         if resp.status_code >= 400:
             raise CommCareExportError(

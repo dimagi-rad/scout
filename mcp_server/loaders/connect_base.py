@@ -125,22 +125,21 @@ class ConnectBaseLoader:
 
         401 and 403 need opposite advice, so they are separate types (#372).
         Both paginated and ad-hoc GETs go through here so the two cannot drift.
+
+        Describe only; remediation copy belongs to the presentation layer, keyed
+        off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
         """
         if status_code == 403:
-            # Reconnecting mints an identically-scoped token and fails the same
-            # way, so do NOT offer that advice here.
             raise ConnectAccessDeniedError(
-                f"Your CommCare Connect account no longer has access to opportunity "
-                f"{self.opportunity_id} (HTTP 403). Your sign-in is still valid, so "
-                f"reconnecting will not help — your access to this opportunity may "
-                f"have been removed. Ask a Connect admin to restore access, or "
-                f"remove this data source."
+                f"CommCare Connect denied access to opportunity "
+                f"{self.opportunity_id} (HTTP 403). The sign-in is still valid and "
+                f"has no access to that opportunity — the access may have been "
+                f"removed."
             )
         if status_code == 401:
             raise ConnectTokenExpiredError(
-                f"Connect authentication failed for opportunity {self.opportunity_id} "
-                f"(HTTP 401). Your CommCare Connect sign-in has expired or been "
-                f"revoked — please reconnect your account and retry."
+                f"CommCare Connect rejected the sign-in for opportunity "
+                f"{self.opportunity_id} (HTTP 401): it has expired or been revoked."
             )
 
     def _get(self, url: str, params: dict | None = None) -> requests.Response:

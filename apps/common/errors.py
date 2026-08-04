@@ -32,6 +32,33 @@ Sentry event is the only signal that anything went wrong at all.
 
 If any of the four fail, raise a plain ``Exception``. **An expected state that
 nobody is told about is not an expected state — it is a silent failure.**
+
+Reporting rules
+---------------
+
+Classification says whether a failure pages. These five say how it is *reported*.
+They exist because Scout had no contract here at all: a raise site and its
+consumer each assumed the other's job, so remediation copy was written twice and
+categories were recovered by substring-matching prose (#388 review).
+
+1. **Every error crossing a boundary carries ``(code, message)``.** ``code`` is an
+   ``ErrorCode`` — stable, never localised, never reworded — and is what handlers,
+   UI, and prompts branch on. ``message`` is prose for humans and for the agent.
+2. **Neither is derived from the other, and nobody parses a message.** Recovering
+   a category by matching prose or a class name is a bug; see finding 06#1, where
+   matching ``'"code": "NOT_FOUND"'`` broke when FastMCP's JSON separators
+   changed.
+3. **Raise sites describe; they never advise.** A loader says what the provider
+   reported. What the user should *do* is presentation, and lives in exactly one
+   place keyed by code (``_CREDENTIAL_GUIDANCE`` in ``apps/workspaces/tasks.py``).
+   While both layers wrote advice, the user got it twice in two phrasings.
+4. **Guidance is attributed.** One block per distinct code, naming the sources it
+   applies to. A run can need opposite advice for two sources, and an
+   unattributed pair reads as a contradiction (#372).
+5. **Substring matching is legal only at the edge of a system we do not own.**
+   ``mcp_server/services/query.py:_classify_error`` matching psycopg's
+   ``"password authentication failed"`` is a boundary adapter and is fine. Between
+   two halves of Scout it is never fine.
 """
 
 from __future__ import annotations

@@ -77,21 +77,19 @@ class OCSBaseLoader:
         resp = get_with_auth_refresh(
             self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
         )
+        # Describe only; remediation copy belongs to the presentation layer, keyed
+        # off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
         if resp.status_code == 403:
-            # Reconnecting mints an identically-scoped token and fails the same
-            # way, so do NOT offer that advice here (#372).
             raise OCSAccessDeniedError(
-                f"Your Open Chat Studio account no longer has access to chatbot "
-                f"{self.experiment_id} (HTTP 403). Your sign-in is still valid, so "
-                f"reconnecting will not help — the chatbot may have moved teams, or "
-                f"your access to it may have been removed. Ask an OCS admin to "
-                f"restore access, or remove this data source."
+                f"Open Chat Studio denied access to chatbot {self.experiment_id} "
+                f"(HTTP 403). The sign-in is still valid and has no access to that "
+                f"chatbot — it may have moved teams, or the access may have been "
+                f"removed."
             )
         if resp.status_code == 401:
             raise OCSTokenExpiredError(
-                f"OCS authentication failed for experiment {self.experiment_id} "
-                f"(HTTP 401). Your Open Chat Studio sign-in has expired or been "
-                f"revoked — please reconnect your account and retry."
+                f"Open Chat Studio rejected the sign-in for chatbot "
+                f"{self.experiment_id} (HTTP 401): it has expired or been revoked."
             )
         if resp.status_code >= 400:
             raise OCSExportError(
