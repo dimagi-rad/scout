@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Iterable
 from datetime import timedelta
+from typing import NamedTuple
 
 import sentry_sdk
 from django.conf import settings
@@ -19,6 +21,7 @@ from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import (
@@ -67,44 +70,54 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Substrings that mark a per-source failure as a credential problem so the user
-# gets actionable advice rather than just "check the connection" (arch #252,
-# finding 14#4). Matching is on the serialized string because _summarize_error
-# persists "{ClassName}: {message}" into MaterializationRun.result — the class
-# name is the half that survives the JSON round-trip, so it anchors each set.
-_AUTH_FAILURE_MARKERS = ("AuthError", "TokenExpiredError", "reconnect your", "HTTP 401")
-_ACCESS_DENIED_MARKERS = ("AccessDeniedError", "HTTP 403")
-_REAUTH_GUIDANCE = (
-    "This looks like an expired or revoked sign-in — reconnect the affected "
-    "account (Settings → Connections) and re-run materialization."
-)
-_ACCESS_DENIED_GUIDANCE = (
-    "This is access that was removed upstream, not an expired sign-in — "
-    "reconnecting will NOT restore it, because it mints a token with exactly the "
-    "same access. Ask an admin on the affected provider to restore access, or "
-    "remove that data source from the workspace."
-)
+# Remediation copy for the credential problems a run can report, keyed by the
+# ``error_code`` the materializer recorded per source (arch #252, finding 14#4).
+#
+# This copy lives here and NOT at the raise site. A loader describes what the
+# provider said; deciding what the user should do about it is a presentation
+# concern, and when both layers wrote advice the user got it twice in two
+# different phrasings.
+#
+# Fragments, not sentences: _credential_guidance prefixes each with the sources
+# it applies to. A 401 and a 403 in one run need *opposite* advice, so an
+# unattributed pair reads as a flat contradiction (#372).
+_CREDENTIAL_GUIDANCE: dict[str, str] = {
+    ErrorCode.AUTH_TOKEN_EXPIRED: (
+        "expired or revoked sign-in — reconnect the affected account "
+        "(Settings → Connections) and re-run materialization."
+    ),
+    ErrorCode.AUTH_ACCESS_DENIED: (
+        "access was removed upstream, not an expired sign-in — reconnecting will "
+        "NOT restore it, because it mints a token with exactly the same access. "
+        "Ask an admin on the affected provider to restore access, or remove that "
+        "data source from the workspace."
+    ),
+}
 
 
-def _looks_like_access_denied(error: str | None) -> bool:
-    """True when a per-source error reads as an upstream 403 (access removed)."""
-    if not error:
-        return False
-    return any(marker in error for marker in _ACCESS_DENIED_MARKERS)
+class _SourceFailure(NamedTuple):
+    """One failed source, as recorded in ``run.result["sources"][name]``."""
+
+    name: str
+    error: str
+    code: str
 
 
-def _looks_like_auth_failure(error: str | None) -> bool:
-    """True when a per-source error reads as a dead *credential* (401).
+def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
+    """Return one guidance line per distinct credential problem, naming its sources.
 
-    A 403 is deliberately excluded. There the credential is valid, so reconnect
-    guidance is not merely unhelpful but wrong — it mints an identically-scoped
-    token that fails the same way, and the user loops (#372).
+    Ordered by ``_CREDENTIAL_GUIDANCE`` rather than by encounter order so the
+    wording is stable regardless of which source failed first.
     """
-    if not error:
-        return False
-    if _looks_like_access_denied(error):
-        return False
-    return any(marker in error for marker in _AUTH_FAILURE_MARKERS)
+    by_code: dict[str, list[str]] = {}
+    for failure in failures:
+        if failure.code in _CREDENTIAL_GUIDANCE:
+            by_code.setdefault(failure.code, []).append(failure.name)
+    return [
+        f"{', '.join(by_code[code])}: {guidance}"
+        for code, guidance in _CREDENTIAL_GUIDANCE.items()
+        if code in by_code
+    ]
 
 
 def _no_pipeline_error(registry, provider: str) -> str:
@@ -135,7 +148,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     if not runs:
         return ""
 
-    failed_sources: list[tuple[str, str]] = []
+    failed_sources: list[_SourceFailure] = []
     completed_sources: list[tuple[str, int]] = []
     skipped_sources: list[str] = []
     cancelled_sources: list[str] = []
@@ -149,7 +162,13 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
                 continue
             state = info.get("state")
             if state == "failed":
-                failed_sources.append((name, str(info.get("error") or "unknown error")))
+                failed_sources.append(
+                    _SourceFailure(
+                        name=name,
+                        error=str(info.get("error") or "unknown error"),
+                        code=str(info.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                    )
+                )
             elif state == "completed":
                 completed_sources.append((name, int(info.get("rows") or 0)))
             elif state == "skipped":
@@ -161,10 +180,10 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     if failed_sources:
         first = failed_sources[0]
         if len(failed_sources) == 1:
-            parts.append(f"{first[0]} failed: {first[1]}")
+            parts.append(f"{first.name} failed: {first.error}")
         else:
-            others = ", ".join(n for n, _ in failed_sources[1:])
-            parts.append(f"{first[0]} failed ({first[1]}); also failed: {others}")
+            others = ", ".join(f.name for f in failed_sources[1:])
+            parts.append(f"{first.name} failed ({first.error}); also failed: {others}")
     if completed_sources:
         total_rows = sum(rows for _, rows in completed_sources)
         names = ", ".join(n for n, _ in completed_sources)
@@ -179,12 +198,8 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         states = sorted({r.state for r in runs})
         return f"Materialization {'/'.join(states)}."
     summary = ". ".join(parts) + "."
-    # Not mutually exclusive: one tenant's token can be dead while another's
-    # access was revoked, and the two need opposite advice.
-    if any(_looks_like_auth_failure(err) for _, err in failed_sources):
-        summary += " " + _REAUTH_GUIDANCE
-    if any(_looks_like_access_denied(err) for _, err in failed_sources):
-        summary += " " + _ACCESS_DENIED_GUIDANCE
+    for line in _credential_guidance(failed_sources):
+        summary += " " + line
     return summary
 
 
@@ -1372,7 +1387,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             "users":   {"state": "completed", "rows": 100},
             "visits":  {"state": "completed", "rows": 98869},
             "completed_works": {"state": "failed",  "rows": 0,
-                                "error": "ConnectionError: 500 ..."},
+                                "error": "ConnectionError: 500 ...",
+                                "error_code": "INTERNAL_ERROR"},
             "payments": {"state": "skipped", "rows": 0},
             ...
         },
@@ -1406,6 +1422,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
+                if "error_code" in info:
+                    detail["error_code"] = info["error_code"]
                 # Expose cursor_state.last_id so the resume prompt can tell the
                 # agent where a partial load will continue from (issue #187).
                 cursor_state = info.get("cursor_state")
@@ -1494,26 +1512,22 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    source_errors = [
-        str(src.get("error"))
+    # Named per source, because a run can carry a dead token on one and revoked
+    # access on another — opposite advice, and the agent has to tell them apart to
+    # relay either honestly.
+    guidance_lines = _credential_guidance(
+        _SourceFailure(
+            name=name,
+            error=str(src.get("error") or ""),
+            code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
+        )
         for tenant in summary
-        for src in (tenant.get("sources") or {}).values()
-    ]
-    auth_failure = any(_looks_like_auth_failure(e) for e in source_errors)
-    access_denied = any(_looks_like_access_denied(e) for e in source_errors)
-    # Both may apply in one run: different sources can fail for different
-    # reasons, and the two need opposite advice.
-    credential_guidance = (
-        f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
-        f"user explicitly to reconnect the affected account."
-        if auth_failure
-        else ""
+        for name, src in (tenant.get("sources") or {}).items()
     )
-    credential_guidance += (
-        f" At least one source was refused because access was removed upstream: "
-        f"{_ACCESS_DENIED_GUIDANCE} Tell the user explicitly that reconnecting will "
-        f"NOT fix this one, and name the affected data source."
-        if access_denied
+    credential_guidance = (
+        " Credential problems, per source — relay these verbatim, naming the "
+        f"source each applies to: {' '.join(guidance_lines)}"
+        if guidance_lines
         else ""
     )
 
