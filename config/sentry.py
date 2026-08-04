@@ -1,17 +1,11 @@
 """Sentry event filtering.
 
-Scout's Sentry config had no ``before_send``, so the SDK's default
-``LoggingIntegration`` promoted *every* ERROR-level log record into an event —
-making the issue stream only as accurate as the codebase's log levels. Log
-levels alone cannot carry the load: one failure is logged by two layers (loader
-and task), each minting its own fingerprint, and the ``#scout-ops`` alert rule
-fires on first-seen with ``actionMatch: any`` and no filters. So each new
-variant pages.
-
-``before_send`` is the backstop: a condition Scout has classified as a known
-operational state never becomes an issue, regardless of how many layers log it.
-Dropping happens here rather than in a Sentry-side alert filter so the rule
-lives in the repo, in review, next to the code that raises.
+The SDK's default ``LoggingIntegration`` promotes every ERROR-level log record
+into an event, so log levels alone cannot keep known operational states out of
+the issue stream: one failure is often logged by two layers, each minting its own
+fingerprint. ``before_send`` is the backstop — it drops classified states however
+many layers log them, and it lives in the repo, in review, next to the code that
+raises, rather than in a Sentry-side alert filter.
 """
 
 from __future__ import annotations
@@ -25,11 +19,8 @@ def before_send(event, hint):
     Only the exception actually raised is inspected — the chain
     (``__cause__`` / ``__context__``) deliberately is not. A bug that occurs
     *while handling* an expected state is still a bug, and walking the chain
-    would swallow it.
-
-    Events with no exception attached (a bare ``logger.error``) are always kept:
-    classification is a property of an exception type, and there is nothing to
-    classify here.
+    would swallow it. Events with no exception attached (a bare
+    ``logger.error``) have nothing to classify, so they are always kept.
     """
     exc_info = hint.get("exc_info")
     if exc_info and isinstance(exc_info[1], ExpectedStateError):

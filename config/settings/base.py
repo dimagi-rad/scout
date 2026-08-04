@@ -290,9 +290,8 @@ LANGFUSE_BASE_URL = env("LANGFUSE_BASE_URL", default="")
 
 # Sentry error monitoring (optional — leave SENTRY_DSN blank to disable)
 SENTRY_DSN = env("SENTRY_DSN", default="")
-# Kill switch for the expected-state filter (see apps/common/errors.py). Flip to
-# False to make Sentry report everything again — for an incident where a
-# condition we classified as routine turns out not to be — without a deploy.
+# Kill switch: flip to False to report expected states again (see
+# apps/common/errors.py) when one turns out not to be routine, without a deploy.
 SENTRY_SUPPRESS_EXPECTED_STATES = env.bool("SENTRY_SUPPRESS_EXPECTED_STATES", default=True)
 if SENTRY_DSN:
     sentry_sdk.init(

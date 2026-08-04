@@ -1,7 +1,7 @@
 """Shared provider errors and the Sentry filter built on them (#371, #386).
 
-``TestBeforeSend`` is the alerting contract, so it is asserted explicitly in
-both directions — what gets dropped AND what must keep coming through.
+``TestBeforeSend`` is the alerting contract, so it is asserted in both
+directions — what gets dropped AND what must keep coming through.
 """
 
 import pytest
@@ -25,8 +25,8 @@ from mcp_server.loaders.ocs_base import OCSAuthError as loader_ocs
 class TestAuthErrorConsolidation:
     """The loader and tenant-resolution modules must name the SAME class.
 
-    These assert *identity*, not that both names resolve — two classes sharing a
-    name is exactly the bug (an ``except`` on one misses the other).
+    Identity, not just resolvable names: two classes sharing a name means an
+    ``except`` on one misses the other.
     """
 
     def test_ocs_auth_error_is_one_class(self):
@@ -39,7 +39,6 @@ class TestAuthErrorConsolidation:
         assert resolution_connect is loader_connect is ConnectAuthError
 
     def test_catching_the_loader_class_catches_the_resolver_raise(self):
-        """The bug this consolidation fixes, stated as behaviour."""
         with pytest.raises(loader_ocs):
             raise resolution_ocs("raised via the tenant-resolution import path")
 
@@ -81,11 +80,7 @@ class TestBeforeSend:
         assert before_send(event, {}) is event
 
     def test_does_not_walk_the_exception_chain(self):
-        """A bug raised *while handling* an expected state is still a bug.
-
-        Walking ``__cause__``/``__context__`` would swallow it, so ``before_send``
-        deliberately inspects only the exception that was raised.
-        """
+        """A bug raised *while handling* an expected state is still a bug."""
         try:
             try:
                 raise ExpectedStateError("routine")
@@ -101,11 +96,6 @@ class TestBeforeSend:
         ids=["commcare", "connect", "ocs"],
     )
     def test_provider_auth_errors_are_not_yet_classified(self, auth_error):
-        """Scope pin: this PR adds the mechanism, it does not classify anything.
-
-        The provider auth errors still reach Sentry exactly as they do today, so
-        this change is a no-op on event volume. Reclassifying them (and
-        splitting 401 from 403) is #371/#372, which inverts this assertion.
-        """
+        """Scope pin: the mechanism lands here, the classification in #372."""
         event = {"event": 1}
         assert before_send(event, self._hint(auth_error("HTTP 401"))) is event
