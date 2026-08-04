@@ -31,6 +31,20 @@ export interface ActiveJob {
   created_at: string
 }
 
+/** Stable server-side error codes. Branch on these, never on error_summary
+ *  prose — see the reporting rules in apps/common/errors.py. */
+export const AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"
+export const AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
+
+export interface CredentialFailure {
+  /** Pipeline source name, e.g. "visits". */
+  source: string
+  /** An ErrorCode — AUTH_TOKEN_EXPIRED or AUTH_ACCESS_DENIED. */
+  code: string
+  /** "ocs" | "commcare" | "commcare_connect", or "" if unrecorded. */
+  provider: string
+}
+
 export interface RecentTermination {
   thread_job_id: string
   thread_id: string
@@ -39,6 +53,10 @@ export interface RecentTermination {
   state: TerminationState
   completed_at: string | null
   error_summary: string
+  /** Machine-readable counterpart to error_summary. Only AUTH_TOKEN_EXPIRED
+   *  warrants a Reconnect CTA: for AUTH_ACCESS_DENIED the credential is valid,
+   *  so reconnecting mints the same token and loops the user (#372). */
+  credential_failures: CredentialFailure[]
   retry_available: boolean
 }
 

@@ -1,6 +1,7 @@
 import { useState } from "react"
-import { AlertTriangle, RotateCw, XCircle } from "lucide-react"
-import { jobsApi, type RecentTermination } from "@/api/jobs"
+import { AlertTriangle, Link2, RotateCw, XCircle } from "lucide-react"
+import { AUTH_TOKEN_EXPIRED, jobsApi, type RecentTermination } from "@/api/jobs"
+import { withBasePath } from "@/config"
 
 interface Props {
   termination: RecentTermination
@@ -26,6 +27,14 @@ export function MaterializationFailure({
 }: Props) {
   const [retryState, setRetryState] = useState<"idle" | "pending" | "error">("idle")
   const isCancelled = termination.state === "cancelled"
+
+  // Reconnect is offered ONLY for a dead credential. For AUTH_ACCESS_DENIED the
+  // credential is valid, so reconnecting mints an identically-scoped token and
+  // fails the same way — offering the button there is the loop #372 is about.
+  // Keyed on the code, never on error_summary prose.
+  const needsReconnect = (termination.credential_failures ?? []).some(
+    (f) => f.code === AUTH_TOKEN_EXPIRED,
+  )
 
   const handleRetry = async () => {
     if (retryState === "pending") return
@@ -71,6 +80,16 @@ export function MaterializationFailure({
             >
               {termination.error_summary}
             </div>
+          )}
+          {needsReconnect && (
+            <a
+              href={withBasePath("/settings/connections")}
+              className="mt-2 inline-flex items-center gap-1 rounded border border-amber-500/40 px-2 py-1 text-amber-600 transition-colors hover:bg-amber-500/10 dark:text-amber-400"
+              data-testid="materialization-reconnect-link"
+            >
+              <Link2 className="h-3 w-3" />
+              <span>Reconnect account</span>
+            </a>
           )}
         </div>
         {termination.retry_available && (

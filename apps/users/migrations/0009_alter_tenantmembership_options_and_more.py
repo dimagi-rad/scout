@@ -5,21 +5,23 @@ from django.db import migrations
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('users', '0008_delete_tenantcredential'),
+        ("users", "0008_delete_tenantcredential"),
     ]
 
     operations = [
         migrations.AlterModelOptions(
-            name='tenantmembership',
-            options={'base_manager_name': 'all_objects', 'ordering': ['-last_selected_at', 'tenant__canonical_name']},
+            name="tenantmembership",
+            options={
+                "base_manager_name": "all_objects",
+                "ordering": ["-last_selected_at", "tenant__canonical_name"],
+            },
         ),
         migrations.AlterModelManagers(
-            name='tenantmembership',
+            name="tenantmembership",
             managers=[
-                ('objects', django.db.models.manager.Manager()),
-                ('all_objects', django.db.models.manager.Manager()),
+                ("objects", django.db.models.manager.Manager()),
+                ("all_objects", django.db.models.manager.Manager()),
             ],
         ),
     ]

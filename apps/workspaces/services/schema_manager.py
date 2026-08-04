@@ -712,8 +712,7 @@ class SchemaManager:
         # which is the membership ALTER DEFAULT PRIVILEGES FOR ROLE requires.
         cursor.execute(
             psycopg.sql.SQL(
-                "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
-                "GRANT SELECT ON TABLES TO {}"
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} GRANT SELECT ON TABLES TO {}"
             ).format(
                 psycopg.sql.Identifier(dbt_role_name(schema_name)),
                 psycopg.sql.Identifier(schema_name),

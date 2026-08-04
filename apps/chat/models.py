@@ -85,6 +85,12 @@ class ThreadJob(models.Model):
     # Failure summary for the frontend error card, populated on FAILED/CANCELLED
     # from MaterializationRun.result["sources"] when available, else a generic string.
     error_summary = models.TextField(blank=True, default="")
+    # The machine-readable counterpart: [{"source", "code", "provider"}] for each
+    # source that failed on a credential problem. The card needs the *code* to
+    # decide whether "Reconnect" is the right CTA — offering it for a 403 loops the
+    # user (#372) — and error_summary is prose, which nothing may parse.
+    # Denormalised rather than joined at read time because jobs/active/ is polled.
+    credential_failures = models.JSONField(default=list, blank=True)
 
     class Meta:
         indexes = [

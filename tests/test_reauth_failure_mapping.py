@@ -11,7 +11,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from apps.common.error_codes import ErrorCode
-from apps.workspaces.tasks import _compose_failure_summary, _credential_guidance, _SourceFailure
+from apps.workspaces.tasks import (
+    _compose_failure_summary,
+    _credential_guidance,
+    _SourceFailure,
+    credential_failure_records,
+)
 
 _DENIED_ERROR = (
     "OCSAccessDeniedError: Your Open Chat Studio account no longer has access to "
@@ -127,3 +132,36 @@ def test_summary_survives_a_failure_record_with_no_code():
     )
     assert _EXPIRED_ERROR in summary
     assert "reconnect" not in summary.lower()
+
+
+def test_credential_failure_records_carry_code_and_provider():
+    records = credential_failure_records(
+        [
+            _run(
+                {
+                    "sessions": {
+                        "state": "failed",
+                        "error": _DENIED_ERROR,
+                        "error_code": ErrorCode.AUTH_ACCESS_DENIED,
+                        "provider": "ocs",
+                    },
+                    "visits": {
+                        "state": "failed",
+                        "error": "HTTP 500",
+                        "error_code": ErrorCode.INTERNAL_ERROR,
+                        "provider": "commcare_connect",
+                    },
+                    "users": {"state": "completed", "rows": 3},
+                }
+            )
+        ]
+    )
+    # Only credential problems — a 500 gives the card nothing extra to offer.
+    assert records == [
+        {"source": "sessions", "code": ErrorCode.AUTH_ACCESS_DENIED, "provider": "ocs"}
+    ]
+
+
+def test_credential_failure_records_omit_uncoded_failures():
+    """An in-flight run from the previous release must not fabricate a code."""
+    assert credential_failure_records([_run({"cases": {"state": "failed", "error": "boom"}})]) == []

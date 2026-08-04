@@ -101,6 +101,7 @@ class _SourceFailure(NamedTuple):
     name: str
     error: str
     code: str
+    provider: str = ""
 
 
 def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
@@ -138,6 +139,39 @@ def _no_pipeline_error(registry, provider: str) -> str:
     return f"No pipeline configured for provider '{provider}'"
 
 
+def _collect_source_failures(runs: list[MaterializationRun]) -> list[_SourceFailure]:
+    """Every failed source across these runs, in encounter order."""
+    failures: list[_SourceFailure] = []
+    for run in runs:
+        result = run.result if isinstance(run.result, dict) else None
+        if not result:
+            continue
+        for name, info in (result.get("sources") or {}).items():
+            if isinstance(info, dict) and info.get("state") == "failed":
+                failures.append(
+                    _SourceFailure(
+                        name=name,
+                        error=str(info.get("error") or "unknown error"),
+                        code=str(info.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                        provider=str(info.get("provider") or ""),
+                    )
+                )
+    return failures
+
+
+def credential_failure_records(runs: list[MaterializationRun]) -> list[dict]:
+    """The credential problems in these runs, for ``ThreadJob.credential_failures``.
+
+    Only failures whose code has remediation copy — everything else is a plain
+    failure the card has nothing special to offer for.
+    """
+    return [
+        {"source": f.name, "code": f.code, "provider": f.provider}
+        for f in _collect_source_failures(runs)
+        if f.code in _CREDENTIAL_GUIDANCE
+    ]
+
+
 def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     """Compose a human-readable failure summary for ``ThreadJob.error_summary``.
 
@@ -148,7 +182,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     if not runs:
         return ""
 
-    failed_sources: list[_SourceFailure] = []
+    failed_sources: list[_SourceFailure] = _collect_source_failures(runs)
     completed_sources: list[tuple[str, int]] = []
     skipped_sources: list[str] = []
     cancelled_sources: list[str] = []
@@ -161,15 +195,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
             if not isinstance(info, dict):
                 continue
             state = info.get("state")
-            if state == "failed":
-                failed_sources.append(
-                    _SourceFailure(
-                        name=name,
-                        error=str(info.get("error") or "unknown error"),
-                        code=str(info.get("error_code") or ErrorCode.INTERNAL_ERROR),
-                    )
-                )
-            elif state == "completed":
+            if state == "completed":
                 completed_sources.append((name, int(info.get("rows") or 0)))
             elif state == "skipped":
                 skipped_sources.append(name)
@@ -1068,7 +1094,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         # The task itself failed/was aborted/cancelled — no result for a resume to
         # narrate, so flip straight to FAILED instead of deferring a resume with
         # nothing to say.
-        summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+        summary, credential_failures = await _build_failure_detail_for_job(tj.procrastinate_job_id)
         updated = await ThreadJob.objects.filter(
             id=tj.id,
             state=ThreadJob.State.PENDING,
@@ -1076,6 +1102,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
             error_summary=summary or MATERIALIZATION_FAILED_MESSAGE,
+            credential_failures=credential_failures,
         )
         if not updated:
             return None
@@ -1172,9 +1199,8 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
     The ThreadJob janitor can't do this for a hard worker death: it returns None
     for a 'doing' zombie job (correct per-tick, permanent for zombies).
     """
-    summary = (
-        await _build_failure_summary_for_job(procrastinate_job_id) or MATERIALIZATION_FAILED_MESSAGE
-    )
+    composed, credential_failures = await _build_failure_detail_for_job(procrastinate_job_id)
+    summary = composed or MATERIALIZATION_FAILED_MESSAGE
     async for tj in ThreadJob.objects.select_related("thread__workspace", "thread__user").filter(
         procrastinate_job_id=procrastinate_job_id,
         state__in=list(ThreadJob.ACTIVE_STATES),
@@ -1186,6 +1212,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
             error_summary=summary,
+            credential_failures=credential_failures,
         )
         if updated:
             await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
@@ -1290,15 +1317,25 @@ async def prune_old_procrastinate_jobs(timestamp: int = 0) -> dict:
     return {"pruned": True}
 
 
-async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
-    """Read MaterializationRuns for this job and compose a user-facing summary."""
+async def _build_failure_detail_for_job(procrastinate_job_id: int) -> tuple[str, list[dict]]:
+    """Read MaterializationRuns for this job; return (prose summary, credential codes).
+
+    Both halves come off one read, and neither is derived from the other — see the
+    reporting rules in ``apps/common/errors.py``.
+    """
     runs = [
         r
         async for r in MaterializationRun.objects.filter(
             procrastinate_job_id=procrastinate_job_id,
         )
     ]
-    return _compose_failure_summary(runs)
+    return _compose_failure_summary(runs), credential_failure_records(runs)
+
+
+async def _build_failure_summary_for_job(procrastinate_job_id: int) -> str:
+    """Prose-only convenience wrapper over ``_build_failure_detail_for_job``."""
+    summary, _ = await _build_failure_detail_for_job(procrastinate_job_id)
+    return summary
 
 
 async def _build_agent_for_resume(workspace, user, conversation_id=None):
@@ -1737,6 +1774,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         )
     )
     error_summary = ""
+    credential_failures: list[dict] = []
     if terminal == ThreadJob.State.FAILED:
         if view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: cascade teardown — re-running materialization IS the fix.
@@ -1757,7 +1795,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 "Check that the workspace's tenants have credentials configured."
             )
         else:
-            error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            error_summary, credential_failures = await _build_failure_detail_for_job(
+                tj.procrastinate_job_id
+            )
             if not error_summary:
                 error_summary = "Materialization did not complete successfully."
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
@@ -1770,6 +1810,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         state=terminal,
         completed_at=timezone.now(),
         error_summary=error_summary,
+        credential_failures=credential_failures,
     )
     if not updated:
         actual_state = (

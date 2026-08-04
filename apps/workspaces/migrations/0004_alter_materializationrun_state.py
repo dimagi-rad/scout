@@ -4,15 +4,28 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('workspaces', '0003_add_materialization_run_progress_and_cancellation'),
+        ("workspaces", "0003_add_materialization_run_progress_and_cancellation"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='materializationrun',
-            name='state',
-            field=models.CharField(choices=[('started', 'Started'), ('discovering', 'Discovering'), ('loading', 'Loading'), ('transforming', 'Transforming'), ('completed', 'Completed'), ('partial', 'Partial'), ('failed', 'Failed'), ('cancelled', 'Cancelled'), ('stale', 'Stale')], default='started', max_length=20),
+            model_name="materializationrun",
+            name="state",
+            field=models.CharField(
+                choices=[
+                    ("started", "Started"),
+                    ("discovering", "Discovering"),
+                    ("loading", "Loading"),
+                    ("transforming", "Transforming"),
+                    ("completed", "Completed"),
+                    ("partial", "Partial"),
+                    ("failed", "Failed"),
+                    ("cancelled", "Cancelled"),
+                    ("stale", "Stale"),
+                ],
+                default="started",
+                max_length=20,
+            ),
         ),
     ]

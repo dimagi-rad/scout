@@ -64,6 +64,12 @@ def _termination_to_dict(job: ThreadJob) -> dict:
     ``retry_available`` is True only for FAILED/CANCELLED — a COMPLETED job
     has no failure to retry from and we surface it in the payload only so the
     frontend can clear any stale failure card it had previously rendered.
+
+    ``credential_failures`` is the machine-readable half of ``error_summary`` so
+    the card can pick a CTA without reading prose (rules 1-2 in
+    ``apps/common/errors.py``). Notably it must NOT offer "Reconnect" for an
+    ``AUTH_ACCESS_DENIED``: that mints an identically-scoped token and loops the
+    user (#372).
     """
     return {
         "thread_job_id": str(job.id),
@@ -72,6 +78,7 @@ def _termination_to_dict(job: ThreadJob) -> dict:
         "state": job.state,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error_summary": job.error_summary or "",
+        "credential_failures": job.credential_failures or [],
         "retry_available": job.state
         in {
             ThreadJob.State.FAILED,
