@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
+from apps.common.errors import ConnectAuthError
 from mcp_server.loaders._http import (
     RETRY_STATUS_FORCELIST,
     RETRY_TOTAL,
@@ -54,10 +55,6 @@ def _extract_last_id(url: str, params: dict | None) -> int | None:
         return int(values[0])
     except (TypeError, ValueError):
         return None
-
-
-class ConnectAuthError(Exception):
-    """Raised when Connect returns a 401 or 403 response."""
 
 
 class ConnectExportError(Exception):
