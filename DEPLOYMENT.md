@@ -180,7 +180,7 @@ production EC2 host** for testing branches. It reuses every AWS Secrets Manager
 value, the ECR repos, and the RDS *instance* — but has **its own database**
 (`agent_platform_staging`) and its own Docker network (`scout_staging_shared`),
 so its data and internal services are isolated from production. Config lives in
-`config/deploy-staging*.yml` and is deployed manually (not from CI).
+`config/deploy-staging*.yml`.
 
 Notes: it runs the API with 2 uvicorn workers (not 4) and no Redis (LocMemCache)
 to limit its footprint on the shared t3.medium, and uses Docker's `json-file` log
@@ -204,7 +204,24 @@ driver so `kamal app logs` works directly.
    fails on staging. `setup_oauth_apps` runs automatically for the staging domain
    in the API container's entrypoint.
 
-### Deploying (from the branch you want to test)
+### Deploying from GitHub Actions
+
+Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
+ref dropdown. It builds and pushes both images, then deploys MCP → API → worker →
+frontend, and needs no secrets beyond the ones production already uses.
+
+Tests are not a gate — staging is for trying work in progress. The workflow is
+`workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
+
+Frontend images are tagged `staging-<sha>` rather than `<sha>`: the image bakes in
+`nginx.staging-kamal.conf` and `SENTRY_ENVIRONMENT` at build time, so sharing a tag
+with production would mean whichever environment deployed a given commit last wins.
+The API image carries no environment-specific build args and reuses the plain `<sha>`.
+Staging frontend builds skip the Sentry sourcemap upload, so a staging deploy can't
+overwrite the artifacts of a production release with the same SHA — errors still
+report to Sentry under the `staging` environment.
+
+### Deploying from your machine
 
 ```bash
 git checkout codex/semantic-model-work
