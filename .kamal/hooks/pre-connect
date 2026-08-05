@@ -1,5 +1,9 @@
 #!/bin/bash
 # Ensure shared Docker network exists before any service deploys
+#
+# Fail loudly: without `set -e` the trailing echo masks a failed ssh, and Kamal
+# then deploys against a network that does not exist.
+set -eo pipefail
 
 echo "Ensuring Docker networks exist on remote server..."
 
@@ -15,8 +19,10 @@ else
 fi
 
 # scout_shared: production. scout_staging_shared: the co-located staging stack.
-# Each stack keeps identical internal aliases (scout-web, scout-mcp-web) on its
-# own network, so the frontend nginx conf and MCP_SERVER_URL are shared verbatim.
+# The two stacks must use distinct internal aliases (scout-web vs
+# scout-staging-web) — Kamal 2 registers --network-alias on the shared `kamal`
+# network, not on these, so a reused alias round-robins prod traffic into
+# staging (see config/deploy-staging.yml).
 for net in scout_shared scout_staging_shared; do
   ssh -o StrictHostKeyChecking=no "${KEY_OPTS[@]}" "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net}"
 done
