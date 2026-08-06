@@ -240,14 +240,21 @@ source .env.deploy && source config/staging.env
 kamal setup -c config/deploy-staging-mcp.yml
 kamal setup -c config/deploy-staging.yml
 kamal setup -c config/deploy-staging-worker.yml
-kamal setup -c config/deploy-staging-frontend.yml
+kamal setup -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
 
 # Subsequent deploys
 kamal deploy -c config/deploy-staging-mcp.yml
 kamal deploy -c config/deploy-staging.yml
 kamal deploy -c config/deploy-staging-worker.yml
-kamal deploy -c config/deploy-staging-frontend.yml
+kamal deploy -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
 ```
+
+The frontend commands carry an explicit `--version`. Without it Kamal versions the
+build as the bare git SHA and pushes it as `scout/frontend:<sha>` — the same tag
+production uses — but with `nginx.staging-kamal.conf` baked in. A later production
+`kamal rollback`, host reboot, or re-pull of that version would then serve a
+frontend proxying to `scout-staging-web`, putting production traffic on the staging
+API. The API/MCP/worker image is environment-agnostic, so those need no override.
 
 Migrations run automatically against the staging database when the API container
 starts. Logs: `kamal app logs -c config/deploy-staging.yml`.
@@ -255,6 +262,11 @@ starts. Logs: `kamal app logs -c config/deploy-staging.yml`.
 > Always `source config/staging.env` before staging commands — it points
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
 > would deploy staging containers against the **production** database.
+>
+> And `unset SCOUT_DB_NAME` before running any **production** kamal command in
+> that shell. The export survives a re-`source` of `.env.deploy` (which never
+> sets it), so a prod deploy from the same session resolves `DATABASE_URL` to
+> `agent_platform_staging` and points production at the staging database.
 
 ## Manual Deployment
 
