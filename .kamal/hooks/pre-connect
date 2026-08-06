@@ -23,8 +23,13 @@ fi
 # scout-staging-web) — Kamal 2 registers --network-alias on the shared `kamal`
 # network, not on these, so a reused alias round-robins prod traffic into
 # staging (see config/deploy-staging.yml).
+#
+# `create || inspect` rather than a bare create: prod and staging deploys are in
+# separate concurrency groups, so two runs can pass the inspect check at the same
+# time and one create then loses with "network already exists". Re-inspecting
+# turns that race into success while a genuine failure still exits non-zero.
 for net in scout_shared scout_staging_shared; do
-  ssh -o StrictHostKeyChecking=no "${KEY_OPTS[@]}" "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net}"
+  ssh -o StrictHostKeyChecking=no "${KEY_OPTS[@]}" "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net} >/dev/null 2>&1 || docker network inspect ${net} >/dev/null"
 done
 
 echo "Network setup complete"
