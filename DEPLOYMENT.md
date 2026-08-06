@@ -182,6 +182,15 @@ value, the ECR repos, and the RDS *instance* — but has **its own database**
 so its data and internal services are isolated from production. Config lives in
 `config/deploy-staging*.yml`.
 
+One thing is *not* isolated: PostgreSQL roles are cluster-scoped, not per-database.
+The `<schema>_ro` / `<schema>_dbt` roles `SchemaManager` mints are named
+deterministically from `(provider, external_id)`, so a tenant provisioned in both
+environments shares a single role object. Expect `DROP ROLE` during schema teardown
+to fail with "objects depend on it … in database agent_platform_staging" (or vice
+versa) and leave a dangling role — the teardown swallows and logs it, so it is
+noise rather than breakage, but it is why staging role errors can appear in
+production logs.
+
 Notes: it runs the API with 2 uvicorn workers (not 4) and no Redis (LocMemCache)
 to limit its footprint on the shared t3.medium, and uses Docker's `json-file` log
 driver so `kamal app logs` works directly.
