@@ -41,14 +41,19 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set deploy env vars
+        # `shell: bash` (not the default `bash -e`) so pipefail is on: the
+        # SCOUT_DB_NAME pipeline below must abort the job when grep finds
+        # nothing rather than exiting 0 on sed's status.
+        shell: bash
         run: |
           echo "SCOUT_EC2_IP=${{ secrets.SCOUT_EC2_IP }}" >> $GITHUB_ENV
           echo "SCOUT_ECR_REGISTRY=${{ vars.SCOUT_ECR_REGISTRY }}" >> $GITHUB_ENV
           echo "SCOUT_RDS_SECRET_ARN=${{ secrets.SCOUT_RDS_SECRET_ARN }}" >> $GITHUB_ENV
           echo "SCOUT_RDS_ENDPOINT=${{ secrets.SCOUT_RDS_ENDPOINT }}" >> $GITHUB_ENV
           # Points DATABASE_URL at the staging database on the shared RDS
-          # instance (scripts/resolve-database-url.sh). Without it, staging
-          # containers boot against the production database.
+          # instance (scripts/resolve-database-url.sh). Silently missing, it
+          # defaults to agent_platform and this job migrates and boots staging
+          # against the PRODUCTION database — so fail hard instead.
           grep '^export SCOUT_DB_NAME=' config/staging.env | sed 's/^export //' >> $GITHUB_ENV
 
       - name: Build and push API image
