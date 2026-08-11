@@ -470,8 +470,18 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # Production deploys run on main, so their token's sub is
+              # ref-based. Staging is dispatched from an arbitrary branch
+              # (DEPLOYMENT.md "Second environment"), which would never match a
+              # ref pattern — so that job declares `environment: staging`, which
+              # makes GitHub mint an environment-based sub instead. Widening the
+              # ref pattern to `:*` would have handed prod ECR push and prod
+              # secret reads to every branch; the environment is a gate we can
+              # attach reviewers or a branch allowlist to.
               StringLike:
-                token.actions.githubusercontent.com:sub: repo:dimagi-rad/scout:ref:refs/heads/main
+                token.actions.githubusercontent.com:sub:
+                  - repo:dimagi-rad/scout:ref:refs/heads/main
+                  - repo:dimagi-rad/scout:environment:staging
       Policies:
         - PolicyName: scout-deploy-policy
           PolicyDocument:

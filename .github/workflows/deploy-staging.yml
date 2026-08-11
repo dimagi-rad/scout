@@ -18,6 +18,11 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Load-bearing for auth, not just bookkeeping: it switches the OIDC token's
+    # sub claim from `ref:refs/heads/<branch>` to `environment:staging`, which is
+    # the subject scout-github-deploy trusts for non-main refs. Remove it and
+    # every branch deploy fails at AssumeRoleWithWebIdentity.
+    environment: staging
     env:
       IMAGE_TAG: ${{ github.sha }}
       # The API image is environment-agnostic (env comes from Kamal), so staging
