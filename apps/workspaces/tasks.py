@@ -178,12 +178,13 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
 
     parts: list[str] = []
     if failed_sources:
-        first = failed_sources[0]
-        if len(failed_sources) == 1:
-            parts.append(f"{first.name} failed: {first.error}")
-        else:
-            others = ", ".join(f.name for f in failed_sources[1:])
-            parts.append(f"{first.name} failed ({first.error}); also failed: {others}")
+        # Every failure carries its own message. Rendering only the first and
+        # listing the rest as bare names discarded the very string the loaders
+        # are asked to produce, and left a second failure indistinguishable
+        # from a skipped source (#388 review).
+        parts.append(
+            "; ".join(f"{f.name} failed: {f.error.rstrip('.')}" for f in failed_sources)
+        )
     if completed_sources:
         total_rows = sum(rows for _, rows in completed_sources)
         names = ", ".join(n for n, _ in completed_sources)

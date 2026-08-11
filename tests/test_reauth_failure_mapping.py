@@ -117,6 +117,30 @@ def test_summary_attributes_each_kind_of_advice_to_its_own_source():
     assert "sessions: access was removed upstream" in summary
 
 
+def test_summary_renders_every_failed_source_not_just_the_first():
+    """Two failures, two messages.
+
+    The old shape rendered ``failed_sources[0].error`` and listed the rest as
+    bare names, so the second source's message — the string the loaders exist to
+    produce — was dropped, and a second failure was indistinguishable from a
+    skipped source.
+    """
+    summary = _compose_failure_summary(
+        [
+            _run(
+                {
+                    "sessions": _failed(_DENIED_ERROR, ErrorCode.AUTH_ACCESS_DENIED),
+                    "messages": _failed(_EXPIRED_ERROR, ErrorCode.AUTH_TOKEN_EXPIRED),
+                }
+            )
+        ]
+    )
+    assert _DENIED_ERROR.rstrip(".") in summary
+    assert _EXPIRED_ERROR.rstrip(".") in summary
+    assert "also failed:" not in summary
+    assert ".." not in summary
+
+
 def test_summary_survives_a_failure_record_with_no_code():
     """An in-flight run written by the previous release carries no error_code.
 

@@ -113,21 +113,27 @@ order, or concurrently. Nothing stacks.
 
 ### PR1 — loaders describe, presentation advises
 
-Already open and CI-green. Fold in `71fb111` (all four loader raise sites become
-descriptions; the five reporting rules land in `apps/common/errors.py`) and narrow the
-body. This is the direct answer to the review comment.
+All four loader raise sites become descriptions; the five reporting rules land in
+`apps/common/errors.py`. This is the direct answer to the review comment.
+
+It also renders **every** failed source's message rather than only the first. That
+began as PR2 work and moved here: PR1 already rewrites `_compose_failure_summary` to
+carry a code, so both PRs would have restructured the same function — and PR1 was
+internally inconsistent without it, since `_credential_guidance` attributed advice to
+every source while the description named one.
 
 ### PR2 — the failure summary tells the truth
 
 | # | Commit |
 |---|---|
 | 1 | `fix(materializer): stop truncating a source failure mid-sentence` |
-| 2 | `fix(tasks): render every failed source, not just the first` |
-| 3 | `fix(tasks): stop overwriting a real summary with generic retry advice` |
-| 4 | `feat(tasks): record a pre-flight credential failure as a run result` |
+| 2 | `fix(tasks): stop overwriting a real summary with generic retry advice` |
+| 3 | `feat(tasks): record a pre-flight credential failure as a run result` |
 
-"Make the pipe faithful, then send more through it." Commits 1-3 are small and
-independently revertable; commit 4 is the structural one and the place to look.
+"Make the pipe faithful, then send more through it." Commits 1-2 are small and
+independently revertable; commit 3 is the structural one and the place to look. None of
+the three touches `_compose_failure_summary`, so PR2 stays independent of PR1 in either
+merge order.
 
 ### PR3 — one owner for credential advice
 
