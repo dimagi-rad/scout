@@ -1481,7 +1481,13 @@ def _run_streamable_http(args: argparse.Namespace) -> None:
     # The MCP server is internal-only; DNS rebinding protection is still on.
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "scout-mcp-web:*"],
+        allowed_hosts=[
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "scout-mcp-web:*",
+            "scout-staging-mcp-web:*",
+        ],
     )
 
     app = mcp.streamable_http_app()

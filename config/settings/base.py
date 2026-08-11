@@ -11,6 +11,8 @@ from pathlib import Path
 import environ
 import sentry_sdk
 
+from config.sentry import before_send, ignore_noisy_loggers
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 env = environ.Env(
@@ -306,6 +308,9 @@ LANGFUSE_BASE_URL = env("LANGFUSE_BASE_URL", default="")
 
 # Sentry error monitoring (optional — leave SENTRY_DSN blank to disable)
 SENTRY_DSN = env("SENTRY_DSN", default="")
+# Kill switch: flip to False to report expected states again (see
+# apps/common/errors.py) when one turns out not to be routine, without a deploy.
+SENTRY_SUPPRESS_EXPECTED_STATES = env.bool("SENTRY_SUPPRESS_EXPECTED_STATES", default=True)
 if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
@@ -313,7 +318,9 @@ if SENTRY_DSN:
         release=env("SENTRY_RELEASE", default="") or None,
         traces_sample_rate=env.float("SENTRY_TRACES_SAMPLE_RATE", default=0.0),
         send_default_pii=env.bool("SENTRY_SEND_DEFAULT_PII", default=False),
+        before_send=before_send if SENTRY_SUPPRESS_EXPECTED_STATES else None,
     )
+    ignore_noisy_loggers()
 
 # Task Badger background-task tracking (optional — leave TASKBADGER_API_KEY blank to disable)
 TASKBADGER_API_KEY = env("TASKBADGER_API_KEY", default="")

@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 import requests
 from requests.adapters import HTTPAdapter
 
+from apps.common.errors import CommCareAuthError
 from mcp_server.loaders._http import build_retry, get_with_auth_refresh
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,6 @@ logger = logging.getLogger(__name__)
 # (connect_timeout_seconds, read_timeout_seconds)
 # Read timeout is generous: large CommCare domains may have slow API responses.
 HTTP_TIMEOUT: tuple[int, int] = (10, 120)
-
-
-class CommCareAuthError(Exception):
-    """Raised when CommCare returns a 401 or 403 response."""
 
 
 class CommCareExportError(Exception):

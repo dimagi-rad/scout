@@ -1,10 +1,35 @@
 #!/bin/bash
 # Ensure shared Docker network exists before any service deploys
+#
+# Fail loudly: without `set -e` the trailing echo masks a failed ssh, and Kamal
+# then deploys against a network that does not exist.
+set -eo pipefail
 
-echo "Ensuring Docker network 'scout_shared' exists on remote server..."
+echo "Ensuring Docker networks exist on remote server..."
 
 SSH_USER="scout"
 
-ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/scout-deploy.pem "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect scout_shared >/dev/null 2>&1 || docker network create scout_shared"
+# Use the dedicated deploy key if it exists; otherwise fall back to the ssh-agent
+# (same mechanism Kamal itself uses when no key file is present).
+SSH_KEY="${SCOUT_DEPLOY_KEY:-$HOME/.ssh/scout-deploy.pem}"
+if [ -f "$SSH_KEY" ]; then
+  KEY_OPTS=(-o IdentitiesOnly=yes -i "$SSH_KEY")
+else
+  KEY_OPTS=()
+fi
+
+# scout_shared: production. scout_staging_shared: the co-located staging stack.
+# The two stacks must use distinct internal aliases (scout-web vs
+# scout-staging-web) — Kamal 2 registers --network-alias on the shared `kamal`
+# network, not on these, so a reused alias round-robins prod traffic into
+# staging (see config/deploy-staging.yml).
+#
+# `create || inspect` rather than a bare create: prod and staging deploys are in
+# separate concurrency groups, so two runs can pass the inspect check at the same
+# time and one create then loses with "network already exists". Re-inspecting
+# turns that race into success while a genuine failure still exits non-zero.
+for net in scout_shared scout_staging_shared; do
+  ssh -o StrictHostKeyChecking=no "${KEY_OPTS[@]}" "${SSH_USER}@${KAMAL_HOSTS}" "docker network inspect ${net} >/dev/null 2>&1 || docker network create ${net} >/dev/null 2>&1 || docker network inspect ${net} >/dev/null"
+done
 
 echo "Network setup complete"

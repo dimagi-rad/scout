@@ -27,6 +27,7 @@ from allauth.socialaccount.models import SocialAccount
 from django.conf import settings
 from django.utils import timezone
 
+from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 
@@ -39,18 +40,6 @@ async def _ocs_team_slug(user) -> str:
     """The OCS team slug the user's current OAuth token is scoped to (OIDC claim)."""
     acct = await SocialAccount.objects.filter(user=user, provider="ocs").afirst()
     return (acct.extra_data or {}).get("team", "") if acct else ""
-
-
-class CommCareAuthError(Exception):
-    """Raised when CommCare returns a 401/403 during domain resolution."""
-
-
-class ConnectAuthError(Exception):
-    """Raised when Connect returns a 401/403 during opportunity resolution."""
-
-
-class OCSAuthError(Exception):
-    """Raised when OCS returns a 401/403 during chatbot resolution."""
 
 
 class TenantResolutionError(Exception):

@@ -54,14 +54,26 @@ class TokenRefreshError(Exception):
     """Raised when token refresh fails."""
 
 
-def token_needs_refresh(expires_at: timezone.datetime | None) -> bool:
+def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
     """Check if a token needs refreshing based on its expiry time.
 
     Returns True if the token expires within REFRESH_BUFFER.
-    Returns False if expires_at is None (unknown expiry -- assume valid).
+
+    An **unknown** expiry (``None``) used to return False — "assume valid" — which
+    fails open. ``expires_at`` is the only health signal Scout has, so a revoked
+    token with no recorded expiry was never proactively refreshed, was handed
+    straight to the loaders, and reported "connected" in the UI right up until it
+    401'd (#373). Unknown expiry now counts as needing a refresh, which is the one
+    action that can actually establish whether the credential is still alive.
+
+    ``can_refresh`` guards that: with no refresh token there is nothing to
+    attempt, and returning True would only condemn a credential that may well be
+    working. So unknown-expiry-and-unrefreshable keeps the old answer, and its
+    honesty problem is fixed where it is visible instead — ``providers_view``
+    reports such a token as needing reconnection rather than asserting it is fine.
     """
     if expires_at is None:
-        return False
+        return can_refresh
     return timezone.now() + REFRESH_BUFFER >= expires_at
 
 
@@ -142,6 +154,23 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
             timeout=30,
         )
         response.raise_for_status()
+    except requests.HTTPError as e:
+        # Mirrors the async twin above: a 4xx (typically 400 invalid_grant on a
+        # dead refresh token) is an expected outcome, not a bug -- log at WARNING
+        # with the body so we can tell invalid_grant (dead token) from
+        # invalid_client (bad secret). The sync path never got this treatment,
+        # so every routine dead-token refresh raised a Sentry event (#373).
+        status = e.response.status_code if e.response is not None else None
+        if status is not None and 400 <= status < 500:
+            logger.warning(
+                "Sync token refresh rejected for app %s: HTTP %s %s",
+                social_token.app.client_id,
+                status,
+                e.response.text,
+            )
+        else:
+            logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
+        raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e

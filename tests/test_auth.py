@@ -719,6 +719,41 @@ class TestProvidersEndpoint:
         assert providers["google"]["connected"] is True  # social_account fixture is google
         assert providers["github"]["connected"] is False
 
+    def test_login_only_provider_with_no_expiry_stays_connected(
+        self, client, user, github_social_app
+    ):
+        """A login-only provider must not be reported "expired" (#373).
+
+        GitHub OAuth Apps return neither ``expires_in`` nor a refresh token, so
+        allauth stores ``expires_at=None`` and an empty ``token_secret``. The
+        fail-closed rule for unknown expiry is about credentials Scout hands to
+        a data loader; GitHub has no token endpoint and is never used that way.
+        Reporting it "expired" would be unclearable — reconnecting re-stores
+        ``expires_at=None`` — and would hide the Disconnect button, which the
+        Connections page only renders for "connected".
+        """
+        account = SocialAccount.objects.create(user=user, provider="github", uid="gh-1")
+        SocialToken.objects.create(
+            app=github_social_app, account=account, token="gho_x", token_secret="", expires_at=None
+        )
+        client.force_login(user)
+
+        providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+        assert providers["github"]["status"] == "connected"
+
+    def test_data_provider_with_no_expiry_is_reported_expired(self, client, user, site):
+        """The inverse: a provider Scout DOES load data with must fail closed."""
+        ocs_app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+        ocs_app.sites.add(site)
+        account = SocialAccount.objects.create(user=user, provider="ocs", uid="ocs-1")
+        SocialToken.objects.create(
+            app=ocs_app, account=account, token="tok", token_secret="", expires_at=None
+        )
+        client.force_login(user)
+
+        providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+        assert providers["ocs"]["status"] == "expired"
+
 
 # ============================================================================
 # 9. TestDisconnectProvider
