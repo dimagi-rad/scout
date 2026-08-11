@@ -19,7 +19,11 @@ from django.utils import timezone
 
 from apps.users.adapters import EncryptingSocialAccountAdapter
 from apps.users.services.credential_resolver import _social_token_qs
-from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_token
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    refresh_oauth_token,
+    token_needs_refresh,
+)
 
 
 class TestTokenStorageSettings:
@@ -230,27 +234,35 @@ class TestTokenRefresh:
         assert any(r.exc_info for r in error_records)
 
     def test_token_needs_refresh_when_expiring_soon(self):
-        from apps.users.services.token_refresh import token_needs_refresh
-
         soon = timezone.now() + timedelta(minutes=3)
         assert token_needs_refresh(soon) is True
 
     def test_token_does_not_need_refresh_when_fresh(self):
-        from apps.users.services.token_refresh import token_needs_refresh
-
         later = timezone.now() + timedelta(hours=1)
         assert token_needs_refresh(later) is False
 
     def test_token_needs_refresh_when_expired(self):
-        from apps.users.services.token_refresh import token_needs_refresh
-
         past = timezone.now() - timedelta(hours=1)
         assert token_needs_refresh(past) is True
 
-    def test_token_needs_refresh_when_none(self):
-        from apps.users.services.token_refresh import token_needs_refresh
+    def test_unknown_expiry_needs_refresh_when_a_refresh_token_exists(self):
+        """Fail closed on unknown expiry (#373).
 
-        assert token_needs_refresh(None) is False
+        expires_at is the only health signal Scout has, so treating "unknown" as
+        "valid" meant a revoked token was never checked and never reported.
+        """
+        assert token_needs_refresh(None) is True
+        assert token_needs_refresh(None, can_refresh=True) is True
+
+    def test_unknown_expiry_does_not_condemn_an_unrefreshable_token(self):
+        """With nothing to refresh with, returning True would only break it."""
+        assert token_needs_refresh(None, can_refresh=False) is False
+
+    def test_can_refresh_does_not_override_a_known_expiry(self):
+        later = timezone.now() + timedelta(hours=1)
+        past = timezone.now() - timedelta(hours=1)
+        assert token_needs_refresh(later, can_refresh=False) is False
+        assert token_needs_refresh(past, can_refresh=False) is True
 
 
 @pytest.mark.django_db

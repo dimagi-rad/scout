@@ -30,7 +30,9 @@ class TestCredentialResolverTokenRefresh:
             ) as mock_refresh,
         ):
             result = await _aresolve_oauth_credential(mock_token, "commcare")
-            mock_needs.assert_called_once_with(mock_token.expires_at)
+            # can_refresh is passed so an unknown expiry only forces a refresh
+            # when there is a refresh token to attempt it with (#373).
+            mock_needs.assert_called_once_with(mock_token.expires_at, can_refresh=True)
             mock_refresh.assert_awaited_once()
             assert result["value"] == "new-fresh-token"
 
