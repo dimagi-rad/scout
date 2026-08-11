@@ -222,6 +222,16 @@ frontend, and needs no secrets beyond the ones production already uses.
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
 
+Branch deploys depend on a GitHub **environment named `staging`** existing in repo
+settings (Settings → Environments). The job declares `environment: staging` purely
+to change its OIDC token's `sub` claim to `repo:dimagi-rad/scout:environment:staging`,
+which is what `scout-github-deploy` trusts for non-main refs — production's trust
+stays pinned to `refs/heads/main`. Leave the environment's *Deployment branches*
+setting on "All branches" so any work-in-progress branch can deploy; add required
+reviewers there if staging ever needs an approval step. Without the environment,
+every branch deploy fails at `AssumeRoleWithWebIdentity` with "not authorized to
+perform sts:AssumeRoleWithWebIdentity".
+
 Frontend images are tagged `staging-<sha>` rather than `<sha>`: the image bakes in
 `nginx.staging-kamal.conf` and `SENTRY_ENVIRONMENT` at build time, so sharing a tag
 with production would mean whichever environment deployed a given commit last wins.
