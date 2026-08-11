@@ -1185,14 +1185,17 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         # The task itself failed/was aborted/cancelled — no result for a resume to
         # narrate, so flip straight to FAILED instead of deferring a resume with
         # nothing to say.
-        summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+        summary = (
+            await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            or MATERIALIZATION_FAILED_MESSAGE
+        )
         updated = await ThreadJob.objects.filter(
             id=tj.id,
             state=ThreadJob.State.PENDING,
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
-            error_summary=summary or MATERIALIZATION_FAILED_MESSAGE,
+            error_summary=summary,
         )
         if not updated:
             return None
@@ -1202,7 +1205,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             tj.procrastinate_job_id,
             status,
         )
-        await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+        await _persist_synthetic_failure_message(tj, summary)
         return "failed"
     if status != _PROCRASTINATE_SUCCEEDED_STATUS:
         # Unknown/future procrastinate status: never fall into the resume act
@@ -1305,7 +1308,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
             error_summary=summary,
         )
         if updated:
-            await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+            await _persist_synthetic_failure_message(tj, summary)
 
 
 async def _fail_zombie_materialization_run(run: MaterializationRun, reason: str) -> bool:
