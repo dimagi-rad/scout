@@ -88,21 +88,50 @@ def _statement_resources(stmt: dict) -> list:
     return [resource] if isinstance(resource, str) else resource
 
 
-def test_batch_get_secret_value_not_account_wide():
-    """kamal fetches secrets with BatchGetSecretValue; it must not be on '*'.
+def test_batch_get_secret_value_stays_unscoped():
+    """BatchGetSecretValue must stay on Resource '*' — scoping it breaks the deploy.
 
-    Granting BatchGetSecretValue on Resource '*' lets the CI role batch-read
-    every secret in the account. kamal passes an explicit --secret-id-list, so
-    per-secret authorization against the scout-namespaced prefixes is sufficient
-    (arch 10#9).
+    This test asserted the opposite until 0def249, and that assertion was wrong
+    in a way that cost two broken deploys. BatchGetSecretValue is an **API-level**
+    action and is not resource-scoped: narrowing it to ARNs denies the call
+    outright with "no identity-based policy allows the
+    secretsmanager:BatchGetSecretValue action", so kamal cannot fetch any secret.
+    arch 10#9 tightened it and broke the staging deploy, re-breaking what cd89826
+    had already fixed.
+
+    Confinement to the scout namespace lives on **GetSecretValue**, which is
+    resource-scoped and is pinned by the tests below. That is the assertion with
+    security value; this one exists so the next well-intentioned tightening fails
+    the build instead of the deploy.
     """
     statements = _statements_for_action("secretsmanager:BatchGetSecretValue")
     assert statements, "expected a BatchGetSecretValue statement (kamal uses it to fetch secrets)"
     for stmt in statements:
-        assert "*" not in _statement_resources(stmt), (
-            "secretsmanager:BatchGetSecretValue must not be granted on Resource '*' — "
-            "scope it to the scout-namespaced secret prefixes the deploy fetches (arch 10#9)."
+        assert "*" in _statement_resources(stmt), (
+            "secretsmanager:BatchGetSecretValue must stay on Resource '*'. It is an "
+            "API-level action and cannot be resource-scoped; narrowing it denies the "
+            "deploy's secret fetch outright. Scope GetSecretValue instead — see 0def249."
         )
+
+
+def test_get_secret_value_is_scoped_to_the_scout_namespace():
+    """The confinement BatchGetSecretValue cannot provide has to live here.
+
+    Since the batch action is necessarily account-wide, GetSecretValue is the only
+    thing between the deploy role and every secret in the account, so it must
+    never be widened to '*'.
+    """
+    statements = _statements_for_action("secretsmanager:GetSecretValue")
+    assert statements, "expected a GetSecretValue statement"
+    resources = [r for stmt in statements for r in _statement_resources(stmt)]
+    assert "*" not in resources, (
+        "secretsmanager:GetSecretValue must not be granted on Resource '*' — it is the "
+        "per-secret gate that confines the deploy to the scout-namespaced prefixes, and "
+        "BatchGetSecretValue is deliberately unscoped, so widening this leaves nothing."
+    )
+    assert any("secret:SCOUT_" in str(r) for r in resources), (
+        "expected GetSecretValue scoped to the SCOUT_ prefix the deploy actually reads"
+    )
 
 
 def test_get_secret_value_not_account_wide_rds():
