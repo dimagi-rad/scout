@@ -88,28 +88,6 @@ class ExpectedUpstreamError(ExpectedStateError):
     code: ErrorCode | None = None
 
 
-# These provider auth errors were each defined TWICE as unrelated classes — once in
-# ``apps/users/services/tenant_resolution.py`` and once in the matching
-# ``mcp_server/loaders/*_base.py`` — so an ``except OCSAuthError`` that imported
-# one sailed straight past the other (#371). They are defined here once and
-# imported by both: the point is identity, not a shared name.
-#
-# There are two axes, because callers need both:
-#
-#   *provider* — OCS / CommCare / Connect.
-#   *cause*    — 401 (the credential is dead) vs 403 (the credential is fine and
-#       has no access to this resource). #372: these need opposite advice, and a
-#       403 is an authoritative per-tenant revocation signal.
-#
-# The leaves inherit from both, so ``except OCSAuthError`` still catches every
-# OCS auth failure and ``except UpstreamAccessDenied`` catches every 403 across
-# providers.
-#
-# The *cause* classes carry the ``code``, because that is the axis consumers
-# branch on. It is what crosses the JSON boundary into
-# ``MaterializationRun.result``; the class name is not a wire value.
-
-
 class UpstreamTokenExpired(ExpectedUpstreamError):
     """HTTP 401 — the credential is dead. Reconnecting mints a working one.
 
@@ -137,11 +115,6 @@ class UpstreamAccessDenied(ExpectedUpstreamError):
     Also the authoritative per-tenant revocation signal the access-revocation
     work (#378/#384) needs: ``except UpstreamAccessDenied`` catches every 403
     across all three providers.
-
-    Expected under the module's four-part test — and note rule 3 only started
-    holding for a 403 once the guidance stopped saying "reconnect" (#372).
-    Classifying it before that would have silenced a condition whose only
-    user-facing advice was wrong.
     """
 
     code = ErrorCode.AUTH_ACCESS_DENIED
