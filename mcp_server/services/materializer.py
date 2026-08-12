@@ -50,6 +50,7 @@ from asgiref.sync import async_to_sync
 from django.utils import timezone
 from psycopg import sql as psql
 
+from apps.common.error_codes import code_of
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset
 from apps.transformations.services.commcare_staging import upsert_system_assets
@@ -347,10 +348,11 @@ def run_pipeline(
                     }
                 raise
             except Exception as e:
-                logger.exception(
+                logger.warning(
                     "Source %s failed for schema %s; earlier sources stay committed",
                     source.name,
                     schema_name,
+                    exc_info=True,
                 )
                 # Preserve any cursor_state advanced by per-page commits so the
                 # next run resumes from the last durable watermark (#187).
@@ -359,6 +361,8 @@ def run_pipeline(
                     "state": "failed",
                     "rows": (source_results.get(source.name) or {}).get("rows", 0),
                     "error": _summarize_error(e),
+                    "error_code": code_of(e),
+                    "provider": getattr(e, "provider", None) or pipeline.provider,
                     "attempts": getattr(e, "attempts", 1),
                     "failed_at": datetime.now(UTC).isoformat(),
                     "cursor_state": prior_cursor,
@@ -426,7 +430,11 @@ def run_pipeline(
         # Idempotent w.r.t. the per-source loop handler: if completed_at was
         # already stamped there, leave the recorded state untouched.
         if run.completed_at is None:
-            logger.exception("Materialization run %s failed before any source committed", run.id)
+            logger.warning(
+                "Materialization run %s failed before any source committed",
+                run.id,
+                exc_info=True,
+            )
             now = datetime.now(UTC)
             MaterializationRun.objects.filter(id=run.id, completed_at__isnull=True).update(
                 state=MaterializationRun.RunState.FAILED,
@@ -435,6 +443,7 @@ def run_pipeline(
                     "pipeline": pipeline.name,
                     "sources": source_results,
                     "error": _summarize_error(e),
+                    "error_code": code_of(e),
                 },
             )
         raise
@@ -675,9 +684,26 @@ def _has_committed_cursor(entry: dict) -> bool:
 def _summarize_error(exc: BaseException) -> str:
     """Return a short, single-line error description for ``result["sources"][n].error``.
 
-    The string is surfaced to the agent in the resume prompt and (eventually)
-    to the end user, so it must be safe to display: no stack trace, no
-    sensitive headers, just the exception type and message.
+    Two consumers read it verbatim, which is why it must be safe to display — no
+    stack trace, no sensitive headers, just the exception type and message:
+
+    - **The agent.** ``_aggregate_materialization_state`` copies it to
+      ``detail["error"]``, which ``resume_thread_after_materialization``
+      interpolates into the prompt as ``"Per-tenant: {summary}"``.
+    - **The end user.** ``_compose_failure_summary`` embeds it in
+      ``ThreadJob.error_summary``, which ``jobs/active/`` returns under
+      ``recent_terminations`` and ``MaterializationFailure.tsx`` renders.
+
+    Caveat on the user path: only the *first* failed source's message survives —
+    ``_compose_failure_summary`` collapses the rest to bare names.
+
+    Both hops are pinned in ``tests/test_resume_thread_task.py`` (search
+    ``Connect 500``), and the API hop in ``tests/test_jobs_endpoints.py``.
+
+    This is the **human** half only. Consumers deciding what to *do* about a
+    failure read the sibling ``error_code`` — never this string. The class name
+    stays on the front for operator legibility in logs and prompts, not as
+    something to match on.
     """
     msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
     if len(msg) > 200:

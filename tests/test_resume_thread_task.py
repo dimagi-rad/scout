@@ -575,6 +575,12 @@ async def test_resume_partial_run_surfaces_per_source_state_in_prompt():
     # Per-source state must be present so the agent knows what's queryable.
     assert "completed_works" in body
     assert "failed" in body
+    # _summarize_error's string itself reaches the agent verbatim. Pinned because
+    # its docstring claims this and nothing was holding the claim up (#388 review):
+    # materializer._summarize_error -> result["sources"][n]["error"]
+    #   -> _aggregate_materialization_state (detail["error"])
+    #   -> "Per-tenant: {summary}" in the resume prompt body.
+    assert "Connect 500" in body
     # And the resume terminal state for partial is FAILED (matches existing behavior).
     assert result["terminal_state"] == ThreadJob.State.FAILED
 
@@ -999,6 +1005,12 @@ async def test_resume_partial_run_sets_threadjob_error_summary():
     assert "98,969" in tj.error_summary  # users 100 + visits 98869
     # And calls out skipped
     assert "payments" in tj.error_summary
+    # _summarize_error's string reaches the end user verbatim, via
+    # ThreadJob.error_summary -> jobs/active/ recent_terminations ->
+    # MaterializationFailure.tsx. Pinned for the same reason as the prompt hop
+    # above (#388 review). NOTE: only the FIRST failed source's message survives;
+    # additional ones collapse to bare names in _compose_failure_summary.
+    assert "Connect 500" in tj.error_summary
 
 
 @pytest.mark.asyncio

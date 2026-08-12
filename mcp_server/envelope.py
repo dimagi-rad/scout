@@ -19,6 +19,8 @@ from typing import Any
 from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 
+from apps.common.error_codes import ErrorCode
+
 logger = logging.getLogger(__name__)
 
 # Dead-DB-connection hygiene for the long-lived MCP server process (arch #253,
@@ -35,13 +37,18 @@ _aclose_old_connections = sync_to_async(close_old_connections, thread_sensitive=
 # Audit logger — separate from the module logger so it can be filtered/routed
 audit_logger = logging.getLogger("mcp_server.audit")
 
-VALIDATION_ERROR = "VALIDATION_ERROR"
-CONNECTION_ERROR = "CONNECTION_ERROR"
-QUERY_TIMEOUT = "QUERY_TIMEOUT"
-NOT_FOUND = "NOT_FOUND"
-INTERNAL_ERROR = "INTERNAL_ERROR"
-SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
-AUTH_TOKEN_EXPIRED = "AUTH_TOKEN_EXPIRED"  # noqa: S105 — error code constant, not a credential
+# Aliases onto the single registry in apps.common.error_codes. Kept as
+# module-level names so the ~30 error_response() call sites in server.py — and
+# the tests asserting on them — are unaffected; StrEnum members are str, so they
+# serialise into the envelope unchanged.
+VALIDATION_ERROR = ErrorCode.VALIDATION_ERROR
+CONNECTION_ERROR = ErrorCode.CONNECTION_ERROR
+QUERY_TIMEOUT = ErrorCode.QUERY_TIMEOUT
+NOT_FOUND = ErrorCode.NOT_FOUND
+INTERNAL_ERROR = ErrorCode.INTERNAL_ERROR
+SCHEMA_BUILD_FAILED = ErrorCode.SCHEMA_BUILD_FAILED
+AUTH_TOKEN_EXPIRED = ErrorCode.AUTH_TOKEN_EXPIRED
+AUTH_ACCESS_DENIED = ErrorCode.AUTH_ACCESS_DENIED
 
 
 def success_response(
