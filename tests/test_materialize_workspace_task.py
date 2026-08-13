@@ -4,10 +4,12 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import CredentialResolutionError
 from apps.workspaces import tasks as workspaces_tasks
@@ -601,8 +603,14 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
             user_id="",
         )
 
-    # Early-return error envelope returned to the worker.
-    assert result == {"error": "No tenant memberships found", "tenants": []}
+    # Early-return error envelope returned to the worker. all_succeeded is now
+    # explicit rather than absent — callers read it, and a run that loaded nothing
+    # is not a success (#364). This workspace has no tenants, so none to name.
+    assert result == {
+        "error": "No tenant memberships found",
+        "tenants": [],
+        "all_succeeded": False,
+    }
     # But the resume task IS still deferred (in the finally block).
     resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
 
@@ -1117,3 +1125,142 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
         )
 
     mock_rebuild.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #364: a workspace tenant the acting user cannot reach must be REPORTED,
+# never silently skipped, and never covered by a teammate's credential.
+# ---------------------------------------------------------------------------
+
+
+def _add_second_tenant(workspace, *, external_id="teammate-domain", provider="commcare"):
+    """Put a second tenant in the workspace that `user` has no membership for."""
+    other = Tenant.objects.create(
+        provider=provider, external_id=external_id, canonical_name=external_id
+    )
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=other)
+    return other
+
+
+async def _materialize_as(user, workspace):
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        return await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), user_id=str(user.id), job_id=None
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """The production path — user_id is always populated — had zero coverage.
+
+    A workspace tenant with no membership for the acting user never entered
+    tenant_results, so `all(...)` over an empty-of-that-tenant list returned True
+    and the run reported success while loading a subset of the workspace (#364).
+    """
+    other = await sync_to_async(_add_second_tenant)(workspace)
+
+    result = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False, "a workspace we could not fully load is not a success"
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[tenant.external_id]["success"] is True
+    unreachable = by_tenant[other.external_id]
+    assert unreachable["success"] is False
+    assert unreachable["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert other.external_id in unreachable["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
+    workspace, tenant, tenant_membership_obj, user, django_user_model
+):
+    """Never borrow another member's credential to satisfy this user's request.
+
+    The tenant IS reachable *by someone* — a teammate holds a live membership —
+    and that must not count. This user's token pulls this user's data; a
+    teammate's token only ever verifies the teammate's own access. Pins that the
+    `user_id` filter stays, rather than being relaxed to any-member resolution.
+    """
+
+    def _setup():
+        mate = django_user_model.objects.create_user(email="mate@example.com", password="pass")
+        other = _add_second_tenant(workspace, external_id="mates-bot")
+        TenantMembership.objects.create(user=mate, tenant=other)
+        return other
+
+    other = await sync_to_async(_setup)()
+
+    result = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_archived_membership_does_not_make_a_tenant_reachable(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """An archived membership is upstream access that was removed — not access."""
+
+    def _setup():
+        other = _add_second_tenant(workspace, external_id="revoked-domain")
+        TenantMembership.objects.create(user=user, tenant=other, archived_at=timezone.now())
+        return other
+
+    other = await sync_to_async(_setup)()
+
+    result = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_fully_reachable_workspace_still_reports_success(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """Regression guard: the invariant check must not fail a healthy workspace."""
+    result = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is True
+    assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_no_memberships_at_all_names_the_tenants_it_could_not_load(
+    workspace, tenant, user, django_user_model
+):
+    """The early return used to give `"tenants": []`, so the caller could not tell
+    which sources were missing — or that anything was missing at all."""
+
+    def _setup():
+        stranger = django_user_model.objects.create_user(
+            email="stranger@example.com", password="pass"
+        )
+        TenantMembership.objects.filter(user=user, tenant=tenant).delete()
+        return stranger
+
+    await sync_to_async(_setup)()
+
+    result = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
+    assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE

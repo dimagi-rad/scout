@@ -323,22 +323,63 @@ async def materialize_workspace_core(
         logger.exception("materialize_workspace: workspace %s not found", workspace_id)
         return {"error": "Workspace not found"}
 
+    workspace_tenants = {
+        wt.tenant_id: wt.tenant
+        async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant")
+    }
+
     qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
         archived_at__isnull=True,
-        tenant_id__in=[
-            wt.tenant_id
-            async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
-                "tenant"
-            )
-        ],
+        tenant_id__in=list(workspace_tenants),
     )
     if user_id:
         qs = qs.filter(user_id=user_id)
 
     memberships = [tm async for tm in qs]
+
+    # Every member of a workspace is supposed to have access to every tenant in
+    # it. A workspace tenant with no live membership for the acting user is
+    # therefore an invariant violation, not a source belonging to someone else
+    # that we may quietly skip. Before this, such a tenant never entered
+    # tenant_results at all, so all_succeeded came back True and the run reported
+    # success while loading a subset of the workspace (#364).
+    #
+    # Borrowing another member's credential is deliberately NOT the answer: this
+    # user's token pulls this user's data, and a teammate's token only ever
+    # verifies the teammate's own access. Enforcement at the add/invite boundary
+    # is #380; until it lands, existing workspaces can be in this state and the
+    # correct behaviour is to say so loudly.
+    reachable = {tm.tenant_id for tm in memberships}
+    for tenant_id, tenant in workspace_tenants.items():
+        if tenant_id in reachable:
+            continue
+        logger.error(
+            "Workspace %s contains tenant %s (%s) with no live membership for the "
+            "acting user; materialization cannot cover it (#364)",
+            workspace_id,
+            tenant.external_id,
+            tenant.provider,
+        )
+        tenant_results.append(
+            {
+                "tenant": tenant.external_id,
+                "success": False,
+                "error": (
+                    f"You are not connected to {tenant.provider} source "
+                    f"'{tenant.external_id}', which this workspace includes, so it "
+                    f"could not be loaded. Connect that account, or move it to a "
+                    f"separate workspace — its data is not in these results."
+                ),
+                "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+            }
+        )
+
     if not memberships:
-        logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
-        return {"error": "No tenant memberships found", "tenants": []}
+        return {
+            "error": "No tenant memberships found",
+            "tenants": tenant_results,
+            "all_succeeded": False,
+        }
 
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}

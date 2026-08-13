@@ -42,6 +42,13 @@ class ErrorCode(StrEnum):
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
 
+    # A workspace contains a tenant the acting user has no live membership for.
+    # Every member of a workspace is supposed to have access to every tenant in
+    # it, so this is an invariant violation rather than an upstream condition —
+    # never resolvable by a retry, and never by borrowing another member's
+    # credential. Enforcement at the add/invite boundary is #380.
+    WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.
