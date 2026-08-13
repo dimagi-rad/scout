@@ -4,7 +4,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from asgiref.sync import sync_to_async
 from django.test import AsyncClient
 from django.utils import timezone
 
@@ -1133,12 +1132,12 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
 # ---------------------------------------------------------------------------
 
 
-def _add_second_tenant(workspace, *, external_id="teammate-domain", provider="commcare"):
+async def _add_second_tenant(workspace, *, external_id="teammate-domain", provider="commcare"):
     """Put a second tenant in the workspace that `user` has no membership for."""
-    other = Tenant.objects.create(
+    other = await Tenant.objects.acreate(
         provider=provider, external_id=external_id, canonical_name=external_id
     )
-    WorkspaceTenant.objects.create(workspace=workspace, tenant=other)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
     return other
 
 
@@ -1168,7 +1167,7 @@ async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
     tenant_results, so `all(...)` over an empty-of-that-tenant list returned True
     and the run reported success while loading a subset of the workspace (#364).
     """
-    other = await sync_to_async(_add_second_tenant)(workspace)
+    other = await _add_second_tenant(workspace)
 
     result = await _materialize_as(user, workspace)
 
@@ -1194,13 +1193,11 @@ async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
     `user_id` filter stays, rather than being relaxed to any-member resolution.
     """
 
-    def _setup():
-        mate = django_user_model.objects.create_user(email="mate@example.com", password="pass")
-        other = _add_second_tenant(workspace, external_id="mates-bot")
-        TenantMembership.objects.create(user=mate, tenant=other)
-        return other
-
-    other = await sync_to_async(_setup)()
+    mate = await django_user_model.objects.acreate_user(
+        email="mate@example.com", password="pass"
+    )
+    other = await _add_second_tenant(workspace, external_id="mates-bot")
+    await TenantMembership.objects.acreate(user=mate, tenant=other)
 
     result = await _materialize_as(user, workspace)
 
@@ -1216,12 +1213,8 @@ async def test_archived_membership_does_not_make_a_tenant_reachable(
 ):
     """An archived membership is upstream access that was removed — not access."""
 
-    def _setup():
-        other = _add_second_tenant(workspace, external_id="revoked-domain")
-        TenantMembership.objects.create(user=user, tenant=other, archived_at=timezone.now())
-        return other
-
-    other = await sync_to_async(_setup)()
+    other = await _add_second_tenant(workspace, external_id="revoked-domain")
+    await TenantMembership.objects.acreate(user=user, tenant=other, archived_at=timezone.now())
 
     result = await _materialize_as(user, workspace)
 
@@ -1245,19 +1238,12 @@ async def test_fully_reachable_workspace_still_reports_success(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_no_memberships_at_all_names_the_tenants_it_could_not_load(
-    workspace, tenant, user, django_user_model
+    workspace, tenant, user
 ):
     """The early return used to give `"tenants": []`, so the caller could not tell
     which sources were missing — or that anything was missing at all."""
 
-    def _setup():
-        stranger = django_user_model.objects.create_user(
-            email="stranger@example.com", password="pass"
-        )
-        TenantMembership.objects.filter(user=user, tenant=tenant).delete()
-        return stranger
-
-    await sync_to_async(_setup)()
+    await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
 
     result = await _materialize_as(user, workspace)
 
