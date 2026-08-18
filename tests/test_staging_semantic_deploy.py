@@ -31,7 +31,7 @@ def test_staging_cube_is_internal_and_uses_the_shared_secret():
     config = _load_config("deploy-staging-cube.yml")
     assert config["image"] == "scout/mcp"
     assert config["builder"]["context"] == "cube_config"
-    assert config["builder"]["dockerfile"] == "Dockerfile"
+    assert config["builder"]["dockerfile"] == "cube_config/Dockerfile"
     server = config["servers"]["web"]
     assert server["proxy"] is False
     assert server["options"]["network"] == "scout_staging_shared"

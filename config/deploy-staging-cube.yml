@@ -40,4 +40,5 @@ ssh:
 builder:
   arch: amd64
   context: cube_config
-  dockerfile: Dockerfile
+  # Docker resolves --file from the repository root, not from build context.
+  dockerfile: cube_config/Dockerfile
