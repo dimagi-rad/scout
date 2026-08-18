@@ -4,7 +4,9 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Iterable
 from datetime import timedelta
+from typing import NamedTuple
 
 import sentry_sdk
 from django.conf import settings
@@ -19,6 +21,7 @@ from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.transformations.models import TransformationRunStatus
@@ -69,23 +72,54 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Substrings that mark a per-source failure as an expired/revoked-credential
-# problem so the user is told to reconnect rather than just "check the
-# connection" (arch #252, finding 14#4). Loader auth errors carry both the
-# class-name suffix and the actionable "reconnect your ... account" guidance;
-# an HTTP 401 anywhere on the seam is the underlying signal.
-_AUTH_FAILURE_MARKERS = ("AuthError", "reconnect your", "HTTP 401")
-_REAUTH_GUIDANCE = (
-    "This looks like an expired or revoked sign-in — reconnect the affected "
-    "account (Settings → Connections) and re-run materialization."
-)
+# Remediation copy for the credential problems a run can report, keyed by the
+# ``error_code`` the materializer recorded per source (arch #252, finding 14#4).
+#
+# This copy lives here and NOT at the raise site. A loader describes what the
+# provider said; deciding what the user should do about it is a presentation
+# concern, and when both layers wrote advice the user got it twice in two
+# different phrasings.
+#
+# Fragments, not sentences: _credential_guidance prefixes each with the sources
+# it applies to. A 401 and a 403 in one run need *opposite* advice, so an
+# unattributed pair reads as a flat contradiction (#372).
+_CREDENTIAL_GUIDANCE: dict[str, str] = {
+    ErrorCode.AUTH_TOKEN_EXPIRED: (
+        "expired or revoked sign-in — reconnect the affected account "
+        "(Settings → Connections) and re-run materialization."
+    ),
+    ErrorCode.AUTH_ACCESS_DENIED: (
+        "access was removed upstream, not an expired sign-in — reconnecting will "
+        "NOT restore it, because it mints a token with exactly the same access. "
+        "Ask an admin on the affected provider to restore access, or remove that "
+        "data source from the workspace."
+    ),
+}
 
 
-def _looks_like_auth_failure(error: str | None) -> bool:
-    """True when a per-source error string reads as a credential/401 failure."""
-    if not error:
-        return False
-    return any(marker in error for marker in _AUTH_FAILURE_MARKERS)
+class _SourceFailure(NamedTuple):
+    """One failed source, as recorded in ``run.result["sources"][name]``."""
+
+    name: str
+    error: str
+    code: str
+
+
+def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
+    """Return one guidance line per distinct credential problem, naming its sources.
+
+    Ordered by ``_CREDENTIAL_GUIDANCE`` rather than by encounter order so the
+    wording is stable regardless of which source failed first.
+    """
+    by_code: dict[str, list[str]] = {}
+    for failure in failures:
+        if failure.code in _CREDENTIAL_GUIDANCE:
+            by_code.setdefault(failure.code, []).append(failure.name)
+    return [
+        f"{', '.join(by_code[code])}: {guidance}"
+        for code, guidance in _CREDENTIAL_GUIDANCE.items()
+        if code in by_code
+    ]
 
 
 def _no_pipeline_error(registry, provider: str) -> str:
@@ -116,7 +150,7 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     if not runs:
         return ""
 
-    failed_sources: list[tuple[str, str]] = []
+    failed_sources: list[_SourceFailure] = []
     completed_sources: list[tuple[str, int]] = []
     skipped_sources: list[str] = []
     cancelled_sources: list[str] = []
@@ -127,13 +161,25 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
             continue
         top_level_error = result.get("error")
         if top_level_error:
-            failed_sources.append(("materialization", str(top_level_error)))
+            failed_sources.append(
+                _SourceFailure(
+                    name="materialization",
+                    error=str(top_level_error),
+                    code=str(result.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                )
+            )
         for name, info in (result.get("sources") or {}).items():
             if not isinstance(info, dict):
                 continue
             state = info.get("state")
             if state == "failed":
-                failed_sources.append((name, str(info.get("error") or "unknown error")))
+                failed_sources.append(
+                    _SourceFailure(
+                        name=name,
+                        error=str(info.get("error") or "unknown error"),
+                        code=str(info.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                    )
+                )
             elif state == "completed":
                 completed_sources.append((name, int(info.get("rows") or 0)))
             elif state == "skipped":
@@ -143,12 +189,11 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
 
     parts: list[str] = []
     if failed_sources:
-        first = failed_sources[0]
-        if len(failed_sources) == 1:
-            parts.append(f"{first[0]} failed: {first[1]}")
-        else:
-            others = ", ".join(n for n, _ in failed_sources[1:])
-            parts.append(f"{first[0]} failed ({first[1]}); also failed: {others}")
+        # Every failure carries its own message. Rendering only the first and
+        # listing the rest as bare names discarded the very string the loaders
+        # are asked to produce, and left a second failure indistinguishable
+        # from a skipped source (#388 review).
+        parts.append("; ".join(f"{f.name} failed: {f.error.rstrip('.')}" for f in failed_sources))
     if completed_sources:
         total_rows = sum(rows for _, rows in completed_sources)
         names = ", ".join(n for n, _ in completed_sources)
@@ -163,8 +208,8 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
         states = sorted({r.state for r in runs})
         return f"Materialization {'/'.join(states)}."
     summary = ". ".join(parts) + "."
-    if any(_looks_like_auth_failure(err) for _, err in failed_sources):
-        summary += " " + _REAUTH_GUIDANCE
+    for line in _credential_guidance(failed_sources):
+        summary += " " + line
     return summary
 
 
@@ -1459,7 +1504,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             "users":   {"state": "completed", "rows": 100},
             "visits":  {"state": "completed", "rows": 98869},
             "completed_works": {"state": "failed",  "rows": 0,
-                                "error": "ConnectionError: 500 ..."},
+                                "error": "ConnectionError: 500 ...",
+                                "error_code": "INTERNAL_ERROR"},
             "payments": {"state": "skipped", "rows": 0},
             ...
         },
@@ -1496,6 +1542,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
                 detail = {"state": src_state, "rows": info.get("rows", 0)}
                 if "error" in info:
                     detail["error"] = info["error"]
+                if "error_code" in info:
+                    detail["error_code"] = info["error_code"]
                 # Expose cursor_state.last_id so the resume prompt can tell the
                 # agent where a partial load will continue from (issue #187).
                 cursor_state = info.get("cursor_state")
@@ -1617,15 +1665,22 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    auth_failure = any(
-        _looks_like_auth_failure(str(src.get("error")))
+    # Named per source, because a run can carry a dead token on one and revoked
+    # access on another — opposite advice, and the agent has to tell them apart to
+    # relay either honestly.
+    guidance_lines = _credential_guidance(
+        _SourceFailure(
+            name=name,
+            error=str(src.get("error") or ""),
+            code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
+        )
         for tenant in summary
-        for src in (tenant.get("sources") or {}).values()
+        for name, src in (tenant.get("sources") or {}).items()
     )
-    reauth_line = (
-        f" At least one source failed authentication: {_REAUTH_GUIDANCE} Tell the "
-        f"user explicitly to reconnect the affected account."
-        if auth_failure
+    credential_guidance = (
+        " Credential problems, per source — relay these verbatim, naming the "
+        f"source each applies to: {' '.join(guidance_lines)}"
+        if guidance_lines
         else ""
     )
 
@@ -1715,19 +1770,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"failed or skipped. A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
-            f"as if it were complete.{reauth_line} Per-tenant: {summary}"
+            f"as if it were complete.{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "failed":
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization FAILED, so this run did not "
             f"produce fresh loaded data. Do NOT claim the materialization completed. "
-            f"Summarize the per-tenant error details below, including any top-level "
-            f"error field. If older workspace tables are still queryable, do NOT "
+            f"Summarize every per-source error below, including any top-level error "
+            f"field. If older workspace tables are still queryable, do NOT "
             f"present them as results from this failed run; only use them if you "
             f"explicitly verify their provenance and last successful materialization "
             f"time. Suggest checking the workspace connection only when the actual "
             f"error points to authentication or authorization. Do NOT silently re-run "
-            f"silently re-run materialization.{reauth_line} Per-tenant: {summary}"
+            f"materialization.{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "cancelled":
         body = (

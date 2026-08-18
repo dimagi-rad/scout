@@ -14,7 +14,11 @@ from urllib.parse import parse_qs, urlparse
 import requests
 from requests.adapters import HTTPAdapter
 
-from apps.common.errors import ConnectAuthError
+from apps.common.errors import (
+    ConnectAccessDeniedError,
+    ConnectAuthError,  # noqa: F401  — re-exported; callers catch the provider base
+    ConnectTokenExpiredError,
+)
 from mcp_server.loaders._http import (
     RETRY_STATUS_FORCELIST,
     RETRY_TOTAL,
@@ -116,16 +120,34 @@ class ConnectBaseLoader:
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
 
+    def _raise_for_auth(self, status_code: int) -> None:
+        """Raise the right auth error for a 401/403; return for anything else.
+
+        401 and 403 need opposite advice, so they are separate types (#372).
+        Both paginated and ad-hoc GETs go through here so the two cannot drift.
+
+        Describe only; remediation copy belongs to the presentation layer, keyed
+        off the ErrorCode these classes carry (rule 3, apps/common/errors.py).
+        """
+        if status_code == 403:
+            raise ConnectAccessDeniedError(
+                f"CommCare Connect denied access to opportunity "
+                f"{self.opportunity_id} (HTTP 403). The sign-in is still valid and "
+                f"has no access to that opportunity — the access may have been "
+                f"removed."
+            )
+        if status_code == 401:
+            raise ConnectTokenExpiredError(
+                f"CommCare Connect rejected the sign-in for opportunity "
+                f"{self.opportunity_id} (HTTP 401): it has expired or been revoked."
+            )
+
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
-        """GET a URL, raising ConnectAuthError on 401/403."""
+        """GET a URL, raising on 401/403 via ``_raise_for_auth``."""
         resp = get_with_auth_refresh(
             self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
         )
-        if resp.status_code in (401, 403):
-            raise ConnectAuthError(
-                f"Connect auth failed for opportunity {self.opportunity_id}: "
-                f"HTTP {resp.status_code}"
-            )
+        self._raise_for_auth(resp.status_code)
         resp.raise_for_status()
         return resp
 
@@ -157,7 +179,8 @@ class ConnectBaseLoader:
         ``[]`` so callers can rely on the loop terminating naturally.
 
         Raises:
-            ConnectAuthError: on 401/403.
+            ConnectTokenExpiredError: on 401 (credential dead).
+            ConnectAccessDeniedError: on 403 (credential valid, no access here).
             ConnectExportError: when the response is not valid JSON, is
                 missing the ``results`` key, or returns a non-2xx status
                 that survives the configured retry policy. On retry
@@ -189,11 +212,7 @@ class ConnectBaseLoader:
                 headers=headers,
                 timeout=HTTP_TIMEOUT,
             )
-            if resp.status_code in (401, 403):
-                raise ConnectAuthError(
-                    f"Connect auth failed for opportunity {self.opportunity_id}: "
-                    f"HTTP {resp.status_code}"
-                )
+            self._raise_for_auth(resp.status_code)
             if not resp.ok:
                 # A status in the forcelist means the urllib3 Retry policy
                 # ran to exhaustion (RETRY_TOTAL retries on top of the initial

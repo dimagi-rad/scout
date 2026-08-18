@@ -123,7 +123,8 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
         raise ConnectAuthError(
-            f"Connect returned {resp.status_code} — access token may have expired"
+            f"Connect returned {resp.status_code} while listing opportunities — the "
+            f"access token is expired, revoked, or not authorized for this API"
         )
     resp.raise_for_status()
 
@@ -173,7 +174,8 @@ async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
                 raise OCSAuthError(
-                    f"OCS returned {resp.status_code} — access token may have expired"
+                    f"OCS returned {resp.status_code} while listing experiments — the "
+                    f"access token is expired, revoked, or not authorized for this team"
                 )
             resp.raise_for_status()
             payload = resp.json()
@@ -220,7 +222,8 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
                 raise CommCareAuthError(
-                    f"CommCare returned {resp.status_code} — access token may have expired"
+                    f"CommCare returned {resp.status_code} while listing domains — the "
+                    f"access token is expired, revoked, or not authorized for this API"
                 )
             resp.raise_for_status()
             data = resp.json()
