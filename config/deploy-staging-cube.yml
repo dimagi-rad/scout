@@ -1,0 +1,41 @@
+# Cube semantic-query runtime — STAGING. Internal only; API, worker, and MCP
+# reach it through scout-staging-cube-web on the isolated staging network.
+
+service: scout-staging-cube
+
+# The workflow builds cube_config/Dockerfile into scout/api:cube-<sha>. Reusing
+# the existing repository avoids requiring a CloudFormation/ECR change.
+image: scout/api
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-staging-cube-web"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    CUBEJS_DEV_MODE: "false"
+    CUBEJS_TELEMETRY: "false"
+    CUBEJS_EXTERNAL_DEFAULT: "false"
+    CUBEJS_PRE_AGGREGATIONS_SCHEMA: "false"
+    CUBEJS_PORT: "4000"
+    CUBE_VALIDATOR_PORT: "4010"
+  secret:
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - CUBEJS_API_SECRET
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64

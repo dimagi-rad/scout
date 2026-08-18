@@ -30,11 +30,18 @@ jobs:
       # environment and are mapped into Kamal's container secret names.
       SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID: ${{ secrets.SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID }}
       SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET: ${{ secrets.SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET }}
+      # Shared by the staging API, worker, MCP, and Cube containers. Keeping it
+      # in the staging environment prevents a branch deploy from depending on
+      # (or rotating) any future production Cube credential.
+      SCOUT_STAGING_CUBEJS_API_SECRET: ${{ secrets.SCOUT_STAGING_CUBEJS_API_SECRET }}
       # The API image is environment-agnostic (env comes from Kamal), so staging
       # reuses prod's tag. The frontend bakes in the nginx conf and Sentry
       # environment at build time, so it needs a tag of its own or the two
       # environments overwrite each other's scout/frontend:<sha>.
       FRONTEND_TAG: staging-${{ github.sha }}
+      # The Cube runtime uses a different Dockerfile but shares scout/api's ECR
+      # repository, avoiding an infrastructure change just to add another repo.
+      CUBE_TAG: cube-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: ruby/setup-ruby@v1
@@ -56,37 +63,45 @@ jobs:
         # nothing rather than exiting 0 on sed's status.
         shell: bash
         run: |
-          echo "SCOUT_EC2_IP=${{ secrets.SCOUT_EC2_IP }}" >> $GITHUB_ENV
-          echo "SCOUT_ECR_REGISTRY=${{ vars.SCOUT_ECR_REGISTRY }}" >> $GITHUB_ENV
-          echo "SCOUT_RDS_SECRET_ARN=${{ secrets.SCOUT_RDS_SECRET_ARN }}" >> $GITHUB_ENV
-          echo "SCOUT_RDS_ENDPOINT=${{ secrets.SCOUT_RDS_ENDPOINT }}" >> $GITHUB_ENV
+          {
+            echo "SCOUT_EC2_IP=${{ secrets.SCOUT_EC2_IP }}"
+            echo "SCOUT_ECR_REGISTRY=${{ vars.SCOUT_ECR_REGISTRY }}"
+            echo "SCOUT_RDS_SECRET_ARN=${{ secrets.SCOUT_RDS_SECRET_ARN }}"
+            echo "SCOUT_RDS_ENDPOINT=${{ secrets.SCOUT_RDS_ENDPOINT }}"
+          } >> "$GITHUB_ENV"
           # Points DATABASE_URL at the staging database on the shared RDS
           # instance (scripts/resolve-database-url.sh). Silently missing, it
           # defaults to agent_platform and this job migrates and boots staging
           # against the PRODUCTION database — so fail hard instead.
-          grep '^export SCOUT_DB_NAME=' config/staging.env | sed 's/^export //' >> $GITHUB_ENV
+          grep '^export SCOUT_DB_NAME=' config/staging.env | sed 's/^export //' >> "$GITHUB_ENV"
 
       - name: Validate staging OAuth credentials
         shell: bash
         run: |
           test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID"
           test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET"
+          test -n "$SCOUT_STAGING_CUBEJS_API_SECRET"
 
       - name: Build and push API image
         run: |
-          docker build -t $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG .
-          docker push $SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG
+          docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG" .
+          docker push "$SCOUT_ECR_REGISTRY/scout/api:$IMAGE_TAG"
 
       - name: Build and push Frontend image
         run: |
-          docker build -t $SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG \
+          docker build -t "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG" \
             -f Dockerfile.frontend \
             --build-arg NGINX_CONF=frontend/nginx.staging-kamal.conf \
-            --build-arg VITE_SENTRY_DSN=${{ secrets.SCOUT_VITE_SENTRY_DSN }} \
+            --build-arg VITE_SENTRY_DSN="${{ secrets.SCOUT_VITE_SENTRY_DSN }}" \
             --build-arg VITE_SENTRY_ENVIRONMENT=staging \
-            --build-arg VITE_SENTRY_RELEASE=$IMAGE_TAG \
+            --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
             .
-          docker push $SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG
+          docker push "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG"
+
+      - name: Build and push Cube image
+        run: |
+          docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$CUBE_TAG" cube_config
+          docker push "$SCOUT_ECR_REGISTRY/scout/api:$CUBE_TAG"
 
       - name: Install Kamal
         run: gem install kamal
@@ -96,17 +111,20 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
+      - name: Deploy Cube
+        run: kamal deploy -c config/deploy-staging-cube.yml --version="$CUBE_TAG"
+
       - name: Deploy MCP
-        run: kamal deploy -c config/deploy-staging-mcp.yml --version=$IMAGE_TAG
+        run: kamal deploy -c config/deploy-staging-mcp.yml --version="$IMAGE_TAG"
 
       - name: Deploy API
-        run: kamal deploy -c config/deploy-staging.yml --version=$IMAGE_TAG
+        run: kamal deploy -c config/deploy-staging.yml --version="$IMAGE_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-staging-worker.yml --version=$IMAGE_TAG
+        run: kamal deploy -c config/deploy-staging-worker.yml --version="$IMAGE_TAG"
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-staging-frontend.yml --version=$FRONTEND_TAG
+        run: kamal deploy -c config/deploy-staging-frontend.yml --version="$FRONTEND_TAG"
 
       - name: Summary
         run: |

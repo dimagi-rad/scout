@@ -112,6 +112,9 @@ AWS secrets above. Store its application credentials as
 `SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
 The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
 container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
+Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
+environment. The workflow shares it only among staging's API, worker, MCP, and
+Cube containers so semantic-query security contexts are accepted end to end.
 
 ### Adding a new secret
 
@@ -228,9 +231,10 @@ driver so `kamal app logs` works directly.
 ### Deploying from GitHub Actions
 
 Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
-ref dropdown. It builds and pushes both images, then deploys MCP → API → worker →
-frontend. In addition to the production deploy secrets, the GitHub `staging`
-environment must contain the two Connect-staging OAuth secrets documented above.
+ref dropdown. It builds and pushes the API, frontend, and Cube images, then deploys
+Cube → MCP → API → worker → frontend. In addition to the production deploy secrets,
+the GitHub `staging` environment must contain the two Connect-staging OAuth secrets
+and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
@@ -260,12 +264,14 @@ git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
 
 # First time
+kamal setup -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal setup -c config/deploy-staging-mcp.yml
 kamal setup -c config/deploy-staging.yml
 kamal setup -c config/deploy-staging-worker.yml
 kamal setup -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
 
 # Subsequent deploys
+kamal deploy -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal deploy -c config/deploy-staging-mcp.yml
 kamal deploy -c config/deploy-staging.yml
 kamal deploy -c config/deploy-staging-worker.yml
