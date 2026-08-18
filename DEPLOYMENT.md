@@ -231,10 +231,11 @@ driver so `kamal app logs` works directly.
 ### Deploying from GitHub Actions
 
 Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
-ref dropdown. It builds and pushes the API, frontend, and Cube images, then deploys
-Cube → MCP → API → worker → frontend. In addition to the production deploy secrets,
-the GitHub `staging` environment must contain the two Connect-staging OAuth secrets
-and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
+ref dropdown. It builds and pushes the API and frontend images, then Kamal builds
+Cube from `cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository
+and deploys Cube → MCP → API → worker → frontend. In addition to the production
+deploy secrets, the GitHub `staging` environment must contain the two
+Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.

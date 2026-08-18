@@ -3,9 +3,9 @@
 
 service: scout-staging-cube
 
-# The workflow builds cube_config/Dockerfile into scout/api:cube-<sha>. Reusing
-# the existing repository avoids requiring a CloudFormation/ECR change.
-image: scout/api
+# MCP shares scout/api, leaving the existing scout/mcp ECR repository available
+# for this distinct runtime without an infrastructure change or API-tag collision.
+image: scout/mcp
 
 servers:
   web:
@@ -39,3 +39,5 @@ ssh:
 
 builder:
   arch: amd64
+  context: cube_config
+  dockerfile: Dockerfile

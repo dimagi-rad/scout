@@ -39,8 +39,8 @@ jobs:
       # environment at build time, so it needs a tag of its own or the two
       # environments overwrite each other's scout/frontend:<sha>.
       FRONTEND_TAG: staging-${{ github.sha }}
-      # The Cube runtime uses a different Dockerfile but shares scout/api's ECR
-      # repository, avoiding an infrastructure change just to add another repo.
+      # The Cube runtime uses the existing scout/mcp ECR repository; the MCP
+      # process itself shares the API image, so that repository is otherwise idle.
       CUBE_TAG: cube-${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
@@ -97,11 +97,6 @@ jobs:
             --build-arg VITE_SENTRY_RELEASE="$IMAGE_TAG" \
             .
           docker push "$SCOUT_ECR_REGISTRY/scout/frontend:$FRONTEND_TAG"
-
-      - name: Build and push Cube image
-        run: |
-          docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$CUBE_TAG" cube_config
-          docker push "$SCOUT_ECR_REGISTRY/scout/api:$CUBE_TAG"
 
       - name: Install Kamal
         run: gem install kamal

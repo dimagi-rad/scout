@@ -29,6 +29,9 @@ def test_staging_services_share_the_cube_runtime_and_signing_secret():
 
 def test_staging_cube_is_internal_and_uses_the_shared_secret():
     config = _load_config("deploy-staging-cube.yml")
+    assert config["image"] == "scout/mcp"
+    assert config["builder"]["context"] == "cube_config"
+    assert config["builder"]["dockerfile"] == "Dockerfile"
     server = config["servers"]["web"]
     assert server["proxy"] is False
     assert server["options"]["network"] == "scout_staging_shared"
@@ -43,5 +46,5 @@ def test_staging_cube_is_internal_and_uses_the_shared_secret():
 def test_staging_workflow_builds_and_deploys_cube_before_dependents():
     workflow = (REPO_ROOT / ".github" / "workflows" / "deploy-staging.yml").read_text()
     assert "SCOUT_STAGING_CUBEJS_API_SECRET" in workflow
-    assert 'docker build -t "$SCOUT_ECR_REGISTRY/scout/api:$CUBE_TAG" cube_config' in workflow
+    assert "CUBE_TAG: cube-${{ github.sha }}" in workflow
     assert workflow.index("- name: Deploy Cube") < workflow.index("- name: Deploy MCP")
