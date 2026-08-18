@@ -32,6 +32,7 @@ def test_staging_cube_is_internal_and_uses_the_shared_secret():
     assert config["image"] == "scout/mcp"
     assert config["builder"]["context"] == "cube_config"
     assert config["builder"]["dockerfile"] == "cube_config/Dockerfile"
+    assert config["env"]["clear"]["CUBEJS_CACHE_AND_QUEUE_DRIVER"] == "memory"
     server = config["servers"]["web"]
     assert server["proxy"] is False
     assert server["options"]["network"] == "scout_staging_shared"

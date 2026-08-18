@@ -25,6 +25,8 @@ env:
   clear:
     CUBEJS_DEV_MODE: "false"
     CUBEJS_TELEMETRY: "false"
+    # Staging runs one Cube instance and has no separate Cube Store service.
+    CUBEJS_CACHE_AND_QUEUE_DRIVER: "memory"
     CUBEJS_EXTERNAL_DEFAULT: "false"
     CUBEJS_PRE_AGGREGATIONS_SCHEMA: "false"
     CUBEJS_PORT: "4000"
