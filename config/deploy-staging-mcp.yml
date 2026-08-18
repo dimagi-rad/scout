@@ -25,6 +25,8 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>

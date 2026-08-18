@@ -25,6 +25,11 @@ jobs:
     environment: staging
     env:
       IMAGE_TAG: ${{ github.sha }}
+      # Staging has its own OAuth provider database and therefore cannot reuse
+      # the production Connect client. These come from the GitHub `staging`
+      # environment and are mapped into Kamal's container secret names.
+      SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID: ${{ secrets.SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID }}
+      SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET: ${{ secrets.SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET }}
       # The API image is environment-agnostic (env comes from Kamal), so staging
       # reuses prod's tag. The frontend bakes in the nginx conf and Sentry
       # environment at build time, so it needs a tag of its own or the two
@@ -60,6 +65,12 @@ jobs:
           # defaults to agent_platform and this job migrates and boots staging
           # against the PRODUCTION database — so fail hard instead.
           grep '^export SCOUT_DB_NAME=' config/staging.env | sed 's/^export //' >> $GITHUB_ENV
+
+      - name: Validate staging OAuth credentials
+        shell: bash
+        run: |
+          test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID"
+          test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET"
 
       - name: Build and push API image
         run: |
