@@ -40,11 +40,11 @@ from apps.semantic.services.catalog import (
     SemanticCatalogUnavailable,
     get_active_semantic_model,
 )
+from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
-    WorkspaceMembership,
     WorkspaceRole,
     WorkspaceViewSchema,
 )
@@ -645,9 +645,7 @@ def _make_injecting_tool_node(
         last_msg = messages[-1]
         event_queue = None
         if isinstance(config, dict):
-            event_queue = (config.get("configurable") or {}).get(
-                SUBAGENT_EVENT_QUEUE_CONFIG_KEY
-            )
+            event_queue = (config.get("configurable") or {}).get(SUBAGENT_EVENT_QUEUE_CONFIG_KEY)
 
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             modified_msg = copy.copy(last_msg)
@@ -675,9 +673,7 @@ def _make_injecting_tool_node(
                     }
                 elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
                     args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                    if tc["name"] == "artifact_manager" and _artifact_manager_task_is_missing(
-                        args
-                    ):
+                    if tc["name"] == "artifact_manager" and _artifact_manager_task_is_missing(args):
                         task = _synthesize_artifact_manager_task(messages)
                         args = {**args, "task": task}
                         logger.warning(
@@ -755,13 +751,13 @@ async def build_agent_graph(
     # Same policy as the canvas REST endpoints: only members above the read
     # role can stage/commit canvas changes, so read-only members never get the
     # canvas_manager tool (the tool closures re-check as the hard boundary).
+    canvas_membership = None
+    if interactive and conversation_id and user is not None:
+        _authorized_workspace, canvas_membership = await aresolve_workspace_access(
+            user, workspace.id
+        )
     canvas_write = bool(
-        interactive
-        and conversation_id
-        and user is not None
-        and await WorkspaceMembership.objects.filter(workspace=workspace, user=user)
-        .exclude(role=WorkspaceRole.READ)
-        .aexists()
+        canvas_membership is not None and canvas_membership.role != WorkspaceRole.READ
     )
 
     # --- Build tools ---

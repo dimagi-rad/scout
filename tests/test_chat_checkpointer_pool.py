@@ -40,6 +40,7 @@ async def test_ensure_checkpointer_uses_configured_pool_limits():
         min_size=0,
         max_size=4,
         open=False,
+        check=pool_cls.check_connection,
         kwargs={
             "autocommit": True,
             "prepare_threshold": 0,

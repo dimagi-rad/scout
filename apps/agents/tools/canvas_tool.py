@@ -28,7 +28,8 @@ from apps.semantic.canvas import (
 )
 from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.semantic.services.sample_rows import sample_dataset_rows
-from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
+from apps.workspaces.access import resolve_workspace_access
+from apps.workspaces.models import WorkspaceRole
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -49,12 +50,8 @@ def can_write_canvas(workspace, user) -> bool:
     """Same policy as the canvas REST endpoints: any role above read."""
     if user is None or not getattr(user, "is_authenticated", True):
         return False
-    role = (
-        WorkspaceMembership.objects.filter(workspace=workspace, user=user)
-        .values_list("role", flat=True)
-        .first()
-    )
-    return role is not None and role != WorkspaceRole.READ
+    _authorized_workspace, membership = resolve_workspace_access(user, workspace.id)
+    return membership is not None and membership.role != WorkspaceRole.READ
 
 
 def _resolve_canvas_sync(workspace, user, conversation_id: str):

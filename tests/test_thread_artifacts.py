@@ -155,8 +155,16 @@ async def test_thread_artifacts_endpoint_collapses_artifact_versions(workspace, 
         conversation_id=str(thread.id),
         data={"story_doc": {"version": 1, "blocks": [{"id": "a", "type": "markdown"}]}},
     )
-    artifact_v2 = await sync_to_async(artifact_v1.create_new_version, thread_sensitive=True)(
+    artifact_v2 = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=user,
+        title=artifact_v1.title,
+        artifact_type=artifact_v1.artifact_type,
+        code=artifact_v1.code,
         data={"story_doc": {"version": 1, "blocks": [{"id": "b", "type": "markdown"}]}},
+        version=artifact_v1.version + 1,
+        parent_artifact=artifact_v1,
+        conversation_id=artifact_v1.conversation_id,
     )
     await link_artifact_to_thread(
         artifact_v1,

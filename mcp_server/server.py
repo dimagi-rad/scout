@@ -45,7 +45,8 @@ from apps.semantic.services.catalog import (
 )
 from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
-from apps.users.models import Tenant, TenantMembership
+from apps.users.models import Tenant, TenantMembership, User
+from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -424,14 +425,14 @@ async def _accessible_workspace_memberships(user_id: str, workspace_ids: list[st
 
 async def _resolve_accessible_workspace(workspace_id: str, user_id: str = "") -> Workspace:
     if user_id:
-        membership = await (
-            WorkspaceMembership.objects.select_related("workspace")
-            .filter(workspace_id=workspace_id, user_id=user_id)
-            .afirst()
-        )
-        if membership is None:
+        try:
+            user = await User.objects.aget(id=user_id)
+        except User.DoesNotExist as exc:
+            raise Workspace.DoesNotExist from exc
+        workspace, _membership = await aresolve_workspace_access(user, workspace_id)
+        if workspace is None:
             raise Workspace.DoesNotExist
-        return membership.workspace
+        return workspace
     return await Workspace.objects.aget(id=workspace_id)
 
 
@@ -777,6 +778,7 @@ async def describe_dataset(
             timing_ms=tc["timer"].elapsed_ms,
         )
         return tc["result"]
+
 
 @mcp.tool()
 async def semantic_query(
