@@ -106,6 +106,13 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
 
+Connect staging is a separate OAuth provider and does not use the two production
+AWS secrets above. Store its application credentials as
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
+The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
+container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
+
 ### Adding a new secret
 
 The chain runs AWS Secrets Manager → `.kamal/secrets` → `env.secret` in each Kamal
@@ -207,17 +214,23 @@ driver so `kamal app logs` works directly.
 2. **DNS**: add an A record `scout-staging.dimagi.com` → the EC2 Elastic IP
    (`SCOUT_EC2_IP` in `.env.deploy`). Kamal's proxy issues the TLS cert once the
    record resolves.
-3. **OAuth**: the staging host reuses the production OAuth client IDs, so register
-   its callback URLs (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`)
-   with each provider (CommCare, Connect, OCS, Google) — otherwise OAuth login
-   fails on staging. `setup_oauth_apps` runs automatically for the staging domain
+3. **OAuth**: most providers reuse the production OAuth client IDs, so register
+   the staging callback URLs
+   (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`) with
+   those providers. Connect is the exception: create a confidential authorization
+   code application on `https://connect-staging.dimagi.com/o/applications/` with
+   callback URL
+   `https://scout-staging.dimagi.com/accounts/commcare_connect/login/callback/`,
+   then store its credentials in the two GitHub `staging` environment secrets
+   documented above. `setup_oauth_apps` runs automatically for the staging domain
    in the API container's entrypoint.
 
 ### Deploying from GitHub Actions
 
 Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
 ref dropdown. It builds and pushes both images, then deploys MCP → API → worker →
-frontend, and needs no secrets beyond the ones production already uses.
+frontend. In addition to the production deploy secrets, the GitHub `staging`
+environment must contain the two Connect-staging OAuth secrets documented above.
 
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.

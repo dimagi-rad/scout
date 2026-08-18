@@ -10,17 +10,17 @@ from django.conf import settings
 
 
 class CommCareConnectOAuth2Adapter(OAuth2Adapter):
-    """OAuth2 adapter for CommCare Connect."""
+    """OAuth2 adapter for the environment's CommCare Connect host."""
 
     provider_id = "commcare_connect"
 
     @property
-    def authorize_url(self) -> str:
-        return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/authorize/"
+    def access_token_url(self) -> str:
+        return f"{settings.CONNECT_API_URL.rstrip('/')}/o/token/"
 
     @property
-    def access_token_url(self) -> str:
-        return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/token/"
+    def authorize_url(self) -> str:
+        return f"{settings.CONNECT_API_URL.rstrip('/')}/o/authorize/"
 
     @property
     def profile_url(self) -> str:

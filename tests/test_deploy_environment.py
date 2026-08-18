@@ -11,7 +11,7 @@ These tests exercise the pure resolver and do NOT need a database.
 
 import pytest
 
-from config.settings.base import resolve_deploy_environment
+from config.settings.base import resolve_connect_api_url, resolve_deploy_environment
 
 
 @pytest.mark.parametrize(
@@ -26,3 +26,15 @@ from config.settings.base import resolve_deploy_environment
 )
 def test_resolve_deploy_environment(settings_module, expected):
     assert resolve_deploy_environment(settings_module) == expected
+
+
+@pytest.mark.parametrize(
+    ("deploy_environment", "expected"),
+    [
+        ("staging", "https://connect-staging.dimagi.com"),
+        ("production", "https://connect.dimagi.com"),
+        ("development", "https://connect.dimagi.com"),
+    ],
+)
+def test_resolve_connect_api_url(deploy_environment, expected):
+    assert resolve_connect_api_url(deploy_environment) == expected

@@ -1,9 +1,10 @@
 """Register OAuth SocialApp records from environment variables.
 
 Reads ``{PREFIX}_OAUTH_CLIENT_ID`` / ``{PREFIX}_OAUTH_CLIENT_SECRET`` for each
-provider and upserts the corresponding allauth SocialApp rows. The prefixes are:
-COMMCARE_OAUTH_*, CONNECT_OAUTH_*, OCS_OAUTH_*, GOOGLE_OAUTH_*, GITHUB_OAUTH_*
-(matching config/deploy.yml).
+provider and upserts the corresponding allauth SocialApp rows. Production uses
+COMMCARE_OAUTH_*, CONNECT_OAUTH_*, OCS_OAUTH_*, GOOGLE_OAUTH_*, GITHUB_OAUTH_*.
+Staging substitutes STAGING_CONNECT_OAUTH_* for Connect because Connect staging
+has its own OAuth application database.
 
 Idempotent — safe to re-run after credential rotation or fresh DB setup.
 """
@@ -11,6 +12,7 @@ Idempotent — safe to re-run after credential rotation or fresh DB setup.
 import os
 
 from allauth.socialaccount.models import SocialApp
+from django.conf import settings
 from django.contrib.sites.models import Site
 from django.core.management.base import BaseCommand
 
@@ -25,6 +27,13 @@ PROVIDERS = [
     ("google", "Google", "GOOGLE"),
     ("github", "GitHub", "GITHUB"),
 ]
+
+
+def oauth_env_prefix(provider_id: str, default_prefix: str) -> str:
+    """Select environment-isolated credentials for providers that need them."""
+    if provider_id == "commcare_connect" and settings.DEPLOY_ENVIRONMENT == "staging":
+        return "STAGING_CONNECT"
+    return default_prefix
 
 
 class Command(BaseCommand):
@@ -47,7 +56,8 @@ class Command(BaseCommand):
         site.save()
         self.stdout.write(f"  site   {site.domain} ({site.name})")
 
-        for provider_id, name, env_prefix in PROVIDERS:
+        for provider_id, name, default_prefix in PROVIDERS:
+            env_prefix = oauth_env_prefix(provider_id, default_prefix)
             client_id = os.environ.get(f"{env_prefix}_OAUTH_CLIENT_ID", "")
             client_secret = os.environ.get(f"{env_prefix}_OAUTH_CLIENT_SECRET", "")
 

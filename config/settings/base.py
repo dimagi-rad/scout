@@ -52,12 +52,14 @@ def resolve_deploy_environment(settings_module: str) -> str:
     return "production" if settings_module in PRODUCTION_SETTINGS_MODULES else "development"
 
 
-# Default deployment environment label for Sentry / Task Badger. Derived from the
-# settings module (set before settings load) rather than DEBUG: base.py defaults
-# DEBUG to True and production.py only flips it after this file is imported, so a
-# DEBUG-based default would freeze to "development" even under production settings.
-# An explicit SENTRY_ENVIRONMENT / TASKBADGER_ENVIRONMENT env var still wins.
-DEPLOY_ENVIRONMENT = resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", ""))
+# Default deployment environment label for environment-specific integrations,
+# Sentry, and Task Badger. Staging intentionally uses the production settings
+# module, so it must set DEPLOY_ENVIRONMENT=staging explicitly; production and
+# development continue to derive a safe default from DJANGO_SETTINGS_MODULE.
+DEPLOY_ENVIRONMENT = env(
+    "DEPLOY_ENVIRONMENT",
+    default=resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", "")),
+)
 
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 
@@ -335,9 +337,20 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 # (loopback only) disables the check; production deploy configs set it.
 MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
 
-# CommCare Connect API
-CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
-CONNECT_OAUTH_URL = env("CONNECT_OAUTH_URL", default=CONNECT_API_URL)
+
+def resolve_connect_api_url(deploy_environment: str) -> str:
+    """Return the Connect host paired with a Scout deployment environment."""
+    if deploy_environment == "staging":
+        return "https://connect-staging.dimagi.com"
+    return "https://connect.dimagi.com"
+
+
+# CommCare Connect API and OAuth host. CONNECT_API_URL remains independently
+# overridable for local development and one-off environments.
+CONNECT_API_URL = env(
+    "CONNECT_API_URL",
+    default=resolve_connect_api_url(DEPLOY_ENVIRONMENT),
+)
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 

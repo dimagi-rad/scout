@@ -32,6 +32,8 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "production"
+    CONNECT_API_URL: "https://connect.dimagi.com"
     DJANGO_ALLOWED_HOSTS: "scout.dimagi.com"
     CSRF_TRUSTED_ORIGINS: "https://scout.dimagi.com"
     # Base URL for links in transactional email (workspace invite sign-in

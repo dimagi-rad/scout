@@ -31,6 +31,8 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
     DJANGO_ALLOWED_HOSTS: "scout-staging.dimagi.com"
     CSRF_TRUSTED_ORIGINS: "https://scout-staging.dimagi.com"
     SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
@@ -56,8 +58,8 @@ env:
     - LANGFUSE_PUBLIC_KEY
     - COMMCARE_OAUTH_CLIENT_ID
     - COMMCARE_OAUTH_CLIENT_SECRET
-    - CONNECT_OAUTH_CLIENT_ID
-    - CONNECT_OAUTH_CLIENT_SECRET
+    - STAGING_CONNECT_OAUTH_CLIENT_ID
+    - STAGING_CONNECT_OAUTH_CLIENT_SECRET
     - OCS_OAUTH_CLIENT_ID
     - OCS_OAUTH_CLIENT_SECRET
     - SENTRY_DSN

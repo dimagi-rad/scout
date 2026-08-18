@@ -33,7 +33,7 @@ def _ocs_token_url() -> str:
 
 
 def _connect_token_url() -> str:
-    return f"{settings.CONNECT_OAUTH_URL.rstrip('/')}/o/token/"
+    return f"{settings.CONNECT_API_URL.rstrip('/')}/o/token/"
 
 
 PROVIDER_TOKEN_URLS = {
