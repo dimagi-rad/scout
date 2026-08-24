@@ -278,7 +278,7 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
                     "name": "amount_per_visit",
                     "field_type": "measure",
                     "measure_type": "number",
-                    "sql": "{count} / NULLIF({count}, 0)",
+                    "sql": "{count}::numeric / NULLIF({count}, 0)",
                     "format": "currency_2",
                     "currency": "usd",
                 },
@@ -295,7 +295,7 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
 
     field = _visits(semantic_model).fields.get(name="amount_per_visit")
     assert field.expression == ""
-    assert field.metadata["cube_sql"] == "{count} / NULLIF({count}, 0)"
+    assert field.metadata["cube_sql"] == "{count}::numeric / NULLIF({count}, 0)"
 
     cube = next(
         c for c in generate_cube_schema(semantic_model)["cubes"] if c["name"] == "raw_visits"
@@ -304,10 +304,24 @@ def test_created_measure_supports_calculated_cube_sql(canvas, semantic_model, mo
     assert measure == {
         "name": "amount_per_visit",
         "type": "number",
-        "sql": "{count} / NULLIF({count}, 0)",
+        "sql": "{count}::numeric / NULLIF({count}, 0)",
         "format": "currency_2",
         "currency": "USD",
     }
+
+    regression = apply_operations(
+        canvas,
+        [
+            {
+                "op": "set",
+                "target": "field/raw_visits.amount_per_visit/cube_sql",
+                "value": "{count} / NULLIF({count}, 0)",
+            }
+        ],
+        user,
+    )
+    assert regression["can_commit"] is False
+    assert regression["diagnostics"][0]["code"] == "INTEGER_DIVISION_RISK"
 
 
 def test_created_ratio_measure_can_reference_filtered_measure(
@@ -341,7 +355,7 @@ def test_created_ratio_measure_can_reference_filtered_measure(
                     "name": "approval_rate",
                     "field_type": "measure",
                     "measure_type": "number",
-                    "sql": "{approved_visit_count} / NULLIF({count}, 0)",
+                    "sql": "{approved_visit_count}::numeric / NULLIF({count}, 0)",
                     "format": "percent_1",
                 },
             },
@@ -363,9 +377,32 @@ def test_created_ratio_measure_can_reference_filtered_measure(
     assert measures["approval_rate"] == {
         "name": "approval_rate",
         "type": "number",
-        "sql": "{approved_visit_count} / NULLIF({count}, 0)",
+        "sql": "{approved_visit_count}::numeric / NULLIF({count}, 0)",
         "format": "percent_1",
     }
+
+
+def test_created_ratio_measure_rejects_integer_division(canvas, user):
+    result = apply_operations(
+        canvas,
+        [
+            {
+                "op": "create",
+                "object_type": "field",
+                "value": {
+                    "dataset": "raw_visits",
+                    "name": "broken_rate",
+                    "field_type": "measure",
+                    "measure_type": "number",
+                    "sql": "{count} / NULLIF({count}, 0)",
+                },
+            }
+        ],
+        user,
+    )
+
+    assert result["can_commit"] is False
+    assert result["diagnostics"][0]["code"] == "INTEGER_DIVISION_RISK"
 
 
 def test_measure_options_are_structural_for_generated_fields(canvas, semantic_model):

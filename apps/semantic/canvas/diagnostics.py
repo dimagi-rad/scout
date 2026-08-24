@@ -8,6 +8,7 @@ diagnostics gate commit.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from apps.semantic.canvas.objects import dataset_column_names
@@ -19,6 +20,18 @@ from apps.semantic.canvas.service import (
     validate_custom_dataset_draft,
 )
 from apps.semantic.models import CustomDataset, SemanticCanvasChange, SemanticField
+
+_DIRECT_MEMBER_DIVISION_RE = re.compile(
+    r"\{[A-Za-z_][A-Za-z0-9_.]*\}\s*/\s*"
+    r"(?:NULLIF\s*\(\s*)?\{[A-Za-z_][A-Za-z0-9_.]*\}",
+    re.IGNORECASE,
+)
+_DECIMAL_COERCION_RE = re.compile(
+    r"::\s*(?:numeric|decimal|double\s+precision|real)\b|"
+    r"\bcast\s*\([^)]*\bas\s+(?:numeric|decimal|double\s+precision|real)\b|"
+    r"\b\d+\.\d+\s*\*",
+    re.IGNORECASE,
+)
 
 
 def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = None) -> list[dict]:
@@ -45,6 +58,13 @@ def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = Non
 
     for change in field_drafts:
         diagnostics.extend(_field_draft_diagnostics(model, change, field_drafts))
+    for change in changes:
+        if change.object_type != ObjectType.FIELD or change.change_type == ChangeType.DELETE:
+            continue
+        base, _state, serialized = base_and_state(canvas, change)
+        if change.change_type != ChangeType.CREATE and base is None:
+            continue
+        diagnostics.extend(_calculated_measure_diagnostics(change, {**serialized, **change.fields}))
     for change in relationship_drafts:
         diagnostics.extend(
             _relationship_draft_diagnostics(
@@ -129,6 +149,27 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
             )
         )
     return out
+
+
+def _calculated_measure_diagnostics(change, fields: dict[str, Any]) -> list[dict]:
+    """Reject the common count/count ratio that PostgreSQL truncates to zero."""
+    if fields.get("measure_type") != SemanticField.MeasureType.NUMBER:
+        return []
+    cube_sql = str(fields.get("cube_sql") or "")
+    if not _DIRECT_MEMBER_DIVISION_RE.search(cube_sql):
+        return []
+    if _DECIMAL_COERCION_RE.search(cube_sql):
+        return []
+    return [
+        _diagnostic(
+            "INTEGER_DIVISION_RISK",
+            change,
+            "cube_sql",
+            "A ratio of count measures needs decimal division in PostgreSQL. "
+            "Cast one operand, for example: "
+            "{approved_count}::numeric / NULLIF({count}, 0).",
+        )
+    ]
 
 
 def _relationship_draft_diagnostics(canvas, model, change, siblings, field_drafts) -> list[dict]:

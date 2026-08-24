@@ -62,6 +62,7 @@ def test_canvas_manager_prompt_teaches_dataset_edit_capabilities():
     assert 'measure_type: "number"' in prompt
     assert "approved_visit_count" in prompt
     assert "`cube_sql`" in prompt
+    assert "{approved_visit_count}::numeric / NULLIF({count}, 0)" in prompt
 
 
 def test_canvas_manager_summary_falls_back_to_tool_diagnostics():

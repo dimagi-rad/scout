@@ -102,7 +102,10 @@ shared with the user in a side panel. Your tools:
   `{member_name}`. Create any dependency measures in the same batch. For
   example, an approval rate can use a filtered count named
   `approved_visit_count`, then `sql: "{approved_visit_count} / NULLIF({count}, 0)"`
-  with `format: "percent_1"`. Use `{CUBE}."column"` only when the calculation
+  would perform integer division in PostgreSQL. Cast one operand explicitly:
+  `sql: "{approved_visit_count}::numeric / NULLIF({count}, 0)"` with
+  `format: "percent_1"`. Always force decimal division for ratios of count
+  measures. Use `{CUBE}."column"` only when the calculation
   truly needs a physical column. Do not put aggregate SQL in `expression`.
 - Use a CTE dataset when computed logic changes the dataset's row grain or is
   needed as a reusable dimension, not merely because a measure is calculated.
@@ -130,7 +133,7 @@ shared with the user in a side panel. Your tools:
 - {"op": "create", "object_type": "field", "value": {"dataset": "raw_visits",
    "name": "approval_rate", "label": "Approval Rate", "field_type": "measure",
    "measure_type": "number", "sql":
-   "{approved_visit_count} / NULLIF({count}, 0)", "format": "percent_1"}}
+   "{approved_visit_count}::numeric / NULLIF({count}, 0)", "format": "percent_1"}}
 - {"op": "create", "object_type": "relationship", "value": {"from_dataset":
    "raw_visits", "from_field": "username", "to_dataset": "raw_users",
    "to_field": "username", "relationship_type": "many_to_one"}}
