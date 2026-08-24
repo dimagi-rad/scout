@@ -81,7 +81,9 @@ def semantic_model(workspace):
 
 
 def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -120,7 +122,9 @@ def test_compile_semantic_query_from_members(monkeypatch, workspace, semantic_mo
 
 
 def test_compile_passes_cube_filter_operators_through(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -146,7 +150,9 @@ def test_compile_passes_cube_filter_operators_through(monkeypatch, workspace, se
 
 
 def test_compile_accepts_values_filter_alias(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -171,10 +177,10 @@ def test_compile_accepts_values_filter_alias(monkeypatch, workspace, semantic_mo
     ]
 
 
-def test_compile_time_granularity_does_not_duplicate_params(
-    monkeypatch, workspace, semantic_model
-):
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+def test_compile_time_granularity_does_not_duplicate_params(monkeypatch, workspace, semantic_model):
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     compiled = query_service._compile_semantic_query(
         workspace,
@@ -196,7 +202,9 @@ def test_compile_time_granularity_does_not_duplicate_params(
 
 
 def test_compile_rejects_unknown_member(monkeypatch, workspace, semantic_model):
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     with pytest.raises(query_service.SemanticQueryError, match="Unknown semantic field"):
         query_service._compile_semantic_query(
@@ -222,7 +230,9 @@ def test_compile_rejects_cross_dataset_query(monkeypatch, workspace, semantic_mo
         data_type="text",
         expression="username",
     )
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
 
     with pytest.raises(query_service.SemanticQueryError, match="one dataset"):
         query_service._compile_semantic_query(
@@ -293,7 +303,9 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
             connection_params={},
         )
 
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
     monkeypatch.setattr(query_service, "CubeClient", FakeCubeClient)
     monkeypatch.setattr(query_service, "load_workspace_context", fake_context)
 
@@ -309,6 +321,42 @@ async def test_run_semantic_query_executes_via_cube(monkeypatch, workspace, sema
     assert captured["security_context"]["workspaceId"] == str(workspace.id)
     assert captured["security_context"]["userId"] == "user-1"
     assert captured["security_context"]["readonlyRole"] == "tenant_schema_ro"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_semantic_query_returns_validation_error_for_expired_schema(
+    monkeypatch, workspace, semantic_model
+):
+    async def expired_context(_workspace_id):
+        raise ValueError(
+            "No active schema for tenant '1529'. Run materialization first to load data."
+        )
+
+    class UnexpectedCubeClient:
+        async def execute_query(self, cube_query, *, security_context):
+            raise AssertionError("Cube must not be called without an active data schema")
+
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
+    monkeypatch.setattr(query_service, "load_workspace_context", expired_context)
+    monkeypatch.setattr(query_service, "CubeClient", UnexpectedCubeClient)
+
+    result = await query_service.run_semantic_query(
+        workspace,
+        {"measures": ["visits.count"], "limit": 10},
+    )
+
+    assert result == {
+        "success": False,
+        "error": {
+            "code": "VALIDATION_ERROR",
+            "message": (
+                "No active schema for tenant '1529'. Run materialization first to load data."
+            ),
+        },
+    }
 
 
 def test_generate_cube_schema_from_semantic_model(semantic_model):
@@ -405,8 +453,12 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
 
     catalog = catalog_service.serialize_catalog(model)
-    custom_entry = next(dataset for dataset in catalog["datasets"] if dataset["name"] == "visit_users")
-    physical_entry = next(dataset for dataset in catalog["datasets"] if dataset["name"] == "raw_visits")
+    custom_entry = next(
+        dataset for dataset in catalog["datasets"] if dataset["name"] == "visit_users"
+    )
+    physical_entry = next(
+        dataset for dataset in catalog["datasets"] if dataset["name"] == "raw_visits"
+    )
     assert custom_entry["source_kind"] == SemanticDataset.SourceKind.CUSTOM
     assert custom_entry["definition_sql"] == "select username from raw_visits"
     assert physical_entry["source_kind"] == SemanticDataset.SourceKind.PHYSICAL
@@ -751,7 +803,9 @@ async def test_run_semantic_query_surfaces_cube_query_errors_as_validation(
         async def execute_query(self, cube_query, *, security_context):
             raise query_service.CubeQueryError("Unsupported filter operator 'afterDate'.")
 
-    monkeypatch.setattr(query_service, "get_active_semantic_model", lambda _workspace: semantic_model)
+    monkeypatch.setattr(
+        query_service, "get_active_semantic_model", lambda _workspace: semantic_model
+    )
     monkeypatch.setattr(query_service, "CubeClient", RejectingCubeClient)
     monkeypatch.setattr(query_service, "load_workspace_context", _fake_workspace_context)
 

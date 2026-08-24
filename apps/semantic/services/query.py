@@ -65,7 +65,14 @@ async def run_semantic_query(
     except CubeSchemaBuildError as exc:
         return error_response(VALIDATION_ERROR, str(exc))
 
-    ctx = await load_workspace_context(str(workspace.id))
+    try:
+        ctx = await load_workspace_context(str(workspace.id))
+    except ValueError as exc:
+        # An expired/teardown tenant schema is an expected validation state,
+        # not an agent-stream failure.  Keep it inside the semantic tool's
+        # structured error envelope so the agent can explain that the data
+        # needs to be materialized again.
+        return error_response(VALIDATION_ERROR, str(exc))
     security_context = build_cube_security_context(
         workspace,
         compiled["model"],
@@ -128,7 +135,14 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
         _resolve_member(model, m, expected=SemanticField.FieldType.MEASURE) for m in measures
     ]
     resolved_dimensions = [
-        _resolve_member(model, d, expected_any={SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION})
+        _resolve_member(
+            model,
+            d,
+            expected_any={
+                SemanticField.FieldType.DIMENSION,
+                SemanticField.FieldType.TIME_DIMENSION,
+            },
+        )
         for d in dimensions
     ]
     resolved_time = (
@@ -140,7 +154,11 @@ def _compile_semantic_query(workspace, query_spec: dict[str, Any]) -> dict[str, 
 
     datasets = {
         member.dataset.id
-        for member in [*resolved_measures, *resolved_dimensions, *( [resolved_time] if resolved_time else [] )]
+        for member in [
+            *resolved_measures,
+            *resolved_dimensions,
+            *([resolved_time] if resolved_time else []),
+        ]
         if member is not None
     }
     datasets.update(member.dataset.id for member, _filter in resolved_filters)
@@ -203,10 +221,7 @@ def _cube_query(
     query: dict[str, Any] = {
         "measures": [member.member for member in resolved_measures],
         "dimensions": [member.member for member in resolved_dimensions],
-        "filters": [
-            _cube_filter(member, filter_spec)
-            for member, filter_spec in resolved_filters
-        ],
+        "filters": [_cube_filter(member, filter_spec) for member, filter_spec in resolved_filters],
         "limit": limit,
     }
     if resolved_time:
@@ -312,6 +327,10 @@ def _validate_order_by(
         if not isinstance(item, dict):
             continue
         field = item.get("field") or item.get("member")
-        alias = "date" if field == (resolved_time.member if resolved_time else None) else str(field).replace(".", "__")
+        alias = (
+            "date"
+            if field == (resolved_time.member if resolved_time else None)
+            else str(field).replace(".", "__")
+        )
         if alias not in selected_aliases:
             raise SemanticQueryError(f"Cannot order by '{field}' because it is not selected.")
