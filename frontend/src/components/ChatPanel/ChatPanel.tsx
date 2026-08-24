@@ -18,6 +18,7 @@ import {
 import {
   ChatErrorNotice,
   ChatOverloadNotice,
+  ChatStoppedNotice,
   ChatThinkingIndicator,
 } from "./ChatStatus"
 import { writeSavedThreadId, clearSavedThreadId } from "./threadStorage"
@@ -46,6 +47,7 @@ export function ChatPanel() {
   const retriedRef = useRef(false)
   const prevRetryStatusRef = useRef<string>("")
   const [overloadNotice, setOverloadNotice] = useState(false)
+  const [stoppedNotice, setStoppedNotice] = useState(false)
 
   const {
     jobsByThreadId,
@@ -165,6 +167,7 @@ export function ChatPanel() {
     setThreadArtifacts([])
     setThreadArtifactsStatus("idle")
     setThreadArtifactsError(null)
+    setStoppedNotice(false)
   }, [threadId])
 
   useEffect(() => {
@@ -241,7 +244,13 @@ export function ChatPanel() {
 
   function handleSend(text: string) {
     resetOverloadState()
+    setStoppedNotice(false)
     sendMessage({ text })
+  }
+
+  function handleStop() {
+    setStoppedNotice(true)
+    void stop()
   }
 
   function handleOverloadRetry() {
@@ -311,6 +320,7 @@ export function ChatPanel() {
             />
           ))}
           {isStreaming && <ChatThinkingIndicator />}
+          {stoppedNotice && <ChatStoppedNotice />}
           {error && <ChatErrorNotice error={error} onStartNewThread={startFreshThread} />}
           {overloadNotice && <ChatOverloadNotice onRetry={handleOverloadRetry} />}
         </div>
@@ -332,7 +342,7 @@ export function ChatPanel() {
             setInput={setInput}
             onSend={handleSend}
             isStreaming={isStreaming}
-            onStop={() => stop()}
+            onStop={handleStop}
           />
         </div>
       </div>

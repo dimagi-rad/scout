@@ -8,6 +8,7 @@ cards and rich rendering work LIVE -- not only after a page reload.
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -451,6 +452,7 @@ class _StallingStream:
 class _StallingAgent:
     def __init__(self, stream_obj):
         self._stream = stream_obj
+        self.aupdate_state = AsyncMock()
 
     def astream_events(self, input_state, *, config, version):
         return self._stream
@@ -462,9 +464,7 @@ async def test_cancelled_stalled_stream_closes_generator():
     still close the abandoned event generator and upstream model call."""
     stalling = _StallingStream()
     agent = _StallingAgent(stalling)
-    output = stream.langgraph_to_ui_stream(
-        agent, {}, {"configurable": {"thread_id": "t1"}}
-    )
+    output = stream.langgraph_to_ui_stream(agent, {}, {"configurable": {"thread_id": "t1"}})
     await anext(output)
     await anext(output)
 
@@ -476,6 +476,53 @@ async def test_cancelled_stalled_stream_closes_generator():
     await output.aclose()
 
     assert stalling.aclosed is True
+    agent.aupdate_state.assert_awaited_once()
+    update_args, update_kwargs = agent.aupdate_state.await_args
+    stopped_message = update_args[1]["messages"][0]
+    assert stopped_message.content == "_Response stopped by user._"
+    assert stopped_message.response_metadata["scout_response_stopped"] is True
+    assert update_kwargs["as_node"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_persists_partial_text_with_terminal_marker():
+    class PartialThenStallingStream:
+        def __init__(self):
+            self.sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.sent:
+                self.sent = True
+                return {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": type("Chunk", (), {"content": "Partial answer"})()},
+                }
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            return None
+
+    agent = _StallingAgent(PartialThenStallingStream())
+    output = stream.langgraph_to_ui_stream(agent, {}, {"configurable": {"thread_id": "t1"}})
+    await anext(output)
+    await anext(output)
+    await anext(output)
+    await anext(output)
+
+    pending = asyncio.create_task(anext(output))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await output.aclose()
+
+    update_args, _update_kwargs = agent.aupdate_state.await_args
+    assert update_args[1]["messages"][0].content == (
+        "Partial answer\n\n_Response stopped by user._"
+    )
 
 
 def test_sse_survives_non_serializable_values():

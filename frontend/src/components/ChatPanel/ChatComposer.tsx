@@ -51,17 +51,27 @@ export function ChatComposer({
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    if (!showSlashMenu || filteredCommands.length === 0) return
+    if (showSlashMenu && filteredCommands.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i + 1) % filteredCommands.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
+        return
+      }
+      if (e.key === "Tab" || e.key === "Enter") {
+        e.preventDefault()
+        selectSlashCommand(filteredCommands[slashMenuIndex])
+        return
+      }
+    }
 
-    if (e.key === "ArrowDown") {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
-      setSlashMenuIndex((i) => (i + 1) % filteredCommands.length)
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault()
-      setSlashMenuIndex((i) => (i - 1 + filteredCommands.length) % filteredCommands.length)
-    } else if (e.key === "Tab" || e.key === "Enter") {
-      e.preventDefault()
-      selectSlashCommand(filteredCommands[slashMenuIndex])
+      submit()
     }
   }
 
@@ -86,12 +96,23 @@ export function ChatComposer({
         className="flex-1"
       />
       {isStreaming ? (
-        <Button type="button" variant="outline" size="icon" onClick={onStop}>
-          <Square className="w-4 h-4" />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          onClick={onStop}
+          aria-label="Stop response"
+        >
+          <Square className="w-4 h-4" aria-hidden="true" />
         </Button>
       ) : (
-        <Button type="submit" size="icon" disabled={!input.trim()}>
-          <Send className="w-4 h-4" />
+        <Button
+          type="submit"
+          size="icon"
+          disabled={!input.trim()}
+          aria-label="Send message"
+        >
+          <Send className="w-4 h-4" aria-hidden="true" />
         </Button>
       )}
     </form>

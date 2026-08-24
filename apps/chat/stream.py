@@ -218,6 +218,35 @@ def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
 
 audit_logger = logging.getLogger("scout.agent.audit")
 
+STOPPED_RESPONSE_MARKER = "Response stopped by user."
+
+
+async def _persist_stopped_response(agent: Any, config: dict, partial_text: str) -> None:
+    """Append a terminal assistant message when the client cancels a stream."""
+    clean_partial = partial_text.strip()
+    content = (
+        f"{clean_partial}\n\n_{STOPPED_RESPONSE_MARKER}_"
+        if clean_partial
+        else f"_{STOPPED_RESPONSE_MARKER}_"
+    )
+    try:
+        await asyncio.shield(
+            agent.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        AIMessage(
+                            content=content,
+                            response_metadata={"scout_response_stopped": True},
+                        )
+                    ]
+                },
+                as_node="agent",
+            )
+        )
+    except Exception:
+        logger.warning("Could not persist stopped chat response", exc_info=True)
+
 
 async def langgraph_to_ui_stream(
     agent: Any,
@@ -245,6 +274,7 @@ async def langgraph_to_ui_stream(
     # chunks and stamp them with the authoritative parent id immediately before
     # the parent tool output is emitted.
     pending_subagent_events: list[dict[str, Any]] = []
+    streamed_text: list[str] = []
 
     yield _sse({"type": "start"})
     yield _sse({"type": "start-step"})
@@ -332,6 +362,7 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "reasoning-delta", "id": reasoning_id, "delta": t})
 
                 for t in texts:
+                    streamed_text.append(t)
                     if reasoning_started:
                         yield _sse({"type": "reasoning-end", "id": reasoning_id})
                         reasoning_started = False
@@ -425,18 +456,14 @@ async def langgraph_to_ui_stream(
                 output_tool_call_id = getattr(tool_output, "tool_call_id", None)
                 started_tool_call_id = run_to_tool_call_id.get(run_id or "")
                 tool_call_id = (
-                    output_tool_call_id
-                    or started_tool_call_id
-                    or run_id
-                    or uuid.uuid4().hex
+                    output_tool_call_id or started_tool_call_id or run_id or uuid.uuid4().hex
                 )
                 pending_start = pending_tool_starts.pop(run_id or "", None)
 
                 # If on_tool_start never emitted an input part for this call,
                 # emit a minimal one now so AI SDK has a part to attach output to.
-                if (
-                    not started_tool_call_id
-                    or (output_tool_call_id and output_tool_call_id != started_tool_call_id)
+                if not started_tool_call_id or (
+                    output_tool_call_id and output_tool_call_id != started_tool_call_id
                 ):
                     yield _sse(
                         {
@@ -489,6 +516,15 @@ async def langgraph_to_ui_stream(
                         text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
+    except (asyncio.CancelledError, GeneratorExit):
+        if not parent_pump.done():
+            parent_pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await parent_pump
+        with contextlib.suppress(Exception):
+            await event_stream.aclose()
+        await _persist_stopped_response(agent, config, "".join(streamed_text))
+        raise
     except Exception as exc:
         if _is_transient_overload(exc):
             # Anthropic was momentarily overloaded / rate-limited -- a transient

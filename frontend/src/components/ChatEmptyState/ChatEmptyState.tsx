@@ -109,8 +109,9 @@ export function ChatEmptyPrompt({
           size="icon"
           disabled={disabled || !input.trim()}
           className="absolute right-3 top-1/2 -translate-y-1/2"
+          aria-label="Send message"
         >
-          <ArrowUp className="h-4 w-4" />
+          <ArrowUp className="h-4 w-4" aria-hidden="true" />
         </Button>
       </form>
 

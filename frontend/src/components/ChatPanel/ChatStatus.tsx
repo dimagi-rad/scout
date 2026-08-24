@@ -73,6 +73,18 @@ export function ChatOverloadNotice({ onRetry }: ChatOverloadNoticeProps) {
   )
 }
 
+export function ChatStoppedNotice() {
+  return (
+    <p
+      className="text-sm text-muted-foreground italic"
+      data-testid="chat-stopped-notice"
+      role="status"
+    >
+      Response stopped by user.
+    </p>
+  )
+}
+
 export function ChatThinkingIndicator() {
   return (
     <div className="flex items-start gap-3 py-2" data-testid="thinking-indicator">
