@@ -7,6 +7,8 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from django.db.models import Q
+
 from apps.artifacts.models import Artifact
 from apps.chat.models import Thread, ThreadArtifact
 from apps.workspaces.models import Workspace
@@ -82,9 +84,7 @@ def _extract_artifact_references(value: Any) -> dict[str, str]:
             _merge_reference(references, child.get("id"), source)
         elif normalized_key in _ARTIFACT_ID_KEYS:
             child_source = (
-                ThreadArtifact.Source.MENTIONED
-                if normalized_key.startswith("previous")
-                else source
+                ThreadArtifact.Source.MENTIONED if normalized_key.startswith("previous") else source
             )
             _merge_reference(references, child, child_source)
 
@@ -104,11 +104,7 @@ async def _load_thread_ui_messages(thread_id: str) -> list[dict[str, Any]]:
     )
     if checkpoint_tuple is None:
         return []
-    lc_messages = (
-        (checkpoint_tuple.checkpoint or {})
-        .get("channel_values", {})
-        .get("messages", [])
-    )
+    lc_messages = (checkpoint_tuple.checkpoint or {}).get("channel_values", {}).get("messages", [])
     return langchain_messages_to_ui(lc_messages)
 
 
@@ -149,9 +145,11 @@ async def backfill_thread_artifact_links(thread: Thread) -> int:
     """Create links for legacy and saved-message artifact references."""
 
     created = 0
+    thread_conversation_id = str(thread.id)
     queryset = Artifact.objects.filter(
+        Q(conversation_id=thread_conversation_id)
+        | Q(conversation_id=f"{thread_conversation_id}:artifact-manager"),
         workspace_id=thread.workspace_id,
-        conversation_id=str(thread.id),
     )
     async for artifact in queryset:
         _, was_created = await ThreadArtifact.objects.aget_or_create(
@@ -172,7 +170,9 @@ async def backfill_thread_artifact_links(thread: Thread) -> int:
     try:
         messages = await _load_thread_ui_messages(str(thread.id))
     except Exception:
-        logger.info("Could not inspect thread %s messages for artifact links", thread.id, exc_info=True)
+        logger.info(
+            "Could not inspect thread %s messages for artifact links", thread.id, exc_info=True
+        )
         return created
 
     references: dict[str, str] = {}

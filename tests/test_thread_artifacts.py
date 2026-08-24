@@ -84,6 +84,35 @@ async def test_thread_artifacts_endpoint_backfills_legacy_conversation_artifacts
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_thread_artifacts_endpoint_backfills_legacy_manager_conversation_id(
+    workspace,
+    user,
+):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=user,
+        title="Legacy manager thread",
+    )
+    artifact = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=user,
+        title="Manager Story",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id=f"{thread.id}:artifact-manager",
+        data={"story_doc": {"schema_version": 1, "blocks": []}},
+    )
+
+    client = await _auth_client(user)
+    response = await client.get(f"/api/workspaces/{workspace.id}/threads/{thread.id}/artifacts/")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["results"]] == [str(artifact.id)]
+    assert await ThreadArtifact.objects.filter(thread=thread, artifact=artifact).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_thread_artifacts_endpoint_backfills_saved_tool_artifact_references(
     monkeypatch,
     workspace,

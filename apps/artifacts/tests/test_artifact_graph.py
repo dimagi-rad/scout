@@ -126,9 +126,7 @@ def test_graph_doc_unknown_config_key_reports_allowed_keys():
         ],
     }
 
-    diagnostics = [
-        item for item in validate_doc(doc) if item.get("code") == "unknown_config_key"
-    ]
+    diagnostics = [item for item in validate_doc(doc) if item.get("code") == "unknown_config_key"]
 
     assert len(diagnostics) == 2
     messages_by_block = {item["block_id"]: item["message"] for item in diagnostics}
@@ -171,9 +169,7 @@ def test_graph_doc_rejects_recharts_data_prop_refs():
     diagnostics = validate_doc(doc)
 
     assert {
-        item.get("block_id")
-        for item in diagnostics
-        if item.get("code") == "recharts_data_prop"
+        item.get("block_id") for item in diagnostics if item.get("code") == "recharts_data_prop"
     } == {"chart"}
 
 
@@ -204,10 +200,7 @@ def test_graph_doc_rejects_missing_bound_result_key():
 
     diagnostics = validate_doc(doc)
 
-    assert {
-        (item.get("severity"), item.get("code"))
-        for item in diagnostics
-    } >= {
+    assert {(item.get("severity"), item.get("code")) for item in diagnostics} >= {
         ("error", "missing_result_key:verification"),
         ("error", "unknown_config_key"),
     }
@@ -274,9 +267,7 @@ def test_manifest_result_keys_are_only_query_outputs(workspace, member_user):
                                     "value": "approved",
                                 }
                             ],
-                            "order_by": [
-                                {"field": "visits.visit_date", "direction": "asc"}
-                            ],
+                            "order_by": [{"field": "visits.visit_date", "direction": "asc"}],
                         }
                     }
                 },
@@ -335,7 +326,9 @@ async def test_semantic_query_dependency_api_paginates(
 @pytest.mark.asyncio
 async def test_graph_manager_creates_story_and_generic_tool_rejects_story(workspace, member_user):
     graph_tool = next(
-        item for item in create_artifact_graph_tools(workspace, member_user, "thread") if item.name == "artifact_write"
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, "thread")
+        if item.name == "artifact_write"
     )
     with patch(
         "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
@@ -358,12 +351,18 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
         for item in create_artifact_graph_tools(workspace, member_user, "thread")
         if item.name == "get_artifact_semantic_queries"
     )
-    dependencies = await dependencies_tool.ainvoke({"artifact_id": result["artifact"]["id"], "limit": 1, "offset": 0})
+    dependencies = await dependencies_tool.ainvoke(
+        {"artifact_id": result["artifact"]["id"], "limit": 1, "offset": 0}
+    )
     assert dependencies["status"] == "ok"
     assert dependencies["pagination"]["has_more"] is False
     assert dependencies["semantic_queries"][0]["query_key"] == "q.visits_by_day"
 
-    create_tool = next(item for item in create_artifact_tools(workspace, member_user, "thread") if item.name == "create_artifact")
+    create_tool = next(
+        item
+        for item in create_artifact_tools(workspace, member_user, "thread")
+        if item.name == "create_artifact"
+    )
     rejected = await create_tool.ainvoke(
         {
             "title": "Direct Story",
@@ -379,7 +378,9 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
 @pytest.mark.asyncio
 async def test_graph_manager_rejects_missing_or_empty_story_doc(workspace, member_user):
     graph_tool = next(
-        item for item in create_artifact_graph_tools(workspace, member_user, "thread") if item.name == "artifact_write"
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, "thread")
+        if item.name == "artifact_write"
     )
 
     missing = await graph_tool.ainvoke(
@@ -407,6 +408,116 @@ async def test_graph_manager_rejects_missing_or_empty_story_doc(workspace, membe
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_graph_manager_replace_and_apply_create_linked_versions(workspace, member_user):
+    thread = await Thread.objects.acreate(
+        workspace=workspace,
+        user=member_user,
+        title="Edit a story",
+    )
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        description="Visit trends",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id=str(thread.id),
+        data={"story_doc": graph_doc()},
+    )
+    graph_tool = next(
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, str(thread.id))
+        if item.name == "artifact_write"
+    )
+
+    replacement_doc = graph_doc()
+    replacement_doc["blocks"][2]["config"]["title"] = "Replacement title"
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(return_value={"success": True, "summary": "1/1 queries ok"}),
+    ):
+        replaced = await graph_tool.ainvoke(
+            {
+                "action": "replace",
+                "artifact_id": str(original.id),
+                "story_doc": replacement_doc,
+            }
+        )
+        updated = await graph_tool.ainvoke(
+            {
+                "action": "apply",
+                "artifact_id": replaced["artifact"]["id"],
+                "ops": [
+                    {
+                        "op": "set",
+                        "target": "block/chart/config/title",
+                        "value": "Applied title",
+                    }
+                ],
+            }
+        )
+
+    assert replaced["status"] == "replaced"
+    assert updated["status"] == "updated"
+    replacement = await Artifact.objects.aget(id=replaced["artifact"]["id"])
+    applied = await Artifact.objects.aget(id=updated["artifact"]["id"])
+    assert replacement.parent_artifact_id == original.id
+    assert replacement.version == 2
+    assert replacement.description == original.description
+    assert applied.parent_artifact_id == replacement.id
+    assert applied.version == 3
+    assert applied.data["story_doc"]["blocks"][2]["config"]["title"] == "Applied title"
+    assert await ThreadArtifact.objects.filter(thread=thread, artifact=replacement).aexists()
+    assert await ThreadArtifact.objects.filter(thread=thread, artifact=applied).aexists()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_graph_manager_runtime_invalid_replace_keeps_previous_version(
+    workspace,
+    member_user,
+):
+    original = await Artifact.objects.acreate(
+        workspace=workspace,
+        created_by=member_user,
+        title="Visits",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id="thread",
+        data={"story_doc": graph_doc()},
+    )
+    graph_tool = next(
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, "thread")
+        if item.name == "artifact_write"
+    )
+
+    with patch(
+        "apps.agents.tools.artifact_graph_tool.check_graph_artifact",
+        new=AsyncMock(return_value={"success": False, "summary": "0/1 queries ok"}),
+    ):
+        result = await graph_tool.ainvoke(
+            {
+                "action": "replace",
+                "artifact_id": str(original.id),
+                "story_doc": graph_doc(),
+            }
+        )
+
+    assert result["status"] == "error"
+    assert await Artifact.objects.filter(id=original.id).aexists()
+    assert await Artifact.objects.filter(parent_artifact=original).acount() == 0
+    assert (
+        await Artifact.all_objects.filter(
+            parent_artifact=original,
+            is_deleted=True,
+        ).acount()
+        == 1
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, member_user):
     thread = await Thread.objects.acreate(
         workspace=workspace,
@@ -414,7 +525,9 @@ async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, 
         title="Runtime invalid artifact",
     )
     graph_tool = next(
-        item for item in create_artifact_graph_tools(workspace, member_user, str(thread.id)) if item.name == "artifact_write"
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, str(thread.id))
+        if item.name == "artifact_write"
     )
 
     with patch(
@@ -445,7 +558,12 @@ async def test_graph_manager_does_not_publish_runtime_invalid_create(workspace, 
     assert result["status"] == "error"
     assert "not published" in result["message"]
     assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
-    assert await Artifact.all_objects.filter(artifact_type=ArtifactType.STORY, is_deleted=True).acount() == 1
+    assert (
+        await Artifact.all_objects.filter(
+            artifact_type=ArtifactType.STORY, is_deleted=True
+        ).acount()
+        == 1
+    )
     assert await ThreadArtifact.objects.filter(thread=thread).acount() == 0
 
 
@@ -458,7 +576,9 @@ async def test_graph_manager_ignores_run_check_false_for_writes(workspace, membe
         title="Runtime invalid artifact",
     )
     graph_tool = next(
-        item for item in create_artifact_graph_tools(workspace, member_user, str(thread.id)) if item.name == "artifact_write"
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, str(thread.id))
+        if item.name == "artifact_write"
     )
 
     with patch(
@@ -490,7 +610,12 @@ async def test_graph_manager_ignores_run_check_false_for_writes(workspace, membe
     assert "not published" in result["message"]
     assert result["runtime"]["key_warnings"]
     assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 0
-    assert await Artifact.all_objects.filter(artifact_type=ArtifactType.STORY, is_deleted=True).acount() == 1
+    assert (
+        await Artifact.all_objects.filter(
+            artifact_type=ArtifactType.STORY, is_deleted=True
+        ).acount()
+        == 1
+    )
     assert await ThreadArtifact.objects.filter(thread=thread).acount() == 0
 
 

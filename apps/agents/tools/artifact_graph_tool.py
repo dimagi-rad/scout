@@ -110,7 +110,9 @@ def create_artifact_graph_tools(
         clean_offset = max(0, int(offset or 0))
         queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
         total_count = await queryset.acount()
-        rows = await sync_to_async(list, thread_sensitive=True)(queryset[clean_offset : clean_offset + clean_limit])
+        rows = await sync_to_async(list, thread_sensitive=True)(
+            queryset[clean_offset : clean_offset + clean_limit]
+        )
         return {
             "status": "ok",
             "artifact": _artifact_summary(artifact),
@@ -226,7 +228,11 @@ async def _create_graph_artifact(
     doc = normalize_doc(story_doc, name=clean_title)
     diagnostics = validate_doc(doc)
     if diagnostics_have_errors(diagnostics):
-        return {"status": "error", "message": "Graph doc has validation errors.", "diagnostics": diagnostics}
+        return {
+            "status": "error",
+            "message": "Graph doc has validation errors.",
+            "diagnostics": diagnostics,
+        }
     artifact = await Artifact.objects.acreate(
         workspace=workspace,
         created_by=user,
@@ -271,14 +277,16 @@ async def _replace_graph_artifact(
     doc = normalize_doc(story_doc, name=title or original.title)
     diagnostics = validate_doc(doc)
     if diagnostics_have_errors(diagnostics):
-        return {"status": "error", "message": "Graph doc has validation errors.", "diagnostics": diagnostics}
-    new_artifact = await sync_to_async(original.create_new_version, thread_sensitive=True)(
-        created_by=user,
+        return {
+            "status": "error",
+            "message": "Graph doc has validation errors.",
+            "diagnostics": diagnostics,
+        }
+    new_artifact = await _create_graph_version(
+        original,
+        user,
         title=(title.strip() if title else original.title),
-        code="",
-        data={"story_doc": doc},
-        semantic_queries=[],
-        semantic_query_manifest={},
+        story_doc=doc,
         conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
@@ -313,13 +321,17 @@ async def _apply_graph_ops(
     doc = story_doc_from_artifact_data(original.data)
     updated_doc = apply_ops(doc, ops)
     diagnostics = validate_doc(updated_doc)
-    new_artifact = await sync_to_async(original.create_new_version, thread_sensitive=True)(
-        created_by=user,
+    if diagnostics_have_errors(diagnostics):
+        return {
+            "status": "error",
+            "message": "Graph doc has validation errors.",
+            "diagnostics": diagnostics,
+        }
+    new_artifact = await _create_graph_version(
+        original,
+        user,
         title=(title.strip() if title else original.title),
-        code="",
-        data={"story_doc": updated_doc},
-        semantic_queries=[],
-        semantic_query_manifest={},
+        story_doc=updated_doc,
         conversation_id=conversation_id or original.conversation_id,
     )
     await sync_to_async(sync_artifact_semantic_query_manifest, thread_sensitive=True)(new_artifact)
@@ -332,6 +344,33 @@ async def _apply_graph_ops(
             source=ThreadArtifact.Source.UPDATED,
         )
     return result
+
+
+async def _create_graph_version(
+    original: Artifact,
+    user: User | None,
+    *,
+    title: str,
+    story_doc: dict[str, Any],
+    conversation_id: str,
+) -> Artifact:
+    artifact = Artifact(
+        workspace_id=original.workspace_id,
+        created_by=user,
+        title=title,
+        description=original.description,
+        artifact_type=ArtifactType.STORY,
+        code="",
+        data={"story_doc": story_doc},
+        version=original.version + 1,
+        parent_artifact=original,
+        conversation_id=conversation_id,
+        source_queries=[],
+        semantic_queries=[],
+        semantic_query_manifest={},
+    )
+    await artifact.asave()
+    return artifact
 
 
 async def _write_result(
@@ -380,7 +419,9 @@ async def _load_graph_artifact(
         except Artifact.DoesNotExist:
             return None
     if conversation_id:
-        artifact = await queryset.filter(conversation_id=conversation_id).order_by("-created_at").afirst()
+        artifact = (
+            await queryset.filter(conversation_id=conversation_id).order_by("-created_at").afirst()
+        )
         if artifact:
             return artifact
     return await queryset.order_by("-created_at").afirst()

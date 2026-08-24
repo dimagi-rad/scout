@@ -170,11 +170,6 @@ class Artifact(models.Model):
         """SHA-256 hex digest of the artifact code, for dedup/integrity checks."""
         return hashlib.sha256(self.code.encode("utf-8")).hexdigest()
 
-    # NB: the live version-bump path is the inline copy in
-    # apps/agents/tools/artifact_tool.py::update_artifact (which also carries the
-    # no-op guard from arch #254, 09#9). A former ``create_new_version`` helper
-    # here was a dead duplicate with zero callers and was removed.
-
     def get_version_history(self, max_depth: int = 100) -> list["Artifact"]:
         """Version history oldest→newest. max_depth caps traversal in case of circular refs."""
         history = [self]
