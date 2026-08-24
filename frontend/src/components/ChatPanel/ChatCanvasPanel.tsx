@@ -547,7 +547,9 @@ function fieldDetail(entry: CanvasObjectEntry): string {
   const fieldType = typeof fields.field_type === "string" ? fields.field_type : ""
   const measureType = typeof fields.measure_type === "string" ? fields.measure_type : ""
   const expression = typeof fields.expression === "string" ? fields.expression : ""
+  const cubeSql = typeof fields.cube_sql === "string" ? fields.cube_sql : ""
   if (fieldType === "measure") {
+    if (cubeSql) return "calculated measure"
     return measureType === "count" ? "count of rows" : `${measureType} of ${expression}`
   }
   if (fieldType) {

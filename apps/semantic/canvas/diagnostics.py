@@ -28,7 +28,9 @@ def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = Non
     model = canvas.semantic_model
 
     field_drafts = [
-        c for c in changes if c.object_type == ObjectType.FIELD and c.change_type == ChangeType.CREATE
+        c
+        for c in changes
+        if c.object_type == ObjectType.FIELD and c.change_type == ChangeType.CREATE
     ]
     relationship_drafts = [
         c
@@ -45,7 +47,9 @@ def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = Non
         diagnostics.extend(_field_draft_diagnostics(model, change, field_drafts))
     for change in relationship_drafts:
         diagnostics.extend(
-            _relationship_draft_diagnostics(canvas, model, change, relationship_drafts, field_drafts)
+            _relationship_draft_diagnostics(
+                canvas, model, change, relationship_drafts, field_drafts
+            )
         )
     for change in custom_drafts:
         diagnostics.extend(_custom_draft_diagnostics(canvas, model, change, custom_drafts))
@@ -119,7 +123,9 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
                 change,
                 "expression",
                 f"'{expression}' is not a column on {dataset.name}. Expressions must "
-                "name an existing column; for computed logic create a CTE dataset instead.",
+                "name an existing column. For a calculated measure use measure_type "
+                "'number' with sql/cube_sql; use a CTE dataset when the calculation "
+                "changes row grain.",
             )
         )
     return out
@@ -131,9 +137,7 @@ def _relationship_draft_diagnostics(canvas, model, change, siblings, field_draft
     from_dataset = model.datasets.filter(id=fields.get("from_dataset_uuid")).first()
     to_dataset = model.datasets.filter(id=fields.get("to_dataset_uuid")).first()
     if from_dataset is None or to_dataset is None:
-        out.append(
-            _diagnostic("UNKNOWN_DATASET", change, "", "A linked dataset no longer exists.")
-        )
+        out.append(_diagnostic("UNKNOWN_DATASET", change, "", "A linked dataset no longer exists."))
         return out
     if from_dataset.id == to_dataset.id:
         out.append(
@@ -216,9 +220,7 @@ def _custom_draft_diagnostics(canvas, model, change, siblings) -> list[dict]:
     columns = validation.get("columns") or []
     if not columns:
         out.append(
-            _diagnostic(
-                "INVALID_SQL", change, "definition_sql", "The query returns no columns."
-            )
+            _diagnostic("INVALID_SQL", change, "definition_sql", "The query returns no columns.")
         )
         return out
 

@@ -95,9 +95,17 @@ shared with the user in a side panel. Your tools:
   "currency", they are talking about this metadata. `decimal_02` means
   `number_2`; USD means `currency: "USD"` and usually `format: "currency_2"`
   for monetary fields.
-- A new field's `expression` must be an existing COLUMN of the dataset (use
-  `describe_dataset` to find columns). For computed logic, create a CTE
-  dataset instead.
+- A standard aggregate measure's `expression` must be an existing COLUMN of
+  the dataset (use `describe_dataset` to find columns).
+- Calculated and ratio measures use `measure_type: "number"` with `sql` (an
+  alias for `cube_sql`) instead of `expression`. Reference measures as
+  `{member_name}`. Create any dependency measures in the same batch. For
+  example, an approval rate can use a filtered count named
+  `approved_visit_count`, then `sql: "{approved_visit_count} / NULLIF({count}, 0)"`
+  with `format: "percent_1"`. Use `{CUBE}."column"` only when the calculation
+  truly needs a physical column. Do not put aggregate SQL in `expression`.
+- Use a CTE dataset when computed logic changes the dataset's row grain or is
+  needed as a reusable dimension, not merely because a measure is calculated.
 - Relationships: ADD links between datasets (from_field/to_field must be real
   fields). Pipeline-derived relationships are protected.
 - CTE datasets: create with `definition_sql` (a single SELECT/WITH query over
@@ -119,6 +127,10 @@ shared with the user in a side panel. Your tools:
    "name": "total_amount", "label": "Total Amount", "field_type": "measure",
    "measure_type": "sum", "expression": "amount", "format": "currency_2",
    "currency": "USD"}}
+- {"op": "create", "object_type": "field", "value": {"dataset": "raw_visits",
+   "name": "approval_rate", "label": "Approval Rate", "field_type": "measure",
+   "measure_type": "number", "sql":
+   "{approved_visit_count} / NULLIF({count}, 0)", "format": "percent_1"}}
 - {"op": "create", "object_type": "relationship", "value": {"from_dataset":
    "raw_visits", "from_field": "username", "to_dataset": "raw_users",
    "to_field": "username", "relationship_type": "many_to_one"}}
