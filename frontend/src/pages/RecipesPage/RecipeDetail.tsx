@@ -207,10 +207,10 @@ export function RecipeDetail({ recipe, runs, onBack, onSave, onRun, onUpdateRun,
             <div className="flex-1">
               <div className="flex items-center gap-2">
                 <Users className="h-4 w-4 text-muted-foreground" />
-                <span className="text-sm font-medium">Share with project</span>
+                <span className="text-sm font-medium">Share with workspace</span>
               </div>
               <p className="text-xs text-muted-foreground mt-0.5">
-                All project members can view and run this recipe
+                All workspace members can view and run this recipe
               </p>
             </div>
           </label>

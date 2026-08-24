@@ -269,7 +269,7 @@ export function ConnectionsPage() {
               <SearchFilterBar
                 search={search}
                 onSearchChange={setSearch}
-                placeholder="Search chatbots..."
+                placeholder="Search connections..."
                 filters={
                   providerFilterGroup.options.length > 1 ? [providerFilterGroup] : []
                 }
