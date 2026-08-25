@@ -1,232 +1,300 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { Eye, Trash2, Zap } from "lucide-react"
+import { useEffect, useState } from "react"
+import { ArrowUpRight, Ellipsis, Pencil, Trash2 } from "lucide-react"
 
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
-import { cn } from "@/lib/utils"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import type { ArtifactSummary, ArtifactType } from "@/store/artifactSlice"
 
 const typeBadgeStyles: Record<ArtifactType, string> = {
   react: "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200",
   html: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
   markdown: "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200",
-  plotly: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200",
   story: "bg-cyan-100 text-cyan-800 dark:bg-cyan-950 dark:text-cyan-200",
   svg: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
+}
+
+const typeLabels: Record<ArtifactType, string> = {
+  react: "Interactive",
+  html: "HTML",
+  markdown: "Document",
+  story: "Story",
+  svg: "Graphic",
 }
 
 export interface ArtifactCardProps {
   artifact: ArtifactSummary
   onOpen: () => void
   onUpdate: (data: { title?: string; description?: string }) => Promise<void>
-  onDelete: () => void
+  onDelete: () => void | Promise<void>
 }
 
 export function ArtifactCard({ artifact, onOpen, onUpdate, onDelete }: ArtifactCardProps) {
-  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [title, setTitle] = useState(artifact.title)
+  const [description, setDescription] = useState(artifact.description)
+  const [isSaving, setIsSaving] = useState(false)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
-  const formattedDate = new Date(artifact.created_at).toLocaleDateString(undefined, {
+  useEffect(() => {
+    if (!editOpen) {
+      setTitle(artifact.title)
+      setDescription(artifact.description)
+      setEditError(null)
+    }
+  }, [artifact.description, artifact.title, editOpen])
+
+  const displayDate = artifact.updated_at || artifact.created_at
+  const dateLabel = artifact.updated_at !== artifact.created_at ? "Updated" : "Created"
+  const formattedDate = new Date(displayDate).toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
     year: "numeric",
   })
 
+  async function handleSave(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const trimmedTitle = title.trim()
+    const trimmedDescription = description.trim()
+
+    if (!trimmedTitle) {
+      setEditError("Enter a title before saving.")
+      return
+    }
+
+    setIsSaving(true)
+    setEditError(null)
+    try {
+      await onUpdate({ title: trimmedTitle, description: trimmedDescription })
+      setEditOpen(false)
+    } catch {
+      setEditError("Couldn’t save these changes. Try again.")
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  async function handleDelete() {
+    setIsDeleting(true)
+    setDeleteError(null)
+    try {
+      await onDelete()
+      setDeleteOpen(false)
+    } catch {
+      setDeleteError("Couldn’t delete this artifact. Try again.")
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
   return (
-    <Card
-      className="flex h-full min-h-[17rem] min-w-0 flex-col overflow-hidden"
-      data-testid={`artifact-card-${artifact.id}`}
-    >
-      <CardHeader className="min-w-0 pb-2">
-        <div className="min-w-0 space-y-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <Badge
-              variant="secondary"
-              className={typeBadgeStyles[artifact.artifact_type]}
+    <>
+      <Card
+        className="group relative flex h-full min-h-[15rem] min-w-0 flex-col overflow-hidden shadow-sm transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-0.5 hover:border-foreground/20 hover:shadow-md"
+        data-testid={`artifact-card-${artifact.id}`}
+      >
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="absolute right-4 top-4 z-20 text-muted-foreground hover:text-foreground"
+              aria-label={`Actions for ${artifact.title}`}
+              data-testid={`artifact-actions-${artifact.id}`}
             >
-              {artifact.artifact_type}
-            </Badge>
-            {artifact.has_live_queries && (
-              <Badge variant="outline" className="gap-1">
-                <Zap className="h-3 w-3" />
-                Live
-              </Badge>
-            )}
-            {artifact.version > 1 && (
-              <span className="text-xs text-muted-foreground">
-                v{artifact.version}
-              </span>
-            )}
-          </div>
+              <Ellipsis aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuItem onSelect={() => setEditOpen(true)}>
+              <Pencil aria-hidden="true" />
+              Edit details
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={() => {
+                setDeleteError(null)
+                setDeleteOpen(true)
+              }}
+              data-testid={`artifact-delete-${artifact.id}`}
+            >
+              <Trash2 aria-hidden="true" />
+              Delete artifact
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-          <EditableText
-            value={artifact.title}
-            onSave={(title) => onUpdate({ title })}
-            className="text-base font-semibold leading-snug text-card-foreground"
-            inputClassName="text-base font-semibold leading-snug"
-            displayClassName="line-clamp-2 break-words"
-            data-testid={`artifact-title-${artifact.id}`}
-          />
-        </div>
-      </CardHeader>
-
-      <CardContent className="flex min-w-0 flex-1 flex-col">
-        <EditableText
-          value={artifact.description}
-          placeholder="Add a description..."
-          onSave={(description) => onUpdate({ description })}
-          className="mb-4 text-sm leading-6 text-muted-foreground"
-          inputClassName="text-sm leading-6"
-          displayClassName="line-clamp-2 break-words"
-          multiline
-          data-testid={`artifact-desc-${artifact.id}`}
-        />
-
-        <div className="mb-4 text-xs text-muted-foreground">
-          Created {formattedDate}
-        </div>
-
-        <div className="mt-auto border-t pt-3">
-          {confirmDelete ? (
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={onDelete}
-                className="min-w-0"
-                data-testid={`artifact-confirm-delete-${artifact.id}`}
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-h-[15rem] w-full flex-1 appearance-none flex-col rounded-xl bg-transparent text-left outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/50"
+          aria-label={`Open ${artifact.title}`}
+          data-testid={`artifact-open-${artifact.id}`}
+        >
+          <CardHeader className="min-w-0 gap-4 pb-3 pr-16">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <Badge
+                variant="secondary"
+                className={typeBadgeStyles[artifact.artifact_type]}
               >
-                Confirm
-              </Button>
+                {typeLabels[artifact.artifact_type]}
+              </Badge>
+              {artifact.version > 1 && (
+                <span className="text-xs tabular-nums text-muted-foreground">
+                  v{artifact.version}
+                </span>
+              )}
+            </div>
+
+            <h2
+              className="line-clamp-2 break-words text-lg font-semibold leading-snug tracking-[-0.01em] text-card-foreground"
+              data-testid={`artifact-title-${artifact.id}`}
+            >
+              {artifact.title}
+            </h2>
+          </CardHeader>
+
+          <CardContent className="flex min-w-0 flex-1 flex-col">
+            <p
+              className="mb-5 line-clamp-2 break-words text-sm leading-6 text-muted-foreground"
+              data-testid={`artifact-desc-${artifact.id}`}
+            >
+              {artifact.description || "No description yet."}
+            </p>
+
+            <div className="mt-auto flex items-center justify-between gap-4 border-t pt-4 text-sm">
+              <span className="text-xs text-muted-foreground">
+                {dateLabel} {formattedDate}
+              </span>
+              <span className="flex shrink-0 items-center gap-1 font-medium text-foreground transition-colors group-hover:text-primary">
+                Open
+                <ArrowUpRight className="size-4" aria-hidden="true" />
+              </span>
+            </div>
+          </CardContent>
+        </button>
+      </Card>
+
+      <Dialog open={editOpen} onOpenChange={(open) => !isSaving && setEditOpen(open)}>
+        <DialogContent>
+          <form onSubmit={handleSave} className="grid gap-5">
+            <DialogHeader>
+              <DialogTitle>Edit artifact details</DialogTitle>
+              <DialogDescription>
+                Update how this artifact appears in the library.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-2">
+              <Label htmlFor={`artifact-title-input-${artifact.id}`}>Title</Label>
+              <Input
+                id={`artifact-title-input-${artifact.id}`}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                autoFocus
+                aria-invalid={!!editError && !title.trim()}
+                disabled={isSaving}
+                data-testid={`artifact-title-${artifact.id}-input`}
+              />
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor={`artifact-description-input-${artifact.id}`}>Description</Label>
+              <Textarea
+                id={`artifact-description-input-${artifact.id}`}
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={4}
+                disabled={isSaving}
+                data-testid={`artifact-desc-${artifact.id}-input`}
+              />
+            </div>
+
+            {editError && (
+              <p className="text-sm text-destructive" role="alert">
+                {editError}
+              </p>
+            )}
+
+            <DialogFooter>
               <Button
+                type="button"
                 variant="outline"
-                size="sm"
-                onClick={() => setConfirmDelete(false)}
-                className="min-w-0"
-                data-testid={`artifact-cancel-delete-${artifact.id}`}
+                onClick={() => setEditOpen(false)}
+                disabled={isSaving}
               >
                 Cancel
               </Button>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onOpen}
-                className="min-w-0"
-                data-testid={`artifact-open-${artifact.id}`}
-              >
-                <Eye className="h-4 w-4" />
-                View
+              <Button type="submit" disabled={isSaving}>
+                {isSaving ? "Saving…" : "Save changes"}
               </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={() => setConfirmDelete(true)}
-                className="min-w-0"
-                data-testid={`artifact-delete-${artifact.id}`}
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete
-              </Button>
-            </div>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={deleteOpen}
+        onOpenChange={(open) => !isDeleting && setDeleteOpen(open)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete “{artifact.title}”?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the artifact from this workspace. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {deleteError && (
+            <p className="text-sm text-destructive" role="alert">
+              {deleteError}
+            </p>
           )}
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
-
-function EditableText({
-  value,
-  placeholder,
-  onSave,
-  className,
-  inputClassName,
-  displayClassName,
-  multiline,
-  "data-testid": testId,
-}: {
-  value: string
-  placeholder?: string
-  onSave: (value: string) => Promise<void>
-  className?: string
-  inputClassName?: string
-  displayClassName?: string
-  multiline?: boolean
-  "data-testid"?: string
-}) {
-  const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState(value)
-  const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null)
-
-  useEffect(() => {
-    setDraft(value)
-  }, [value])
-
-  useEffect(() => {
-    if (editing && inputRef.current) {
-      inputRef.current.focus()
-      inputRef.current.select()
-    }
-  }, [editing])
-
-  const commit = useCallback(async () => {
-    const trimmed = draft.trim()
-    setEditing(false)
-    if (trimmed !== value) {
-      await onSave(trimmed)
-    }
-  }, [draft, value, onSave])
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      commit()
-    } else if (e.key === "Escape") {
-      setDraft(value)
-      setEditing(false)
-    }
-  }, [commit, value])
-
-  if (editing) {
-    const sharedProps = {
-      ref: inputRef as never,
-      value: draft,
-      onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-        setDraft(e.target.value),
-      onBlur: commit,
-      onKeyDown: handleKeyDown,
-      className: cn(
-        "w-full rounded-md border border-input bg-background px-2 py-1",
-        inputClassName,
-      ),
-      "data-testid": testId ? `${testId}-input` : undefined,
-    }
-
-    if (multiline) {
-      return <textarea {...sharedProps} rows={2} />
-    }
-    return <input type="text" {...sharedProps} />
-  }
-
-  const displayValue = value || placeholder
-  const isEmpty = !value
-
-  return (
-    <button
-      type="button"
-      onClick={() => setEditing(true)}
-      className={cn(
-        "block w-full min-w-0 rounded-md px-1 text-left transition-colors hover:bg-muted",
-        isEmpty && "italic text-muted-foreground/50",
-        className,
-      )}
-      title="Click to edit"
-      data-testid={testId}
-    >
-      <span className={cn("block min-w-0", displayClassName)}>{displayValue}</span>
-    </button>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isDeleting}>Keep artifact</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={isDeleting}
+              data-testid={`artifact-confirm-delete-${artifact.id}`}
+            >
+              {isDeleting ? "Deleting…" : "Delete artifact"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   )
 }

@@ -94,9 +94,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
     <!-- Recharts for React charts -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/recharts@2/umd/Recharts.min.js"></script>
 
-    <!-- Plotly for advanced charts -->
-    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2/plotly.min.js"></script>
-
     <!-- D3 for custom visualizations -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 
@@ -224,7 +221,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
             }
-            /* Recharts/Plotly draw into SVG/canvas; keep them visible and unclipped. */
+            /* Recharts draws into SVG/canvas; keep charts visible and unclipped. */
             svg, canvas {
                 max-width: 100% !important;
                 overflow: visible !important;
@@ -371,9 +368,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                             break;
                         case 'markdown':
                             this.renderMarkdown(artifact);
-                            break;
-                        case 'plotly':
-                            this.renderPlotly(artifact);
                             break;
                         case 'svg':
                             this.renderSVG(artifact);
@@ -601,54 +595,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 }
             },
 
-            renderPlotly(artifact) {
-                const { code, data } = artifact;
-
-                this.container.innerHTML = '<div id="plotly-root" style="width: 100%; height: 100%;"></div>';
-                const plotlyRoot = document.getElementById('plotly-root');
-
-                try {
-                    // Parse the Plotly configuration
-                    let config;
-                    if (typeof code === 'string') {
-                        // If code is a string, try to parse it as JSON first
-                        try {
-                            config = JSON.parse(code);
-                        } catch {
-                            // If not JSON, evaluate it as JavaScript that returns a config
-                            const configFactory = new Function('data', 'Plotly', 'd3', '_', `return ${code}`);
-                            config = configFactory(data || {}, Plotly, d3, _);
-                        }
-                    } else {
-                        config = code;
-                    }
-
-                    // Merge with any provided data
-                    if (data && config.data) {
-                        config.data = config.data.map((trace, i) => ({
-                            ...trace,
-                            ...(data.traces ? data.traces[i] : {})
-                        }));
-                    }
-
-                    const layout = {
-                        autosize: true,
-                        margin: { t: 40, r: 20, b: 40, l: 50 },
-                        ...config.layout
-                    };
-
-                    const plotConfig = {
-                        responsive: true,
-                        displayModeBar: true,
-                        ...config.config
-                    };
-
-                    Plotly.newPlot(plotlyRoot, config.data || [], layout, plotConfig);
-                } catch (error) {
-                    this.showError('Plotly Render Error', error.message, error.stack);
-                }
-            },
-
             renderSVG(artifact) {
                 const { code, data } = artifact;
 
@@ -808,7 +754,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
     """
     Serves the sandbox HTML template for rendering artifacts in an iframe.
 
-    The sandbox page loads React, Recharts, Plotly, D3, and other libraries
+    The sandbox page loads React, Recharts, D3, and other libraries
     from CDN and listens for postMessage events to render artifacts securely.
     """
 
@@ -991,10 +937,7 @@ class ArtifactQueryDataView(View):
 
         results = list(
             await asyncio.gather(
-                *(
-                    _run_one(i, entry)
-                    for i, entry in enumerate(artifact.semantic_queries)
-                )
+                *(_run_one(i, entry) for i, entry in enumerate(artifact.semantic_queries))
             )
         )
 
@@ -1089,7 +1032,10 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
             return err
 
         search = request.GET.get("search", "").strip()
-        queryset = Artifact.objects.filter(workspace=workspace)
+        queryset = Artifact.objects.filter(
+            workspace=workspace,
+            artifact_type__in=ArtifactType.values,
+        )
         if search:
             queryset = queryset.filter(
                 Q(title__icontains=search) | Q(description__icontains=search)
@@ -1122,7 +1068,12 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return None, err
-        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
+        artifact = get_object_or_404(
+            Artifact,
+            pk=artifact_id,
+            workspace=workspace,
+            artifact_type__in=ArtifactType.values,
+        )
         return artifact, None
 
     def patch(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
@@ -1193,7 +1144,10 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
         filename = exporter.get_download_filename(format)
 
         if format == "html":
-            content = exporter.export_html()
+            try:
+                content = exporter.export_html()
+            except ValueError as error:
+                return JsonResponse({"error": str(error)}, status=400)
             response = HttpResponse(content, content_type="text/html")
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response

@@ -1,3 +1,4 @@
+import { StrictMode } from "react"
 import { render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -105,9 +106,9 @@ describe("ArtifactGraphRenderer", () => {
     )
   })
 
-  it("uses block rows when legacy Recharts props.data contains a ref", async () => {
-    const legacyArtifact = artifact()
-    legacyArtifact.data.story_doc = {
+  it("rejects Recharts props.data refs instead of falling back to block rows", async () => {
+    const invalidArtifact = artifact()
+    invalidArtifact.data.story_doc = {
       schema_version: 1,
       blocks: [
         {
@@ -141,10 +142,10 @@ describe("ArtifactGraphRenderer", () => {
       ],
     }
 
-    const { container } = render(<ArtifactGraphRenderer artifact={legacyArtifact} workspaceId="workspace-1" />)
+    render(<ArtifactGraphRenderer artifact={invalidArtifact} workspaceId="workspace-1" />)
 
-    await waitFor(() => expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument())
-    expect(screen.queryByText(/Chart config error/)).not.toBeInTheDocument()
+    expect(await screen.findByText(/Chart config error/)).toBeInTheDocument()
+    expect(screen.getByText(/Recharts Pie prop "data" is not supported/)).toBeInTheDocument()
     expect(mockedPost).not.toHaveBeenCalled()
   })
 
@@ -191,10 +192,121 @@ describe("ArtifactGraphRenderer", () => {
 
     expect(row).toBeInTheDocument()
     expect(row).toHaveStyle({
-      gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))",
+      gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))",
     })
     expect(statBlocks).toHaveLength(4)
+    expect(screen.getByRole("heading", { name: "Key metrics" })).toBeInTheDocument()
     expect(screen.getByText("$361.00")).toBeInTheDocument()
+    expect(row?.className).not.toContain("data-stat-period]]:hidden")
+    expect(mockedPost).not.toHaveBeenCalled()
+  })
+
+  it("renders list and single-summary TLDR blocks as labeled high-emphasis regions", () => {
+    const summaryArtifact = artifact()
+    summaryArtifact.data.story_doc = {
+      schema_version: 1,
+      blocks: [
+        {
+          id: "takeaways",
+          type: "tldr",
+          config: { items: ["Approvals rose.", "Pending work fell."] },
+        },
+        {
+          id: "headline",
+          type: "tldr",
+          config: { content: "Operations are keeping pace with demand." },
+        },
+      ],
+    }
+
+    const { container } = render(<ArtifactGraphRenderer artifact={summaryArtifact} workspaceId="workspace-1" />)
+
+    expect(screen.getAllByRole("heading", { name: "In brief" })).toHaveLength(2)
+    expect(screen.getByText("Approvals rose.")).toBeInTheDocument()
+    expect(screen.getByText("Operations are keeping pace with demand.")).toBeInTheDocument()
+    expect(container.querySelectorAll('[data-block-type="tldr"]')).toHaveLength(2)
+  })
+
+  it("only consolidates comparison captions when every grouped KPI shares an active comparison", () => {
+    const kpiArtifact = artifact()
+    kpiArtifact.data.story_doc = {
+      schema_version: 1,
+      blocks: [
+        {
+          id: "approved",
+          type: "stat",
+          row_group: "kpis",
+          inputs: {
+            current: { value: [{ value: 8 }] },
+            previous: { value: [{ value: 6 }] },
+          },
+          config: {
+            label: "Approved",
+            value_key: "value",
+            comparison: { type: "absolute", label: "vs previous period" },
+          },
+        },
+        {
+          id: "pending",
+          type: "stat",
+          row_group: "kpis",
+          inputs: {
+            current: { value: [{ value: 2 }] },
+            previous: { value: [{ value: 3 }] },
+          },
+          config: {
+            label: "Pending",
+            value_key: "value",
+            comparison: { type: "absolute", label: "vs previous year" },
+          },
+        },
+      ],
+    }
+
+    const { container } = render(<ArtifactGraphRenderer artifact={kpiArtifact} workspaceId="workspace-1" />)
+    const row = container.querySelector<HTMLElement>('[data-block-row-group="kpis"]')
+
+    expect(row?.className).not.toContain("data-stat-period]]:hidden")
+    expect(screen.getByText(/vs previous period/)).toBeInTheDocument()
+    expect(screen.getByText(/vs previous year/)).toBeInTheDocument()
+    expect(screen.queryByText(/Compared with/)).not.toBeInTheDocument()
+  })
+
+  it("renders literal graph inputs inside React Strict Mode", async () => {
+    const literalArtifact = artifact()
+    literalArtifact.data.story_doc = {
+      schema_version: 1,
+      blocks: [
+        {
+          id: "chart",
+          type: "graph",
+          inputs: {
+            data: {
+              value: [
+                { date: "2026-06-01", visits: 12 },
+                { date: "2026-06-02", visits: 15 },
+              ],
+            },
+          },
+          config: {
+            chart_type: "line",
+            x_key: "date",
+            y_key: "visits",
+          },
+        },
+      ],
+    }
+
+    const { container } = render(
+      <StrictMode>
+        <ArtifactGraphRenderer artifact={literalArtifact} workspaceId="workspace-1" />
+      </StrictMode>,
+    )
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-block-type="graph"]')).toBeInTheDocument()
+    })
+    expect(screen.queryByText("Loading data...")).not.toBeInTheDocument()
     expect(mockedPost).not.toHaveBeenCalled()
   })
 

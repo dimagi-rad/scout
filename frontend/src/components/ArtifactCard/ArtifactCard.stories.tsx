@@ -52,7 +52,7 @@ export const LongContentResponsive: Story = {
     },
   },
   render: (args) => (
-    <div className="grid w-[18rem] max-w-[calc(100vw-2rem)] gap-4">
+    <div className="grid w-[20rem] max-w-[calc(100vw-2rem)] gap-4">
       <ArtifactCard {...args} />
     </div>
   ),
@@ -81,7 +81,7 @@ export const ResponsiveGrid: Story = {
     ]
 
     return (
-      <div className="grid w-[58rem] max-w-[calc(100vw-2rem)] grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-4">
+      <div className="grid w-[64rem] max-w-[calc(100vw-2rem)] grid-cols-[repeat(auto-fill,minmax(min(100%,20rem),1fr))] gap-4">
         {artifacts.map((artifact) => (
           <ArtifactCard
             key={artifact.id}

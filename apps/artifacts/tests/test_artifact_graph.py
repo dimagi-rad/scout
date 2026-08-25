@@ -150,6 +150,81 @@ def test_graph_doc_allows_recharts_graph_config_keys():
     assert "unknown_config_key" not in codes
 
 
+def test_graph_doc_allows_bounded_graph_style_and_stat_comparison():
+    doc = graph_doc()
+    doc["blocks"][2]["config"].update(
+        {
+            "subtitle": "Weekly visits",
+            "style": {
+                "palette": "categorical",
+                "legend": "top",
+                "grid": "horizontal",
+                "curve": "monotone",
+                "orientation": "vertical",
+                "labels": "none",
+            },
+        }
+    )
+    doc["blocks"].append(
+        {
+            "id": "stat",
+            "type": "stat",
+            "inputs": {"current": {"$ref": "q.visits_by_day"}},
+            "config": {
+                "label": "Visits",
+                "value_key": "visits_count",
+                "prefix": "~",
+                "suffix": " visits",
+                "comparison": {
+                    "type": "percent",
+                    "format": "percent_1",
+                    "label": "vs previous period",
+                    "goal": "higher",
+                },
+            },
+        }
+    )
+    doc["blocks"].extend(
+        [
+            {
+                "id": "question",
+                "type": "question",
+                "config": {"text": "What changed?", "context": "Compare the selected periods."},
+            },
+            {
+                "id": "summary",
+                "type": "tldr",
+                "config": {"title": "Key findings", "items": ["Approvals rose."]},
+            },
+        ]
+    )
+
+    diagnostics = validate_doc(doc)
+
+    assert not [
+        item
+        for item in diagnostics
+        if item.get("code") in {"unknown_config_key", "config_shape", "config_value"}
+    ]
+
+
+def test_graph_doc_rejects_unknown_visualization_grammar_values():
+    doc = graph_doc()
+    doc["blocks"][2]["config"].update(
+        {
+            "chart_type": "radar",
+            "style": {"palette": "rainbow", "animation": "sparkle"},
+        }
+    )
+
+    diagnostics = validate_doc(doc)
+    codes = {item.get("code") for item in diagnostics}
+
+    assert "graph_chart_type" in codes
+    assert "config_value" in codes
+    assert "unknown_config_key" in codes
+
+
 def test_graph_doc_rejects_recharts_data_prop_refs():
     doc = graph_doc()
     doc["blocks"][2]["config"]["recharts"] = {
@@ -171,6 +246,54 @@ def test_graph_doc_rejects_recharts_data_prop_refs():
     assert {
         item.get("block_id") for item in diagnostics if item.get("code") == "recharts_data_prop"
     } == {"chart"}
+
+
+def test_graph_doc_rejects_unsafe_recharts_props_and_colors():
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {
+        "type": "BarChart",
+        "props": {"style": {"position": "fixed", "inset": 0, "zIndex": 9999}},
+        "palette": ["#ff0000"],
+        "children": [
+            {
+                "type": "Bar",
+                "props": {"dataKey": "visits_count", "fill": "red", "onClick": "alert"},
+            }
+        ],
+    }
+
+    diagnostics = validate_doc(doc)
+    codes = {item.get("code") for item in diagnostics}
+
+    assert "recharts_prop" in codes
+    assert "recharts_color" in codes
+
+
+def test_graph_doc_allows_bounded_raw_recharts_composition():
+    doc = graph_doc()
+    doc["blocks"][2]["config"]["recharts"] = {
+        "type": "ComposedChart",
+        "props": {"margin": {"top": 8, "right": 12, "bottom": 8, "left": 0}},
+        "children": [
+            {"type": "CartesianGrid", "props": {"stroke": "var(--border)", "vertical": False}},
+            {"type": "XAxis", "props": {"dataKey": "date", "axisLine": False, "tickLine": False}},
+            {"type": "YAxis", "props": {"yAxisId": "count", "allowDecimals": False}},
+            {"type": "YAxis", "props": {"yAxisId": "amount", "orientation": "right"}},
+            {
+                "type": "Line",
+                "props": {
+                    "dataKey": "visits_count",
+                    "yAxisId": "count",
+                    "stroke": "var(--chart-1)",
+                },
+            },
+        ],
+    }
+
+    codes = {item.get("code") for item in validate_doc(doc)}
+
+    assert "recharts_prop" not in codes
+    assert "recharts_color" not in codes
 
 
 def test_graph_doc_passes_cube_filter_operators_to_runtime():
@@ -345,6 +468,16 @@ async def test_graph_manager_creates_story_and_generic_tool_rejects_story(worksp
 
     assert result["status"] == "created"
     assert await Artifact.objects.filter(artifact_type=ArtifactType.STORY).acount() == 1
+
+    overview_tool = next(
+        item
+        for item in create_artifact_graph_tools(workspace, member_user, "thread")
+        if item.name == "artifact_graph_overview"
+    )
+    overview = await overview_tool.ainvoke({"artifact_id": result["artifact"]["id"]})
+    assert overview["status"] == "ok"
+    assert overview["story_doc"] == graph_doc()
+    assert overview["doc"]["block_count"] == len(graph_doc()["blocks"])
 
     dependencies_tool = next(
         item

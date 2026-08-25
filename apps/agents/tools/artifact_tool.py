@@ -3,7 +3,7 @@ Artifact creation tools for the Scout data agent platform.
 
 This module provides factory functions to create tools that allow the agent
 to generate interactive visualizations and content artifacts. Artifacts can be
-React components, HTML, Markdown, Plotly charts, or SVG graphics.
+React components, HTML, Markdown, or SVG graphics. Charts use Recharts.
 
 The tools support:
 - Creating new artifacts with code and optional data
@@ -46,7 +46,6 @@ VALID_ARTIFACT_TYPES = frozenset(
         "react",
         "html",
         "markdown",
-        "plotly",
         "svg",
         "story",
     }
@@ -88,9 +87,8 @@ def create_artifact_tools(
 
             artifact_type: Type of artifact to create. Must be one of:
                 - "react": Interactive React component (recommended for dashboards,
-                  complex visualizations). Use Recharts for charts.
-                - "plotly": Plotly chart specification (good for statistical charts).
-                  Pass the Plotly figure spec as the code.
+                  complex visualizations). Use Recharts for every chart; Plotly is
+                  not available in the artifact runtime.
                 - "html": Static HTML content (for simple tables, formatted text).
                 - "markdown": Markdown content (for documentation, reports).
                 - "svg": SVG graphic (for custom diagrams, icons).
@@ -99,7 +97,6 @@ def create_artifact_tools(
             code: The source code for the artifact:
                 - For "react": JSX code with a default export component.
                   Legacy data-backed React artifacts receive a `data` prop.
-                - For "plotly": JSON string of Plotly figure specification
                 - For "html": HTML markup
                 - For "markdown": Markdown text
                 - For "svg": SVG markup
@@ -285,6 +282,20 @@ def create_artifact_tools(
                     "message": f"Artifact with ID '{artifact_id}' not found in this workspace.",
                 }
 
+            if original.artifact_type not in VALID_ARTIFACT_TYPES:
+                return {
+                    "artifact_id": None,
+                    "previous_version_id": artifact_id,
+                    "status": "error",
+                    "version": None,
+                    "title": original.title,
+                    "render_url": None,
+                    "message": (
+                        f"Artifact type '{original.artifact_type}' is no longer supported. "
+                        "Create a new React artifact and use Recharts for charts."
+                    ),
+                }
+
             if original.artifact_type == "story":
                 return {
                     "artifact_id": None,
@@ -313,9 +324,7 @@ def create_artifact_tools(
             new_title = title.strip() if title is not None else original.title
             new_data = data if data is not None else original.data
             new_semantic_queries = (
-                semantic_queries
-                if semantic_queries is not None
-                else original.semantic_queries
+                semantic_queries if semantic_queries is not None else original.semantic_queries
             )
 
             # No-op guard (arch #254, finding 09#9): each update copies the full

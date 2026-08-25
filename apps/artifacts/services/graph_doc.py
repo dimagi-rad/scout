@@ -54,14 +54,15 @@ ALLOWED_GRANULARITIES = {"day", "week", "month", "quarter", "year"}
 CONFIG_KEYS = {
     "title": {"text", "subtitle"},
     "section": {"title", "body"},
-    "question": {"text"},
-    "tldr": {"content", "items"},
+    "question": {"text", "context"},
+    "tldr": {"title", "content", "items"},
     "markdown": {"body", "content"},
     "date_filter": {"label", "default"},
     "period_selector": {"label", "default_range", "default_comparison"},
     "semantic_query": {"queries", "compare"},
     "graph": {
         "title",
+        "subtitle",
         "chart_type",
         "x_key",
         "y_key",
@@ -72,9 +73,36 @@ CONFIG_KEYS = {
         "stacked",
         "y_format",
         "height",
+        "style",
+        "x_label",
+        "y_label",
     },
     "table": {"title", "columns", "query"},
-    "stat": {"title", "label", "value_path", "value_key", "format", "delta_path"},
+    "stat": {
+        "title",
+        "label",
+        "value_path",
+        "value_key",
+        "format",
+        "delta_path",
+        "prefix",
+        "suffix",
+        "comparison",
+    },
+}
+
+COMPACT_CHART_TYPES = {"line", "bar", "area", "pie", "donut"}
+GRAPH_STYLE_KEYS = {
+    "palette": {"categorical", "status", "sequential", "monochrome"},
+    "legend": {"auto", "top", "bottom", "none"},
+    "grid": {"horizontal", "both", "none"},
+    "curve": {"monotone", "linear", "step"},
+    "orientation": {"vertical", "horizontal"},
+    "labels": {"none", "value"},
+}
+STAT_COMPARISON_KEYS = {
+    "type": {"none", "absolute", "percent"},
+    "goal": {"higher", "lower", "neutral"},
 }
 
 RECHARTS_COMPONENT_TYPES = {
@@ -109,6 +137,165 @@ RECHARTS_DATA_TYPES = {
 }
 
 RECHARTS_RESULT_KEY_PROPS = {"dataKey", "nameKey", "xAxisKey", "yAxisKey"}
+
+RECHARTS_PROP_ALLOWLIST = {
+    "AreaChart": {"layout", "margin", "stackOffset", "syncId"},
+    "BarChart": {"layout", "margin", "stackOffset", "barCategoryGap", "barGap", "syncId"},
+    "ComposedChart": {"layout", "margin", "stackOffset", "barCategoryGap", "barGap", "syncId"},
+    "LineChart": {"layout", "margin", "syncId"},
+    "PieChart": {"margin"},
+    "ScatterChart": {"layout", "margin", "syncId"},
+    "CartesianGrid": {"horizontal", "vertical", "stroke", "strokeDasharray"},
+    "XAxis": {
+        "allowDecimals",
+        "angle",
+        "axisLine",
+        "dataKey",
+        "domain",
+        "height",
+        "hide",
+        "interval",
+        "label",
+        "minTickGap",
+        "name",
+        "orientation",
+        "padding",
+        "reversed",
+        "scale",
+        "tickCount",
+        "tickFormatter",
+        "tickLine",
+        "tickMargin",
+        "ticks",
+        "type",
+        "unit",
+        "width",
+        "xAxisId",
+    },
+    "YAxis": {
+        "allowDecimals",
+        "angle",
+        "axisLine",
+        "dataKey",
+        "domain",
+        "height",
+        "hide",
+        "interval",
+        "label",
+        "minTickGap",
+        "name",
+        "orientation",
+        "padding",
+        "reversed",
+        "scale",
+        "tickCount",
+        "tickFormatter",
+        "tickLine",
+        "tickMargin",
+        "ticks",
+        "type",
+        "unit",
+        "width",
+        "yAxisId",
+    },
+    "Tooltip": {"cursor", "formatter", "labelFormatter", "separator"},
+    "Legend": {"align", "iconSize", "iconType", "layout", "verticalAlign"},
+    "Line": {
+        "activeDot",
+        "connectNulls",
+        "dataKey",
+        "dot",
+        "hide",
+        "name",
+        "stroke",
+        "strokeWidth",
+        "label",
+        "type",
+        "unit",
+        "xAxisId",
+        "yAxisId",
+    },
+    "Area": {
+        "activeDot",
+        "connectNulls",
+        "dataKey",
+        "dot",
+        "fill",
+        "fillOpacity",
+        "hide",
+        "name",
+        "label",
+        "stackId",
+        "stroke",
+        "strokeWidth",
+        "type",
+        "unit",
+        "xAxisId",
+        "yAxisId",
+    },
+    "Bar": {
+        "barSize",
+        "dataKey",
+        "fill",
+        "hide",
+        "label",
+        "maxBarSize",
+        "name",
+        "radius",
+        "stackId",
+        "unit",
+        "xAxisId",
+        "yAxisId",
+    },
+    "Pie": {
+        "cx",
+        "cy",
+        "dataKey",
+        "endAngle",
+        "innerRadius",
+        "label",
+        "labelLine",
+        "minAngle",
+        "nameKey",
+        "outerRadius",
+        "paddingAngle",
+        "startAngle",
+    },
+    "Scatter": {"fill", "hide", "line", "lineType", "name", "shape", "xAxisId", "yAxisId"},
+    "ReferenceLine": {
+        "ifOverflow",
+        "label",
+        "stroke",
+        "strokeDasharray",
+        "x",
+        "xAxisId",
+        "y",
+        "yAxisId",
+    },
+    "Cell": {"fill", "stroke"},
+}
+
+RECHARTS_COLOR_PROPS = {"fill", "stroke"}
+SAFE_RECHARTS_COLORS = {
+    "var(--chart-1)",
+    "var(--chart-2)",
+    "var(--chart-3)",
+    "var(--chart-4)",
+    "var(--chart-5)",
+    "var(--chart-warning)",
+    "var(--chart-positive)",
+    "var(--destructive)",
+    "var(--muted-foreground)",
+    "var(--foreground)",
+    "color-mix(in oklch, var(--chart-1) 78%, var(--background))",
+    "color-mix(in oklch, var(--chart-1) 58%, var(--background))",
+    "color-mix(in oklch, var(--chart-1) 38%, var(--background))",
+    "color-mix(in oklch, var(--chart-1) 22%, var(--background))",
+    "color-mix(in oklch, var(--foreground) 78%, var(--background))",
+    "color-mix(in oklch, var(--foreground) 58%, var(--background))",
+    "color-mix(in oklch, var(--foreground) 38%, var(--background))",
+    "color-mix(in oklch, var(--foreground) 22%, var(--background))",
+}
 
 
 class GraphDocError(ValueError):
@@ -352,7 +539,9 @@ def query_diagnostics(
                 code="raw_query_key",
             )
         )
-    unknown_keys = sorted(k for k in query if k not in ALLOWED_QUERY_KEYS and k not in RAW_QUERY_KEYS)
+    unknown_keys = sorted(
+        k for k in query if k not in ALLOWED_QUERY_KEYS and k not in RAW_QUERY_KEYS
+    )
     if unknown_keys:
         diagnostics.append(
             problem(
@@ -366,11 +555,27 @@ def query_diagnostics(
     dimensions = _string_list(query.get("dimensions"))
     time_dimension = query.get("time_dimension")
     if query.get("measures") is not None and measures is None:
-        diagnostics.append(problem(f"{path}.measures must be a string array", block_id=block_id, code="query_measures"))
+        diagnostics.append(
+            problem(
+                f"{path}.measures must be a string array", block_id=block_id, code="query_measures"
+            )
+        )
     if query.get("dimensions") is not None and dimensions is None:
-        diagnostics.append(problem(f"{path}.dimensions must be a string array", block_id=block_id, code="query_dimensions"))
+        diagnostics.append(
+            problem(
+                f"{path}.dimensions must be a string array",
+                block_id=block_id,
+                code="query_dimensions",
+            )
+        )
     if time_dimension is not None and not isinstance(time_dimension, str):
-        diagnostics.append(problem(f"{path}.time_dimension must be a string", block_id=block_id, code="query_time_dimension"))
+        diagnostics.append(
+            problem(
+                f"{path}.time_dimension must be a string",
+                block_id=block_id,
+                code="query_time_dimension",
+            )
+        )
     if require_time_dimension and not time_dimension:
         diagnostics.append(
             problem(
@@ -381,7 +586,11 @@ def query_diagnostics(
         )
     granularity = query.get("granularity")
     if granularity is not None and granularity not in ALLOWED_GRANULARITIES:
-        diagnostics.append(problem(f"{path}.granularity is unsupported", block_id=block_id, code="query_granularity"))
+        diagnostics.append(
+            problem(
+                f"{path}.granularity is unsupported", block_id=block_id, code="query_granularity"
+            )
+        )
     if granularity and not time_dimension:
         diagnostics.append(
             problem(
@@ -507,6 +716,82 @@ def _validate_block_config(block: dict[str, Any]) -> list[dict[str, Any]]:
                 path="config.recharts",
             )
         )
+    if block_type == "graph" and "recharts" not in config:
+        chart_type = config.get("chart_type", "line")
+        if chart_type not in COMPACT_CHART_TYPES:
+            diagnostics.append(
+                problem(
+                    f'Unsupported compact chart type "{chart_type}"',
+                    block_id=block_id,
+                    code="graph_chart_type",
+                )
+            )
+        diagnostics.extend(
+            _enum_object_diagnostics(
+                config.get("style"),
+                allowed=GRAPH_STYLE_KEYS,
+                path="config.style",
+                block_id=block_id,
+            )
+        )
+        diagnostics.extend(
+            _compact_series_color_diagnostics(config.get("series"), block_id=block_id)
+        )
+    if block_type == "stat":
+        diagnostics.extend(
+            _enum_object_diagnostics(
+                config.get("comparison"),
+                allowed=STAT_COMPARISON_KEYS,
+                optional_string_keys={"label", "format"},
+                path="config.comparison",
+                block_id=block_id,
+            )
+        )
+    return diagnostics
+
+
+def _enum_object_diagnostics(
+    value: Any,
+    *,
+    allowed: dict[str, set[str]],
+    path: str,
+    block_id: str,
+    optional_string_keys: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, dict):
+        return [problem(f"{path} must be an object", block_id=block_id, code="config_shape")]
+
+    string_keys = optional_string_keys or set()
+    diagnostics: list[dict[str, Any]] = []
+    unknown = sorted(set(value) - set(allowed) - string_keys)
+    if unknown:
+        diagnostics.append(
+            problem(
+                f"{path} has unsupported key(s): {', '.join(unknown)}",
+                block_id=block_id,
+                code="unknown_config_key",
+            )
+        )
+    for key, choices in allowed.items():
+        if key in value and value[key] not in choices:
+            diagnostics.append(
+                problem(
+                    f"{path}.{key} must be one of {', '.join(sorted(choices))}",
+                    block_id=block_id,
+                    code="config_value",
+                )
+            )
+    for key in string_keys:
+        if key in value and not isinstance(value[key], str):
+            diagnostics.append(
+                problem(
+                    f"{path}.{key} must be a string",
+                    block_id=block_id,
+                    code="config_value",
+                )
+            )
     return diagnostics
 
 
@@ -526,6 +811,15 @@ def _recharts_diagnostics(
         ]
 
     diagnostics: list[dict[str, Any]] = []
+    unknown_node_keys = sorted(set(node) - {"type", "props", "children", "palette"})
+    if unknown_node_keys:
+        diagnostics.append(
+            problem(
+                f"{path} has unsupported key(s): {', '.join(unknown_node_keys)}",
+                block_id=block_id,
+                code="recharts_node_key",
+            )
+        )
     node_type = node.get("type")
     if not isinstance(node_type, str) or not node_type:
         diagnostics.append(
@@ -544,6 +838,20 @@ def _recharts_diagnostics(
             )
         )
 
+    palette = node.get("palette")
+    if palette is not None and (
+        not isinstance(palette, list)
+        or not palette
+        or any(not isinstance(color, str) or color not in SAFE_RECHARTS_COLORS for color in palette)
+    ):
+        diagnostics.append(
+            problem(
+                f"{path}.palette may contain only Scout chart color tokens",
+                block_id=block_id,
+                code="recharts_color",
+            )
+        )
+
     props = node.get("props", {})
     if props is not None and not isinstance(props, dict):
         diagnostics.append(
@@ -554,6 +862,16 @@ def _recharts_diagnostics(
             )
         )
     elif isinstance(props, dict):
+        allowed_props = RECHARTS_PROP_ALLOWLIST.get(node_type, set())
+        unknown_props = sorted(set(props) - allowed_props)
+        if unknown_props:
+            diagnostics.append(
+                problem(
+                    f"{path}.props has unsupported key(s): {', '.join(unknown_props)}",
+                    block_id=block_id,
+                    code="recharts_prop",
+                )
+            )
         if node_type in RECHARTS_DATA_TYPES and "data" in props:
             diagnostics.append(
                 problem(
@@ -569,6 +887,22 @@ def _recharts_diagnostics(
                         f"{path}.props.{prop_name} must be a string",
                         block_id=block_id,
                         code="recharts_key_prop",
+                    )
+                )
+        for prop_name in RECHARTS_COLOR_PROPS:
+            color = props.get(prop_name)
+            decorative_color = (
+                node_type in {"CartesianGrid", "ReferenceLine"} and color == "var(--border)"
+            )
+            if prop_name in props and (
+                not isinstance(color, str)
+                or (color not in SAFE_RECHARTS_COLORS and not decorative_color)
+            ):
+                diagnostics.append(
+                    problem(
+                        f"{path}.props.{prop_name} must use a Scout chart color token",
+                        block_id=block_id,
+                        code="recharts_color",
                     )
                 )
 
@@ -592,6 +926,28 @@ def _recharts_diagnostics(
                 path=f"{path}.children[{index}]",
             )
         )
+    return diagnostics
+
+
+def _compact_series_color_diagnostics(
+    series: Any,
+    *,
+    block_id: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(series, list):
+        return []
+    diagnostics: list[dict[str, Any]] = []
+    for index, item in enumerate(series):
+        if not isinstance(item, dict) or "color" not in item:
+            continue
+        if item.get("color") not in SAFE_RECHARTS_COLORS:
+            diagnostics.append(
+                problem(
+                    f"config.series[{index}].color must use a Scout chart color token",
+                    block_id=block_id,
+                    code="recharts_color",
+                )
+            )
     return diagnostics
 
 
@@ -696,8 +1052,7 @@ def parse_ref(ref: str) -> tuple[str, str]:
 
 def _cycle_diagnostics(refs_by_block: dict[str, list[str]]) -> list[dict[str, Any]]:
     edges = {
-        block_id: [parse_ref(ref)[0] for ref in refs]
-        for block_id, refs in refs_by_block.items()
+        block_id: [parse_ref(ref)[0] for ref in refs] for block_id, refs in refs_by_block.items()
     }
     visiting: set[str] = set()
     visited: set[str] = set()
@@ -823,16 +1178,36 @@ def _filter_diagnostics(
     if filters is None:
         return []
     if not isinstance(filters, list):
-        return [problem(f"{path}.filters must be an array", block_id=block_id, code="query_filters")]
+        return [
+            problem(f"{path}.filters must be an array", block_id=block_id, code="query_filters")
+        ]
     diagnostics: list[dict[str, Any]] = []
     for index, item in enumerate(filters):
         if not isinstance(item, dict):
-            diagnostics.append(problem(f"{path}.filters[{index}] must be an object", block_id=block_id, code="query_filter_shape"))
+            diagnostics.append(
+                problem(
+                    f"{path}.filters[{index}] must be an object",
+                    block_id=block_id,
+                    code="query_filter_shape",
+                )
+            )
             continue
         if not isinstance(item.get("field"), str) or not item.get("field"):
-            diagnostics.append(problem(f"{path}.filters[{index}] needs field", block_id=block_id, code="query_filter_field"))
+            diagnostics.append(
+                problem(
+                    f"{path}.filters[{index}] needs field",
+                    block_id=block_id,
+                    code="query_filter_field",
+                )
+            )
         if "member" in item:
-            diagnostics.append(problem(f"{path}.filters[{index}] uses member; use field", block_id=block_id, code="query_filter_member_key"))
+            diagnostics.append(
+                problem(
+                    f"{path}.filters[{index}] uses member; use field",
+                    block_id=block_id,
+                    code="query_filter_member_key",
+                )
+            )
     return diagnostics
 
 
@@ -845,14 +1220,28 @@ def _order_by_diagnostics(
     if order_by is None:
         return []
     if not isinstance(order_by, list):
-        return [problem(f"{path}.order_by must be an array", block_id=block_id, code="query_order_by")]
+        return [
+            problem(f"{path}.order_by must be an array", block_id=block_id, code="query_order_by")
+        ]
     diagnostics: list[dict[str, Any]] = []
     for index, item in enumerate(order_by):
         if not isinstance(item, dict):
-            diagnostics.append(problem(f"{path}.order_by[{index}] must be an object", block_id=block_id, code="query_order_shape"))
+            diagnostics.append(
+                problem(
+                    f"{path}.order_by[{index}] must be an object",
+                    block_id=block_id,
+                    code="query_order_shape",
+                )
+            )
             continue
         if not isinstance(item.get("field"), str) or not item.get("field"):
-            diagnostics.append(problem(f"{path}.order_by[{index}] needs field", block_id=block_id, code="query_order_field"))
+            diagnostics.append(
+                problem(
+                    f"{path}.order_by[{index}] needs field",
+                    block_id=block_id,
+                    code="query_order_field",
+                )
+            )
     return diagnostics
 
 

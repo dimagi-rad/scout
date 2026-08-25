@@ -2,6 +2,14 @@ import { api } from "@/api/client"
 
 import type { DateRange, ResolvedQuery, Row, SemanticQuerySpec, StoryDoc } from "./types"
 
+export const COMPARISON_PRESETS = ["previous_period", "previous_year"] as const
+export type ComparisonPreset = (typeof COMPARISON_PRESETS)[number]
+
+export const COMPARISON_LABELS: Record<ComparisonPreset, string> = {
+  previous_period: "Previous period",
+  previous_year: "Same period last year",
+}
+
 interface SemanticQueryResponse {
   columns?: string[]
   rows?: unknown[]
@@ -62,6 +70,20 @@ export function previousPeriod(range: DateRange): DateRange {
   start.setDate(start.getDate() - days)
   end.setDate(end.getDate() - days)
   return { start: isoDate(start), end: isoDate(end), preset: "previous_period" }
+}
+
+export function normalizeComparisonPreset(value: unknown): ComparisonPreset {
+  return value === "previous_year" ? "previous_year" : "previous_period"
+}
+
+export function comparisonPeriod(range: DateRange, preset: ComparisonPreset): DateRange {
+  if (preset === "previous_period") return previousPeriod(range)
+
+  return {
+    start: isoDate(previousYearDate(parseIsoDate(range.start))),
+    end: isoDate(previousYearDate(parseIsoDate(range.end))),
+    preset,
+  }
 }
 
 export function buildSemanticQueryInput(query: ResolvedQuery): SemanticQuerySpec {
@@ -161,4 +183,11 @@ function isoDate(date: Date): string {
 function parseIsoDate(value: string): Date {
   const [year, month, day] = value.split("-").map((part) => Number.parseInt(part, 10))
   return new Date(year, month - 1, day)
+}
+
+function previousYearDate(date: Date): Date {
+  const year = date.getFullYear() - 1
+  const month = date.getMonth()
+  const lastDay = new Date(year, month + 1, 0).getDate()
+  return new Date(year, month, Math.min(date.getDate(), lastDay))
 }

@@ -8,27 +8,13 @@ Scout supports several artifact types, each suited to different visualization an
 
 Interactive React components rendered in a sandboxed iframe. Best for complex, interactive visualizations and dashboards.
 
-The agent writes a React component that receives the query data as props. The component is rendered in an isolated sandbox with access to common libraries.
+The agent writes a React component that receives the query data as props. The component is rendered in an isolated sandbox with access to common libraries, including Recharts for charts.
 
 **Use cases:**
 - Multi-panel dashboards
 - Interactive data explorers
 - Custom visualizations with user controls
 - Forms and filters
-
-## Plotly
-
-**Type identifier:** `plotly`
-
-[Plotly.js](https://plotly.com/javascript/) charts rendered in a sandboxed iframe. Best for standard data visualizations.
-
-The agent generates a Plotly chart specification (data + layout) in JSON. The chart is rendered with full interactivity: zoom, pan, hover tooltips, and legend toggles.
-
-**Use cases:**
-- Bar charts, line charts, scatter plots
-- Heatmaps, histograms
-- Time series visualizations
-- Statistical plots
 
 ## HTML
 
@@ -74,6 +60,8 @@ Blocks render vertically by default. Consecutive visible blocks with the same to
 side in a responsive row; use this for KPI strips, chart pairs, filter rows, and comparison sections. Keep hidden
 compute blocks outside the visible row group.
 
+Story graph blocks render with Recharts. Compact `line`, `bar`, `area`, `pie`, and `donut` configurations cover common charts; explicit Recharts element trees support more advanced composition. Compact charts use a bounded `style` vocabulary for named palettes, legends, grids, curves, orientation, and value labels. Stat blocks can show absolute or percent comparisons with a semantic higher/lower/neutral goal, so favorable color is only applied when metric meaning supports it.
+
 ## Versioning
 
 All artifact types support versioning. When the agent creates an updated version of an artifact, it links the new version to the original via the `parent_artifact` field. The version number is automatically incremented.
@@ -82,11 +70,10 @@ All artifact types support versioning. When the agent creates an updated version
 
 Artifacts have a `data` JSON field that stores structured data used by the artifact. For example:
 
-- **Plotly** artifacts store chart data and layout configuration.
 - **React** artifacts may store static data that the component renders.
 - **Story** artifacts store a structured story document and named semantic query specs for live data.
 
-The `code` field contains the source code (React JSX, HTML markup, Markdown text, Plotly JSON, or SVG markup), and the `data` field contains supplementary structured data.
+The `code` field contains the source code (React JSX, HTML markup, Markdown text, or SVG markup), and the `data` field contains supplementary structured data.
 
 ## Semantic query provenance
 

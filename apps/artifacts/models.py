@@ -19,7 +19,6 @@ class ArtifactType(models.TextChoices):
     REACT = "react", "React Component"
     HTML = "html", "HTML Document"
     MARKDOWN = "markdown", "Markdown Document"
-    PLOTLY = "plotly", "Plotly Chart"
     SVG = "svg", "SVG Graphic"
     STORY = "story", "Story"
 
@@ -37,7 +36,7 @@ class Artifact(models.Model):
         created_by: The user who triggered the artifact creation.
         title: Display title for the artifact.
         description: Optional description of what the artifact does/shows.
-        artifact_type: Type of artifact (react, html, markdown, plotly, svg).
+        artifact_type: Type of artifact (react, html, markdown, svg, story).
         code: The source code for the artifact.
         data: Structured JSON data used by the artifact (e.g., chart data).
         version: Version number, incremented when creating new versions.
@@ -81,7 +80,7 @@ class Artifact(models.Model):
     artifact_type = models.CharField(
         max_length=20,
         choices=ArtifactType.choices,
-        help_text="The type of artifact (react, html, markdown, plotly, svg, story).",
+        help_text="The type of artifact (react, html, markdown, svg, story).",
     )
     code = models.TextField(
         help_text="Source code for the artifact.",

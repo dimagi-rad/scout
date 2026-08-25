@@ -28,6 +28,29 @@ export interface StoryBlock {
   config?: Record<string, unknown>
 }
 
+export type GraphPalette = "categorical" | "status" | "sequential" | "monochrome"
+export type GraphLegend = "auto" | "top" | "bottom" | "none"
+export type GraphGrid = "horizontal" | "both" | "none"
+export type GraphCurve = "monotone" | "linear" | "step"
+export type GraphOrientation = "vertical" | "horizontal"
+export type GraphLabels = "none" | "value"
+
+export interface GraphStyleConfig {
+  palette?: GraphPalette
+  legend?: GraphLegend
+  grid?: GraphGrid
+  curve?: GraphCurve
+  orientation?: GraphOrientation
+  labels?: GraphLabels
+}
+
+export interface StatComparisonConfig {
+  type?: "none" | "absolute" | "percent"
+  label?: string
+  goal?: "higher" | "lower" | "neutral"
+  format?: string
+}
+
 export type Binding = { $ref: string } | { value: unknown }
 
 export function isRefBinding(binding: Binding): binding is { $ref: string } {

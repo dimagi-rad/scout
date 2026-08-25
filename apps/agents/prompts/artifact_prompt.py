@@ -9,6 +9,8 @@ reusable view, or any multi-metric answer that should be reopened later.
 ### Semantic graph artifacts
 
 For all artifact work, use `artifact_manager`.
+All charts render with Recharts. Never create or request a Plotly artifact or
+Plotly specification; Plotly is not part of Scout's artifact runtime.
 Call `artifact_manager` immediately with a clear `task` and optional
 `artifact_id`. The Artifact Manager subagent owns the lower-level graph reads,
 writes, validation, and semantic-query verification. `artifact_manager.task`
@@ -32,7 +34,7 @@ The graph manager creates `story` artifacts whose canonical document lives in
 {
   "schema_version": 1,
   "name": "Weekly visits",
-  "prd": "Short durable spec of the question, audience, data, and sections.",
+  "prd": "One or two short user-facing sentences about the question and data scope.",
   "blocks": [
     {"id": "title", "type": "title", "config": {"text": "Weekly visits"}},
     {"id": "range", "type": "date_filter", "config": {"default": "last_30_days"}},
@@ -85,21 +87,50 @@ Layout:
 Block config keys:
 - `title`: `text`, optional `subtitle`.
 - `section`: `title`, `body` (markdown body text). Do not use `text`.
-- `question`: `text`.
-- `tldr`: `content` for a short summary, or `items` for bullet-like strings.
-  Do not use `text`.
+- `question`: `text`, optional `context`.
+- `tldr`: optional `title`, plus `content` for a short summary or `items` for
+  takeaway strings. Do not use `text`.
 - `markdown`: `body` or `content`. Do not use `text`.
 - `date_filter`: `label`, `default`.
 - `period_selector`: `label`, `default_range`, `default_comparison`.
 - `semantic_query`: `queries`, optional `compare`.
 - `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
-  `data_label`, `query`, `stacked`, `y_format`, `height`,
+  `subtitle`, `data_label`, `query`, `stacked`, `y_format`, `height`,
+  `x_label`, `y_label`, `style`,
   or `recharts` for an explicit Recharts element tree. Compact graph configs
   render through Recharts; use `recharts` when the chart needs composition
-  beyond the compact `line`, `bar`, `area`, or `pie` presets.
+  beyond the compact `line`, `bar`, `area`, `pie`, or `donut` presets.
 - `table`: `title`, `columns`, `query`.
 - `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
-  `delta_path`.
+  `delta_path`, optional `prefix`, `suffix`, and `comparison`.
+
+Visualization grammar:
+- Choose the chart from the analytical comparison: one headline measure ->
+  `stat`; time plus measure -> `line`; categories plus measure -> sorted `bar`
+  (use horizontal orientation for long labels); two independently varying
+  measures -> explicit Recharts `ScatterChart`; a few part-to-whole categories
+  -> `donut` or a 100% stacked bar; detailed or high-cardinality rows -> `table`.
+- A compact graph `style` is a bounded object. It may contain:
+  `palette` (`categorical`, `status`, `sequential`, `monochrome`), `legend`
+  (`auto`, `top`, `bottom`, `none`), `grid` (`horizontal`, `both`, `none`),
+  `curve` (`monotone`, `linear`, `step`), `orientation` (`vertical`,
+  `horizontal`), and `labels` (`none`, `value`). Prefer quiet horizontal grids,
+  at most five category colors, and value labels only when they do not crowd.
+- A stat `comparison` may contain `type` (`none`, `absolute`, `percent`),
+  `format`, `label`, and `goal` (`higher`, `lower`, `neutral`). Use `goal` only
+  when metric meaning establishes whether movement is favorable; otherwise use
+  `neutral`. Do not encode good/bad by choosing raw red or green colors.
+- Named formats support decimal suffixes, for example `number_0`, `percent_1`,
+  `currency_2`, `accounting_0`, and `compact_1`.
+- Set `y_format` to match the measure's semantics: counts use `number_0`, money
+  uses a currency or accounting format, and rates use a percent format. This
+  keeps chart axes and tooltips honest and avoids fractional count ticks.
+- `prd` renders in the artifact. Keep it to one or two concise, user-facing
+  sentences about the question and data scope. Do not list implementation
+  details, block IDs, semantic member names, or section inventories there.
+- Use graph subtitles for units, date window, denominator, sample size, or
+  synthetic/demo disclosure when that context is needed to read the chart
+  honestly. Do not invent a takeaway in the title.
 
 Rules:
 - Use semantic member names from `list_datasets` / `describe_dataset`.

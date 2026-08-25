@@ -4,6 +4,7 @@ import { AppLayout } from "@/components/AppLayout/AppLayout"
 import { ChatRoute } from "@/components/ChatPanel/ChatRoute"
 import { ChatRedirect } from "@/components/ChatPanel/ChatRedirect"
 import { ArtifactDetailPage } from "@/pages/ArtifactDetailPage"
+import { ArtifactDemoPage } from "@/pages/ArtifactDemoPage"
 import { ArtifactsPage } from "@/pages/ArtifactsPage"
 import { DatasetBrowserPage } from "@/pages/DatasetBrowserPage"
 import { KnowledgePage } from "@/pages/KnowledgePage"
@@ -29,6 +30,7 @@ export const router = createBrowserRouter([
       { path: "workspaces/:slug/:workspaceId/chat", element: <ChatRoute /> },
       { path: "workspaces/:slug/:workspaceId/chat/:threadId", element: <ChatRoute /> },
       { path: "artifacts", element: <ArtifactsPage /> },
+      { path: "artifacts/demo", element: <ArtifactDemoPage /> },
       { path: "artifacts/:artifactId", element: <ArtifactDetailPage /> },
       { path: "knowledge", element: <KnowledgePage /> },
       { path: "knowledge/new", element: <KnowledgePage /> },

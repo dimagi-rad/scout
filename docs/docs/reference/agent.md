@@ -100,7 +100,7 @@ Create interactive visualizations and content.
 
 **Parameters:**
 - `title` (string, required): Human-readable title
-- `artifact_type` (string, required): One of `react`, `plotly`, `html`, `markdown`, `svg`, `story`
+- `artifact_type` (string, required): One of `react`, `html`, `markdown`, `svg`, `story`
 - `code` (string, required): Source code for the artifact
 - `description` (string, optional): What the artifact visualizes
 - `data` (dict, optional): JSON data passed to React components as `data` prop
@@ -111,7 +111,6 @@ Create interactive visualizations and content.
 | Type | Use case | Code format |
 |------|----------|-------------|
 | `react` | Interactive dashboards, charts with Recharts | JSX with default export |
-| `plotly` | Statistical charts, 3D plots, heatmaps | Plotly JSON specification |
 | `html` | Simple tables, static content | HTML markup |
 | `markdown` | Documentation, reports | Markdown text |
 | `svg` | Custom diagrams, flowcharts | SVG markup |
@@ -119,6 +118,7 @@ Create interactive visualizations and content.
 
 **React artifacts:**
 - Recharts is pre-loaded (no imports from CDN needed)
+- Use Recharts for every chart; Plotly is not available in the artifact runtime
 - Tailwind CSS classes available
 - Data passed via `data` prop to the default export component
 

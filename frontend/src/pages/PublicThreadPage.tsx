@@ -155,7 +155,7 @@ function PublicChatMessage({
   )
 }
 
-// Self-contained markup renderable directly in a sandboxed iframe. React/Plotly
+// Self-contained markup renderable directly in a sandboxed iframe. React
 // artifacts need the CDN-backed renderer plus auth'd query data, so anonymous
 // viewers see their source instead.
 const SANDBOXABLE_TYPES = new Set(["html", "svg"])

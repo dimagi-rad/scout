@@ -49,7 +49,10 @@ export class StoryEngine implements StoryEngineApi {
   }
 
   loadDoc(doc: StoryDoc): void {
-    if (this.destroyed) return
+    // React Strict Mode intentionally runs effect cleanup and setup twice in
+    // development. Allow the same engine instance to be loaded again after
+    // that cleanup instead of leaving every computed block pending forever.
+    this.destroyed = false
 
     const oldNodes = this.nodes
     const oldOutputs = this.outputs
@@ -412,7 +415,7 @@ export class StoryEngine implements StoryEngineApi {
         ctx: this.ctx,
         signal: abort.signal,
       })
-      if (this.destroyed || epoch !== node.epoch) return
+      if (this.destroyed || abort.signal.aborted || epoch !== node.epoch) return
       node.lastOk = true
       node.abort = null
       this.publishOutputs(node, result)

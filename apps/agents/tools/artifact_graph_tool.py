@@ -49,7 +49,17 @@ class ArtifactWriteInput(BaseModel):
     title: str | None = None
     description: str = ""
     story_doc: dict[str, Any] | None = None
-    ops: list[dict[str, Any]] | None = None
+    ops: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Atomic apply operations. Supported shapes: "
+            "{op:'set', target:'story/name'|'story/prd'|'story/tags'|"
+            "'block/<id>/<slash-delimited-path>', value:any}; "
+            "{op:'add_block', after:'start'|'end'|'<id>', block:{...}}; "
+            "{op:'remove_block', id:'<id>'}; "
+            "{op:'move_block', id:'<id>', after:'start'|'end'|'<id>'}."
+        ),
+    )
     run_check: bool = Field(
         default=True,
         description=(
@@ -68,7 +78,7 @@ def create_artifact_graph_tools(
 
     @tool(args_schema=ArtifactGraphOverviewInput)
     async def artifact_graph_overview(artifact_id: str | None = None) -> dict[str, Any]:
-        """Read-only summary of a graph artifact's doc, diagnostics, and dependencies."""
+        """Read a graph artifact's full doc, summary, diagnostics, and dependencies."""
         artifact = await _load_graph_artifact(workspace, artifact_id, conversation_id)
         if artifact is None:
             return {"status": "not_found", "message": "No graph artifact found."}
@@ -85,6 +95,7 @@ def create_artifact_graph_tools(
             "status": "ok",
             "artifact": _artifact_summary(artifact),
             "doc": _doc_summary(doc),
+            "story_doc": doc,
             "diagnostics": diagnostics,
             "manifest": _manifest_summary(manifest),
         }

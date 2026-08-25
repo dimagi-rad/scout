@@ -13,6 +13,7 @@ from django.test import AsyncClient, Client
 
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
+from apps.artifacts.services.export import ArtifactExporter
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
@@ -175,8 +176,8 @@ class TestArtifactModel:
             ArtifactType.REACT,
             ArtifactType.HTML,
             ArtifactType.MARKDOWN,
-            ArtifactType.PLOTLY,
             ArtifactType.SVG,
+            ArtifactType.STORY,
         ]:
             artifact = Artifact.objects.create(
                 workspace=workspace,
@@ -194,12 +195,42 @@ class TestArtifactModel:
         assert "react" in artifact_types
         assert "html" in artifact_types
         assert "markdown" in artifact_types
-        assert "plotly" in artifact_types
+        assert "plotly" not in artifact_types
         assert "svg" in artifact_types
+        assert "story" in artifact_types
 
 
 # ============================================================================
-# 3. TestArtifactSandboxView
+# 3. TestArtifactListView
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestArtifactListView:
+    def test_list_hides_unsupported_legacy_artifacts(
+        self,
+        authenticated_client,
+        artifact,
+        user,
+        workspace,
+    ):
+        Artifact.objects.create(
+            workspace=workspace,
+            created_by=user,
+            title="Legacy Plotly chart",
+            artifact_type="plotly",
+            code='{"data": []}',
+            conversation_id="legacy-thread",
+        )
+
+        response = authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/")
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()["results"]] == [str(artifact.id)]
+
+
+# ============================================================================
+# 4. TestArtifactSandboxView
 # ============================================================================
 
 
@@ -221,7 +252,27 @@ class TestArtifactSandboxView:
         assert "<!DOCTYPE html>" in content
         assert "Artifact Sandbox" in content
         assert "React" in content or "react" in content
+        assert "Recharts" in content
+        assert "Plotly" not in content
         assert "root" in content
+
+    def test_react_export_loads_recharts_without_plotly(self, artifact):
+        content = ArtifactExporter(artifact).export_html()
+
+        assert "Recharts.js" in content
+        assert "plotly" not in content.lower()
+
+    def test_export_rejects_removed_artifact_types(self, artifact):
+        artifact.artifact_type = "plotly"
+
+        with pytest.raises(ValueError, match="Unsupported artifact type: plotly"):
+            ArtifactExporter(artifact).export_html()
+
+    def test_export_rejects_story_until_a_standalone_renderer_exists(self, artifact):
+        artifact.artifact_type = ArtifactType.STORY
+
+        with pytest.raises(ValueError, match="Unsupported artifact type: story"):
+            ArtifactExporter(artifact).export_html()
 
     def test_sandbox_supports_print_to_pdf(self, authenticated_client, artifact, workspace):
         """Sandbox HTML wires up print-to-PDF: print CSS and a scout-print listener."""
@@ -504,6 +555,22 @@ class TestArtifactTools:
         assert artifact.parent_artifact is None
 
     @pytest.mark.asyncio
+    async def test_create_artifact_tool_rejects_plotly(self, user, workspace):
+        tools = create_artifact_tools(workspace, user)
+
+        result = await tools[0].ainvoke(
+            {
+                "title": "Legacy chart",
+                "artifact_type": "plotly",
+                "code": '{"data": []}',
+            }
+        )
+
+        assert result["status"] == "error"
+        assert "Invalid artifact_type 'plotly'" in result["message"]
+        assert not await Artifact.objects.filter(title="Legacy chart").aexists()
+
+    @pytest.mark.asyncio
     async def test_update_artifact_tool(self, user, workspace, artifact, tenant_membership):
         """Test update_artifact tool creates a new version of an artifact."""
         from apps.agents.tools.artifact_tool import create_artifact_tools
@@ -533,6 +600,28 @@ class TestArtifactTools:
         assert new_artifact.code == new_code
         assert new_artifact.title == "Updated Chart Title"
         assert new_artifact.data == {"rows": [{"x": 2, "y": 4}]}
+
+    @pytest.mark.asyncio
+    async def test_update_artifact_tool_rejects_removed_type(self, user, workspace):
+        legacy = await Artifact.objects.acreate(
+            workspace=workspace,
+            created_by=user,
+            title="Legacy chart",
+            artifact_type="plotly",
+            code='{"data": []}',
+        )
+        tools = create_artifact_tools(workspace, user)
+
+        result = await tools[1].ainvoke(
+            {
+                "artifact_id": str(legacy.id),
+                "code": "export default function Chart() { return <div />; }",
+            }
+        )
+
+        assert result["status"] == "error"
+        assert "no longer supported" in result["message"]
+        assert await Artifact.all_objects.acount() == 1
 
     @pytest.mark.asyncio
     async def test_update_creates_new_version(self, user, workspace, artifact, tenant_membership):

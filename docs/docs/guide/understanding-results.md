@@ -18,8 +18,8 @@ Query results are formatted as tables in the chat. Tables include column headers
 
 When the agent creates a visualization or interactive component, it appears as an artifact. Artifacts render in a separate panel and can be:
 
-- **Charts** (Plotly) -- bar charts, line charts, scatter plots, etc.
-- **Dashboards** (React) -- interactive components with multiple views.
+- **Charts and analytical stories** (Recharts) -- bar, line, area, pie, and composed views.
+- **Dashboards** (React with Recharts) -- interactive components with multiple views.
 - **Documents** (Markdown or HTML) -- formatted reports.
 - **Graphics** (SVG) -- static diagrams and illustrations.
 

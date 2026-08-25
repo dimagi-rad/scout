@@ -12,7 +12,7 @@ Scout is an AI-powered data agent platform that lets teams query databases using
 
 **Natural language data querying** — Ask questions about your data in plain English. Scout translates your intent into SQL, executes it safely, and returns structured results.
 
-**Artifacts** — Responses can include rich artifacts: charts, dashboards, and interactive visualizations built with React, Plotly, or plain HTML.
+**Artifacts** — Responses can include rich artifacts: Recharts-powered charts, semantic stories, dashboards, and interactive visualizations.
 
 **Sharing** — Share artifacts with teammates or stakeholders via secure links with configurable access levels and expiration.
 

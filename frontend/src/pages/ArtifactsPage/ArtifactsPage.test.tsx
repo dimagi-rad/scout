@@ -99,6 +99,7 @@ describe("ArtifactsPage navigation", () => {
     )
 
     await screen.findByText("Alpha Dashboard")
+    expect(screen.getByTestId("artifact-demo-link")).toHaveAttribute("href", "/artifacts/demo")
 
     await userEvent.click(screen.getByTestId(`artifact-open-${ARTIFACT_ID}`))
 

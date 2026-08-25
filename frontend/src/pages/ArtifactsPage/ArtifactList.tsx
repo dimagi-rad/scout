@@ -9,7 +9,7 @@ interface ArtifactListProps {
   search: string
   onSearchChange: (search: string) => void
   onUpdate: (item: ArtifactSummary, data: { title?: string; description?: string }) => Promise<void>
-  onDelete: (item: ArtifactSummary) => void
+  onDelete: (item: ArtifactSummary) => void | Promise<void>
 }
 
 export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete }: ArtifactListProps) {
@@ -50,7 +50,7 @@ export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete
         </div>
       )}
 
-      <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,18rem),1fr))] gap-4">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,20rem),1fr))] gap-4">
         {items.map((item) => (
           <ArtifactCard
             key={item.id}

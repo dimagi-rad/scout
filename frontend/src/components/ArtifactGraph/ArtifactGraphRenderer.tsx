@@ -49,6 +49,14 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
                 engine={engine}
                 registry={registry}
               />
+            ) : group.blocks.every((block) => block.type === "stat") ? (
+              <StatGroup
+                key={`${group.key}-${index}`}
+                blocks={group.blocks}
+                engine={engine}
+                groupKey={group.key}
+                registry={registry}
+              />
             ) : (
               <div
                 key={`${group.key}-${index}`}
@@ -56,7 +64,7 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
                 data-block-row-group={group.key}
                 style={{
                   gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${
-                    group.blocks.length >= 3 ? "200px" : "300px"
+                    group.blocks.length >= 3 ? "230px" : "300px"
                   }), 1fr))`,
                 }}
               >
@@ -69,6 +77,41 @@ export function ArtifactGraphRenderer({ artifact, workspaceId }: ArtifactGraphRe
         </div>
       </div>
     </div>
+  )
+}
+
+function StatGroup({
+  blocks,
+  engine,
+  groupKey,
+  registry,
+}: {
+  blocks: StoryBlock[]
+  engine: StoryEngineApi
+  groupKey: string
+  registry: ReturnType<typeof buildStoryRegistry>
+}) {
+  const comparisonContext = statGroupComparisonContext(blocks)
+  const periodVisibility = comparisonContext ? "[&_[data-stat-period]]:hidden" : ""
+
+  return (
+    <section data-stat-group className="overflow-hidden rounded-xl border border-border bg-border">
+      <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 bg-card px-4 py-3">
+        <h2 className="text-sm font-semibold">Key metrics</h2>
+        {comparisonContext && <p className="text-xs text-muted-foreground">{comparisonContext}</p>}
+      </header>
+      <div
+        className={`grid gap-px bg-border [&_[data-block-type=stat]]:min-h-28 [&_[data-block-type=stat]]:rounded-none [&_[data-block-type=stat]]:border-0 ${periodVisibility}`}
+        data-block-row-group={groupKey}
+        style={{
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))",
+        }}
+      >
+        {blocks.map((block) => (
+          <RenderedBlock key={block.id} block={block} engine={engine} registry={registry} />
+        ))}
+      </div>
+    </section>
   )
 }
 
@@ -103,6 +146,18 @@ function RenderedBlock({
   const Component = spec?.component
   if (!Component) return null
   return <Component block={block} config={block.config ?? {}} engine={engine} />
+}
+
+function statGroupComparisonContext(blocks: StoryBlock[]): string | null {
+  const labels = blocks.map((block) => {
+    const comparison = isRecord(block.config?.comparison) ? block.config.comparison : null
+    return comparison && comparison.type !== "none" && typeof comparison.label === "string"
+      ? comparison.label.trim()
+      : null
+  })
+  const first = labels[0]
+  if (!first || labels.some((label) => label !== first)) return null
+  return first.replace(/^vs\s+/i, "Compared with ")
 }
 
 function groupVisibleBlocks(blocks: StoryBlock[]) {

@@ -226,7 +226,7 @@ function PanelState({
 }
 
 function artifactIcon(type: string): ReactNode {
-  if (type === "story" || type === "plotly") return <FileBarChart className="h-4 w-4" />
+  if (type === "story") return <FileBarChart className="h-4 w-4" />
   if (type === "react" || type === "html" || type === "svg") {
     return <PanelsTopLeft className="h-4 w-4" />
   }
