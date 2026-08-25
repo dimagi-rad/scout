@@ -45,6 +45,7 @@ repo's CloudFormation template.
 
 | Service | Config | Port | Public? |
 |---------|--------|------|---------|
+| Cube + schema validator | `deploy-cube.yml` | 4000 / 4010 | No (internal network) |
 | API (Django/uvicorn) | `deploy.yml` | 8000 | No (internal network) |
 | MCP Server | `deploy-mcp.yml` | 8100 | No (internal network) |
 | Worker (Celery) | `deploy-worker.yml` | — | No |
@@ -57,8 +58,8 @@ The frontend nginx container reverse-proxies `/api/` and `/mcp/` to the internal
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
 
 1. Authenticates to AWS via OIDC (no access keys)
-2. Builds and pushes Docker images to ECR
-3. Deploys each service with Kamal
+2. Builds and pushes the API/frontend images to ECR; Kamal builds Cube from `cube_config/Dockerfile`
+3. Deploys Cube → MCP → API → worker → frontend with Kamal
 4. Runs migrations in a pre-deploy hook (API service only)
 
 ### Required GitHub Configuration
@@ -102,6 +103,7 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 | `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
 | `SCOUT_SENTRY_DSN` | Sentry DSN for the backend Django project (API, worker, MCP all share it) |
 | `SCOUT_TASKBADGER_API_KEY` | Task Badger project API key for background-job tracking (API + worker share it) |
+| `SCOUT_CUBEJS_API_SECRET` | Production-only Cube JWT signing key shared by API, worker, MCP, and Cube. |
 
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
@@ -115,6 +117,11 @@ container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
 Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
 environment. The workflow shares it only among staging's API, worker, MCP, and
 Cube containers so semantic-query security contexts are accepted end to end.
+Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
+the production workflow validates before building and Kamal resolves through
+`.kamal/secrets`. Generate the two values independently (for example,
+`openssl rand -hex 32`) so a staging credential can never sign a production
+Cube security context.
 
 ### Adding a new secret
 
@@ -334,13 +341,22 @@ For deploying from your local machine (e.g., debugging or first-time setup):
 # 1. Generate .env.deploy from CloudFormation outputs
 ./scripts/fetch-deploy-env.sh        # use -q/--quiet to suppress output
 
-# 2. Deploy (first time)
+# 2. Deploy (first time, in dependency order)
+kamal setup -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
+kamal setup -c config/deploy-mcp.yml
 kamal setup
+kamal setup -c config/deploy-worker.yml
+kamal setup -c config/deploy-frontend.yml
 
-# 3. Deploy (subsequent)
+# 3. Deploy (subsequent, in dependency order)
+kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-mcp.yml
 kamal deploy
+kamal deploy -c config/deploy-worker.yml
+kamal deploy -c config/deploy-frontend.yml
 
 # Or deploy a specific service
+kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal deploy -c config/deploy-mcp.yml
 kamal deploy -c config/deploy-frontend.yml
 kamal deploy -c config/deploy-worker.yml

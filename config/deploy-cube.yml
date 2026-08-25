@@ -1,0 +1,57 @@
+# Cube semantic-query runtime — PRODUCTION. Internal only; API, worker, and
+# MCP reach it through scout-cube-web on the shared production network.
+
+service: scout-cube
+
+# MCP shares scout/api, leaving the existing scout/mcp ECR repository available
+# for this distinct runtime without an infrastructure change or API-tag collision.
+image: scout/mcp
+
+servers:
+  web:
+    hosts:
+      - <%= ENV.fetch('SCOUT_EC2_IP') %>
+    options:
+      network: "scout_shared"
+      network-alias: "scout-cube-web"
+    proxy: false
+
+registry:
+  server: <%= ENV.fetch('SCOUT_ECR_REGISTRY') %>
+  username: AWS
+  password: <%= %x(./registry_password.sh) %>
+
+env:
+  clear:
+    CUBEJS_DEV_MODE: "false"
+    CUBEJS_TELEMETRY: "false"
+    # Production runs one Cube instance and has no separate Cube Store service.
+    CUBEJS_CACHE_AND_QUEUE_DRIVER: "memory"
+    CUBEJS_EXTERNAL_DEFAULT: "false"
+    CUBEJS_PRE_AGGREGATIONS_SCHEMA: "false"
+    CUBEJS_PORT: "4000"
+    CUBE_VALIDATOR_PORT: "4010"
+  secret:
+    - DATABASE_URL
+    - MANAGED_DATABASE_URL
+    - CUBEJS_API_SECRET
+
+ssh:
+  user: scout
+
+builder:
+  arch: amd64
+  context: cube_config
+  # Docker resolves --file from the repository root, not from build context.
+  dockerfile: cube_config/Dockerfile
+
+# Reuse the existing MCP CloudWatch group so the first production rollout does
+# not depend on a separate infrastructure-stack update. Container names keep
+# Cube and MCP streams distinguishable.
+logging:
+  driver: awslogs
+  options:
+    awslogs-region: us-east-1
+    awslogs-group: /scout/mcp
+    awslogs-create-group: "false"
+    tag: "{{.Name}}"

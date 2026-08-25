@@ -27,6 +27,7 @@ env:
     DJANGO_SETTINGS_MODULE: config.settings.production
     DEPLOY_ENVIRONMENT: "production"
     CONNECT_API_URL: "https://connect.dimagi.com"
+    CUBE_API_URL: "http://scout-cube-web:4000"
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
@@ -39,6 +40,7 @@ env:
     # Shared-secret caller auth (arch #253, 01#6). MUST match the value the API
     # (deploy.yml) and worker (deploy-worker.yml) send in X-Scout-MCP-Secret.
     - MCP_SHARED_SECRET
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout

@@ -33,7 +33,7 @@ jobs:
       # Shared by the staging API, worker, MCP, and Cube containers. Keeping it
       # in the staging environment prevents a branch deploy from depending on
       # (or rotating) any future production Cube credential.
-      SCOUT_STAGING_CUBEJS_API_SECRET: ${{ secrets.SCOUT_STAGING_CUBEJS_API_SECRET }}
+      SCOUT_CUBEJS_API_SECRET: ${{ secrets.SCOUT_STAGING_CUBEJS_API_SECRET }}
       # The API image is environment-agnostic (env comes from Kamal), so staging
       # reuses prod's tag. The frontend bakes in the nginx conf and Sentry
       # environment at build time, so it needs a tag of its own or the two
@@ -80,7 +80,7 @@ jobs:
         run: |
           test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID"
           test -n "$SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET"
-          test -n "$SCOUT_STAGING_CUBEJS_API_SECRET"
+          test -n "$SCOUT_CUBEJS_API_SECRET"
 
       - name: Build and push API image
         run: |
