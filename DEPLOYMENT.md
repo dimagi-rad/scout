@@ -88,7 +88,7 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push 
 ### AWS Secrets Manager
 
 The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
-`aws_secrets_manager` adapter (see `.kamal/secrets`):
+`aws_secrets_manager` adapter (see `.kamal/secrets-common`):
 
 | Secret | Purpose |
 |--------|---------|
@@ -119,13 +119,13 @@ environment. The workflow shares it only among staging's API, worker, MCP, and
 Cube containers so semantic-query security contexts are accepted end to end.
 Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
 the production workflow validates before building and Kamal resolves through
-`.kamal/secrets`. Generate the two values independently (for example,
+`.kamal/secrets-common`. Generate the two values independently (for example,
 `openssl rand -hex 32`) so a staging credential can never sign a production
 Cube security context.
 
 ### Adding a new secret
 
-The chain runs AWS Secrets Manager → `.kamal/secrets` → `env.secret` in each Kamal
+The chain runs AWS Secrets Manager → `.kamal/secrets-common` → `env.secret` in each Kamal
 config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
 
 1. **Store it in AWS Secrets Manager**, following the `SCOUT_*` naming convention:
@@ -137,7 +137,7 @@ config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
    ```
    (Use `put-secret-value` instead of `create-secret` to rotate an existing one.)
 
-2. **Map it in `.kamal/secrets`** — fetch it from AWS, then extract it into the env
+2. **Map it in `.kamal/secrets-common`** — fetch it from AWS, then extract it into the env
    var name your app reads. Group related keys into one `fetch` call to cut AWS round-trips:
    ```bash
    TASKBADGER_SECRETS=$(kamal secrets fetch --adapter aws_secrets_manager SCOUT_TASKBADGER_API_KEY)
@@ -155,7 +155,7 @@ config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
 4. **Verify and deploy.** `kamal secrets print` resolves the file locally so you can
    confirm the value is non-empty before shipping; then redeploy the affected services.
 
-Only `env.secret` entries are injected from `.kamal/secrets`. Non-sensitive config goes
+Only `env.secret` entries are injected from `.kamal/secrets-common`. Non-sensitive config goes
 in `env.clear` instead, written inline in the Kamal config (no AWS entry needed).
 
 ## Error monitoring (Sentry)

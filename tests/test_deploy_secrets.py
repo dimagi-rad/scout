@@ -1,11 +1,11 @@
-"""Guard: every secret a Kamal deploy config references must resolve in .kamal/secrets.
+"""Guard: every secret a Kamal deploy config references must resolve in .kamal/secrets-common.
 
-Kamal fails a deploy with ``Secret '<NAME>' not found in .kamal/secrets`` when a
-config lists a name under ``env.secret:`` that ``.kamal/secrets`` never defines. This
+Kamal fails a deploy with ``Secret '<NAME>' not found in .kamal/secrets-common`` when a
+config lists a name under ``env.secret:`` that ``.kamal/secrets-common`` never defines. This
 shipped to prod twice: MCP_SHARED_SECRET (arch #253) and REDIS_URL (arch #254) were
-both added to config secret blocks but never wired into .kamal/secrets, and every
+both added to config secret blocks but never wired into .kamal/secrets-common, and every
 production deploy from 2026-06-26 onward silently failed at boot. This test parses the
-deploy configs and .kamal/secrets straight off disk (no Kamal/AWS needed) and fails
+deploy configs and .kamal/secrets-common straight off disk (no Kamal/AWS needed) and fails
 if any referenced secret is unresolved — catching the whole class before deploy.
 """
 
@@ -45,7 +45,7 @@ def _referenced_secret_names(config_text: str) -> list[str]:
 
 
 def _defined_var_names(secrets_text: str) -> set[str]:
-    """Return every top-level ``NAME=...`` assignment in .kamal/secrets."""
+    """Return every top-level ``NAME=...`` assignment in .kamal/secrets-common."""
     return {
         match.group(1)
         for line in secrets_text.splitlines()
@@ -54,7 +54,7 @@ def _defined_var_names(secrets_text: str) -> set[str]:
 
 
 def test_every_deploy_secret_is_resolved_in_kamal_secrets():
-    defined = _defined_var_names((REPO_ROOT / ".kamal" / "secrets").read_text())
+    defined = _defined_var_names((REPO_ROOT / ".kamal" / "secrets-common").read_text())
 
     configs = sorted(REPO_ROOT.glob("config/deploy*.yml"))
     assert configs, "no config/deploy*.yml files found — glob or layout changed"
@@ -66,8 +66,8 @@ def test_every_deploy_secret_is_resolved_in_kamal_secrets():
     }
 
     assert not missing, (
-        "Deploy config(s) reference secrets that .kamal/secrets does not resolve. Kamal "
-        "will fail at deploy with \"Secret '<NAME>' not found in .kamal/secrets\" and the "
-        "container won't boot. Add each missing name to .kamal/secrets (fetch from AWS "
+        "Deploy config(s) reference secrets that .kamal/secrets-common does not resolve. Kamal "
+        "will fail at deploy with \"Secret '<NAME>' not found in .kamal/secrets-common\" and the "
+        "container won't boot. Add each missing name to .kamal/secrets-common (fetch from AWS "
         f"Secrets Manager, or derive from an exported env var). Missing: {missing}"
     )

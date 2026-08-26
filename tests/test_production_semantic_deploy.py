@@ -51,7 +51,7 @@ def test_production_workflow_requires_and_deploys_cube_before_dependents():
 
 
 def test_kamal_uses_the_environment_aware_cube_secret_resolver():
-    secrets_file = (REPO_ROOT / ".kamal" / "secrets").read_text()
+    secrets_file = (REPO_ROOT / ".kamal" / "secrets-common").read_text()
     assert "CUBEJS_API_SECRET=$(scripts/resolve-cube-secret.sh)" in secrets_file
 
 
