@@ -1,0 +1,12 @@
+# Cube semantic-query runtime — STAGING overlay over config/deploy-cube.yml.
+#   kamal deploy -c config/deploy-cube.yml -d staging
+#
+# Internal only; the staging API, worker, and MCP reach it through
+# scout-staging-cube-web on the isolated staging network. Everything else —
+# image, builder, Cube env, secrets — is identical to production.
+
+servers:
+  web:
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-staging-cube-web"

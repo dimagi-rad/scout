@@ -1,0 +1,24 @@
+# Scout Procrastinate Worker — STAGING overlay over config/deploy-worker.yml.
+#   kamal deploy -c config/deploy-worker.yml -d staging
+#
+# Its task queue is the staging PostgreSQL database, so it is isolated from
+# production's worker. The secret list is identical to production's and is
+# inherited from the base config.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+servers:
+  web:
+    options:
+      network: "scout_staging_shared"
+
+env:
+  clear:
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
+    SENTRY_ENVIRONMENT: "staging"
+    MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
+    CUBE_API_URL: "http://scout-staging-cube-web:4000"
+    CUBE_VALIDATOR_URL: "http://scout-staging-cube-web:4010"
+    SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
+    DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"

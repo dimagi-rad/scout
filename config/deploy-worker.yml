@@ -2,6 +2,8 @@
 # No HTTP interface — runs background tasks and periodic scheduling
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+#
+# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-worker
 
@@ -75,6 +77,8 @@ ssh:
 builder:
   arch: amd64
 
+# Production only — see the gate comment in config/deploy.yml.
+#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -82,5 +86,6 @@ logging:
     awslogs-group: /scout/worker
     awslogs-create-group: "false"
     tag: "{{.Name}}"
+#<% end %>
 
 # No proxy — worker has no HTTP interface

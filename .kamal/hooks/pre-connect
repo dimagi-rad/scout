@@ -22,7 +22,7 @@ fi
 # The two stacks must use distinct internal aliases (scout-web vs
 # scout-staging-web) — Kamal 2 registers --network-alias on the shared `kamal`
 # network, not on these, so a reused alias round-robins prod traffic into
-# staging (see config/deploy-staging.yml).
+# staging (see config/deploy.staging.yml).
 #
 # `create || inspect` rather than a bare create: prod and staging deploys are in
 # separate concurrency groups, so two runs can pass the inspect check at the same

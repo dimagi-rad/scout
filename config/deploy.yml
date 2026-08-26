@@ -2,6 +2,8 @@
 # Internal only (no proxy) — reached via nginx in frontend container
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+#
+# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout
 
@@ -88,6 +90,14 @@ ssh:
 builder:
   arch: amd64
 
+# Production ships container logs to CloudWatch; staging (-d staging) stays on
+# Docker's json-file driver so `kamal app logs -d staging` works for debugging.
+# This is an ERB gate rather than an override in deploy.staging.yml because Kamal
+# deep-merges the destination file over this one: a destination `driver:` would
+# still inherit the awslogs-* options below, and Docker rejects those on
+# json-file. The leading `#` keeps the ERB tags YAML comments, so this file also
+# parses as plain YAML for the fitness tests.
+#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -95,5 +105,6 @@ logging:
     awslogs-group: /scout/api
     awslogs-create-group: "false"
     tag: "{{.Name}}"
+#<% end %>
 
 # No proxy — API is internal only, reached via nginx in frontend container

@@ -107,19 +107,19 @@ jobs:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
       - name: Deploy Cube
-        run: kamal deploy -c config/deploy-staging-cube.yml --version="$CUBE_TAG"
+        run: kamal deploy -c config/deploy-cube.yml -d staging --version="$CUBE_TAG"
 
       - name: Deploy MCP
-        run: kamal deploy -c config/deploy-staging-mcp.yml --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$IMAGE_TAG"
 
       - name: Deploy API
-        run: kamal deploy -c config/deploy-staging.yml --version="$IMAGE_TAG"
+        run: kamal deploy -d staging --version="$IMAGE_TAG"
 
       - name: Deploy Worker
-        run: kamal deploy -c config/deploy-staging-worker.yml --version="$IMAGE_TAG"
+        run: kamal deploy -c config/deploy-worker.yml -d staging --version="$IMAGE_TAG"
 
       - name: Deploy Frontend
-        run: kamal deploy -c config/deploy-staging-frontend.yml --version="$FRONTEND_TAG"
+        run: kamal deploy -c config/deploy-frontend.yml -d staging --version="$FRONTEND_TAG"
 
       - name: Summary
         run: |

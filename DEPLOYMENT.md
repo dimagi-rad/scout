@@ -53,6 +53,10 @@ repo's CloudFormation template.
 
 The frontend nginx container reverse-proxies `/api/` and `/mcp/` to the internal services.
 
+Each config is the production definition. Staging deploys from the same files with
+`-d staging`, which deep-merges the matching `config/<name>.staging.yml` overlay over
+it — see [Second environment (staging)](#second-environment-staging).
+
 ## Automated Deployment (CI/CD)
 
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
@@ -196,8 +200,14 @@ A staging environment (`scout-staging.dimagi.com`) runs **co-located on the
 production EC2 host** for testing branches. It reuses every AWS Secrets Manager
 value, the ECR repos, and the RDS *instance* — but has **its own database**
 (`agent_platform_staging`) and its own Docker network (`scout_staging_shared`),
-so its data and internal services are isolated from production. Config lives in
-`config/deploy-staging*.yml`.
+so its data and internal services are isolated from production.
+
+Staging has no config files of its own. It deploys the production configs with
+`-d staging`, and Kamal deep-merges `config/<name>.staging.yml` over the base — those
+overlays hold only what differs (network, hostnames, Sentry environment, the API's
+worker count and secret list). Hashes merge key by key; arrays such as `env.secret`
+are replaced wholesale. Secrets resolve from `.kamal/secrets-common`, which Kamal
+reads for every destination.
 
 One thing is *not* isolated: PostgreSQL roles are cluster-scoped, not per-database.
 The `<schema>_ro` / `<schema>_dbt` roles `SchemaManager` mints are named
@@ -272,19 +282,22 @@ git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
 
 # First time
-kamal setup -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal setup -c config/deploy-staging-mcp.yml
-kamal setup -c config/deploy-staging.yml
-kamal setup -c config/deploy-staging-worker.yml
-kamal setup -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
+kamal setup -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
+kamal setup -c config/deploy-mcp.yml -d staging
+kamal setup -d staging
+kamal setup -c config/deploy-worker.yml -d staging
+kamal setup -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
 
 # Subsequent deploys
-kamal deploy -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal deploy -c config/deploy-staging-mcp.yml
-kamal deploy -c config/deploy-staging.yml
-kamal deploy -c config/deploy-staging-worker.yml
-kamal deploy -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-mcp.yml -d staging
+kamal deploy -d staging
+kamal deploy -c config/deploy-worker.yml -d staging
+kamal deploy -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
 ```
+
+Omitting `-d staging` deploys **production** — the base configs are the production
+definition.
 
 The frontend commands carry an explicit `--version`. Without it Kamal versions the
 build as the bare git SHA and pushes it as `scout/frontend:<sha>` — the same tag
@@ -294,7 +307,7 @@ frontend proxying to `scout-staging-web`, putting production traffic on the stag
 API. The API/MCP/worker image is environment-agnostic, so those need no override.
 
 Migrations run automatically against the staging database when the API container
-starts. Logs: `kamal app logs -c config/deploy-staging.yml`.
+starts. Logs: `kamal app logs -d staging`.
 
 > Always `source config/staging.env` before staging commands — it points
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
