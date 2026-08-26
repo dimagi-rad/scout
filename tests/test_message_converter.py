@@ -1,4 +1,6 @@
-from langchain_core.messages import AIMessage, HumanMessage
+import json
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from apps.chat.message_converter import langchain_messages_to_ui
 from apps.workspaces.tasks import SYSTEM_RESUME_MARKER
@@ -54,3 +56,64 @@ def test_reasoning_part_omitted_when_no_thinking():
     ui = langchain_messages_to_ui(msgs)
     assistant = next(m for m in ui if m["role"] == "assistant")
     assert all(p["type"] != "reasoning" for p in assistant["parts"])
+
+
+def test_artifact_manager_subagent_trace_survives_reload():
+    msgs = [
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "artifact_manager",
+                    "id": "toolu_PARENT",
+                    "args": {"task": "build"},
+                }
+            ],
+        ),
+        ToolMessage(
+            name="artifact_manager",
+            tool_call_id="toolu_PARENT",
+            content=json.dumps(
+                {
+                    "status": "done",
+                    "message": "Built artifact.",
+                    "subagent_trace": {
+                        "subagentName": "artifact_manager",
+                        "events": [
+                            {
+                                "type": "data-subagent-status",
+                                "id": "artifact_manager:status",
+                                "data": {
+                                    "parentToolCallId": "missing-parent",
+                                    "subagentName": "artifact_manager",
+                                    "phase": "running",
+                                    "message": "Started",
+                                },
+                            },
+                            {
+                                "type": "data-subagent-tool-output",
+                                "id": "artifact_manager:child:output",
+                                "data": {
+                                    "parentToolCallId": "missing-parent",
+                                    "subagentName": "artifact_manager",
+                                    "toolCallId": "artifact_manager:child",
+                                    "toolName": "artifact_write",
+                                    "output": "{\"status\":\"created\"}",
+                                },
+                            },
+                        ],
+                    },
+                }
+            ),
+        ),
+    ]
+
+    ui = langchain_messages_to_ui(msgs)
+    assistant = next(m for m in ui if m["role"] == "assistant")
+    types = [part["type"] for part in assistant["parts"]]
+
+    assert "tool-artifact_manager" in types
+    assert "data-subagent-status" in types
+    child = next(part for part in assistant["parts"] if part["type"] == "data-subagent-tool-output")
+    assert child["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert child["data"]["toolName"] == "artifact_write"

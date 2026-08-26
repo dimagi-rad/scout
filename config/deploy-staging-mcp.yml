@@ -25,6 +25,9 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
+    CUBE_API_URL: "http://scout-staging-cube-web:4000"
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
     SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
@@ -35,6 +38,7 @@ env:
     - DJANGO_SECRET_KEY
     - SENTRY_DSN
     - MCP_SHARED_SECRET
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout

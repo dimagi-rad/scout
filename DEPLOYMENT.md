@@ -45,6 +45,7 @@ repo's CloudFormation template.
 
 | Service | Config | Port | Public? |
 |---------|--------|------|---------|
+| Cube + schema validator | `deploy-cube.yml` | 4000 / 4010 | No (internal network) |
 | API (Django/uvicorn) | `deploy.yml` | 8000 | No (internal network) |
 | MCP Server | `deploy-mcp.yml` | 8100 | No (internal network) |
 | Worker (Celery) | `deploy-worker.yml` | — | No |
@@ -57,8 +58,8 @@ The frontend nginx container reverse-proxies `/api/` and `/mcp/` to the internal
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
 
 1. Authenticates to AWS via OIDC (no access keys)
-2. Builds and pushes Docker images to ECR
-3. Deploys each service with Kamal
+2. Builds and pushes the API/frontend images to ECR; Kamal builds Cube from `cube_config/Dockerfile`
+3. Deploys Cube → MCP → API → worker → frontend with Kamal
 4. Runs migrations in a pre-deploy hook (API service only)
 
 ### Required GitHub Configuration
@@ -102,9 +103,25 @@ The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
 | `SCOUT_ANTHROPIC_API_KEY` | Claude API key |
 | `SCOUT_SENTRY_DSN` | Sentry DSN for the backend Django project (API, worker, MCP all share it) |
 | `SCOUT_TASKBADGER_API_KEY` | Task Badger project API key for background-job tracking (API + worker share it) |
+| `SCOUT_CUBEJS_API_SECRET` | Production-only Cube JWT signing key shared by API, worker, MCP, and Cube. |
 
 The RDS master password is auto-managed by AWS (referenced via `SCOUT_RDS_SECRET_ARN`).
 `DATABASE_URL` is resolved at deploy time by `scripts/resolve-database-url.sh`.
+
+Connect staging is a separate OAuth provider and does not use the two production
+AWS secrets above. Store its application credentials as
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_ID` and
+`SCOUT_STAGING_CONNECT_OAUTH_CLIENT_SECRET` in the GitHub `staging` environment.
+The staging workflow maps them to `STAGING_CONNECT_OAUTH_*` inside the API
+container; production continues to use the AWS-backed `CONNECT_OAUTH_*` values.
+Store a random signing key as `SCOUT_STAGING_CUBEJS_API_SECRET` in the same
+environment. The workflow shares it only among staging's API, worker, MCP, and
+Cube containers so semantic-query security contexts are accepted end to end.
+Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
+the production workflow validates before building and Kamal resolves through
+`.kamal/secrets`. Generate the two values independently (for example,
+`openssl rand -hex 32`) so a staging credential can never sign a production
+Cube security context.
 
 ### Adding a new secret
 
@@ -207,17 +224,25 @@ driver so `kamal app logs` works directly.
 2. **DNS**: add an A record `scout-staging.dimagi.com` → the EC2 Elastic IP
    (`SCOUT_EC2_IP` in `.env.deploy`). Kamal's proxy issues the TLS cert once the
    record resolves.
-3. **OAuth**: the staging host reuses the production OAuth client IDs, so register
-   its callback URLs (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`)
-   with each provider (CommCare, Connect, OCS, Google) — otherwise OAuth login
-   fails on staging. `setup_oauth_apps` runs automatically for the staging domain
+3. **OAuth**: most providers reuse the production OAuth client IDs, so register
+   the staging callback URLs
+   (`https://scout-staging.dimagi.com/accounts/<provider>/login/callback/`) with
+   those providers. Connect is the exception: create a confidential authorization
+   code application on `https://connect-staging.dimagi.com/o/applications/` with
+   callback URL
+   `https://scout-staging.dimagi.com/accounts/commcare_connect/login/callback/`,
+   then store its credentials in the two GitHub `staging` environment secrets
+   documented above. `setup_oauth_apps` runs automatically for the staging domain
    in the API container's entrypoint.
 
 ### Deploying from GitHub Actions
 
 Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
-ref dropdown. It builds and pushes both images, then deploys MCP → API → worker →
-frontend, and needs no secrets beyond the ones production already uses.
+ref dropdown. It builds and pushes the API and frontend images, then Kamal builds
+Cube from `cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository
+and deploys Cube → MCP → API → worker → frontend. In addition to the production
+deploy secrets, the GitHub `staging` environment must contain the two
+Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
 Tests are not a gate — staging is for trying work in progress. The workflow is
 `workflow_dispatch`-only, so nothing reaches staging unless someone asks for it.
@@ -247,12 +272,14 @@ git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
 
 # First time
+kamal setup -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal setup -c config/deploy-staging-mcp.yml
 kamal setup -c config/deploy-staging.yml
 kamal setup -c config/deploy-staging-worker.yml
 kamal setup -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
 
 # Subsequent deploys
+kamal deploy -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal deploy -c config/deploy-staging-mcp.yml
 kamal deploy -c config/deploy-staging.yml
 kamal deploy -c config/deploy-staging-worker.yml
@@ -314,13 +341,22 @@ For deploying from your local machine (e.g., debugging or first-time setup):
 # 1. Generate .env.deploy from CloudFormation outputs
 ./scripts/fetch-deploy-env.sh        # use -q/--quiet to suppress output
 
-# 2. Deploy (first time)
+# 2. Deploy (first time, in dependency order)
+kamal setup -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
+kamal setup -c config/deploy-mcp.yml
 kamal setup
+kamal setup -c config/deploy-worker.yml
+kamal setup -c config/deploy-frontend.yml
 
-# 3. Deploy (subsequent)
+# 3. Deploy (subsequent, in dependency order)
+kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-mcp.yml
 kamal deploy
+kamal deploy -c config/deploy-worker.yml
+kamal deploy -c config/deploy-frontend.yml
 
 # Or deploy a specific service
+kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
 kamal deploy -c config/deploy-mcp.yml
 kamal deploy -c config/deploy-frontend.yml
 kamal deploy -c config/deploy-worker.yml

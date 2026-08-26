@@ -9,6 +9,7 @@ to the parameterized query execution.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import pytest_asyncio
 from django.contrib.auth import get_user_model
 from django.test import override_settings
 
@@ -19,12 +20,15 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
 from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
+from mcp_server.services.pool import close_all_pools
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -33,6 +37,12 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 # inside the function body, so we must patch on the source module.
 PATCH_INTERNAL_QUERY = "mcp_server.services.query.execute_internal_query"
 PATCH_WORKSPACE_CONTEXT = "mcp_server.server.load_workspace_context"
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_managed_db_pools():
+    yield
+    await close_all_pools()
 
 
 @pytest.fixture
@@ -182,13 +192,15 @@ class TestExecuteAsyncParameterized:
                 30,
             )
 
-        # SET search_path, SET timeout, actual query, then RESET ALL on return.
+        # SET ROLE, search_path, timeout, actual query, then reset role/session.
         execute_calls = mock_cursor.execute.call_args_list
-        assert len(execute_calls) == 4
+        assert len(execute_calls) == 6
+        assert "SET ROLE" in str(execute_calls[0][0][0])
+        assert "RESET ROLE" in str(execute_calls[-2])
         assert "RESET ALL" in str(execute_calls[-1])
 
         # Verify the actual query was called with params
-        final_call = execute_calls[2]
+        final_call = execute_calls[3]
         assert "information_schema.tables" in final_call[0][0]
         assert final_call[0][1] == ("test_domain",)
 
@@ -339,8 +351,143 @@ class TestListTablesTool:
 
             result = await list_tables(workspace_id="ws-test")
 
+            assert result["success"] is True
+            assert result["data"]["tables"] == []
+
+
+# ---------------------------------------------------------------------------
+# workspace/dataset discovery tools
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db(transaction=True)
+class TestWorkspaceAndDatasetDiscoveryTools:
+    async def test_list_workspaces_returns_accessible_workspaces(self, workspace, user):
+        from mcp_server.server import list_workspaces
+
+        result = await list_workspaces(
+            user_id=str(user.id),
+            workspace_id=str(workspace.id),
+            limit=10,
+            offset=0,
+        )
+
         assert result["success"] is True
-        assert result["data"]["tables"] == []
+        assert result["data"]["total"] == 1
+        assert result["data"]["has_more"] is False
+        item = result["data"]["workspaces"][0]
+        assert item["id"] == str(workspace.id)
+        assert item["name"] == workspace.name
+        assert item["role"] == WorkspaceRole.MANAGE
+        assert item["is_active"] is True
+        assert item["tenants"][0]["canonical_name"] == "Test Domain"
+
+    async def test_list_workspaces_requires_user_id(self):
+        from mcp_server.server import list_workspaces
+
+        result = await list_workspaces()
+
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    async def test_list_datasets_pages_across_accessible_workspaces(self, workspace, user):
+        from apps.semantic.models import SemanticDataset, SemanticField, SemanticModel
+        from mcp_server.server import list_datasets
+
+        model = await SemanticModel.objects.acreate(
+            workspace=workspace,
+            name="Test semantic model",
+        )
+        dataset = await SemanticDataset.objects.acreate(
+            workspace=workspace,
+            semantic_model=model,
+            name="raw_users",
+            label="Raw Users",
+            description="Worker roster",
+            schema_name="tenant_schema",
+            table_name="raw_users",
+            row_count=10,
+            metadata={"row_count_verified": False},
+        )
+        await SemanticField.objects.acreate(
+            dataset=dataset,
+            name="count",
+            label="Count",
+            field_type=SemanticField.FieldType.MEASURE,
+            data_type="integer",
+            expression="*",
+            measure_type=SemanticField.MeasureType.COUNT,
+            is_visible=True,
+        )
+
+        with patch("mcp_server.server.get_active_semantic_model", return_value=model):
+            result = await list_datasets(
+                user_id=str(user.id),
+                limit=10,
+                offset=0,
+                include_fields=True,
+            )
+
+        assert result["success"] is True
+        assert result["data"]["total"] == 1
+        item = result["data"]["datasets"][0]
+        assert item["workspace"]["id"] == str(workspace.id)
+        assert item["workspace"]["role"] == WorkspaceRole.MANAGE
+        assert item["name"] == "raw_users"
+        assert item["row_count"] == 10
+        assert item["row_count_verified"] is False
+        assert item["fields"][0]["member"] == "raw_users.count"
+
+    async def test_list_datasets_filters_inaccessible_requested_workspaces(
+        self, workspace, user, other_user, tenant
+    ):
+        from mcp_server.server import list_datasets
+
+        other_workspace = await Workspace.objects.acreate(
+            name="Other workspace",
+            created_by=other_user,
+        )
+        await WorkspaceTenant.objects.acreate(workspace=other_workspace, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=other_workspace,
+            user=other_user,
+            role=WorkspaceRole.MANAGE,
+        )
+
+        result = await list_datasets(
+            user_id=str(user.id),
+            workspace_ids=[str(other_workspace.id)],
+            limit=10,
+            offset=0,
+        )
+
+        assert result["success"] is True
+        assert result["data"]["datasets"] == []
+        assert result["data"]["inaccessible_workspace_ids"] == [str(other_workspace.id)]
+
+    async def test_semantic_catalog_rejects_inaccessible_workspace(
+        self, workspace, user, other_user, tenant
+    ):
+        from mcp_server.server import semantic_catalog
+
+        other_workspace = await Workspace.objects.acreate(
+            name="Other workspace",
+            created_by=other_user,
+        )
+        await WorkspaceTenant.objects.acreate(workspace=other_workspace, tenant=tenant)
+        await WorkspaceMembership.objects.acreate(
+            workspace=other_workspace,
+            user=other_user,
+            role=WorkspaceRole.MANAGE,
+        )
+
+        result = await semantic_catalog(
+            user_id=str(user.id),
+            workspace_id=str(other_workspace.id),
+        )
+
+        assert result["success"] is False
+        assert result["error"]["code"] == NOT_FOUND
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +778,14 @@ class TestParseDbUrl:
         assert params["dbname"] == "scout"
         assert params["user"] == ""
         assert params["password"] == ""
+        assert params["sslmode"] == "prefer"
+
+    def test_preserves_explicit_sslmode(self):
+        from mcp_server.context import _parse_db_url
+
+        params = _parse_db_url("postgresql://localhost/scout?sslmode=require", "my_schema")
+
+        assert params["sslmode"] == "require"
 
     def test_bare_dbname_fallback(self):
         """In dev, MANAGED_DATABASE_URL may be just a database name."""
@@ -1007,7 +1162,7 @@ async def test_cancel_materialization_aborts_job_and_flips_threadjob():
 
 class TestExecuteAsyncIntegration:
     """
-    End-to-end tests for _execute_async and _execute_async_parameterized against
+    End-to-end tests for _execute_async_parameterized against
     a real PostgreSQL server.  These catch driver-level regressions (e.g. SET
     statement_timeout failing with psycopg3's server-side parameters) that
     mock-based tests can't detect.
@@ -1056,7 +1211,7 @@ class TestExecuteAsyncIntegration:
                     VALUES ('alpha', 1), ('beta', 2), ('gamma', 3)
                     """
                 )
-                # Create the read-only role required by _execute_async SET ROLE
+                # Create the read-only role required by the executor SET ROLE
                 cur.execute(f'CREATE ROLE "{self.ro_role}"')
                 cur.execute(f'GRANT USAGE ON SCHEMA "{self.schema}" TO "{self.ro_role}"')
                 cur.execute(
@@ -1088,10 +1243,10 @@ class TestExecuteAsyncIntegration:
 
     @pytest.mark.asyncio
     async def test_returns_rows(self):
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
-        result = await _execute_async(
-            self._ctx(), "SELECT name, value FROM items ORDER BY value", 30
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT name, value FROM items ORDER BY value", (), 30
         )
 
         assert result["columns"] == ["name", "value"]
@@ -1101,17 +1256,19 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_statement_timeout_does_not_use_server_side_param(self):
         """Regression: SET statement_timeout TO $1 raises SyntaxError in psycopg3."""
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
         # Would raise psycopg.errors.SyntaxError before the fix
-        result = await _execute_async(self._ctx(), "SELECT 1 AS n", 30)
+        result = await _execute_async_parameterized(self._ctx(), "SELECT 1 AS n", (), 30)
         assert result["row_count"] == 1
 
     @pytest.mark.asyncio
     async def test_empty_result(self):
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
-        result = await _execute_async(self._ctx(), "SELECT name FROM items WHERE value > 9999", 30)
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT name FROM items WHERE value > 9999", (), 30
+        )
 
         assert result["columns"] == ["name"]
         assert result["rows"] == []
@@ -1135,10 +1292,12 @@ class TestExecuteAsyncIntegration:
     @pytest.mark.asyncio
     async def test_search_path_is_applied(self):
         """Unqualified table name resolves because search_path is set to the schema."""
-        from mcp_server.services.query import _execute_async
+        from mcp_server.services.query import _execute_async_parameterized
 
         # No schema qualifier — relies on SET search_path TO working correctly
-        result = await _execute_async(self._ctx(), "SELECT count(*) AS n FROM items", 30)
+        result = await _execute_async_parameterized(
+            self._ctx(), "SELECT count(*) AS n FROM items", (), 30
+        )
 
         assert result["row_count"] == 1
         assert result["rows"][0][0] == 3

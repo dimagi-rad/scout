@@ -37,22 +37,47 @@ VALID_CATEGORIES = frozenset(
 
 
 def create_save_learning_tool(workspace: Workspace, user: User):
-    """Create the save_learning tool scoped to a workspace and discovering user."""
+    """
+    Create a tool for saving agent learnings.
+
+    The returned tool allows the agent to persist discovered corrections
+    and patterns that will be automatically applied to future queries.
+    This is the key mechanism for the agent's self-improvement capability.
+
+    Learnings are stored with:
+    - A plain English description (injected into future prompts)
+    - The category of learning (for organization and retrieval)
+    - The tables it applies to (for relevance filtering)
+
+    Args:
+        workspace: The Workspace model instance for scoping the learning.
+        user: The User model instance who triggered the conversation
+              where the learning was discovered.
+
+    Returns:
+        A LangChain tool function that saves learnings.
+
+    Example:
+        >>> tool = create_save_learning_tool(workspace, user)
+        >>> result = tool.invoke({
+        ...     "description": "The events.timestamp column stores epoch ms, not a timestamp",
+        ...     "category": "type_mismatch",
+        ...     "tables": ["events"],
+        ... })
+    """
 
     @tool
     async def save_learning(
         description: str,
         category: str,
         tables: list[str],
-        original_sql: str = "",
-        corrected_sql: str = "",
     ) -> dict[str, Any]:
         """
-        Save a learned correction for future queries.
+        Save a learned correction for future semantic queries.
 
-        Call this tool AFTER you have successfully corrected a query error.
-        The learning will be automatically applied to future queries,
-        preventing the same mistake from happening again.
+        Call this tool AFTER you have successfully corrected a data-model,
+        business-logic, or interpretation issue. The learning will be
+        automatically applied to future semantic queries.
 
         Guidelines for good learnings:
         - Be specific and actionable
@@ -62,7 +87,7 @@ def create_save_learning_tool(workspace: Workspace, user: User):
 
         Good example:
         "The events.timestamp column stores Unix epoch milliseconds (not seconds).
-        Use to_timestamp(timestamp / 1000.0) to convert to a PostgreSQL timestamp."
+        Treat it as millisecond epoch time before comparing by calendar date."
 
         Bad example:
         "The timestamp column was wrong."
@@ -88,12 +113,6 @@ def create_save_learning_tool(workspace: Workspace, user: User):
             tables: List of table names this learning applies to.
                 Future queries involving these tables will see this learning.
                 Use actual table names from the schema.
-
-            original_sql: The SQL that failed (optional but recommended).
-                Helps validate the learning and provides context.
-
-            corrected_sql: The SQL that worked (optional but recommended).
-                Shows the correct pattern to follow.
 
         Returns:
             A dict with:
@@ -181,9 +200,7 @@ def create_save_learning_tool(workspace: Workspace, user: User):
                 category=category,
                 applies_to_tables=tables,
                 original_error="",
-                original_sql=original_sql,
-                corrected_sql=corrected_sql,
-                confidence_score=0.5,  # neutral
+                confidence_score=0.5,  # Start at neutral confidence
                 times_applied=0,
                 is_active=True,
                 discovered_by_user=user,

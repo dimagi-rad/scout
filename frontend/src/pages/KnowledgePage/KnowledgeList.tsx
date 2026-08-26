@@ -36,7 +36,7 @@ function getItemDescription(item: KnowledgeItem): string | null {
     case "entry":
       return item.content ? item.content.slice(0, 120) + (item.content.length > 120 ? "..." : "") : null
     case "learning":
-      return item.corrected_sql ? `Corrected: ${item.corrected_sql.slice(0, 100)}...` : null
+      return item.original_error || null
   }
 }
 

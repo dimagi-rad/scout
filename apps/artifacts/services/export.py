@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_EXPORT_TYPES = frozenset({"react", "html", "markdown", "svg"})
+
 ALLOWED_SVG_TAGS = [
     "svg",
     "g",
@@ -148,7 +150,6 @@ STANDALONE_HTML_TEMPLATE = """<!DOCTYPE html>
     <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/recharts@2/umd/Recharts.js"></script>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
     <script src="https://cdn.jsdelivr.net/npm/lodash@4/lodash.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
@@ -243,36 +244,6 @@ MARKDOWN_HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
-PLOTLY_HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title}</title>
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-    <style>
-        body {{
-            margin: 0;
-            padding: 16px;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        }}
-        #chart {{
-            width: 100%;
-            height: 100vh;
-            max-height: 800px;
-        }}
-    </style>
-</head>
-<body>
-    <div id="chart"></div>
-    <script>
-        const spec = {plotly_json};
-        Plotly.newPlot('chart', spec.data, spec.layout || {{}}, {{responsive: true}});
-    </script>
-</body>
-</html>
-"""
-
 
 class ArtifactExporter:
     """
@@ -290,19 +261,14 @@ class ArtifactExporter:
     def export_html(self) -> str:
         """Export the artifact as a standalone HTML file with embedded libs and data."""
         artifact = self.artifact
+        if artifact.artifact_type not in SUPPORTED_EXPORT_TYPES:
+            raise ValueError(f"Unsupported artifact type: {artifact.artifact_type}")
         safe_title = html.escape(artifact.title or "Artifact")
 
         if artifact.artifact_type == "markdown":
             return MARKDOWN_HTML_TEMPLATE.format(
                 title=safe_title,
                 markdown_json=json.dumps(artifact.code),
-            )
-
-        if artifact.artifact_type == "plotly":
-            # code holds the plot spec (JSON)
-            return PLOTLY_HTML_TEMPLATE.format(
-                title=html.escape(artifact.title or "Chart"),
-                plotly_json=artifact.code,
             )
 
         if artifact.artifact_type == "svg":

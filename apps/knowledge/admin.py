@@ -91,7 +91,7 @@ class AgentLearningAdmin(admin.ModelAdmin):
         "created_at",
     ]
     list_filter = ["workspace", "category", "is_active", ConfidenceRangeFilter]
-    search_fields = ["description", "original_error", "original_sql", "corrected_sql"]
+    search_fields = ["description", "original_error"]
     actions = [
         "approve_learnings",
         "reject_learnings",
@@ -105,7 +105,7 @@ class AgentLearningAdmin(admin.ModelAdmin):
         (
             "Evidence",
             {
-                "fields": ("original_error", "original_sql", "corrected_sql"),
+                "fields": ("original_error",),
                 "classes": ("collapse",),
             },
         ),

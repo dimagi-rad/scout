@@ -32,3 +32,4 @@ jobs:
         run: >-
           uv run pytest tests/smoke/test_deployment.py
           -v --override-ini="addopts=" -p no:django
+          --confcutdir=tests/smoke

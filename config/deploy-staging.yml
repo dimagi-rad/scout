@@ -31,12 +31,17 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
     DJANGO_ALLOWED_HOSTS: "scout-staging.dimagi.com"
     CSRF_TRUSTED_ORIGINS: "https://scout-staging.dimagi.com"
     SCOUT_BASE_URL: "https://scout-staging.dimagi.com"
     DEFAULT_FROM_EMAIL: "Scout Staging <noreply@dimagi.com>"
     SECURE_SSL_REDIRECT: "False"
     MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
+    CUBE_API_URL: "http://scout-staging-cube-web:4000"
+    CUBE_VALIDATOR_URL: "http://scout-staging-cube-web:4010"
+    CUBE_SCHEMA_VALIDATION_REQUIRED: "True"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60
@@ -56,13 +61,14 @@ env:
     - LANGFUSE_PUBLIC_KEY
     - COMMCARE_OAUTH_CLIENT_ID
     - COMMCARE_OAUTH_CLIENT_SECRET
-    - CONNECT_OAUTH_CLIENT_ID
-    - CONNECT_OAUTH_CLIENT_SECRET
+    - STAGING_CONNECT_OAUTH_CLIENT_ID
+    - STAGING_CONNECT_OAUTH_CLIENT_SECRET
     - OCS_OAUTH_CLIENT_ID
     - OCS_OAUTH_CLIENT_SECRET
     - SENTRY_DSN
     - TASKBADGER_API_KEY
     - MCP_SHARED_SECRET
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout

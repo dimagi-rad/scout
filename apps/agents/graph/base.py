@@ -15,33 +15,43 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from apps.agents.graph.state import AgentState, prune_messages
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
-from apps.agents.tools.artifact_tool import create_artifact_tools
+from apps.agents.subagents.events import (
+    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    SUBAGENT_TOOL_NAMES,
+    reset_subagent_event_queue,
+    set_subagent_event_queue,
+)
 from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
+from apps.semantic.services.catalog import (
+    SemanticCatalogUnavailable,
+    get_active_semantic_model,
+)
+from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
+    WorkspaceRole,
     WorkspaceViewSchema,
 )
-from mcp_server.context import load_tenant_context, load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
-    pipeline_describe_table,
     pipeline_list_tables,
     transformation_aware_list_tables,
-    workspace_list_tables,
 )
 
 if TYPE_CHECKING:
@@ -57,8 +67,12 @@ MCP_TOOL_NAMES = frozenset(
     {
         "list_tables",
         "describe_table",
-        "query",
         "get_metadata",
+        "list_workspaces",
+        "list_datasets",
+        "semantic_catalog",
+        "describe_dataset",
+        "semantic_query",
         "run_materialization",
         "get_schema_status",
         "get_lineage",
@@ -69,27 +83,52 @@ MCP_TOOL_NAMES = frozenset(
     }
 )
 
-# MCP tools the server advertises but that must NEVER be bound to the LLM.
-#
-# ``teardown_schema`` (arch #237 / finding 00#2) DROPs all tenant/view schemas
-# but updates no Django state (TenantSchema/MaterializationRun/WorkspaceViewSchema
-# stay stale) and silently destroys sibling workspaces sharing the schema. Its
-# only guards are an LLM-suppliable ``confirm`` flag and workspace existence — no
-# role check — and the agent has no use for it (schemas re-provision on the next
-# materialization). Filtered here, not removed from the server (operator/HTTP
-# callers still use it).
-AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
+LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 
-# Context params the graph injects server-side into every MCP tool call. Hidden
-# from the LLM-facing schema AND stripped from tool input surfaced to the UI
-# (internal ids, not user args). ``tool_call_id`` is injected per-call from the
-# tool_call's own id; the rest from agent state. Single source of truth so the
-# SSE stream's input-redaction stays in lockstep with the graph's injection.
-INJECTED_TOOL_PARAMS = frozenset({"workspace_id", "user_id", "thread_id", "tool_call_id"})
+# MCP tools the server advertises but that must NEVER be exposed to the agent.
+#
+# ``teardown_schema`` (arch #237 / finding 00#2) physically DROPs every tenant
+# and view schema for a workspace but updates no Django state — TenantSchema
+# stays ACTIVE over dropped schemas, MaterializationRuns stay COMPLETED, the
+# WorkspaceViewSchema stays ACTIVE, and sibling multi-tenant workspaces sharing
+# the (external_id-keyed) tenant schema are silently destroyed without being
+# failed. Its only guards are an LLM-suppliable ``confirm`` flag and workspace
+# existence; there is no role/membership check. It duplicates the worker
+# ``teardown_schema`` task (which carries the full state-update + sibling-fail
+# machinery) with none of its safety, and has no legitimate agent use case
+# (schemas are re-provisioned automatically on the next materialization). It is
+# therefore filtered out before tools are bound to the LLM. The MCP server still
+# defines the tool so operator/HTTP callers are unaffected.
+AGENT_EXCLUDED_MCP_TOOLS = frozenset(
+    {
+        "teardown_schema",
+        # Semantic-model mode: keep raw table-inspection tools server-side for
+        # internal and operator callers, but do not expose them to the LLM.
+        "list_tables",
+        "describe_table",
+        "get_metadata",
+    }
+)
+
+# Context params the graph injects into every MCP tool call server-side. They
+# are hidden from the LLM-facing tool schema (so the model never sets them) and
+# must also be stripped from any tool input surfaced to the UI (they carry
+# internal ids, not arguments the user typed). ``tool_call_id`` is injected
+# per-call from the LangChain tool_call's own id; the rest come from agent
+# state. Kept here as the single source of truth so the SSE stream's
+# input-redaction stays in lockstep with what the graph injects.
+INJECTED_TOOL_PARAMS = frozenset(
+    {
+        "workspace_id",
+        "user_id",
+        "thread_id",
+        "tool_call_id",
+        SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    }
+)
 
 
 DEFAULT_MAX_TOKENS = 4096
-SCHEMA_CONTEXT_CHAR_BUDGET = 6000
 
 # Anthropic prompt-caching breakpoint (arch #254, finding 02#3).
 # Default 5-min ephemeral TTL breaks even at ~2 reads, which a single agent turn
@@ -110,6 +149,7 @@ PROMPT_CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
 # Single source of truth shared with base_system.py's "When the Schema is Broken".
 ESCALATION_ERROR_CODES = frozenset({"NOT_FOUND", "VALIDATION_ERROR"})
 ESCALATION_TRIGGER_COUNT = 3
+ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS = 2_000
 
 
 def _tool_message_error_code(content: Any) -> str | None:
@@ -187,79 +227,108 @@ _system_prompt_cache: dict[str, tuple[str, float]] = {}
 _SYSTEM_PROMPT_TTL = 60  # short, to limit staleness from knowledge/schema changes
 
 
-def _system_prompt_cache_key(workspace, user, interactive: bool = True) -> str:
+def _system_prompt_cache_key(
+    workspace,
+    user,
+    interactive: bool = True,
+    canvas_write: bool = False,
+) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
-    user.id: _fetch_schema_context scopes TenantMetadata lookup per-user.
-    system_prompt hash: edits invalidate immediately.
-    interactive: materialization guidance differs (fire-and-resume vs blocking).
+    Includes user.id because _fetch_schema_context scopes TenantMetadata
+    lookup to the specific user. Includes workspace.system_prompt hash
+    so edits invalidate immediately. Includes ``interactive`` because the
+    materialization guidance differs between interactive (fire-and-resume) and
+    headless (blocking) runs. Includes ``canvas_write`` because write-capable
+    chats get different dataset-editing instructions from read-only chats.
     """
     prompt_hash = hashlib.md5(
         (workspace.system_prompt or "").encode(), usedforsecurity=False
     ).hexdigest()[:8]
     user_id = getattr(user, "id", "anon")
     mode = "i" if interactive else "h"
-    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}"
+    canvas_mode = "cw" if canvas_write else "cr"
+    return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}"
 
 
-def _render_compact_schema(tables: list[dict], last_materialized_at: str | None) -> str:
-    """Render a compact schema block: table names, descriptions, row counts."""
-    lines = []
-    if last_materialized_at:
-        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
-    else:
-        lines.append("Data is loaded and ready.\n")
-
-    lines.append("### Available Tables\n")
-    lines.append("| Table | Description | Materialized Rows |")
-    lines.append("|---|---|---|")
-    for t in tables:
-        materialized = t.get("materialized_row_count")
-        row_count = f"{materialized:,}" if materialized is not None else "unknown"
-        desc = t.get("description") or ""
-        lines.append(f"| {t['name']} | {desc} | {row_count} |")
-
-    lines.append(
-        "\nThe `Materialized Rows` column is the count at the last "
-        "materialization — not a live count. Do not quote it as an answer; "
-        "run `SELECT COUNT(*)` to get a verified value."
+def _semantic_catalog_context_sync(workspace) -> str:
+    get_active_semantic_model(workspace)
+    return (
+        "Data is loaded and ready through the workspace semantic model. "
+        "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
+        "to page through dataset summaries, `describe_dataset` for one dataset's "
+        "members, and `semantic_query` for analysis. Do not write SQL."
     )
-    lines.append("\nUse the `describe_table` tool for column details.")
-    return "\n".join(lines)
 
 
-def _render_full_schema(
-    tables: list[dict],
-    column_map: dict[str, list[dict]],
-    last_materialized_at: str | None,
-) -> str:
-    """Render a full schema block with column details per table."""
-    lines = []
-    if last_materialized_at:
-        lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}\n")
-    else:
-        lines.append("Data is loaded and ready.\n")
-
-    lines.append("### Available Tables\n")
-    for t in tables:
-        materialized = t.get("materialized_row_count")
-        row_count = f"{materialized:,}" if materialized is not None else "unknown"
-        desc = t.get("description") or ""
-        header = f"**{t['name']}**"
-        if desc:
-            header += f" — {desc}"
-        header += f" ({row_count} rows at last materialization)"
-        lines.append(header)
-
-        cols = column_map.get(t["name"], [])
-        if cols:
-            lines.append("Columns:")
-            for col in cols:
-                col_desc = f" — {col['description']}" if col.get("description") else ""
-                lines.append(f"- {col['name']} ({col['type']}){col_desc}")
-        lines.append("")
-
-    return "\n".join(lines)
+async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+    try:
+        return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
+    except SemanticCatalogUnavailable:
+        tenant_count = await workspace.tenants.acount()
+        if tenant_count == 1:
+            tenant = await workspace.tenants.afirst()
+            ts = await TenantSchema.objects.filter(
+                tenant=tenant,
+                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
+            ).afirst()
+            if ts is None:
+                return (
+                    _HEADLESS_MATERIALIZE_GUIDANCE
+                    if not interactive
+                    else (
+                        "No data has been loaded yet. Call `run_materialization` to start "
+                        "loading. This tool returns IMMEDIATELY with `status: started` — do "
+                        "NOT call other data tools in the same turn. Acknowledge to the user "
+                        "in ONE sentence and end your turn. The system will resume the "
+                        "conversation automatically when materialization completes."
+                    )
+                )
+            if ts.state == SchemaState.MATERIALIZING:
+                return (
+                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+                    if not interactive
+                    else (
+                        "A materialization is already in progress in the background. Do NOT "
+                        "trigger another one and do NOT call other data tools. Briefly tell "
+                        "the user it's still loading and end your turn — the system will "
+                        "resume the conversation automatically when materialization completes."
+                    )
+                )
+            return (
+                "Data is loaded, but no semantic datasets are available yet. "
+                "Run materialization to rebuild the semantic catalog, then use "
+                "`list_datasets` and `semantic_query`."
+            )
+        if tenant_count > 1:
+            vs = await WorkspaceViewSchema.objects.filter(workspace_id=workspace.id).afirst()
+            if vs is not None and vs.state == SchemaState.MATERIALIZING:
+                return (
+                    _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+                    if not interactive
+                    else (
+                        "A materialization is already in progress in the background. Do NOT "
+                        "trigger another one and do NOT call other data tools. Briefly tell "
+                        "the user it's still loading and end your turn — the system will "
+                        "resume the conversation automatically when materialization completes."
+                    )
+                )
+            return (
+                f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
+                "No semantic datasets are available yet. Call `run_materialization` "
+                "to load workspace data and rebuild the semantic catalog."
+            )
+        return (
+            _HEADLESS_MATERIALIZE_GUIDANCE
+            if not interactive
+            else (
+                "No data has been loaded yet. Call `run_materialization` to start "
+                "loading. This tool returns IMMEDIATELY with `status: started` — do "
+                "NOT call other data tools in the same turn. Acknowledge to the user "
+                "in ONE sentence and end your turn. The system will resume the "
+                "conversation automatically when materialization completes."
+            )
+        )
 
 
 # HEADLESS (non-interactive, e.g. recipe) guidance. No Thread/checkpointer/resume
@@ -287,8 +356,8 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
-    Tries to build a full schema block (tables + columns). Falls back to a compact
-    block (tables + row counts only) if the full text exceeds SCHEMA_CONTEXT_CHAR_BUDGET.
+    Reports availability state without embedding table or dataset names. Runtime
+    dataset discovery belongs in MCP tools such as ``list_datasets``.
 
     ``interactive`` selects the materialization guidance: fire-and-resume (chat)
     vs blocking (headless recipe runs).
@@ -340,40 +409,21 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
         tables = await pipeline_list_tables(ts, pipeline_config)
 
     if not tables:
-        return "Data is loaded but no tables are available yet. The materialization may still be completing."
-
-    last_materialized_at = tables[0].get("materialized_at") if tables else None
-
-    try:
-        ctx = await load_tenant_context(tenant.external_id, tenant.provider)
-        from apps.workspaces.models import TenantMetadata
-
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant=tenant, tenant_membership__user=user
-        ).afirst()
-
-        column_map: dict[str, list[dict]] = {}
-        for t in tables:
-            detail = await pipeline_describe_table(t["name"], ctx, tenant_metadata, pipeline_config)
-            if detail:
-                column_map[t["name"]] = detail.get("columns", [])
-
-        full_text = _render_full_schema(tables, column_map, last_materialized_at)
-
-        if terminal_assets:
-            full_text += (
-                "\n\nThese tables are produced by a transformation pipeline. "
-                "Use the `get_lineage` tool to explore how any table was built."
-            )
-
-        if len(full_text) <= SCHEMA_CONTEXT_CHAR_BUDGET:
-            return full_text
-    except Exception:
-        logger.debug(
-            "Could not fetch full schema for context injection, using compact", exc_info=True
+        return (
+            "Data is loaded but no semantic datasets are available yet. The "
+            "materialization may still be completing. Retry `list_datasets` shortly."
         )
 
-    compact = _render_compact_schema(tables, last_materialized_at)
+    last_materialized_at = tables[0].get("materialized_at") if tables else None
+    if last_materialized_at:
+        loaded = f"Data is loaded and ready. Last updated: {last_materialized_at}."
+    else:
+        loaded = "Data is loaded and ready."
+    compact = (
+        f"{loaded} Use `list_datasets` to page through dataset summaries, "
+        "`describe_dataset` for one dataset's members, and `semantic_query` "
+        "for analysis."
+    )
     if terminal_assets:
         compact += (
             "\n\nThese tables are produced by a transformation pipeline. "
@@ -383,9 +433,8 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
 
 _MULTI_TENANT_NAMESPACE_HINT = (
-    "This is a multi-tenant workspace. Tables are namespaced views prefixed with the "
-    "tenant name using double underscore: `{tenant_name}__{table_name}`. "
-    "To query across tenants, use explicit JOINs between namespaced tables."
+    "This is a multi-tenant workspace. Use the semantic catalog rather than "
+    "raw tenant tables; semantic datasets handle the workspace scope."
 )
 
 
@@ -432,13 +481,6 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
             "when materialization completes."
         )
 
-    tables: list[dict] = []
-    try:
-        ctx = await load_workspace_context(str(workspace.id))
-        tables = await workspace_list_tables(ctx)
-    except Exception:
-        logger.debug("Could not fetch multi-tenant table list for context injection", exc_info=True)
-
     last_run = None
     if tenant_ids:
         last_run = (
@@ -456,13 +498,6 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
         last_run.completed_at.isoformat() if last_run and last_run.completed_at else None
     )
 
-    if not tables:
-        return (
-            f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
-            "Data is loaded but no tables are visible yet. The view schema may "
-            "still be initializing — call `list_tables` to re-check shortly."
-        )
-
     lines: list[str] = []
     if last_materialized_at:
         lines.append(f"Data is loaded and ready. Last updated: {last_materialized_at}")
@@ -471,14 +506,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
     lines.append("")
     lines.append(_MULTI_TENANT_NAMESPACE_HINT)
     lines.append("")
-    lines.append("### Available Tables")
-    lines.append("")
-    lines.append("| Table |")
-    lines.append("|---|")
-    for t in tables:
-        lines.append(f"| {t['name']} |")
-    lines.append("")
-    lines.append("Use the `describe_table` tool for column details.")
+    lines.append("Use `list_datasets` and `describe_dataset` for dataset details.")
     return "\n".join(lines)
 
 
@@ -490,17 +518,19 @@ def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
     hidden = set(hidden_params)
     result: list = []
     for tool in tools:
-        if tool.name not in MCP_TOOL_NAMES:
-            result.append(tool)
-            continue
-
         schema = tool.get_input_schema().model_json_schema()
         props = schema.get("properties", {})
         to_hide = hidden & set(props)
+
         if not to_hide:
             result.append(tool)
             continue
 
+        if tool.name not in MCP_TOOL_NAMES and tool.name not in LOCAL_CONTEXT_TOOL_NAMES:
+            result.append(tool)
+            continue
+
+        # Build a trimmed schema dict for bind_tools
         trimmed_props = {k: v for k, v in props.items() if k not in to_hide}
         trimmed_required = [r for r in schema.get("required", []) if r not in to_hide]
         result.append(
@@ -518,6 +548,66 @@ def _llm_tool_schemas(tools: list, hidden_params: list[str]) -> list:
             }
         )
     return result
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+                elif isinstance(block.get("content"), str):
+                    parts.append(block["content"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def _artifact_manager_task_is_missing(args: Any) -> bool:
+    if not isinstance(args, dict):
+        return True
+    task = args.get("task")
+    return not isinstance(task, str) or not task.strip()
+
+
+def _latest_human_text(messages: list[Any]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            text = _message_text(msg).strip()
+            if text:
+                return text
+    return ""
+
+
+def _synthesize_artifact_manager_task(messages: list[Any]) -> str:
+    """Build a bounded fallback task when the LLM emits an empty tool call.
+
+    Anthropic can still produce an empty argument object despite a required
+    schema. For artifact work, the user's latest request is enough context: the
+    Artifact Manager subagent owns data discovery, semantic query verification,
+    graph construction, and validation.
+    """
+
+    user_request = _latest_human_text(messages)
+    if len(user_request) > ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS:
+        user_request = user_request[:ARTIFACT_MANAGER_SYNTHETIC_TASK_MAX_CHARS].rstrip()
+        user_request += "..."
+    if not user_request:
+        user_request = "Create or update the semantic story artifact requested in this thread."
+
+    return (
+        "Create or update a semantic story artifact for the user's latest request. "
+        "Treat this as a complete delegated artifact task. Do your own dataset "
+        "discovery and semantic-query verification inside the Artifact Manager; "
+        "use live semantic data, hidden semantic_query blocks, validated graph/table/stat "
+        "bindings, and publish only after artifact_write validation succeeds.\n\n"
+        f"User request:\n{user_request}"
+    )
 
 
 def _build_cached_system_message(stable: str, volatile: str) -> SystemMessage:
@@ -547,17 +637,26 @@ def _make_injecting_tool_node(
     what the LLM generated.
     """
 
-    async def injecting_node(state: AgentState) -> dict[str, Any]:
+    async def injecting_node(
+        state: AgentState,
+        config: RunnableConfig | None = None,
+    ) -> dict[str, Any]:
         messages = list(state["messages"])
         last_msg = messages[-1]
+        event_queue = None
+        if isinstance(config, dict):
+            event_queue = (config.get("configurable") or {}).get(SUBAGENT_EVENT_QUEUE_CONFIG_KEY)
 
         if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             modified_msg = copy.copy(last_msg)
+            persistable_msg = copy.copy(last_msg)
             modified_calls = []
+            persistable_calls = []
+            persistable_changed = False
             for tc in last_msg.tool_calls:
+                tc_id = tc.get("id") or ""
                 if tc["name"] in MCP_TOOL_NAMES:
                     extra = {k: state.get(v, "") for k, v in injections.items()}
-                    tc_id = tc.get("id") or ""
                     if not tc_id:
                         logger.warning(
                             "MCP tool call '%s' has no id; tool_call_id will be empty — "
@@ -566,12 +665,53 @@ def _make_injecting_tool_node(
                         )
                     extra["tool_call_id"] = tc_id
                     tc = {**tc, "args": {**tc["args"], **extra}}
+                    persistable_tc = copy.deepcopy(tc)
+                    persistable_tc["args"] = {
+                        k: v
+                        for k, v in persistable_tc.get("args", {}).items()
+                        if k not in INJECTED_TOOL_PARAMS
+                    }
+                elif tc["name"] in LOCAL_CONTEXT_TOOL_NAMES:
+                    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+                    if tc["name"] == "artifact_manager" and _artifact_manager_task_is_missing(args):
+                        task = _synthesize_artifact_manager_task(messages)
+                        args = {**args, "task": task}
+                        logger.warning(
+                            "artifact_manager tool call had empty task; synthesized "
+                            "fallback task from latest user request (tool_call_id=%s)",
+                            tc_id,
+                        )
+                        persistable_changed = True
+                    persistable_tc = {**tc, "args": dict(args)}
+                    extra = {"tool_call_id": tc_id}
+                    if tc["name"] in SUBAGENT_TOOL_NAMES:
+                        extra[SUBAGENT_EVENT_QUEUE_CONFIG_KEY] = event_queue
+                    tc = {**tc, "args": {**args, **extra}}
+                else:
+                    persistable_tc = tc
                 modified_calls.append(tc)
+                persistable_calls.append(persistable_tc)
             modified_msg.tool_calls = modified_calls
+            if persistable_changed:
+                persistable_msg.tool_calls = persistable_calls
             messages = [*messages[:-1], modified_msg]
 
-        return await base_tool_node.ainvoke({"messages": messages})
+        token = set_subagent_event_queue(event_queue)
+        try:
+            result = await base_tool_node.ainvoke({"messages": messages}, config=config)
+            if (
+                "persistable_msg" in locals()
+                and persistable_changed
+                and getattr(persistable_msg, "id", None)
+                and isinstance(result, dict)
+            ):
+                result_messages = list(result.get("messages", []))
+                return {**result, "messages": [persistable_msg, *result_messages]}
+            return result
+        finally:
+            reset_subagent_event_queue(token)
 
+    injecting_node.__annotations__["config"] = RunnableConfig | None
     return injecting_node
 
 
@@ -608,6 +748,19 @@ async def build_agent_graph(
     """
     logger.info("Building agent graph for workspace %s (interactive=%s)", workspace.id, interactive)
 
+    # Same policy as the canvas REST endpoints: only members above the read
+    # role can stage/commit canvas changes, so read-only members never get the
+    # canvas_manager tool (the tool closures re-check as the hard boundary).
+    canvas_membership = None
+    if interactive and conversation_id and user is not None:
+        _authorized_workspace, canvas_membership = await aresolve_workspace_access(
+            user, workspace.id
+        )
+    canvas_write = bool(
+        canvas_membership is not None and canvas_membership.role != WorkspaceRole.READ
+    )
+
+    # --- Build tools ---
     tools = _build_tools(
         workspace,
         user,
@@ -615,6 +768,7 @@ async def build_agent_graph(
         conversation_id=conversation_id,
         interactive=interactive,
         job_id=job_id,
+        canvas_write=canvas_write,
     )
     logger.debug("Created %d tools for workspace %s", len(tools), workspace.id)
 
@@ -637,7 +791,10 @@ async def build_agent_graph(
     llm_with_tools = llm.bind_tools(llm_tool_schemas)
 
     stable_prompt, volatile_prompt = await _build_system_prompt(
-        workspace, user, interactive=interactive
+        workspace,
+        user,
+        interactive=interactive,
+        canvas_write=canvas_write,
     )
     logger.debug(
         "System prompt assembled: %d stable + %d volatile chars for workspace %s",
@@ -778,20 +935,50 @@ def _build_tools(
     conversation_id: str | None = None,
     interactive: bool = True,
     job_id: int | None = None,
+    canvas_write: bool = False,
 ) -> list:
     """Build the tool list: MCP data tools plus local artifact/recipe/learning
     tools, and a blocking materialization tool in headless mode.
     """
-    # Drop MCP tools that must not reach the LLM (see AGENT_EXCLUDED_MCP_TOOLS).
-    # In headless mode also drop the interactive fire-and-ack run_materialization
-    # (needs a Thread + checkpointer + async resume a headless run lacks); it's
-    # replaced below by the blocking materialize tool.
+    # Drop any MCP tool the server advertises but that must not reach the LLM
+    # (e.g. the destructive ``teardown_schema`` — see AGENT_EXCLUDED_MCP_TOOLS).
+    # In headless mode also drop the interactive fire-and-ack
+    # ``run_materialization``: it requires a real chat Thread + checkpointer +
+    # async resume that a headless run does not have. It is replaced below by the
+    # blocking materialize tool, which runs the pipeline inline and returns when
+    # data is ready.
     excluded = set(AGENT_EXCLUDED_MCP_TOOLS)
     if not interactive:
         excluded.add("run_materialization")
     tools = [t for t in mcp_tools if getattr(t, "name", None) not in excluded]
+    from apps.agents.tools.artifact_manager_agent import create_artifact_manager_tool
+    from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
+    from apps.agents.tools.canvas_tool import create_canvas_read_tool
+
     tools.append(create_save_learning_tool(workspace, user))
-    tools.extend(create_artifact_tools(workspace, user, conversation_id=conversation_id))
+    tools.append(
+        create_artifact_manager_tool(
+            workspace,
+            user,
+            mcp_tools or [],
+            conversation_id=conversation_id,
+        )
+    )
+    if interactive and conversation_id:
+        # The canvas is thread-bound; headless (recipe) runs have no thread.
+        # The parent keeps a read-only canvas_read for cheap draft questions;
+        # all canvas writes are delegated to the Canvas Manager subagent,
+        # which read-only workspace members do not get at all.
+        tools.append(create_canvas_read_tool(workspace, user, conversation_id))
+        if canvas_write:
+            tools.append(
+                create_canvas_manager_tool(
+                    workspace,
+                    user,
+                    mcp_tools or [],
+                    conversation_id=conversation_id,
+                )
+            )
     tools.append(create_recipe_tool(workspace, user))
     if not interactive:
         tools.append(create_materialization_tool(workspace, user, job_id))
@@ -799,21 +986,23 @@ def _build_tools(
 
 
 async def _build_system_prompt(
-    workspace: Workspace, user, interactive: bool = True
+    workspace: Workspace,
+    user,
+    interactive: bool = True,
+    canvas_write: bool = False,
 ) -> tuple[str, str]:
     """Assemble the workspace system prompt as a (stable, volatile) split.
 
     Stable = base prompt + artifact additions + workspace instructions +
-    knowledge (rarely change; invalidated via the cache key below). Volatile =
-    tenant context + ``## Data Availability`` (row counts / last-materialized
-    timestamp, change every materialization).
+    knowledge + dataset/canvas guidance. Volatile = runtime data availability,
+    which may change after every materialization.
 
     Splitting lets the agent node put the ``cache_control`` breakpoint on the
     stable prefix while the volatile block sits after it, so a new materialization
     no longer rewrites cached prefix bytes and defeats every cache hit (arch #254,
     finding 02#3). ``volatile_suffix`` may be "".
     """
-    cache_key = _system_prompt_cache_key(workspace, user, interactive)
+    cache_key = _system_prompt_cache_key(workspace, user, interactive, canvas_write)
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -838,19 +1027,36 @@ async def _build_system_prompt(
 
     tenant_count = await workspace.tenants.acount()
 
-    if tenant_count == 1:
-        tenant = await workspace.tenants.afirst()
-        pipeline_config = get_registry().get_by_provider(tenant.provider)
-        pipeline_name = pipeline_config.name if pipeline_config else "commcare_sync"
+    if tenant_count > 0:
+        stable_sections.append("""
+## Workspace And Dataset Discovery
 
-        volatile_sections.append(f"""
-## Tenant Context
+Semantic datasets are the primary objects users see and ask about. A dataset
+has business-facing dimensions, time dimensions, measures, relationships,
+labels, descriptions, and display metadata. Workspace names, providers,
+pipelines, and dataset lists are runtime data; do not assume they are present
+in the system prompt.
 
-- Tenant: {tenant.canonical_name} ({tenant.external_id})
-- Provider: {tenant.get_provider_display()}
-- Pipeline: {pipeline_name}
+Use dataset tools by intent:
+- Discover available data: `list_workspaces` and `list_datasets`.
+- Inspect one dataset's fields, labels, descriptions, formats, and
+  relationships: `describe_dataset`.
+- Answer analytical questions: `semantic_query` over semantic members only.
+- Change dataset definitions, labels, descriptions, fields, relationships, or
+  display metadata: use the Semantic Canvas instructions below when available;
+  do not invent raw SQL or mutate datasets directly from the parent chat agent.
 
-## Query Configuration
+Dataset editing vocabulary:
+- Create a new dataset: ask the canvas manager to create a CTE/SQL-derived
+  dataset with `definition_sql` and a `primary_key`.
+- Add fields: ask the canvas manager to add dimensions or measures with field
+  names, source columns, and measure types.
+- Change a value format / number format / display format: ask the canvas
+  manager to set field metadata `format` and optional `currency`. Examples:
+  `number_0`, `number_2`, `percent_1`, `currency_2` + `USD`,
+  `accounting_2`. If the user says `decimal_02`, use `number_2`.
+
+## Semantic Query Configuration
 
 - Maximum rows per query: 500
 - Query timeout: 30 seconds
@@ -858,20 +1064,37 @@ async def _build_system_prompt(
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-        # Pre-fetch so the agent needn't call get_schema_status at runtime.
-        schema_context = await _fetch_schema_context(tenant, user, interactive)
-        volatile_sections.append(f"\n## Data Availability\n\n{schema_context}\n")
-    elif tenant_count > 1:
-        volatile_sections.append("""
-## Query Configuration
+        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        volatile_sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
 
-- Maximum rows per query: 500
-- Query timeout: 30 seconds
+    if interactive and canvas_write:
+        stable_sections.append("""
+## Semantic Canvas (dataset editing)
 
-When results are truncated, suggest adding filters or using aggregations to reduce the result size.
+This conversation has a canvas — a draft changeset over the workspace's
+datasets, shown to the user in the side panel. When the user asks to edit a
+dataset's label/description, field labels/descriptions, value format / display
+format / number format or currency, add measures or dimensions, link datasets, or create a
+CTE/SQL-derived dataset, delegate the whole job to the `canvas_manager` tool
+with a complete task description (datasets, field names and source columns,
+relationship endpoints, SQL, display metadata, and whether to commit). Use
+`canvas_read` yourself only to answer questions about pending draft changes.
+Draft changes become queryable only after the canvas is committed.
+Autogenerated fields can be curated (label/description/format/currency) but
+never removed or retyped.
+For value format requests, tell `canvas_manager` to set field metadata `format`
+and optional `currency`.
 """)
-        schema_context = await _fetch_multi_tenant_schema_context(workspace, user, interactive)
-        volatile_sections.append(f"\n## Data Availability\n\n{schema_context}\n")
+    elif interactive:
+        stable_sections.append("""
+## Semantic Canvas (read-only)
+
+This conversation has a canvas showing draft dataset changes in the side
+panel. Use `canvas_read` to answer questions about it. This user's workspace
+role is read-only: you cannot stage or save dataset changes for them — if they
+ask to update dataset labels, descriptions, fields, relationships, formats, or
+currency, explain that a read-write workspace role is required.
+""")
 
     stable = "\n".join(stable_sections)
     volatile = "\n".join(volatile_sections)

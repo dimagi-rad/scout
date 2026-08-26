@@ -5,16 +5,15 @@ Tests artifact models, views, access control, versioning, and artifact tools.
 """
 
 import uuid
-from unittest.mock import AsyncMock, patch
 
 import pytest
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user_model
 from django.test import AsyncClient, Client
 
-import apps.artifacts.views as artifact_views
 from apps.agents.tools.artifact_tool import create_artifact_tools
 from apps.artifacts.models import Artifact, ArtifactType
+from apps.artifacts.services.export import ArtifactExporter
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
@@ -22,7 +21,6 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceTenant,
 )
-from mcp_server.context import QueryContext
 
 User = get_user_model()
 
@@ -178,8 +176,8 @@ class TestArtifactModel:
             ArtifactType.REACT,
             ArtifactType.HTML,
             ArtifactType.MARKDOWN,
-            ArtifactType.PLOTLY,
             ArtifactType.SVG,
+            ArtifactType.STORY,
         ]:
             artifact = Artifact.objects.create(
                 workspace=workspace,
@@ -197,12 +195,42 @@ class TestArtifactModel:
         assert "react" in artifact_types
         assert "html" in artifact_types
         assert "markdown" in artifact_types
-        assert "plotly" in artifact_types
+        assert "plotly" not in artifact_types
         assert "svg" in artifact_types
+        assert "story" in artifact_types
 
 
 # ============================================================================
-# 3. TestArtifactSandboxView
+# 3. TestArtifactListView
+# ============================================================================
+
+
+@pytest.mark.django_db
+class TestArtifactListView:
+    def test_list_hides_unsupported_legacy_artifacts(
+        self,
+        authenticated_client,
+        artifact,
+        user,
+        workspace,
+    ):
+        Artifact.objects.create(
+            workspace=workspace,
+            created_by=user,
+            title="Legacy Plotly chart",
+            artifact_type="plotly",
+            code='{"data": []}',
+            conversation_id="legacy-thread",
+        )
+
+        response = authenticated_client.get(f"/api/workspaces/{workspace.id}/artifacts/")
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()["results"]] == [str(artifact.id)]
+
+
+# ============================================================================
+# 4. TestArtifactSandboxView
 # ============================================================================
 
 
@@ -224,7 +252,27 @@ class TestArtifactSandboxView:
         assert "<!DOCTYPE html>" in content
         assert "Artifact Sandbox" in content
         assert "React" in content or "react" in content
+        assert "Recharts" in content
+        assert "Plotly" not in content
         assert "root" in content
+
+    def test_react_export_loads_recharts_without_plotly(self, artifact):
+        content = ArtifactExporter(artifact).export_html()
+
+        assert "Recharts.js" in content
+        assert "plotly" not in content.lower()
+
+    def test_export_rejects_removed_artifact_types(self, artifact):
+        artifact.artifact_type = "plotly"
+
+        with pytest.raises(ValueError, match="Unsupported artifact type: plotly"):
+            ArtifactExporter(artifact).export_html()
+
+    def test_export_rejects_story_until_a_standalone_renderer_exists(self, artifact):
+        artifact.artifact_type = ArtifactType.STORY
+
+        with pytest.raises(ValueError, match="Unsupported artifact type: story"):
+            ArtifactExporter(artifact).export_html()
 
     def test_sandbox_supports_print_to_pdf(self, authenticated_client, artifact, workspace):
         """Sandbox HTML wires up print-to-PDF: print CSS and a scout-print listener."""
@@ -483,7 +531,6 @@ class TestArtifactTools:
                 "code": "export default function Chart() { return <div>Chart</div>; }",
                 "description": "Monthly revenue visualization",
                 "data": {"revenue": [1000, 2000, 3000]},
-                "source_queries": [{"name": "revenue", "sql": "SELECT month, revenue FROM sales"}],
             }
         )
 
@@ -503,11 +550,25 @@ class TestArtifactTools:
         assert artifact.artifact_type == "react"
         assert artifact.code == "export default function Chart() { return <div>Chart</div>; }"
         assert artifact.data["revenue"] == [1000, 2000, 3000]
-        assert artifact.source_queries == [
-            {"name": "revenue", "sql": "SELECT month, revenue FROM sales"}
-        ]
+        assert artifact.source_queries == []
         assert artifact.version == 1
         assert artifact.parent_artifact is None
+
+    @pytest.mark.asyncio
+    async def test_create_artifact_tool_rejects_plotly(self, user, workspace):
+        tools = create_artifact_tools(workspace, user)
+
+        result = await tools[0].ainvoke(
+            {
+                "title": "Legacy chart",
+                "artifact_type": "plotly",
+                "code": '{"data": []}',
+            }
+        )
+
+        assert result["status"] == "error"
+        assert "Invalid artifact_type 'plotly'" in result["message"]
+        assert not await Artifact.objects.filter(title="Legacy chart").aexists()
 
     @pytest.mark.asyncio
     async def test_update_artifact_tool(self, user, workspace, artifact, tenant_membership):
@@ -539,6 +600,28 @@ class TestArtifactTools:
         assert new_artifact.code == new_code
         assert new_artifact.title == "Updated Chart Title"
         assert new_artifact.data == {"rows": [{"x": 2, "y": 4}]}
+
+    @pytest.mark.asyncio
+    async def test_update_artifact_tool_rejects_removed_type(self, user, workspace):
+        legacy = await Artifact.objects.acreate(
+            workspace=workspace,
+            created_by=user,
+            title="Legacy chart",
+            artifact_type="plotly",
+            code='{"data": []}',
+        )
+        tools = create_artifact_tools(workspace, user)
+
+        result = await tools[1].ainvoke(
+            {
+                "artifact_id": str(legacy.id),
+                "code": "export default function Chart() { return <div />; }",
+            }
+        )
+
+        assert result["status"] == "error"
+        assert "no longer supported" in result["message"]
+        assert await Artifact.all_objects.acount() == 1
 
     @pytest.mark.asyncio
     async def test_update_creates_new_version(self, user, workspace, artifact, tenant_membership):
@@ -650,17 +733,8 @@ class TestArtifactQueryDataRouting:
     """Tests for ArtifactQueryDataView schema routing (issue #240, finding 00#6)."""
 
     @pytest.mark.asyncio
-    async def test_query_data_routes_through_workspace_context(self, user):
-        """Live query-data in a multi-tenant workspace must execute against the
-        VIEW schema (ws_*), not the FIRST tenant's t_* schema.
-
-        Before the fix, ArtifactQueryDataView resolved context via
-        workspace.tenants.afirst() + load_tenant_context(external_id), so it ran
-        against the wrong schema (relation-does-not-exist / silent single-tenant
-        slice). The fix routes through load_workspace_context like every other
-        consumer.
-        """
-
+    async def test_legacy_source_queries_do_not_execute(self, user):
+        """Legacy SQL-backed source_queries return a disabled error."""
         ws = await Workspace.objects.acreate(name="Multi WS", created_by=user)
         await WorkspaceMembership.objects.acreate(
             workspace=ws, user=user, role=WorkspaceRole.MANAGE
@@ -681,41 +755,19 @@ class TestArtifactQueryDataRouting:
             source_queries=[{"name": "q", "sql": "SELECT 1"}],
         )
 
-        view_ctx = QueryContext(
-            tenant_id=str(ws.id),
-            schema_name="ws_viewschema123",
-            connection_params={"host": "localhost"},
-        )
-
         client = AsyncClient()
         await sync_to_async(client.force_login)(user)
 
-        with (
-            patch(
-                "apps.artifacts.views.load_workspace_context",
-                new=AsyncMock(return_value=view_ctx),
-            ) as mock_lwc,
-            patch(
-                "apps.artifacts.views.execute_query",
-                new=AsyncMock(
-                    return_value={
-                        "success": True,
-                        "columns": ["n"],
-                        "rows": [[1]],
-                        "row_count": 1,
-                        "truncated": False,
-                    }
-                ),
-            ) as mock_exec,
-        ):
-            resp = await client.get(f"/api/workspaces/{ws.id}/artifacts/{art.id}/query-data/")
+        resp = await client.get(f"/api/workspaces/{ws.id}/artifacts/{art.id}/query-data/")
 
         assert resp.status_code == 200
-        mock_lwc.assert_awaited_once_with(str(ws.id))
-        # The query ran against the view-schema context, not a tenant context.
-        assert mock_exec.await_args.args[0].schema_name == "ws_viewschema123"
         body = resp.json()
-        assert body["queries"][0]["rows"] == [[1]]
-
-        # Regression guard: the view must no longer reach for per-tenant context.
-        assert not hasattr(artifact_views, "load_tenant_context")
+        assert body["queries"] == [
+            {
+                "name": "q",
+                "error": (
+                    "Legacy SQL-backed artifact queries are disabled. "
+                    "Recreate this artifact with semantic_queries."
+                ),
+            }
+        ]

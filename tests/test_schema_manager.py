@@ -9,7 +9,7 @@ from django.utils import timezone
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
-from apps.workspaces.services.schema_manager import SchemaManager, readonly_role_name
+from apps.workspaces.services.schema_manager import SchemaManager, dbt_role_name, readonly_role_name
 
 
 @pytest.mark.django_db
@@ -261,12 +261,22 @@ class TestSchemaManagerRoleCreation:
             ts = mgr.provision(tenant_membership.tenant)
 
         role_name = readonly_role_name(ts.schema_name)
+        dbt_role = dbt_role_name(ts.schema_name)
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
         assert any("CREATE ROLE" in c and role_name in c for c in calls), (
             f"Expected CREATE ROLE for {role_name} in DDL calls"
         )
         assert any("GRANT USAGE ON SCHEMA" in c for c in calls)
+        assert any(
+            "GRANT SELECT ON ALL TABLES IN SCHEMA" in c and role_name in c for c in calls
+        )
         assert any("ALTER DEFAULT PRIVILEGES" in c for c in calls)
+        assert any(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE" in c
+            and dbt_role in c
+            and role_name in c
+            for c in calls
+        )
 
     def test_create_physical_schema_creates_readonly_role(self, tenant_membership):
         mock_conn = MagicMock()

@@ -5,7 +5,7 @@ import { PublicThreadPage } from "@/pages/PublicThreadPage"
 
 // Issue #240, finding 00#8: the shared/public thread page must SANDBOX-RENDER
 // artifacts (self-contained html/svg in an iframe) instead of always dumping
-// the source as <pre>. React/Plotly artifacts (which need the CDN renderer +
+// the source as <pre>. React artifacts (which need the CDN renderer +
 // authed live data) keep showing source for anonymous viewers.
 
 const TOKEN = "share-tok-123"

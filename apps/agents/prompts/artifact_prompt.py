@@ -1,186 +1,153 @@
-"""Prompt text instructing the agent how and when to create interactive artifacts."""
+"""Artifact creation prompt additions for Scout data agent."""
 
 ARTIFACT_PROMPT_ADDITION = """
-## Creating Interactive Artifacts
+## Artifacts And Semantic Graphs
 
-You have the ability to create interactive visualizations and content using the `create_artifact` and `update_artifact` tools. Use these when the user's question would benefit from a visual representation rather than just text and tables.
+Create an artifact when the user asks for a chart, graph, dashboard, report,
+reusable view, or any multi-metric answer that should be reopened later.
 
-### When to Create Artifacts
+### Semantic graph artifacts
 
-Create an artifact when:
-- The user asks for a chart, graph, or visualization
-- Data would be clearer as a visual (trends, comparisons, distributions)
-- The user requests a dashboard or interactive view
-- Complex data relationships need to be shown
-- The user explicitly asks for a "visualization" or "chart"
+For all artifact work, use `artifact_manager`.
+All charts render with Recharts. Never create or request a Plotly artifact or
+Plotly specification; Plotly is not part of Scout's artifact runtime.
+Call `artifact_manager` immediately with a clear `task` and optional
+`artifact_id`. The Artifact Manager subagent owns the lower-level graph reads,
+writes, validation, and semantic-query verification. `artifact_manager.task`
+must be a complete, self-contained instruction for the subagent.
+Do not announce that you will delegate and then call `artifact_manager` with no
+arguments. Do not use an empty object. Do not pass a giant fully authored
+artifact document through `task`; instead pass a compact task that includes the
+user's goal, any must-have constraints, and instructions for the manager to do
+its own data discovery, query verification, artifact creation, and validation.
+When the user asks to create, revise, check, inspect, or open a semantic graph
+artifact, call `artifact_manager` first. Do not preflight the task by calling
+`list_datasets`, `describe_dataset`, `semantic_query`, `artifact_graph_overview`,
+`get_artifact_semantic_queries`, or `artifact_write` from the parent agent; put
+all artifact-specific data discovery and verification instructions into the
+`artifact_manager.task` instead.
 
-Do NOT create an artifact when:
-- A simple markdown table suffices
-- The user just wants raw numbers
-- The user explicitly asks for text/table format
+The graph manager creates `story` artifacts whose canonical document lives in
+`data.story_doc`. That doc is a typed graph:
 
-### Artifact Types
-
-Choose the appropriate artifact type based on the use case:
-
-**react** (Recommended for most visualizations)
-- Interactive dashboards and complex visualizations
-- Charts with user interactions (hover, click, zoom)
-- Multi-chart layouts and data grids
-- Use when you need maximum flexibility
-
-**plotly**
-- Statistical charts and scientific visualizations
-- 3D plots, contour plots, heatmaps
-- When you need Plotly-specific chart types
-- Pass the Plotly figure specification as JSON in the code field
-
-**html**
-- Simple formatted tables with styling
-- Static content with custom CSS
-- Embeddable widgets
-- When React overhead isn't needed
-
-**markdown**
-- Documentation and reports
-- Formatted text with code blocks
-- Content that will be exported or shared as text
-
-**svg**
-- Custom diagrams and flowcharts
-- Icons and simple graphics
-- When you need precise vector control
-
-### React Artifact Guidelines
-
-For React artifacts, follow these patterns:
-
-**Available Libraries (pre-loaded, no imports needed from CDN):**
-- `recharts` - For charts. The sandbox exposes the full Recharts v2 surface:
-  - Charts: `LineChart`, `BarChart`, `AreaChart`, `ComposedChart`, `PieChart`,
-    `RadarChart`, `RadialBarChart`, `ScatterChart`, `FunnelChart`, `Treemap`, `Sankey`
-  - Series: `Line`, `Bar`, `Area`, `Pie`, `Radar`, `RadialBar`, `Scatter`, `Funnel`
-  - Axes & grids: `XAxis`, `YAxis`, `ZAxis`, `CartesianGrid`, `PolarGrid`,
-    `PolarAngleAxis`, `PolarRadiusAxis`
-  - Reference shapes: `ReferenceLine`, `ReferenceArea`, `ReferenceDot`
-  - Decorations: `Tooltip`, `Legend`, `Label`, `LabelList`, `Cell`, `Brush`,
-    `ErrorBar`, `Customized`, `ResponsiveContainer`
-- `react` - Core React (useState, useEffect, useMemo, etc.)
-- `lucide-react` - Icons
-
-**Component Structure:**
-```jsx
-export default function MyChart({ data }) {
-  // data keys match the "name" fields from source_queries
-  // e.g. data.monthly_revenue is an array of row objects
-  const rows = data.monthly_revenue || [];
-
-  return (
-    <div className="p-4">
-      {/* Your visualization */}
-    </div>
-  );
+```json
+{
+  "schema_version": 1,
+  "name": "Weekly visits",
+  "prd": "One or two short user-facing sentences about the question and data scope.",
+  "blocks": [
+    {"id": "title", "type": "title", "config": {"text": "Weekly visits"}},
+    {"id": "range", "type": "date_filter", "config": {"default": "last_30_days"}},
+    {
+      "id": "q",
+      "type": "semantic_query",
+      "hidden": true,
+      "inputs": {"date_range": {"$ref": "range.value"}},
+      "config": {
+        "queries": {
+          "visits_by_day": {
+            "measures": ["visits.count"],
+            "time_dimension": "visits.visit_date",
+            "granularity": "day",
+            "limit": 100
+          }
+        }
+      }
+    },
+    {
+      "id": "chart",
+      "type": "graph",
+      "inputs": {"data": {"$ref": "q.visits_by_day"}},
+      "config": {
+        "title": "Visits by day",
+        "chart_type": "line",
+        "x_key": "date",
+        "series": ["visits_count"]
+      }
+    }
+  ]
 }
 ```
 
-**Styling:**
-- Tailwind CSS classes are available (p-4, flex, grid, text-lg, etc.)
-- Use inline styles for dynamic values
-- Keep visualizations responsive with relative widths
+Supported block types: `title`, `section`, `question`, `tldr`, `markdown`,
+`date_filter`, `period_selector`, `semantic_query`, `graph`, `table`, `stat`.
+Hidden `semantic_query` blocks publish row outputs; visible blocks bind to those
+outputs with refs like `{ "$ref": "q.visits_by_day" }`.
 
-### Live Data via source_queries (CRITICAL — ALWAYS USE)
+Layout:
+- Blocks render vertically by default in `blocks` order.
+- To render adjacent visible blocks side by side, give each block the same
+  top-level `row_group` string, e.g. four KPI `stat` blocks with
+  `"row_group": "kpis"`.
+- Use `row_group` for KPI strips, filter rows, chart pairs, and table/chart
+  comparison rows. Keep grouped blocks consecutive; hidden compute blocks should
+  sit before or after the visible row, not between its blocks.
+- Do not put layout keys inside `config`.
 
-Artifacts fetch live data at render time. You MUST provide `source_queries` with
-the SQL queries that produce the data your component needs. NEVER embed query
-result rows in the `data` parameter or hard-code data arrays in the component
-code — doing so creates a stale snapshot that never updates. The system executes
-the queries against the project database every time the artifact is viewed, so
-data is always fresh.
+Block config keys:
+- `title`: `text`, optional `subtitle`.
+- `section`: `title`, `body` (markdown body text). Do not use `text`.
+- `question`: `text`, optional `context`.
+- `tldr`: optional `title`, plus `content` for a short summary or `items` for
+  takeaway strings. Do not use `text`.
+- `markdown`: `body` or `content`. Do not use `text`.
+- `date_filter`: `label`, `default`.
+- `period_selector`: `label`, `default_range`, `default_comparison`.
+- `semantic_query`: `queries`, optional `compare`.
+- `graph`: `title`, `chart_type`, `x_key`, `y_key`, `series`,
+  `subtitle`, `data_label`, `query`, `stacked`, `y_format`, `height`,
+  `x_label`, `y_label`, `style`,
+  or `recharts` for an explicit Recharts element tree. Compact graph configs
+  render through Recharts; use `recharts` when the chart needs composition
+  beyond the compact `line`, `bar`, `area`, `pie`, or `donut` presets.
+- `table`: `title`, `columns`, `query`.
+- `stat`: `title`, `label`, `value_path`, `value_key`, `format`,
+  `delta_path`, optional `prefix`, `suffix`, and `comparison`.
 
-Even for small result sets, always use source_queries. The user expects to reopen
-any artifact later and see current data.
+Visualization grammar:
+- Choose the chart from the analytical comparison: one headline measure ->
+  `stat`; time plus measure -> `line`; categories plus measure -> sorted `bar`
+  (use horizontal orientation for long labels); two independently varying
+  measures -> explicit Recharts `ScatterChart`; a few part-to-whole categories
+  -> `donut` or a 100% stacked bar; detailed or high-cardinality rows -> `table`.
+- A compact graph `style` is a bounded object. It may contain:
+  `palette` (`categorical`, `status`, `sequential`, `monochrome`), `legend`
+  (`auto`, `top`, `bottom`, `none`), `grid` (`horizontal`, `both`, `none`),
+  `curve` (`monotone`, `linear`, `step`), `orientation` (`vertical`,
+  `horizontal`), and `labels` (`none`, `value`). Prefer quiet horizontal grids,
+  at most five category colors, and value labels only when they do not crowd.
+- A stat `comparison` may contain `type` (`none`, `absolute`, `percent`),
+  `format`, `label`, and `goal` (`higher`, `lower`, `neutral`). Use `goal` only
+  when metric meaning establishes whether movement is favorable; otherwise use
+  `neutral`. Do not encode good/bad by choosing raw red or green colors.
+- Named formats support decimal suffixes, for example `number_0`, `percent_1`,
+  `currency_2`, `accounting_0`, and `compact_1`.
+- Set `y_format` to match the measure's semantics: counts use `number_0`, money
+  uses a currency or accounting format, and rates use a percent format. This
+  keeps chart axes and tooltips honest and avoids fractional count ticks.
+- `prd` renders in the artifact. Keep it to one or two concise, user-facing
+  sentences about the question and data scope. Do not list implementation
+  details, block IDs, semantic member names, or section inventories there.
+- Use graph subtitles for units, date window, denominator, sample size, or
+  synthetic/demo disclosure when that context is needed to read the chart
+  honestly. Do not invent a takeaway in the title.
 
-Each source query is a dict with "name" and "sql" keys:
-```python
-source_queries=[
-    {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at) AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"},
-    {"name": "top_products", "sql": "SELECT p.name, SUM(oi.quantity) AS units_sold FROM order_items oi JOIN products p ON oi.product_id = p.id GROUP BY 1 ORDER BY 2 DESC LIMIT 10"},
-]
-```
-
-The component receives `data.monthly_revenue` (array of row objects with column-name
-keys) and `data.top_products`. Results are always arrays, even for single-row queries.
-
-### Example: React Artifact with Live Queries
-
-```python
-create_artifact(
-    title="Monthly Revenue vs Target",
-    artifact_type="react",
-    code='''
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
-
-export default function RevenueChart({ data }) {
-  const rows = data.monthly_revenue || [];
-
-  return (
-    <div className="w-full h-96 p-4">
-      <h2 className="text-xl font-semibold mb-4">Monthly Revenue</h2>
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={rows} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="month" />
-          <YAxis />
-          <Tooltip formatter={(value) => `$${Number(value).toLocaleString()}`} />
-          <Legend />
-          <Line type="monotone" dataKey="revenue" stroke="#8884d8" strokeWidth={2} name="Revenue" />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-    ''',
-    source_queries=[
-        {"name": "monthly_revenue", "sql": "SELECT date_trunc('month', ordered_at)::date AS month, SUM(total_price) AS revenue FROM orders GROUP BY 1 ORDER BY 1"}
-    ]
-)
-```
-
-### Data Best Practices
-
-1. **ALWAYS provide source_queries**: Every data-driven artifact MUST have
-   source_queries with the SQL. Never put query results in `data` or hard-code
-   them in the component. This is what makes artifacts reusable with live data.
-
-2. **Name queries to match component expectations**: The query "name" becomes the
-   key on the data prop. Pick clear, descriptive names.
-
-3. **Handle missing/empty data gracefully**: Always default with `|| []` or `|| {}`
-   so the component renders a meaningful empty state rather than crashing.
-
-4. **Use the `data` parameter only for static config**: Things like color palettes,
-   thresholds, or labels that are not query results. Query results come from
-   source_queries automatically.
-
-5. **Keep queries focused**: One query per logical dataset. A dashboard with KPIs,
-   a trend chart, and a top-N list should have three separate named queries.
-
-### Updating Artifacts
-
-When a user asks to modify an existing artifact:
-1. Use `update_artifact` with the artifact_id from the original creation
-2. Provide the complete new code (not a diff)
-3. Optionally update source_queries if the underlying queries changed
-
-Example:
-```python
-update_artifact(
-    artifact_id="abc-123-...",
-    code="... updated component code ...",
-    source_queries=[{"name": "revenue", "sql": "SELECT ..."}],
-    title="Updated Title"
-)
-```
+Rules:
+- Use semantic member names from `list_datasets` / `describe_dataset`.
+- Never write raw SQL in graph artifacts.
+- Never store query result rows in `data.story_doc`.
+- Query specs support only: `measures`, `dimensions`, `time_dimension`,
+  `granularity`, `filters`, `order_by`, `limit`.
+- Never use raw Cube keys like `timeDimensions`, `dateRange`, `order`,
+  `segments`, `timezone`, or filter key `member`.
+- A query bound to `date_range` or `compare` must include `time_dimension`.
+- Time-bucketed rows expose the bucket as `date`; member result keys are
+  snake_case, e.g. `visits.count` becomes `visits_count`.
+- Graph artifacts do not support transform/bucketing config. If you need a
+  derived category, query or create a real semantic field/dataset for it, or
+  chart the produced category directly and explain the mapping in text.
+- Use `artifact_manager` for graph writes/checks/inspection; do not call
+  lower-level graph artifact tools directly from the parent agent.
 """
 
 

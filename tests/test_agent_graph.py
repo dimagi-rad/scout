@@ -19,9 +19,12 @@ class TestMcpToolNames:
 
         assert "list_tables" in MCP_TOOL_NAMES
         assert "describe_table" in MCP_TOOL_NAMES
-        assert "query" in MCP_TOOL_NAMES
+        assert "semantic_query" in MCP_TOOL_NAMES
+        assert "semantic_catalog" in MCP_TOOL_NAMES
         assert "get_metadata" in MCP_TOOL_NAMES
         assert "run_materialization" in MCP_TOOL_NAMES
+        assert "list_workspaces" in MCP_TOOL_NAMES
+        assert "list_datasets" in MCP_TOOL_NAMES
 
 
 class TestTeardownSchemaUnbound:
@@ -51,7 +54,7 @@ class TestTeardownSchemaUnbound:
             return t
 
         mcp_tools = [
-            _fake_mcp_tool("query"),
+            _fake_mcp_tool("semantic_query"),
             _fake_mcp_tool("list_tables"),
             _fake_mcp_tool("teardown_schema"),
         ]
@@ -61,9 +64,47 @@ class TestTeardownSchemaUnbound:
         tool_names = {t.name for t in tools}
 
         assert "teardown_schema" not in tool_names
-        # The non-destructive MCP tools survive.
-        assert "query" in tool_names
-        assert "list_tables" in tool_names
+        assert "semantic_query" in tool_names
+        assert "list_tables" not in tool_names
+
+    def test_parent_graph_exposes_artifact_manager_not_primitives(self):
+        from apps.agents.graph.base import _build_tools
+
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+        tools = _build_tools(workspace, None, [])
+        tool_names = {t.name for t in tools}
+
+        assert "artifact_manager" in tool_names
+        assert "create_artifact" not in tool_names
+        assert "update_artifact" not in tool_names
+        assert "artifact_write" not in tool_names
+        assert "artifact_graph_overview" not in tool_names
+        assert "get_artifact_semantic_queries" not in tool_names
+
+    def test_artifact_manager_tool_call_id_hidden_from_llm_schema(self):
+        from apps.agents.graph.base import INJECTED_TOOL_PARAMS, _build_tools, _llm_tool_schemas
+
+        workspace = SimpleNamespace(id="ws-1", system_prompt="")
+        schemas = _llm_tool_schemas(
+            _build_tools(workspace, None, []),
+            hidden_params=list(INJECTED_TOOL_PARAMS),
+        )
+        artifact_schema = next(
+            item
+            for item in schemas
+            if isinstance(item, dict)
+            and item["function"]["name"] == "artifact_manager"
+        )
+        props = artifact_schema["function"]["parameters"]["properties"]
+        required = artifact_schema["function"]["parameters"]["required"]
+
+        assert "task" in props
+        assert "task" in required
+        assert "intent" not in props
+        assert "tool_call_id" not in props
+        assert "subagent_event_queue" not in props
+        assert "tool_call_id" not in required
+        assert "subagent_event_queue" not in required
 
 
 class TestHeadlessMode:
@@ -78,7 +119,10 @@ class TestHeadlessMode:
     def test_build_tools_headless_swaps_in_blocking_materialization(self):
         from apps.agents.graph.base import _build_tools
 
-        mcp_tools = [self._fake_mcp_tool("query"), self._fake_mcp_tool("run_materialization")]
+        mcp_tools = [
+            self._fake_mcp_tool("semantic_query"),
+            self._fake_mcp_tool("run_materialization"),
+        ]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
         headless = _build_tools(workspace, None, mcp_tools, interactive=False, job_id=7)
@@ -92,7 +136,7 @@ class TestHeadlessMode:
         from apps.agents.graph.base import _build_tools
 
         mcp_rm = self._fake_mcp_tool("run_materialization")
-        mcp_tools = [self._fake_mcp_tool("query"), mcp_rm]
+        mcp_tools = [self._fake_mcp_tool("semantic_query"), mcp_rm]
         workspace = SimpleNamespace(id="ws-1", system_prompt="")
 
         interactive = _build_tools(workspace, None, mcp_tools, interactive=True)
@@ -141,7 +185,7 @@ class TestSystemPrompt:
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio
-    async def test_data_availability_section_present(self, workspace, user):
+    async def test_data_availability_section_present(self, workspace, user, tenant):
         from apps.agents.graph.base import _build_system_prompt
 
         # _build_system_prompt returns a (stable, volatile) split (arch #254).
@@ -152,6 +196,12 @@ class TestSystemPrompt:
         assert "get_schema_status" not in prompt
         # When no schema exists, agent is told to call run_materialization
         assert "run_materialization" in prompt
+        assert "list_workspaces" in prompt
+        assert "list_datasets" in prompt
+        # Runtime workspace/provider details are tool-discovered, not preloaded.
+        assert tenant.canonical_name not in prompt
+        assert tenant.external_id not in prompt
+        assert "Pipeline:" not in prompt
 
     @pytest.mark.django_db(transaction=True)
     @pytest.mark.asyncio

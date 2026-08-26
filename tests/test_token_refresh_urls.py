@@ -1,8 +1,10 @@
-"""Verify PROVIDER_TOKEN_URLS match actual OAuth adapter endpoints."""
+"""Verify refresh URLs match the OAuth adapter endpoints."""
+
+from django.test import override_settings
 
 from apps.users.providers.commcare.views import CommCareOAuth2Adapter
 from apps.users.providers.commcare_connect.views import CommCareConnectOAuth2Adapter
-from apps.users.services.token_refresh import PROVIDER_TOKEN_URLS
+from apps.users.services.token_refresh import PROVIDER_TOKEN_URLS, get_token_url
 
 
 class TestProviderTokenUrls:
@@ -13,9 +15,11 @@ class TestProviderTokenUrls:
             f"CommCare token URL mismatch: Adapter={adapter_url}, Refresh={refresh_url}"
         )
 
-    def test_connect_token_url_matches_adapter(self):
-        adapter_url = CommCareConnectOAuth2Adapter.access_token_url
-        refresh_url = PROVIDER_TOKEN_URLS["commcare_connect"]
+    @override_settings(CONNECT_API_URL="https://connect-staging.example")
+    def test_connect_token_url_matches_adapter_and_environment(self):
+        adapter_url = CommCareConnectOAuth2Adapter(request=None).access_token_url
+        refresh_url = get_token_url("commcare_connect")
         assert adapter_url == refresh_url, (
             f"Connect token URL mismatch: Adapter={adapter_url}, Refresh={refresh_url}"
         )
+        assert adapter_url == "https://connect-staging.example/o/token/"

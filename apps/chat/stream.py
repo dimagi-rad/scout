@@ -38,11 +38,12 @@ from anthropic import APIStatusError, InternalServerError, RateLimitError
 from langchain_core.messages import AIMessage, ToolMessage
 
 from apps.agents.graph.base import INJECTED_TOOL_PARAMS
+from apps.agents.subagents.events import (
+    SUBAGENT_EVENT_QUEUE_CONFIG_KEY,
+    SUBAGENT_TOOL_NAMES,
+)
 
 logger = logging.getLogger(__name__)
-
-# Maximum wall-clock time for agent execution before we abort.
-AGENT_TIMEOUT_SECONDS = 300  # 5 minutes
 
 # Hard cap on the tool-output payload we put on the wire, to bound a runaway
 # tool from flooding the SSE stream / browser. Generous enough that real query
@@ -178,7 +179,73 @@ def _truncate_tool_output(content: str) -> str:
     )
 
 
+def _is_nested_subagent_graph_event(event: dict[str, Any]) -> bool:
+    """True for LangGraph events produced inside a parent-facing subagent tool.
+
+    Subagent tools forward their own UI events through ``subagent_event_queue``
+    with explicit ``parentToolCallId`` metadata. LangGraph may also surface the
+    nested graph's raw events through the parent callback stream. If we translate
+    those raw events here, the browser shows child tools as top-level cards and
+    the nested version is no longer the single source of truth.
+    """
+    metadata = event.get("metadata") or {}
+    if isinstance(metadata, dict) and metadata.get("subagent"):
+        return True
+    tags = event.get("tags") or []
+    return isinstance(tags, list) and "subagent" in tags
+
+
+def _with_parent_tool_call_id(
+    event: dict[str, Any],
+    *,
+    parent_tool_call_id: str,
+) -> dict[str, Any]:
+    """Return a subagent UI chunk linked to the authoritative parent tool id."""
+    patched = dict(event)
+    data = patched.get("data")
+    if isinstance(data, dict):
+        patched["data"] = {**data, "parentToolCallId": parent_tool_call_id}
+    return patched
+
+
+def _subagent_parent_tool_call_id(event: dict[str, Any]) -> str | None:
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return None
+    parent_id = data.get("parentToolCallId")
+    return parent_id if isinstance(parent_id, str) and parent_id else None
+
+
 audit_logger = logging.getLogger("scout.agent.audit")
+
+STOPPED_RESPONSE_MARKER = "Response stopped by user."
+
+
+async def _persist_stopped_response(agent: Any, config: dict, partial_text: str) -> None:
+    """Append a terminal assistant message when the client cancels a stream."""
+    clean_partial = partial_text.strip()
+    content = (
+        f"{clean_partial}\n\n_{STOPPED_RESPONSE_MARKER}_"
+        if clean_partial
+        else f"_{STOPPED_RESPONSE_MARKER}_"
+    )
+    try:
+        await asyncio.shield(
+            agent.aupdate_state(
+                config,
+                {
+                    "messages": [
+                        AIMessage(
+                            content=content,
+                            response_metadata={"scout_response_stopped": True},
+                        )
+                    ]
+                },
+                as_node="agent",
+            )
+        )
+    except Exception:
+        logger.warning("Could not persist stopped chat response", exc_info=True)
 
 
 async def langgraph_to_ui_stream(
@@ -198,29 +265,64 @@ async def langgraph_to_ui_stream(
     # The frontend keys per-card progress / Stop / failure off the toolu_ id
     # (ThreadJob.tool_call_id), so the stream MUST emit that id, not run_id.
     run_to_tool_call_id: dict[str, str] = {}
+    # Some local tools do not receive the injected ``tool_call_id`` in their
+    # on_tool_start input. Defer their input card until on_tool_end, where the
+    # ToolMessage carries the authoritative LLM toolu_ id.
+    pending_tool_starts: dict[str, dict[str, Any]] = {}
+    # Subagent tools may emit child UI events before the parent local-tool
+    # ``toolu_`` id is available to the stream bridge. Buffer those child
+    # chunks and stamp them with the authoritative parent id immediately before
+    # the parent tool output is emitted.
+    pending_subagent_events: list[dict[str, Any]] = []
+    streamed_text: list[str] = []
 
     yield _sse({"type": "start"})
     yield _sse({"type": "start-step"})
 
-    event_stream = agent.astream_events(input_state, config=config, version="v2")
+    event_queue: asyncio.Queue = asyncio.Queue()
+    stream_config = {
+        **config,
+        "configurable": {
+            **(config.get("configurable") or {}),
+            SUBAGENT_EVENT_QUEUE_CONFIG_KEY: event_queue,
+        },
+    }
+    event_stream = agent.astream_events(input_state, config=stream_config, version="v2")
+
+    async def _pump_parent_events() -> None:
+        try:
+            async for parent_event in event_stream:
+                await event_queue.put({"source": "parent", "event": parent_event})
+        except Exception as exc:
+            await event_queue.put({"source": "parent_error", "error": exc})
+        finally:
+            await event_queue.put({"source": "parent_done"})
+
+    parent_pump = asyncio.create_task(_pump_parent_events())
 
     try:
-        deadline = asyncio.get_event_loop().time() + AGENT_TIMEOUT_SECONDS
-
         while True:
-            # Bound the wait for the NEXT event: a silent stall (nothing emitted)
-            # would otherwise never reach the deadline check (arch #255 02#8).
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                raise TimeoutError(f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout")
-            try:
-                event = await asyncio.wait_for(event_stream.__anext__(), timeout=remaining)
-            except StopAsyncIteration:
+            item = await event_queue.get()
+            source = item.get("source")
+            if source == "subagent":
+                event = item.get("event")
+                if isinstance(event, dict):
+                    parent_id = _subagent_parent_tool_call_id(event)
+                    if parent_id and not parent_id.startswith("missing-parent-"):
+                        yield _sse(event)
+                    else:
+                        pending_subagent_events.append(event)
+                continue
+            if source == "parent_error":
+                raise item["error"]
+            if source == "parent_done":
                 break
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"Agent execution exceeded {AGENT_TIMEOUT_SECONDS}s timeout"
-                ) from exc
+            if source != "parent":
+                continue
+
+            event = item.get("event") or {}
+            if _is_nested_subagent_graph_event(event):
+                continue
 
             event_type = event.get("event")
 
@@ -260,6 +362,7 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "reasoning-delta", "id": reasoning_id, "delta": t})
 
                 for t in texts:
+                    streamed_text.append(t)
                     if reasoning_started:
                         yield _sse({"type": "reasoning-end", "id": reasoning_id})
                         reasoning_started = False
@@ -280,10 +383,6 @@ async def langgraph_to_ui_stream(
                 tool_call_id = None
                 if isinstance(raw_input, dict):
                     tool_call_id = raw_input.get("tool_call_id")
-                if not tool_call_id:
-                    tool_call_id = run_id or uuid.uuid4().hex
-                if run_id:
-                    run_to_tool_call_id[run_id] = tool_call_id
 
                 if text_started:
                     yield _sse({"type": "text-end", "id": text_id})
@@ -293,6 +392,18 @@ async def langgraph_to_ui_stream(
                     yield _sse({"type": "reasoning-end", "id": reasoning_id})
                     reasoning_started = False
                     reasoning_id = f"reasoning-{uuid.uuid4().hex[:8]}"
+
+                if not tool_call_id:
+                    if run_id:
+                        pending_tool_starts[run_id] = {
+                            "toolName": event.get("name", "unknown"),
+                            "input": _redact_tool_input(raw_input),
+                        }
+                        continue
+                    tool_call_id = uuid.uuid4().hex
+
+                if run_id:
+                    run_to_tool_call_id[run_id] = tool_call_id
 
                 yield _sse(
                     {
@@ -334,7 +445,7 @@ async def langgraph_to_ui_stream(
                     "tool_call tool=%s user_id=%s thread_id=%s workspace_id=%s",
                     tool_name,
                     input_state.get("user_id", ""),
-                    config.get("configurable", {}).get("thread_id", ""),
+                    stream_config.get("configurable", {}).get("thread_id", ""),
                     input_state.get("workspace_id", ""),
                 )
 
@@ -342,24 +453,36 @@ async def langgraph_to_ui_stream(
                 # it so this output pairs with the input part the frontend keyed
                 # its per-card affordances off of. Fall back to the start map /
                 # run_id when (rarely) absent.
+                output_tool_call_id = getattr(tool_output, "tool_call_id", None)
+                started_tool_call_id = run_to_tool_call_id.get(run_id or "")
                 tool_call_id = (
-                    getattr(tool_output, "tool_call_id", None)
-                    or run_to_tool_call_id.get(run_id or "")
-                    or run_id
-                    or uuid.uuid4().hex
+                    output_tool_call_id or started_tool_call_id or run_id or uuid.uuid4().hex
                 )
+                pending_start = pending_tool_starts.pop(run_id or "", None)
 
                 # If on_tool_start never emitted an input part for this call,
                 # emit a minimal one now so AI SDK has a part to attach output to.
-                if not run_id or run_id not in run_to_tool_call_id:
+                if not started_tool_call_id or (
+                    output_tool_call_id and output_tool_call_id != started_tool_call_id
+                ):
                     yield _sse(
                         {
                             "type": "tool-input-available",
                             "toolCallId": tool_call_id,
                             "toolName": tool_name,
-                            "input": {},
+                            "input": (pending_start or {}).get("input", {}),
                         }
                     )
+
+                if tool_name in SUBAGENT_TOOL_NAMES and pending_subagent_events:
+                    for subagent_event in pending_subagent_events:
+                        yield _sse(
+                            _with_parent_tool_call_id(
+                                subagent_event,
+                                parent_tool_call_id=str(tool_call_id),
+                            )
+                        )
+                    pending_subagent_events.clear()
 
                 yield _sse(
                     {
@@ -393,35 +516,15 @@ async def langgraph_to_ui_stream(
                         text_started = True
                     yield _sse({"type": "text-delta", "id": text_id, "delta": esc_text})
 
-    except TimeoutError as exc:
-        ref = _error_ref(exc)
-        logger.warning("Agent execution timed out after %ds [ref=%s]", AGENT_TIMEOUT_SECONDS, ref)
-        if reasoning_started:
-            yield _sse({"type": "reasoning-end", "id": reasoning_id})
-            reasoning_started = False
-        if not text_started:
-            yield _sse({"type": "text-start", "id": text_id})
-            text_started = True
-        yield _sse(
-            {
-                "type": "text-delta",
-                "id": text_id,
-                "delta": "\n\nThe request timed out. Try simplifying your question or breaking it into smaller steps.",
-            }
-        )
-        if text_started:
-            yield _sse({"type": "text-end", "id": text_id})
-            text_started = False
-        # Emit a native AI SDK error chunk so useChat's error state fires — a
-        # timed-out run MUST be distinguishable from a successful one (06#4).
-        # Without this the apology above was just message text followed by a
-        # normal finishReason 'stop', indistinguishable from success.
-        yield _sse(
-            {
-                "type": "error",
-                "errorText": f"The request timed out. Ref: {ref}",
-            }
-        )
+    except (asyncio.CancelledError, GeneratorExit):
+        if not parent_pump.done():
+            parent_pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await parent_pump
+        with contextlib.suppress(Exception):
+            await event_stream.aclose()
+        await _persist_stopped_response(agent, config, "".join(streamed_text))
+        raise
     except Exception as exc:
         if _is_transient_overload(exc):
             # Anthropic was momentarily overloaded / rate-limited -- a transient
@@ -470,8 +573,12 @@ async def langgraph_to_ui_stream(
                 }
             )
     finally:
-        # Close the generator on every exit so an abandoned ainvoke (and its
-        # Anthropic call) is cancelled, not left running until GC (arch #255 02#8).
+        if not parent_pump.done():
+            parent_pump.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await parent_pump
+        # Close the generator on every exit so an abandoned run and its
+        # upstream model call are cancelled instead of waiting for GC.
         with contextlib.suppress(Exception):
             await event_stream.aclose()
 

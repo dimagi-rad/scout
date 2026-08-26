@@ -5,7 +5,7 @@ import psycopg.errors
 import pytest
 
 from mcp_server.context import QueryContext
-from mcp_server.services.query import _classify_error, _execute_async
+from mcp_server.services.query import _classify_error, _execute_async_parameterized
 
 
 class TestQueryContextReadonlyRole:
@@ -54,7 +54,7 @@ class TestSetRoleIsolation:
         )
 
     @pytest.mark.asyncio
-    async def test_execute_async_sets_and_resets_role(self):
+    async def test_execute_async_parameterized_sets_and_resets_role(self):
         mock_cursor = AsyncMock()
         mock_cursor.description = [("col1",)]
         mock_cursor.fetchall.return_value = [("val1",)]
@@ -66,7 +66,7 @@ class TestSetRoleIsolation:
             new=_make_pool_for_conn(mock_conn),
         ):
             ctx = self._make_ctx()
-            await _execute_async(ctx, "SELECT 1", 30)
+            await _execute_async_parameterized(ctx, "SELECT 1", (), 30)
 
         execute_calls = mock_cursor.execute.call_args_list
         # First call should be SET ROLE
@@ -98,7 +98,7 @@ class TestSetRoleIsolation:
         ):
             ctx = self._make_ctx()
             with contextlib.suppress(Exception):
-                await _execute_async(ctx, "SELECT bad", 30)
+                await _execute_async_parameterized(ctx, "SELECT bad", (), 30)
 
         # RESET ROLE must still have run after the query error (before RESET ALL).
         call_strs = [str(c) for c in mock_cursor.execute.call_args_list]

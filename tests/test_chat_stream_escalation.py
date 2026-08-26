@@ -5,8 +5,8 @@
 into a live text-delta and only appeared on reload. ``langgraph_to_ui_stream``
 must translate the escalate node's output into a streamed text-delta.
 
-06#4 — on TimeoutError / any non-transient exception the stream emitted an
-apology as plain message text plus a normal ``finish`` with
+06#4 — on any non-transient exception the stream emitted an apology as plain
+message text plus a normal ``finish`` with
 ``finishReason 'stop'`` and NO error chunk, so the frontend ``useChat`` error
 state never fired and a failed run was indistinguishable from success. The
 stream must emit a native AI SDK ``{"type":"error"}`` chunk so the failure
@@ -138,14 +138,17 @@ async def test_non_escalate_chain_end_is_ignored():
 
 
 @pytest.mark.asyncio
-async def test_timeout_emits_error_chunk():
-    """A TimeoutError must emit a native AI SDK error chunk so useChat.error
-    fires — a timed-out run must be distinguishable from a successful one."""
+async def test_upstream_timeout_error_emits_generic_error_chunk():
+    """A TimeoutError from the upstream graph is treated as a normal exception.
+
+    The live chat SSE bridge does not impose its own wall-clock timeout.
+    """
     chunks = await _run_raising(TimeoutError("agent exceeded timeout"))
 
     errors = [c for c in chunks if c.get("type") == "error"]
-    assert errors, "timeout emitted no error chunk — failure looks like success"
+    assert errors, "exception emitted no error chunk — failure looks like success"
     assert "errorText" in errors[0]
+    assert "timed out" not in errors[0]["errorText"]
     # The error text carries a correlation ref the user can quote.
     assert "Ref:" in errors[0]["errorText"]
 

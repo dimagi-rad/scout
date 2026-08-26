@@ -1,7 +1,7 @@
 """Tests for ArtifactQueryDataView — live query execution via MCP service."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from django.contrib.auth.models import update_last_login
@@ -94,12 +94,33 @@ def live_artifact(db, workspace, member_user):
         workspace=workspace,
         created_by=member_user,
         title="Live Chart",
+        artifact_type=ArtifactType.STORY,
+        code="",
+        conversation_id="thread-1",
+        data={"story_doc": {"version": 1, "blocks": []}},
+        semantic_queries=[
+            {"name": "submissions", "measures": ["visits.count"]},
+            {
+                "name": "daily",
+                "measures": ["visits.count"],
+                "time_dimension": "visits.visit_date",
+                "granularity": "day",
+            },
+        ],
+    )
+
+
+@pytest.fixture
+def legacy_sql_artifact(db, workspace, member_user):
+    return Artifact.objects.create(
+        workspace=workspace,
+        created_by=member_user,
+        title="Legacy SQL Chart",
         artifact_type=ArtifactType.REACT,
         code="export default function() { return <div/> }",
-        conversation_id="thread-1",
+        conversation_id="thread-legacy",
         source_queries=[
             {"name": "submissions", "sql": "SELECT count(*) as total FROM forms"},
-            {"name": "daily", "sql": "SELECT date, count(*) FROM forms GROUP BY date"},
         ],
     )
 
@@ -118,16 +139,13 @@ def static_artifact(db, workspace, member_user):
     )
 
 
-FAKE_CTX = MagicMock()
-FAKE_CTX.schema_name = "test_domain"
-
 MOCK_SUBMISSIONS_RESULT = {
     "columns": ["total"],
     "rows": [[99]],
     "row_count": 1,
     "truncated": False,
-    "sql_executed": "SELECT count(*) as total FROM forms LIMIT 500",
-    "tables_accessed": ["forms"],
+    "semantic_query": {"measures": ["visits.count"], "limit": 100},
+    "members": ["visits.count"],
 }
 
 MOCK_DAILY_RESULT = {
@@ -135,26 +153,25 @@ MOCK_DAILY_RESULT = {
     "rows": [["2024-01-01", 10], ["2024-01-02", 20]],
     "row_count": 2,
     "truncated": False,
-    "sql_executed": "SELECT date, count(*) FROM forms GROUP BY date LIMIT 500",
-    "tables_accessed": ["forms"],
+    "semantic_query": {
+        "measures": ["visits.count"],
+        "time_dimension": "visits.visit_date",
+        "granularity": "day",
+        "limit": 100,
+    },
+    "members": ["visits.visit_date", "visits.count"],
 }
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_returns_query_results_for_live_artifact(live_artifact, member_client, membership):
-    """Happy path: queries are executed and results returned with correct shape."""
+    """Happy path: semantic queries are executed and returned with correct shape."""
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
-    with (
-        patch(
-            "apps.artifacts.views.load_workspace_context",
-            new=AsyncMock(return_value=FAKE_CTX),
-        ),
-        patch(
-            "apps.artifacts.views.execute_query",
-            new=AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT]),
-        ),
+    with patch(
+        "apps.artifacts.views.run_semantic_query",
+        new=AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT]),
     ):
         response = await member_client.get(url)
 
@@ -164,9 +181,11 @@ async def test_returns_query_results_for_live_artifact(live_artifact, member_cli
     assert data["queries"][0]["name"] == "submissions"
     assert data["queries"][0]["columns"] == ["total"]
     assert data["queries"][0]["rows"] == [[99]]
+    assert "semantic_query" in data["queries"][0]
+    assert "sql" not in data["queries"][0]
     assert data["queries"][1]["name"] == "daily"
     assert "error" not in data["queries"][0]
-    assert data["static_data"] == {}
+    assert data["static_data"] == {"story_doc": {"version": 1, "blocks": []}}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -214,7 +233,7 @@ async def test_no_workspace_returns_404(member_user, member_client, membership):
         artifact_type=ArtifactType.REACT,
         code="x",
         conversation_id="t",
-        source_queries=[{"name": "q", "sql": "SELECT 1"}],
+        semantic_queries=[{"name": "q", "measures": ["visits.count"]}],
     )
     url = f"/api/workspaces/{membership.id}/artifacts/{artifact.id}/query-data/"
     response = await member_client.get(url)
@@ -223,38 +242,37 @@ async def test_no_workspace_returns_404(member_user, member_client, membership):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_tenant_context_error_returns_error_query(live_artifact, member_client, membership):
-    """If load_workspace_context fails (no schema), return error response."""
-    url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
-
-    with patch(
-        "apps.artifacts.views.load_workspace_context",
-        new=AsyncMock(side_effect=ValueError("No active schema")),
-    ):
-        response = await member_client.get(url)
+async def test_legacy_sql_source_queries_are_disabled(
+    legacy_sql_artifact, member_client, membership
+):
+    """Legacy SQL-backed artifacts do not execute source_queries."""
+    url = f"/api/workspaces/{membership.id}/artifacts/{legacy_sql_artifact.id}/query-data/"
+    response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
-    assert all("error" in q for q in data["queries"])
+    assert data["queries"] == [
+        {
+            "name": "submissions",
+            "error": (
+                "Legacy SQL-backed artifact queries are disabled. "
+                "Recreate this artifact with semantic_queries."
+            ),
+        }
+    ]
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_individual_query_failure_continues(live_artifact, member_client, membership):
-    """A failed query includes an error entry; other queries still execute."""
+    """A failed semantic query includes an error entry; other queries still execute."""
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     error_result = {"success": False, "error": {"code": "QUERY_TIMEOUT", "message": "Timed out"}}
 
-    with (
-        patch(
-            "apps.artifacts.views.load_workspace_context",
-            new=AsyncMock(return_value=FAKE_CTX),
-        ),
-        patch(
-            "apps.artifacts.views.execute_query",
-            new=AsyncMock(side_effect=[error_result, MOCK_DAILY_RESULT]),
-        ),
+    with patch(
+        "apps.artifacts.views.run_semantic_query",
+        new=AsyncMock(side_effect=[error_result, MOCK_DAILY_RESULT]),
     ):
         response = await member_client.get(url)
 
@@ -272,8 +290,8 @@ async def test_individual_query_failure_continues(live_artifact, member_client, 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_source_queries_run_concurrently(live_artifact, member_client, membership):
-    """The source queries execute concurrently, not strictly serially (09#9).
+async def test_semantic_queries_run_concurrently(live_artifact, member_client, membership):
+    """The semantic queries execute concurrently, not strictly serially (09#9).
 
     Each execute_query waits on a shared barrier: if they ran serially the
     second would never start until the first returned, and the barrier (which
@@ -285,50 +303,36 @@ async def test_source_queries_run_concurrently(live_artifact, member_client, mem
     started = asyncio.Event()
     in_flight = {"n": 0, "max": 0}
 
-    async def slow_execute(ctx, sql):
+    async def slow_execute(workspace, query_spec, *, user_id):
         in_flight["n"] += 1
         in_flight["max"] = max(in_flight["max"], in_flight["n"])
         # Yield so the other coroutine can start before we return.
         await asyncio.sleep(0.05)
         in_flight["n"] -= 1
         started.set()
-        if "count(*) as total" in sql:
-            return MOCK_SUBMISSIONS_RESULT
-        return MOCK_DAILY_RESULT
+        return MOCK_DAILY_RESULT if query_spec.get("time_dimension") else MOCK_SUBMISSIONS_RESULT
 
-    with (
-        patch(
-            "apps.artifacts.views.load_workspace_context",
-            new=AsyncMock(return_value=FAKE_CTX),
-        ),
-        patch("apps.artifacts.views.execute_query", new=slow_execute),
-    ):
+    with patch("apps.artifacts.views.run_semantic_query", new=slow_execute):
         response = await member_client.get(url)
 
     assert response.status_code == 200
     data = response.json()
     # Both queries overlapped at least once → ran concurrently.
     assert in_flight["max"] >= 2
-    # Results are still assembled in source_queries order.
+    # Results are still assembled in semantic_queries order.
     assert [q["name"] for q in data["queries"]] == ["submissions", "daily"]
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_query_results_cached_across_opens(live_artifact, member_client, membership):
-    """A second open within the cache TTL must not re-execute the source
+    """A second open within the cache TTL must not re-execute the semantic
     queries (09#9 — live artifacts re-ran every query on every open)."""
     cache.clear()
     url = f"/api/workspaces/{membership.id}/artifacts/{live_artifact.id}/query-data/"
 
     exec_mock = AsyncMock(side_effect=[MOCK_SUBMISSIONS_RESULT, MOCK_DAILY_RESULT])
-    with (
-        patch(
-            "apps.artifacts.views.load_workspace_context",
-            new=AsyncMock(return_value=FAKE_CTX),
-        ),
-        patch("apps.artifacts.views.execute_query", new=exec_mock),
-    ):
+    with patch("apps.artifacts.views.run_semantic_query", new=exec_mock):
         first = await member_client.get(url)
         calls_after_first = exec_mock.await_count
         second = await member_client.get(url)

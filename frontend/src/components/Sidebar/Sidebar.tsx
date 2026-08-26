@@ -1,4 +1,4 @@
-import { useEffect } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useLocation, useNavigate } from "react-router-dom"
 import {
   MessageSquare,
@@ -20,6 +20,13 @@ import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
 
 export function Sidebar() {
   const navigate = useNavigate()
+  const sidebarRef = useRef<HTMLDivElement>(null)
+  const [isRailExpanded, setIsRailExpanded] = useState(false)
+  const [isTouchDevice, setIsTouchDevice] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(hover: none)").matches
+      : false
+  )
   const user = useAppStore((s) => s.user)
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const domains = useAppStore((s) => s.domains)
@@ -45,10 +52,92 @@ export function Sidebar() {
     ? `${pathPrefix}${workspacePath(activeWorkspace ?? { id: activeDomainId })}/chat`
     : null
 
+  const collapseSidebar = () => {
+    if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+    window.requestAnimationFrame(() => {
+      const isHovering =
+        !isTouchDevice &&
+        document.visibilityState !== "hidden" &&
+        (sidebarRef.current?.matches(":hover") ?? false)
+      setIsRailExpanded(isHovering)
+    })
+  }
+
+  const syncExpandedToInteractionState = useCallback(() => {
+    const sidebar = sidebarRef.current
+    if (!sidebar) return
+
+    const activeElement = document.activeElement
+    const focusInside = activeElement ? sidebar.contains(activeElement) : false
+    const hoverInside =
+      !isTouchDevice &&
+      document.visibilityState !== "hidden" &&
+      sidebar.matches(":hover")
+    const shouldExpand = hoverInside || focusInside
+
+    setIsRailExpanded((current) => (current === shouldExpand ? current : shouldExpand))
+  }, [isTouchDevice])
+
+  const expandFromPointer = () => {
+    if (!isTouchDevice && document.visibilityState !== "hidden") {
+      setIsRailExpanded(true)
+    }
+  }
+
+  const collapseFromPointer = () => {
+    const sidebar = sidebarRef.current
+    const activeElement = document.activeElement
+    const focusInside =
+      sidebar && activeElement ? sidebar.contains(activeElement) : false
+    if (!focusInside) {
+      setIsRailExpanded(false)
+    }
+  }
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return undefined
+    }
+
+    const mediaQuery = window.matchMedia("(hover: none)")
+    const handleChange = (event: MediaQueryListEvent) => {
+      setIsTouchDevice(event.matches)
+    }
+
+    mediaQuery.addEventListener("change", handleChange)
+    return () => {
+      mediaQuery.removeEventListener("change", handleChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const intervalId = window.setInterval(syncExpandedToInteractionState, 100)
+    const handleDocumentMouseOut = (event: MouseEvent) => {
+      if (event.relatedTarget === null) syncExpandedToInteractionState()
+    }
+
+    window.addEventListener("blur", syncExpandedToInteractionState)
+    window.addEventListener("focus", syncExpandedToInteractionState)
+    document.addEventListener("visibilitychange", syncExpandedToInteractionState)
+    document.addEventListener("mouseout", handleDocumentMouseOut)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener("blur", syncExpandedToInteractionState)
+      window.removeEventListener("focus", syncExpandedToInteractionState)
+      document.removeEventListener("visibilitychange", syncExpandedToInteractionState)
+      document.removeEventListener("mouseout", handleDocumentMouseOut)
+    }
+  }, [syncExpandedToInteractionState])
+
+  // Fetch domains on mount
   useEffect(() => {
     fetchDomains()
   }, [fetchDomains])
 
+  // Fetch threads when domain changes
   useEffect(() => {
     if (activeDomainId) {
       fetchThreads(activeDomainId)
@@ -64,173 +153,244 @@ export function Sidebar() {
   }, [recentlyCompletedThreadIds, activeDomainId, fetchThreads])
 
   return (
-    <aside className="flex h-screen w-64 flex-col border-r bg-background">
-      {/* Logo — height matches the TopBar (h-11) so their bottom borders align */}
-      <div className="flex h-11 items-center border-b px-4">
-        <Link to={`${pathPrefix}/`} className="flex items-center gap-2 font-semibold">
-          <span className="text-lg">Scout</span>
-        </Link>
-      </div>
-
-      {/* Workspace Selector — only in embed mode, which has no TopBar.
-          Outside embed, the workspace switcher lives in the top-right TopBar. */}
-      {isEmbed && (
-        <div className="border-b p-4">
-          <label className="text-xs font-medium text-muted-foreground">Workspace</label>
-          <WorkspaceSwitcher />
+    <div
+      ref={sidebarRef}
+      className="scout-sidebar-shell"
+      data-expanded={isRailExpanded ? "true" : "false"}
+      data-testid="sidebar-shell"
+      onPointerEnter={expandFromPointer}
+      onPointerMove={expandFromPointer}
+      onPointerLeave={collapseFromPointer}
+      onPointerCancel={collapseFromPointer}
+      onFocusCapture={() => setIsRailExpanded(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
+          setIsRailExpanded(false)
+        }
+      }}
+    >
+      <aside
+        className="scout-sidebar-panel flex h-screen flex-col overflow-hidden border-r bg-background"
+        aria-label="Primary navigation"
+      >
+        {/* Logo — height matches the TopBar (h-11) so their bottom borders align */}
+        <div className="flex h-11 items-center border-b px-3 lg:px-4">
+          <Link
+            to={`${pathPrefix}/`}
+            className="scout-sidebar-brand flex min-w-0 items-center gap-2 font-semibold"
+            title="Scout"
+            onClick={collapseSidebar}
+          >
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-semibold text-primary-foreground">
+              S
+            </span>
+            <span className="scout-sidebar-label min-w-0 truncate text-lg">Scout</span>
+          </Link>
         </div>
-      )}
 
-      <nav className="space-y-1 p-4">
-        <NavItem
-          to={chatBase ?? `${pathPrefix}/`}
-          icon={MessageSquare}
-          label="Chat"
-          isActivePath={(p) => /\/workspaces\/(?:[^/]+\/)?[^/]+\/chat(\/|$)/.test(p)}
-        />
-        <NavItem to={`${pathPrefix}/artifacts`} icon={LayoutDashboard} label="Artifacts" />
-        <NavItem to={`${pathPrefix}/knowledge`} icon={BookOpen} label="Knowledge" />
-        <NavItem to={`${pathPrefix}/recipes`} icon={ChefHat} label="Recipes" />
-        <NavItem to={`${pathPrefix}/data-dictionary`} icon={Database} label="Data Dictionary" />
-      </nav>
+        {/* Workspace Selector — only in embed mode, which has no TopBar.
+            Outside embed, the workspace switcher lives in the top-right TopBar. */}
+        {isEmbed && (
+          <div className="scout-sidebar-expanded-block border-b p-4">
+            <label className="text-xs font-medium text-muted-foreground">Workspace</label>
+            <WorkspaceSwitcher />
+          </div>
+        )}
 
-      <div className="flex flex-1 flex-col border-t overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-2">
-          <span className="text-xs font-medium text-muted-foreground">
-            Chat History
-          </span>
+        {/* Navigation */}
+        <nav className="space-y-1 p-3 lg:p-4">
+          <NavItem
+            to={chatBase ?? `${pathPrefix}/`}
+            icon={MessageSquare}
+            label="Chat"
+            onNavigate={collapseSidebar}
+            isActivePath={(p) => /\/workspaces\/(?:[^/]+\/)?[^/]+\/chat(\/|$)/.test(p)}
+          />
+          <NavItem
+            to={`${pathPrefix}/artifacts`}
+            icon={LayoutDashboard}
+            label="Artifacts"
+            onNavigate={collapseSidebar}
+          />
+          <NavItem
+            to={`${pathPrefix}/knowledge`}
+            icon={BookOpen}
+            label="Knowledge"
+            onNavigate={collapseSidebar}
+          />
+          <NavItem
+            to={`${pathPrefix}/recipes`}
+            icon={ChefHat}
+            label="Recipes"
+            onNavigate={collapseSidebar}
+          />
+          <NavItem
+            to={`${pathPrefix}/datasets`}
+            icon={Database}
+            label="Datasets"
+            onNavigate={collapseSidebar}
+          />
+        </nav>
+
+        {/* Thread History */}
+        <div className="flex flex-1 flex-col overflow-hidden border-t">
+          <div className="scout-sidebar-history-header flex items-center justify-center px-3 py-2 lg:justify-between lg:px-4">
+            <span className="scout-sidebar-label text-xs font-medium text-muted-foreground">
+              Chat History
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 shrink-0"
+              onClick={() => {
+                newThread()
+                collapseSidebar()
+                navigate(chatBase ?? `${pathPrefix}/chat`)
+              }}
+              title="New chat"
+              data-testid="sidebar-new-chat"
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+          <div className="scout-sidebar-expanded-block flex-1 overflow-y-auto px-2 pb-2">
+            {threadsStatus === "error" && threadsAccessLostMessage && (
+              <div
+                className="px-3 py-2 text-xs text-muted-foreground"
+                data-testid="sidebar-threads-access-lost"
+              >
+                <p>{threadsAccessLostMessage}</p>
+              </div>
+            )}
+            {threadsStatus === "error" && !threadsAccessLostMessage && (
+              // 07#7: a load failure must not look like "no conversations". Show a
+              // distinct error + retry so an outage is recoverable, not silent.
+              <div
+                className="px-3 py-2 text-xs text-muted-foreground"
+                data-testid="sidebar-threads-error"
+              >
+                <p>Couldn&apos;t load conversations.</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeDomainId) void fetchThreads(activeDomainId)
+                  }}
+                  className="mt-1 text-primary underline-offset-2 hover:underline"
+                  data-testid="sidebar-threads-retry"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            {threads.map((thread) => {
+              const historyTitle = sidebarThreadTitle(thread)
+              const job = jobsByThreadId[thread.id]
+              const lastUpdated = new Date(thread.updated_at)
+              const baseline = thread.last_viewed_at
+                ? new Date(thread.last_viewed_at)
+                : new Date(thread.created_at)
+              const hasUnread = lastUpdated > baseline
+              return (
+                <button
+                  key={thread.id}
+                  onClick={() => {
+                    selectThread(thread.id)
+                    collapseSidebar()
+                    navigate(chatBase ? `${chatBase}/${thread.id}` : `${pathPrefix}/chat`)
+                  }}
+                  title={historyTitle}
+                  data-testid={`sidebar-thread-${thread.id}`}
+                  className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
+                    thread.id === threadId
+                      ? "bg-accent text-accent-foreground"
+                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+                  }`}
+                >
+                  <span className="flex-1 truncate">{historyTitle}</span>
+                  {job ? (
+                    <span
+                      className="flex items-center gap-1 text-xs"
+                      data-testid={`sidebar-thread-job-${thread.id}`}
+                      title={
+                        job.progress?.source
+                          ? `Loading ${job.progress.source}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
+                          : (job.progress?.message ?? "Materializing...")
+                      }
+                    >
+                      <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
+                      {job.progress?.percent != null ? (
+                        <span
+                          className="font-medium text-primary"
+                          data-testid={`sidebar-thread-job-percent-${thread.id}`}
+                        >
+                          {job.progress.percent}%
+                        </span>
+                      ) : job.progress?.source ? (
+                        <span
+                          className="truncate max-w-[4rem]"
+                          data-testid={`sidebar-thread-job-source-${thread.id}`}
+                        >
+                          {job.progress.source}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : hasUnread ? (
+                    <span
+                      className="h-2 w-2 rounded-full bg-green-500"
+                      data-testid={`sidebar-thread-unread-${thread.id}`}
+                    />
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* User Section */}
+        <div className="border-t p-3 lg:p-4">
+          <div className="scout-sidebar-expanded-block mb-2 truncate text-sm text-muted-foreground">
+            {user?.email}
+          </div>
           <Button
             variant="ghost"
-            size="icon"
-            className="h-6 w-6"
-            onClick={() => {
-              newThread()
-              navigate(chatBase ?? `${pathPrefix}/chat`)
-            }}
-            data-testid="sidebar-new-chat"
+            size="sm"
+            className="scout-sidebar-nav-link w-full px-2 lg:px-3"
+            asChild
+            title="Connected Accounts"
+            data-testid="sidebar-connections"
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Link to={`${pathPrefix}/settings/connections`} onClick={collapseSidebar}>
+              <Link2 className="h-4 w-4 shrink-0" />
+              <span className="scout-sidebar-label min-w-0 truncate">
+                Connected Accounts
+              </span>
+            </Link>
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="scout-sidebar-nav-link w-full px-2 lg:px-3"
+            onClick={() => {
+              collapseSidebar()
+              logout()
+            }}
+            title="Logout"
+            data-testid="logout-btn"
+          >
+            <LogOut className="h-4 w-4 shrink-0" />
+            <span className="scout-sidebar-label min-w-0 truncate">Logout</span>
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto px-2 pb-2">
-          {threadsStatus === "error" && threadsAccessLostMessage && (
-            // Lost upstream tenant access: retry won't help, so explain what
-            // happened and what to do instead of offering a dead retry.
-            <div
-              className="px-3 py-2 text-xs text-muted-foreground"
-              data-testid="sidebar-threads-access-lost"
-            >
-              <p>{threadsAccessLostMessage}</p>
-            </div>
-          )}
-          {threadsStatus === "error" && !threadsAccessLostMessage && (
-            // 07#7: a load failure must not look like "no conversations". Show a
-            // distinct error + retry so an outage is recoverable, not silent.
-            <div
-              className="px-3 py-2 text-xs text-muted-foreground"
-              data-testid="sidebar-threads-error"
-            >
-              <p>Couldn&apos;t load conversations.</p>
-              <button
-                type="button"
-                onClick={() => {
-                  if (activeDomainId) void fetchThreads(activeDomainId)
-                }}
-                className="mt-1 text-primary underline-offset-2 hover:underline"
-                data-testid="sidebar-threads-retry"
-              >
-                Retry
-              </button>
-            </div>
-          )}
-          {threads.map((thread) => {
-            const job = jobsByThreadId[thread.id]
-            const lastUpdated = new Date(thread.updated_at)
-            const baseline = thread.last_viewed_at
-              ? new Date(thread.last_viewed_at)
-              : new Date(thread.created_at)
-            const hasUnread = lastUpdated > baseline
-            return (
-              <button
-                key={thread.id}
-                onClick={() => {
-                  selectThread(thread.id)
-                  navigate(chatBase ? `${chatBase}/${thread.id}` : `${pathPrefix}/chat`)
-                }}
-                data-testid={`sidebar-thread-${thread.id}`}
-                className={`flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
-                  thread.id === threadId
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                }`}
-              >
-                <span className="flex-1 truncate">{thread.title}</span>
-                {job ? (
-                  <span
-                    className="flex items-center gap-1 text-xs"
-                    data-testid={`sidebar-thread-job-${thread.id}`}
-                    title={
-                      job.progress?.source
-                        ? `Loading ${job.progress.source}${job.progress.rows_loaded ? ` — ${job.progress.rows_loaded.toLocaleString()} rows` : ""}`
-                        : (job.progress?.message ?? "Materializing...")
-                    }
-                  >
-                    <Loader2 className="h-3 w-3 animate-spin text-primary shrink-0" />
-                    {job.progress?.percent != null ? (
-                      <span
-                        className="font-medium text-primary"
-                        data-testid={`sidebar-thread-job-percent-${thread.id}`}
-                      >
-                        {job.progress.percent}%
-                      </span>
-                    ) : job.progress?.source ? (
-                      <span
-                        className="truncate max-w-[4rem]"
-                        data-testid={`sidebar-thread-job-source-${thread.id}`}
-                      >
-                        {job.progress.source}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : hasUnread ? (
-                  <span
-                    className="h-2 w-2 rounded-full bg-green-500"
-                    data-testid={`sidebar-thread-unread-${thread.id}`}
-                  />
-                ) : null}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      <div className="border-t p-4">
-        <div className="mb-2 truncate text-sm text-muted-foreground">
-          {user?.email}
-        </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          asChild
-          data-testid="sidebar-connections"
-        >
-          <Link to={`${pathPrefix}/settings/connections`}>
-            <Link2 className="mr-2 h-4 w-4" />
-            Connected Accounts
-          </Link>
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="w-full justify-start"
-          onClick={logout}
-          data-testid="logout-btn"
-        >
-          <LogOut className="mr-2 h-4 w-4" />
-          Logout
-        </Button>
-      </div>
-    </aside>
+      </aside>
+    </div>
   )
+}
+
+function sidebarThreadTitle(thread: {
+  title: string
+  history_title?: string
+  title_is_custom: boolean
+}): string {
+  if (thread.title_is_custom) return thread.title.trim() || "Untitled"
+  return thread.history_title?.trim() || "Untitled"
 }

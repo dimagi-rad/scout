@@ -9,7 +9,8 @@ Configure via env vars or tests/smoke/.env:
     SCOUT_API_URL=https://labs.connect.dimagi.com/scout
 
 Run:
-    uv run pytest tests/smoke/test_deployment.py -v -s --override-ini="addopts=" -p no:django
+    uv run pytest tests/smoke/test_deployment.py -v -s --override-ini="addopts=" \
+        -p no:django --confcutdir=tests/smoke
 """
 
 from __future__ import annotations

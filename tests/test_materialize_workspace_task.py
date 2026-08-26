@@ -41,6 +41,57 @@ def _mock_registry(provider="commcare"):
     return registry
 
 
+@pytest.mark.django_db
+def test_compose_failure_summary_surfaces_top_level_error(tenant):
+    """Failures before any source runs should expose the real discovery/load error."""
+    schema = TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name="t_failure_summary",
+        state=SchemaState.ACTIVE,
+    )
+    run = MaterializationRun.objects.create(
+        tenant_schema=schema,
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.FAILED,
+        result={
+            "error": "ConnectionError: failed to reach host.docker.internal:8001",
+            "sources": {},
+            "pipeline": "connect_sync",
+        },
+    )
+
+    summary = workspaces_tasks._compose_failure_summary([run])
+
+    assert "ConnectionError" in summary
+    assert "host.docker.internal:8001" in summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_aggregate_materialization_state_surfaces_top_level_error(tenant):
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="t_failure_aggregate",
+        state=SchemaState.ACTIVE,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="connect_sync",
+        state=MaterializationRun.RunState.FAILED,
+        procrastinate_job_id=12345,
+        result={
+            "error": "ConnectionError: failed to reach host.docker.internal:8001",
+            "sources": {},
+            "pipeline": "connect_sync",
+        },
+    )
+
+    status, summary = await workspaces_tasks._aggregate_materialization_state(12345)
+
+    assert status == "failed"
+    assert summary[0]["error"] == "ConnectionError: failed to reach host.docker.internal:8001"
+
+
 @pytest.fixture
 def tenant_membership_obj(db, user, tenant):
     tm, _ = TenantMembership.objects.get_or_create(user=user, tenant=tenant)

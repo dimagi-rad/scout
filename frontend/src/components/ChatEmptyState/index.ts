@@ -1,1 +1,1 @@
-export { ChatEmptyState } from "./ChatEmptyState"
+export { ChatEmptyPrompt, ChatEmptyState } from "./ChatEmptyState"

@@ -6,6 +6,12 @@ from .base import *
 
 DEBUG = True
 
+# Keep local dev from exhausting the stock Postgres max_connections=100.
+# This pool is per Python process, and reloaders/workers multiply it quickly.
+LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE", default=0)
+LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE", default=4)
+
+# Use console email backend for development
 EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
 
 # Default the managed DB to the app DB in dev (schema isolation still applies)

@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "start": "/start-cube-with-validator.sh"
+  },
+  "dependencies": {
+    "@cubejs-backend/native": "1.6.39",
+    "@cubejs-backend/postgres-driver": "1.6.39",
+    "@cubejs-backend/schema-compiler": "1.6.39",
+    "fastify": "5.8.5",
+    "ioredis": "5.10.1",
+    "lru-cache": "11.3.5",
+    "pg": "8.20.0"
+  }
+}

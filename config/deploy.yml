@@ -32,6 +32,8 @@ registry:
 env:
   clear:
     DJANGO_SETTINGS_MODULE: config.settings.production
+    DEPLOY_ENVIRONMENT: "production"
+    CONNECT_API_URL: "https://connect.dimagi.com"
     DJANGO_ALLOWED_HOSTS: "scout.dimagi.com"
     CSRF_TRUSTED_ORIGINS: "https://scout.dimagi.com"
     # Base URL for links in transactional email (workspace invite sign-in
@@ -42,6 +44,9 @@ env:
     DEFAULT_FROM_EMAIL: "Scout <noreply@dimagi.com>"
     SECURE_SSL_REDIRECT: "False"
     MCP_SERVER_URL: "http://scout-mcp-web:8100/mcp"
+    CUBE_API_URL: "http://scout-cube-web:4000"
+    CUBE_VALIDATOR_URL: "http://scout-cube-web:4010"
+    CUBE_SCHEMA_VALIDATION_REQUIRED: "True"
     EMBED_ALLOWED_ORIGINS: "https://labs.connect.dimagi.com"
     MAX_CONNECTIONS_PER_PROJECT: 5
     MAX_QUERIES_PER_MINUTE: 60
@@ -73,6 +78,9 @@ env:
     # Sent in X-Scout-MCP-Secret to authenticate to the MCP server (arch #253,
     # 01#6). MUST match deploy-mcp.yml's MCP_SHARED_SECRET.
     - MCP_SHARED_SECRET
+    # Shared with worker, MCP, and Cube so semantic-query security-context JWTs
+    # can be signed and verified end to end.
+    - CUBEJS_API_SECRET
 
 ssh:
   user: scout

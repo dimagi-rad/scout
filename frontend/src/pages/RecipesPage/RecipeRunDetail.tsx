@@ -206,7 +206,7 @@ export function RecipeRunDetail({ recipe, run, onBack, onUpdateRun }: RecipeRunD
               className="h-4 w-4 rounded border-gray-300"
             />
             <Users className="h-4 w-4 text-muted-foreground" />
-            <span>Share with project</span>
+            <span>Share with workspace</span>
           </label>
         </CardContent>
       </Card>

@@ -88,13 +88,11 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
     with (
         patch("apps.agents.graph.base.KnowledgeRetriever") as MockRetriever,
         patch(
-            "apps.agents.graph.base._fetch_schema_context",
+            "apps.agents.graph.base._fetch_semantic_model_context",
             new=AsyncMock(return_value=schema_block),
         ),
-        patch("apps.agents.graph.base.get_registry") as mock_reg,
     ):
         MockRetriever.return_value = MagicMock(retrieve=AsyncMock(return_value=""))
-        mock_reg.return_value.get_by_provider.return_value = MagicMock(name="pc")
 
         stable, volatile = await graph_base._build_system_prompt(workspace, user)
 

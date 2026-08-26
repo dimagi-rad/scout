@@ -33,8 +33,16 @@ from apps.workspaces.services.workspace_service import touch_workspace_schemas
 
 logger = logging.getLogger(__name__)
 
+THREAD_TITLE_PREVIEW_CHARS = 200
 
-async def _upsert_thread(thread_id, user, title, *, workspace):
+def _short_thread_title(title: str) -> str:
+    clean = title.strip()
+    if len(clean) > THREAD_TITLE_PREVIEW_CHARS:
+        return f"{clean[:THREAD_TITLE_PREVIEW_CHARS].rstrip()}..."
+    return clean
+
+
+async def _upsert_thread(thread_id, user, history_title: str = "", *, workspace):
     """Create the Thread row if absent and bump updated_at on every turn.
 
     Ownership has already been validated by the caller — this helper only
@@ -49,7 +57,12 @@ async def _upsert_thread(thread_id, user, title, *, workspace):
     await Thread.objects.aupdate_or_create(
         id=thread_id,
         defaults={"updated_at": timezone.now()},
-        create_defaults={"user": user, "workspace": workspace, "title": title[:200]},
+        create_defaults={
+            "user": user,
+            "workspace": workspace,
+            "title": _short_thread_title(history_title),
+            "title_is_custom": False,
+        },
     )
 
 

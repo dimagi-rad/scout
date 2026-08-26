@@ -65,6 +65,9 @@ Or to allow a specific set but exclude one of them for testing:
 ["staging_orders"]
 ```
 
-## SQL enforcement
+## Semantic-model enforcement
 
-Table access controls are enforced at the SQL validation layer. The `SQLValidator` parses queries using sqlglot and checks that every referenced table is allowed. If a query references a disallowed table, it is rejected before execution.
+Agent-facing analysis goes through the semantic model, not raw SQL. Dataset and
+field visibility define what the agent can request with `semantic_query`.
+Database roles remain read-only for the backend queries Scout compiles from
+those structured semantic requests.

@@ -2,35 +2,19 @@
 
 Scout implements multiple layers of security to protect data and prevent abuse.
 
-## SQL validation
+## Semantic query access
 
-All queries pass through the `SQLValidator` before execution. The validator uses [sqlglot](https://github.com/tobymao/sqlglot) for AST-level analysis:
+Scout does not expose a raw SQL tool to the agent. User questions are answered
+through semantic-model tools:
 
-### SELECT only
+- `semantic_catalog` lists curated datasets and members.
+- `describe_dataset` returns dataset details.
+- `semantic_query` accepts structured measures, dimensions, filters, time
+  dimensions, orderings, and limits.
 
-Only `SELECT` statements are allowed. Any query containing `INSERT`, `UPDATE`, `DELETE`, `DROP`, `CREATE`, `ALTER`, `TRUNCATE`, or other non-SELECT statements is rejected.
-
-### Single statement
-
-Only one SQL statement per request is allowed. Multi-statement queries (separated by semicolons) are blocked.
-
-### Dangerous function blocking
-
-PostgreSQL functions that could be used for data exfiltration or system access are blocked:
-
-- **File system access** -- `pg_read_file`, `pg_read_binary_file`, `pg_ls_dir`, `pg_stat_file`, etc.
-- **Large object manipulation** -- `lo_import`, `lo_export`, `lo_create`, etc.
-- **Remote database access** -- `dblink` and related functions.
-- **Command execution** -- any function that could execute system commands.
-- **Copy operations** -- `COPY` statements are blocked.
-
-### Table access enforcement
-
-The validator checks that every table referenced in the query is allowed by the project's table access configuration (allowlist/blocklist). Queries referencing disallowed tables are rejected before execution.
-
-### Automatic LIMIT injection
-
-If a query does not include a `LIMIT` clause, one is automatically added based on the project's `max_rows_per_query` setting (default: 500).
+Scout backend code compiles those structured requests into trusted,
+parameterized database queries. Generated SQL is not part of the agent-facing
+tool contract.
 
 ## Database isolation
 
@@ -58,7 +42,7 @@ Login attempts are rate-limited per email address: 5 attempts within 5 minutes t
 
 ### Query rate limiting
 
-Query execution is rate-limited per user at `MAX_QUERIES_PER_MINUTE` (default: 60 queries per minute).
+Semantic query execution is rate-limited per user at `MAX_QUERIES_PER_MINUTE` (default: 60 queries per minute).
 
 ## Session security
 

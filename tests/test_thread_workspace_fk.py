@@ -53,8 +53,18 @@ def test_thread_list_view_scoped_to_workspace(db, workspace, user):
 
     from apps.chat.models import Thread
 
-    Thread.objects.create(workspace=workspace, user=user, title="Thread 1")
-    Thread.objects.create(workspace=workspace, user=user, title="Thread 2")
+    Thread.objects.create(
+        workspace=workspace,
+        user=user,
+        title="Thread 1",
+        title_is_custom=True,
+    )
+    Thread.objects.create(
+        workspace=workspace,
+        user=user,
+        title="Thread 2",
+        title_is_custom=True,
+    )
 
     client = Client(enforce_csrf_checks=False)
     client.force_login(user)

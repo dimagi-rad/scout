@@ -8,7 +8,7 @@ cards and rich rendering work LIVE -- not only after a page reload.
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -50,6 +50,148 @@ async def _run(events: list[dict]) -> list[dict]:
         )
     ]
     return _parse_sse(chunks)
+
+
+class _QueuedSubagentEventAgent:
+    def astream_events(self, input_state, *, config, version):
+        async def _gen():
+            queue = config["configurable"]["subagent_event_queue"]
+            await queue.put(
+                {
+                    "source": "subagent",
+                    "event": {
+                        "type": "data-subagent-tool-input",
+                        "id": "artifact_manager:toolu_CHILD:input",
+                        "data": {
+                            "toolCallId": "artifact_manager:toolu_CHILD",
+                            "toolName": "artifact_write",
+                            "input": {"action": "check"},
+                            "parentToolCallId": "toolu_PARENT",
+                            "subagentName": "artifact_manager",
+                        },
+                    },
+                }
+            )
+            return
+            yield
+
+        return _gen()
+
+
+class _BufferedSubagentEventAgent:
+    def astream_events(self, input_state, *, config, version):
+        async def _gen():
+            queue = config["configurable"]["subagent_event_queue"]
+            yield {
+                "event": "on_tool_start",
+                "run_id": "run-parent",
+                "name": "artifact_manager",
+                "data": {"input": {"task": "build artifact"}},
+            }
+            await queue.put(
+                {
+                    "source": "subagent",
+                    "event": {
+                        "type": "data-subagent-tool-input",
+                        "id": "artifact_manager:toolu_CHILD:input",
+                        "data": {
+                            "toolCallId": "artifact_manager:toolu_CHILD",
+                            "toolName": "artifact_write",
+                            "input": {"action": "check"},
+                            "parentToolCallId": "missing-parent-abc",
+                            "subagentName": "artifact_manager",
+                        },
+                    },
+                }
+            )
+            yield {
+                "event": "on_tool_end",
+                "run_id": "run-parent",
+                "name": "artifact_manager",
+                "data": {
+                    "output": ToolMessage(
+                        content=json.dumps({"status": "done"}),
+                        tool_call_id="toolu_PARENT",
+                        name="artifact_manager",
+                    )
+                },
+            }
+
+        return _gen()
+
+
+@pytest.mark.asyncio
+async def test_stream_merges_queued_subagent_tool_events():
+    chunks = [
+        c
+        async for c in stream.langgraph_to_ui_stream(
+            _QueuedSubagentEventAgent(), {}, {"configurable": {"thread_id": "t1"}}
+        )
+    ]
+    parsed = _parse_sse(chunks)
+
+    child = next(c for c in parsed if c.get("type") == "data-subagent-tool-input")
+    assert child["data"]["toolCallId"] == "artifact_manager:toolu_CHILD"
+    assert child["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert child["data"]["subagentName"] == "artifact_manager"
+
+
+@pytest.mark.asyncio
+async def test_stream_buffers_subagent_events_until_parent_tool_id_is_known():
+    chunks = [
+        c
+        async for c in stream.langgraph_to_ui_stream(
+            _BufferedSubagentEventAgent(), {}, {"configurable": {"thread_id": "t1"}}
+        )
+    ]
+    parsed = _parse_sse(chunks)
+
+    parent_input_idx = next(
+        i
+        for i, c in enumerate(parsed)
+        if c.get("type") == "tool-input-available" and c.get("toolCallId") == "toolu_PARENT"
+    )
+    child_idx = next(i for i, c in enumerate(parsed) if c.get("type") == "data-subagent-tool-input")
+    parent_output_idx = next(
+        i
+        for i, c in enumerate(parsed)
+        if c.get("type") == "tool-output-available" and c.get("toolCallId") == "toolu_PARENT"
+    )
+
+    child = parsed[child_idx]
+    assert parent_input_idx < child_idx < parent_output_idx
+    assert child["data"]["parentToolCallId"] == "toolu_PARENT"
+    assert child["data"]["toolCallId"] == "artifact_manager:toolu_CHILD"
+
+
+@pytest.mark.asyncio
+async def test_stream_ignores_raw_subagent_graph_events():
+    """Nested subagent graph events are forwarded through the queue with parent
+    linkage. The raw callback events must not also render as top-level cards.
+    """
+    tm = ToolMessage(
+        content=json.dumps({"status": "created"}),
+        tool_call_id="toolu_CHILD",
+        name="artifact_write",
+    )
+    events = [
+        {
+            "event": "on_tool_end",
+            "run_id": "raw-subagent-run",
+            "name": "artifact_write",
+            "tags": ["subagent", "artifact_manager"],
+            "metadata": {"subagent": "artifact_manager"},
+            "data": {"output": tm},
+        }
+    ]
+    chunks = await _run(events)
+
+    leaked = [
+        c
+        for c in chunks
+        if c.get("type") == "tool-output-available" and c.get("toolCallId") == "toolu_CHILD"
+    ]
+    assert leaked == []
 
 
 # --- toolCallId is the LLM toolu_ id, not the LangGraph run_id (06#3) --------
@@ -103,10 +245,10 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
         {
             "event": "on_tool_start",
             "run_id": "run-1",
-            "name": "query",
+            "name": "semantic_query",
             "data": {
                 "input": {
-                    "sql": "SELECT 1",
+                    "measures": ["visits.count"],
                     "workspace_id": "ws-secret",
                     "user_id": "u",
                     "thread_id": "t",
@@ -120,9 +262,9 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
     assert starts, "on_tool_start should emit a tool-input-available chunk"
     start = starts[0]
     assert start["toolCallId"] == "toolu_Q"
-    assert start["toolName"] == "query"
+    assert start["toolName"] == "semantic_query"
     # Real input is surfaced...
-    assert start["input"].get("sql") == "SELECT 1"
+    assert start["input"].get("measures") == ["visits.count"]
     # ...but injected/hidden context params are stripped.
     assert "workspace_id" not in start["input"]
     assert "user_id" not in start["input"]
@@ -130,12 +272,56 @@ async def test_on_tool_start_emits_real_input_and_loading_state():
     assert "tool_call_id" not in start["input"]
 
 
+@pytest.mark.asyncio
+async def test_local_tool_start_without_tool_call_id_uses_tool_message_id():
+    """Local tools such as artifact_manager do not receive the injected
+    tool_call_id on start. The stream must not start a card with run_id and end
+    it with toolu_ id, because the AI SDK treats that as a missing invocation.
+    """
+    tm = ToolMessage(
+        content=json.dumps({"status": "created"}),
+        tool_call_id="toolu_ARTIFACT",
+        name="artifact_manager",
+    )
+    events = [
+        {
+            "event": "on_tool_start",
+            "run_id": "run-artifact",
+            "name": "artifact_manager",
+            "data": {
+                "input": {
+                    "action": "create",
+                    "title": "Example Artifact",
+                }
+            },
+        },
+        {
+            "event": "on_tool_end",
+            "run_id": "run-artifact",
+            "name": "artifact_manager",
+            "data": {"output": tm},
+        },
+    ]
+    chunks = await _run(events)
+
+    tool_inputs = [c for c in chunks if c["type"] == "tool-input-available"]
+    tool_outputs = [c for c in chunks if c["type"] == "tool-output-available"]
+
+    assert len(tool_inputs) == 1
+    assert len(tool_outputs) == 1
+    assert tool_inputs[0]["toolCallId"] == "toolu_ARTIFACT"
+    assert tool_outputs[0]["toolCallId"] == "toolu_ARTIFACT"
+    assert tool_inputs[0]["toolName"] == "artifact_manager"
+    assert tool_inputs[0]["input"]["action"] == "create"
+    assert tool_inputs[0]["input"]["title"] == "Example Artifact"
+
+
 # --- output JSON stays parse-safe; not double-pretty-printed (13#4/13#7) -----
 
 
 @pytest.mark.asyncio
 async def test_tool_output_is_parse_safe_json_not_truncated_mid_token():
-    """A large query result must remain valid JSON so the rich card parses it
+    """A large semantic query result must remain valid JSON so the rich card parses it
     LIVE. The old 2000-char hard truncation cut JSON mid-token."""
     rows = [[i, f"name-{i}", "x" * 50] for i in range(200)]
     payload = {
@@ -147,7 +333,7 @@ async def test_tool_output_is_parse_safe_json_not_truncated_mid_token():
         {
             "event": "on_tool_end",
             "run_id": "r",
-            "name": "query",
+            "name": "semantic_query",
             "data": {"output": tm},
         },
     ]
@@ -168,7 +354,7 @@ async def test_tool_output_not_double_indented():
     payload = {"success": True, "data": {"k": "v"}}
     tm = ToolMessage(content=json.dumps(payload), tool_call_id="toolu_C")
     events = [
-        {"event": "on_tool_end", "run_id": "r", "name": "query", "data": {"output": tm}},
+        {"event": "on_tool_end", "run_id": "r", "name": "semantic_query", "data": {"output": tm}},
     ]
     chunks = await _run(events)
     out = next(c for c in chunks if c["type"] == "tool-output-available")["output"]
@@ -216,10 +402,10 @@ async def test_tool_runtime_in_input_does_not_crash_stream():
         {
             "event": "on_tool_start",
             "run_id": "run-1",
-            "name": "query",
+            "name": "semantic_query",
             "data": {
                 "input": {
-                    "sql": "SELECT 1",
+                    "measures": ["visits.count"],
                     "workspace_id": "ws-secret",
                     "tool_call_id": "toolu_RT",
                     "runtime": _make_tool_runtime(),
@@ -241,7 +427,7 @@ async def test_tool_runtime_in_input_does_not_crash_stream():
     assert starts, "on_tool_start should still emit a tool-input-available chunk"
     start = starts[0]
     assert start["toolCallId"] == "toolu_RT"
-    assert start["input"].get("sql") == "SELECT 1"
+    assert start["input"].get("measures") == ["visits.count"]
     # The injected, non-serializable runtime must not surface in the card.
     assert "runtime" not in start["input"]
     assert "workspace_id" not in start["input"]
@@ -266,31 +452,77 @@ class _StallingStream:
 class _StallingAgent:
     def __init__(self, stream_obj):
         self._stream = stream_obj
+        self.aupdate_state = AsyncMock()
 
     def astream_events(self, input_state, *, config, version):
         return self._stream
 
 
 @pytest.mark.asyncio
-async def test_stream_times_out_on_stalled_event_and_closes_generator():
-    """arch #255, 02#8: a stalled call that emits no events must still trip the
-    deadline (the wait for the NEXT event is bounded), and the abandoned
-    generator must be aclose()d so the in-flight ainvoke/Anthropic call is
-    cancelled rather than leaking until GC."""
+async def test_cancelled_stalled_stream_closes_generator():
+    """The SSE bridge has no execution deadline, but client cancellation must
+    still close the abandoned event generator and upstream model call."""
     stalling = _StallingStream()
     agent = _StallingAgent(stalling)
-    with patch.object(stream, "AGENT_TIMEOUT_SECONDS", 0.2):
-        chunks = [
-            c
-            async for c in stream.langgraph_to_ui_stream(
-                agent, {}, {"configurable": {"thread_id": "t1"}}
-            )
-        ]
-    parsed = _parse_sse(chunks)
-    assert any(
-        c.get("type") == "error" and "timed out" in c.get("errorText", "").lower() for c in parsed
-    ), "a stalled stream must emit a timeout error chunk"
-    assert stalling.aclosed is True, "the abandoned event generator must be closed on timeout"
+    output = stream.langgraph_to_ui_stream(agent, {}, {"configurable": {"thread_id": "t1"}})
+    await anext(output)
+    await anext(output)
+
+    pending = asyncio.create_task(anext(output))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await output.aclose()
+
+    assert stalling.aclosed is True
+    agent.aupdate_state.assert_awaited_once()
+    update_args, update_kwargs = agent.aupdate_state.await_args
+    stopped_message = update_args[1]["messages"][0]
+    assert stopped_message.content == "_Response stopped by user._"
+    assert stopped_message.response_metadata["scout_response_stopped"] is True
+    assert update_kwargs["as_node"] == "agent"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_persists_partial_text_with_terminal_marker():
+    class PartialThenStallingStream:
+        def __init__(self):
+            self.sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.sent:
+                self.sent = True
+                return {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": type("Chunk", (), {"content": "Partial answer"})()},
+                }
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            return None
+
+    agent = _StallingAgent(PartialThenStallingStream())
+    output = stream.langgraph_to_ui_stream(agent, {}, {"configurable": {"thread_id": "t1"}})
+    await anext(output)
+    await anext(output)
+    await anext(output)
+    await anext(output)
+
+    pending = asyncio.create_task(anext(output))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await output.aclose()
+
+    update_args, _update_kwargs = agent.aupdate_state.await_args
+    assert update_args[1]["messages"][0].content == (
+        "Partial answer\n\n_Response stopped by user._"
+    )
 
 
 def test_sse_survives_non_serializable_values():

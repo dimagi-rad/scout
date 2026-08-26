@@ -44,6 +44,7 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     workspaceId: null,
     threadId: null,
   })
+  const adoptedUrlRef = useRef(false)
 
   // Direction 1: URL → store
   useEffect(() => {
@@ -61,13 +62,17 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
       return
     }
 
+    let adoptedUrl = false
     if (urlWorkspaceId !== activeDomainId) {
       setActiveDomain(urlWorkspaceId)
+      adoptedUrl = true
     }
     if (urlThreadId && urlThreadId !== threadId) {
       void selectThread(urlThreadId)
+      adoptedUrl = true
     }
 
+    adoptedUrlRef.current = adoptedUrl
     syncedRef.current = { workspaceId: urlWorkspaceId, threadId: urlThreadId ?? null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlWorkspaceId, urlThreadId, domainsStatus, domains])
@@ -75,6 +80,10 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
   // Direction 2: store → URL
   useEffect(() => {
     if (!activeDomainId) return
+    if (adoptedUrlRef.current) {
+      adoptedUrlRef.current = false
+      return
+    }
     if (
       syncedRef.current.workspaceId === activeDomainId &&
       syncedRef.current.threadId === (threadId || null)

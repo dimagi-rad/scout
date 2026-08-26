@@ -19,12 +19,34 @@ class ArtifactType(models.TextChoices):
     REACT = "react", "React Component"
     HTML = "html", "HTML Document"
     MARKDOWN = "markdown", "Markdown Document"
-    PLOTLY = "plotly", "Plotly Chart"
     SVG = "svg", "SVG Graphic"
+    STORY = "story", "Story"
 
 
 class Artifact(models.Model):
-    """A generated artifact from agent conversations, versioned via parent_artifact."""
+    """
+    Represents a generated artifact from agent conversations.
+
+    Artifacts are code or visualization outputs created by the AI agent during
+    conversations. They support versioning through parent_artifact linking.
+
+    Attributes:
+        id: Unique identifier for the artifact.
+        project: The project this artifact belongs to.
+        created_by: The user who triggered the artifact creation.
+        title: Display title for the artifact.
+        description: Optional description of what the artifact does/shows.
+        artifact_type: Type of artifact (react, html, markdown, svg, story).
+        code: The source code for the artifact.
+        data: Structured JSON data used by the artifact (e.g., chart data).
+        version: Version number, incremented when creating new versions.
+        parent_artifact: Link to previous version for version tracking.
+        conversation_id: Thread ID from the conversation that created this.
+        source_queries: Disabled legacy SQL query metadata.
+        semantic_queries: Structured semantic queries that generated the story data.
+        created_at: When the artifact was created.
+        updated_at: When the artifact was last modified.
+    """
 
     id = models.UUIDField(
         primary_key=True,
@@ -58,7 +80,7 @@ class Artifact(models.Model):
     artifact_type = models.CharField(
         max_length=20,
         choices=ArtifactType.choices,
-        help_text="The type of artifact (react, html, markdown, plotly, svg).",
+        help_text="The type of artifact (react, html, markdown, svg, story).",
     )
     code = models.TextField(
         help_text="Source code for the artifact.",
@@ -89,7 +111,17 @@ class Artifact(models.Model):
     source_queries = models.JSONField(
         default=list,
         blank=True,
-        help_text="SQL queries that generated the data for this artifact.",
+        help_text="Disabled legacy query metadata for older artifacts.",
+    )
+    semantic_queries = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Structured semantic queries that generated the data for this artifact.",
+    )
+    semantic_query_manifest = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Normalized semantic query dependency manifest for graph artifacts.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -137,11 +169,6 @@ class Artifact(models.Model):
         """SHA-256 hex digest of the artifact code, for dedup/integrity checks."""
         return hashlib.sha256(self.code.encode("utf-8")).hexdigest()
 
-    # NB: the live version-bump path is the inline copy in
-    # apps/agents/tools/artifact_tool.py::update_artifact (which also carries the
-    # no-op guard from arch #254, 09#9). A former ``create_new_version`` helper
-    # here was a dead duplicate with zero callers and was removed.
-
     def get_version_history(self, max_depth: int = 100) -> list["Artifact"]:
         """Version history oldest→newest. max_depth caps traversal in case of circular refs."""
         history = [self]
@@ -156,3 +183,47 @@ class Artifact(models.Model):
             current = current.parent_artifact
             depth += 1
         return list(reversed(history))
+
+
+class ArtifactSemanticQuery(models.Model):
+    """Normalized semantic query dependency for one artifact version."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    artifact = models.ForeignKey(
+        Artifact,
+        on_delete=models.CASCADE,
+        related_name="semantic_query_records",
+    )
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="artifact_semantic_queries",
+    )
+    query_key = models.CharField(max_length=500)
+    query_hash = models.CharField(max_length=64, db_index=True)
+    query_type = models.CharField(max_length=50, default="semantic")
+    validation_status = models.CharField(max_length=50, default="valid")
+    query_payload = models.JSONField(default=dict, blank=True)
+    members = models.JSONField(default=list, blank=True)
+    datasets = models.JSONField(default=list, blank=True)
+    dependencies = models.JSONField(default=list, blank=True)
+    block_locations = models.JSONField(default=list, blank=True)
+    unresolved_references = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["query_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["artifact", "query_key"],
+                name="unique_artifact_semantic_query_key",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "query_key"]),
+            models.Index(fields=["artifact", "query_key"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.artifact_id}: {self.query_key}"

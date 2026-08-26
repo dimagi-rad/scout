@@ -12,6 +12,16 @@ export type {
   DictionarySlice,
 } from "./dictionarySlice"
 export type {
+  DatasetCatalog,
+  DatasetDetailStatus,
+  DatasetSlice,
+  DatasetStatus,
+  SemanticDataset,
+  SemanticField,
+  SemanticModelSummary,
+  SemanticRelationship,
+} from "./datasetSlice"
+export type {
   KnowledgeType,
   KnowledgeItem,
   KnowledgeEntryItem,

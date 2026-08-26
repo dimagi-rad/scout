@@ -15,6 +15,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
@@ -22,13 +23,16 @@ from django.shortcuts import get_object_or_404
 from django.views import View
 
 from apps.common.utils import creator_display_name
+from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
-from mcp_server.context import load_workspace_context
-from mcp_server.services.query import execute_query
 
-from .models import Artifact
+from .models import Artifact, ArtifactSemanticQuery, ArtifactType
 from .services.export import ArtifactExporter
+from .services.graph_manifest import (
+    semantic_query_summary,
+    sync_artifact_semantic_query_manifest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +47,14 @@ ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
 
 
 def _artifact_query_cache_key(artifact: Artifact) -> str:
-    payload = json.dumps(artifact.source_queries, sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "semantic_queries": artifact.semantic_queries,
+            "source_queries": artifact.source_queries,
+        },
+        sort_keys=True,
+        default=str,
+    )
     digest = hashlib.md5(payload.encode(), usedforsecurity=False).hexdigest()[:12]
     return f"artifact_qdata:{artifact.id}:{artifact.version}:{digest}"
 
@@ -82,9 +93,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
 
     <!-- Recharts for React charts -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/recharts@2/umd/Recharts.min.js"></script>
-
-    <!-- Plotly for advanced charts -->
-    <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2/plotly.min.js"></script>
 
     <!-- D3 for custom visualizations -->
     <script nonce="{{CSP_NONCE}}" src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
@@ -213,7 +221,7 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
             }
-            /* Recharts/Plotly draw into SVG/canvas; keep them visible and unclipped. */
+            /* Recharts draws into SVG/canvas; keep charts visible and unclipped. */
             svg, canvas {
                 max-width: 100% !important;
                 overflow: visible !important;
@@ -361,11 +369,11 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                         case 'markdown':
                             this.renderMarkdown(artifact);
                             break;
-                        case 'plotly':
-                            this.renderPlotly(artifact);
-                            break;
                         case 'svg':
                             this.renderSVG(artifact);
+                            break;
+                        case 'story':
+                            this.renderStory(artifact);
                             break;
                         default:
                             this.showError('Unknown artifact type', `Type "${artifact.type}" is not supported.`);
@@ -587,54 +595,6 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 }
             },
 
-            renderPlotly(artifact) {
-                const { code, data } = artifact;
-
-                this.container.innerHTML = '<div id="plotly-root" style="width: 100%; height: 100%;"></div>';
-                const plotlyRoot = document.getElementById('plotly-root');
-
-                try {
-                    // Parse the Plotly configuration
-                    let config;
-                    if (typeof code === 'string') {
-                        // If code is a string, try to parse it as JSON first
-                        try {
-                            config = JSON.parse(code);
-                        } catch {
-                            // If not JSON, evaluate it as JavaScript that returns a config
-                            const configFactory = new Function('data', 'Plotly', 'd3', '_', `return ${code}`);
-                            config = configFactory(data || {}, Plotly, d3, _);
-                        }
-                    } else {
-                        config = code;
-                    }
-
-                    // Merge with any provided data
-                    if (data && config.data) {
-                        config.data = config.data.map((trace, i) => ({
-                            ...trace,
-                            ...(data.traces ? data.traces[i] : {})
-                        }));
-                    }
-
-                    const layout = {
-                        autosize: true,
-                        margin: { t: 40, r: 20, b: 40, l: 50 },
-                        ...config.layout
-                    };
-
-                    const plotConfig = {
-                        responsive: true,
-                        displayModeBar: true,
-                        ...config.config
-                    };
-
-                    Plotly.newPlot(plotlyRoot, config.data || [], layout, plotConfig);
-                } catch (error) {
-                    this.showError('Plotly Render Error', error.message, error.stack);
-                }
-            },
-
             renderSVG(artifact) {
                 const { code, data } = artifact;
 
@@ -653,6 +613,66 @@ SANDBOX_HTML_TEMPLATE = """<!DOCTYPE html>
                 } catch (error) {
                     this.showError('SVG Render Error', error.message, error.stack);
                 }
+            },
+
+            renderStory(artifact) {
+                const storyDoc = artifact.data && artifact.data.story_doc;
+                if (!storyDoc || !Array.isArray(storyDoc.blocks)) {
+                    this.showError('Story Not Found', 'This story artifact has no story_doc.blocks payload.');
+                    return;
+                }
+
+                const visibleBlocks = storyDoc.blocks.filter(block => !block.hidden);
+                this.container.innerHTML = `
+                    <article class="story-root" style="font-family: system-ui, -apple-system, sans-serif; color: #111827; max-width: 960px; margin: 0 auto;">
+                        ${visibleBlocks.map(block => this.renderStoryBlock(block, artifact.data || {})).join('')}
+                    </article>
+                `;
+            },
+
+            renderStoryBlock(block, data) {
+                const config = block.config || {};
+                if (block.type === 'markdown') {
+                    const body = config.body || '';
+                    return `<section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">${marked.parse(body)}</section>`;
+                }
+                if (block.type === 'stat') {
+                    const queryName = config.query;
+                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
+                    const field = config.field;
+                    const value = rows[0] && field ? rows[0][field] : config.value;
+                    return `
+                        <section style="margin-bottom: 16px; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px;" data-block-id="${this.escapeHtml(block.id || '')}">
+                            <div style="font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: .04em;">${this.escapeHtml(config.label || block.id || 'Metric')}</div>
+                            <div style="font-size: 32px; font-weight: 700; margin-top: 4px;">${this.escapeHtml(value == null ? '—' : String(value))}</div>
+                        </section>
+                    `;
+                }
+                if (block.type === 'table') {
+                    const queryName = config.query;
+                    const rows = Array.isArray(data[queryName]) ? data[queryName] : [];
+                    const columns = config.columns || (rows[0] ? Object.keys(rows[0]) : []);
+                    return `
+                        <section style="margin-bottom: 20px;" data-block-id="${this.escapeHtml(block.id || '')}">
+                            ${config.title ? `<h2 style="font-size: 18px; margin: 0 0 8px;">${this.escapeHtml(config.title)}</h2>` : ''}
+                            <div style="overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px;">
+                                <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                                    <thead style="background: #f9fafb;">
+                                        <tr>${columns.map(col => `<th style="text-align: left; padding: 8px; border-bottom: 1px solid #e5e7eb;">${this.escapeHtml(String(col))}</th>`).join('')}</tr>
+                                    </thead>
+                                    <tbody>
+                                        ${rows.map(row => `<tr>${columns.map(col => `<td style="padding: 8px; border-bottom: 1px solid #f3f4f6;">${this.escapeHtml(row[col] == null ? '' : String(row[col]))}</td>`).join('')}</tr>`).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </section>
+                    `;
+                }
+                return `
+                    <section style="margin-bottom: 16px; color: #6b7280;" data-block-id="${this.escapeHtml(block.id || '')}">
+                        Unsupported story block: ${this.escapeHtml(block.type || 'unknown')}
+                    </section>
+                `;
             },
 
             hideLoading() {
@@ -734,7 +754,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
     """
     Serves the sandbox HTML template for rendering artifacts in an iframe.
 
-    The sandbox page loads React, Recharts, Plotly, D3, and other libraries
+    The sandbox page loads React, Recharts, D3, and other libraries
     from CDN and listens for postMessage events to render artifacts securely.
     """
 
@@ -747,7 +767,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
 
         csp_nonce = secrets.token_urlsafe(16)
 
-        has_live_queries = bool(artifact.source_queries)
+        has_live_queries = bool(artifact.semantic_queries)
 
         artifact_json = json.dumps(
             {
@@ -756,7 +776,7 @@ class ArtifactSandboxView(LoginRequiredJsonMixin, View):
                 "title": artifact.title,
                 "type": artifact.artifact_type,
                 "code": artifact.code,
-                "data": artifact.data if not has_live_queries else {},
+                "data": artifact.data or {},
                 "has_live_queries": has_live_queries,
                 "version": artifact.version,
             }
@@ -802,7 +822,8 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
             "type": artifact.artifact_type,
             "code": artifact.code,
             "data": artifact.data,
-            "source_queries": artifact.source_queries,
+            "semantic_queries": artifact.semantic_queries,
+            "semantic_query_manifest": artifact.semantic_query_manifest,
             "version": artifact.version,
         }
 
@@ -824,14 +845,11 @@ def _json_safe(value: Any) -> Any:
 
 class ArtifactQueryDataView(View):
     """
-    Executes an artifact's source_queries via the MCP query service and returns results.
+    Executes an artifact's semantic_queries and returns results.
 
-    For artifacts with source_queries, each SQL query is executed against the
-    workspace's query schema using the same query service as the MCP server.
-    Routing goes through ``load_workspace_context`` so multi-tenant workspaces hit
-    the ``ws_*`` view schema the agent authored queries against -- not the first
-    tenant's ``t_*`` schema. Results are returned in a format the artifact sandbox
-    can consume directly via mergeQueryResults().
+    Legacy SQL-backed ``source_queries`` are intentionally not executed. Results
+    are returned in a format the artifact sandbox can consume directly via
+    mergeQueryResults().
     """
 
     async def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
@@ -850,8 +868,20 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
-        if not artifact.source_queries:
-            return JsonResponse({"queries": [], "static_data": artifact.data or {}})
+        if artifact.artifact_type == ArtifactType.STORY:
+            await sync_to_async(
+                sync_artifact_semantic_query_manifest,
+                thread_sensitive=True,
+            )(artifact)
+
+        if not artifact.source_queries and not artifact.semantic_queries:
+            return JsonResponse(
+                {
+                    "queries": [],
+                    "static_data": artifact.data or {},
+                    "semantic_query_manifest": artifact.semantic_query_manifest or {},
+                }
+            )
 
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
@@ -863,62 +893,132 @@ class ArtifactQueryDataView(View):
         cache_key = _artifact_query_cache_key(artifact)
         cached = await cache.aget(cache_key)
         if cached is not None:
-            return JsonResponse({"queries": cached, "static_data": static_data})
-
-        # Route through load_workspace_context so single- vs multi-tenant
-        # workspaces resolve to the correct schema (t_* vs ws_* view schema) and
-        # the inactivity TTL is touched on the right schema.
-        try:
-            ctx = await load_workspace_context(str(artifact.workspace_id))
-        except Exception as e:
-            error_msg = str(e)
-            results = [
-                {"name": entry.get("name", f"query_{i}"), "error": error_msg}
-                for i, entry in enumerate(artifact.source_queries)
-            ]
-            # Don't cache a context-resolution failure — it's likely transient.
-            return JsonResponse({"queries": results, "static_data": static_data})
+            return JsonResponse(
+                {
+                    "queries": cached,
+                    "static_data": static_data,
+                    "semantic_query_manifest": artifact.semantic_query_manifest or {},
+                }
+            )
 
         async def _run_one(i: int, entry: dict) -> dict:
-            name = entry.get("name", f"query_{i}")
-            sql = entry.get("sql", "")
-            if not sql:
-                return {"name": name, "error": "Empty SQL query"}
+            name = entry.get("name", f"semantic_query_{i}")
+            query_spec = {k: v for k, v in entry.items() if k != "name"}
             try:
-                result = await execute_query(ctx, sql)
+                result = await run_semantic_query(
+                    artifact.workspace,
+                    query_spec,
+                    user_id=str(user.id),
+                )
             except Exception:
                 logger.exception("Artifact query '%s' failed for artifact %s", name, artifact.id)
-                return {"name": name, "error": "Query failed"}
+                return {
+                    "name": name,
+                    "semantic_query": query_spec,
+                    "error": "Semantic query failed",
+                }
+
             if not result.get("success", True) or result.get("error"):
                 error_info = result.get("error", {})
                 msg = (
-                    error_info.get("message", "Query failed")
+                    error_info.get("message", "Semantic query failed")
                     if isinstance(error_info, dict)
                     else str(error_info)
                 )
-                return {"name": name, "error": msg}
+                return {"name": name, "semantic_query": query_spec, "error": msg}
             return {
                 "name": name,
+                "semantic_query": result.get("semantic_query", query_spec),
                 "columns": result.get("columns", []),
                 "rows": result.get("rows", []),
                 "row_count": result.get("row_count", 0),
                 "truncated": result.get("truncated", False),
             }
 
-        # Execute the source queries concurrently rather than one-at-a-time
-        # (09#9). asyncio.gather preserves input order, so results still line up
-        # with source_queries.
-        results = await asyncio.gather(
-            *(_run_one(i, entry) for i, entry in enumerate(artifact.source_queries))
+        results = list(
+            await asyncio.gather(
+                *(_run_one(i, entry) for i, entry in enumerate(artifact.semantic_queries))
+            )
         )
-        results = list(results)
 
-        # Cache only when every query succeeded — never persist a transient
-        # failure for the whole TTL.
-        if not any("error" in r for r in results):
+        for i, entry in enumerate(artifact.source_queries):
+            name = entry.get("name", f"query_{i}")
+            results.append(
+                {
+                    "name": name,
+                    "error": (
+                        "Legacy SQL-backed artifact queries are disabled. "
+                        "Recreate this artifact with semantic_queries."
+                    ),
+                }
+            )
+
+        if not any("error" in result for result in results):
             await cache.aset(cache_key, results, ARTIFACT_QUERY_CACHE_TTL)
 
-        return JsonResponse({"queries": results, "static_data": static_data})
+        return JsonResponse(
+            {
+                "queries": results,
+                "static_data": static_data,
+                "semantic_query_manifest": artifact.semantic_query_manifest or {},
+            }
+        )
+
+
+class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
+    """
+    GET /api/workspaces/<workspace_id>/artifacts/<artifact_id>/semantic-queries/
+    Returns paginated graph artifact semantic query dependencies.
+    """
+
+    def get(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
+        workspace, err = resolve_workspace(request.user, workspace_id)
+        if err:
+            return err
+        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
+        if artifact.artifact_type == ArtifactType.STORY:
+            sync_artifact_semantic_query_manifest(artifact)
+
+        limit = _bounded_int(request.GET.get("limit"), default=25, lower=1, upper=100)
+        offset = _bounded_int(request.GET.get("offset"), default=0, lower=0, upper=100_000)
+        queryset = ArtifactSemanticQuery.objects.filter(artifact=artifact).order_by("query_key")
+        total_count = queryset.count()
+        records = list(queryset[offset : offset + limit])
+        manifest = artifact.semantic_query_manifest or {}
+        return JsonResponse(
+            {
+                "artifact": {
+                    "id": str(artifact.id),
+                    "title": artifact.title,
+                    "version": artifact.version,
+                    "artifact_type": artifact.artifact_type,
+                },
+                "semantic_queries": [semantic_query_summary(record) for record in records],
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "count": len(records),
+                    "total_count": total_count,
+                    "has_more": offset + len(records) < total_count,
+                },
+                "manifest": {
+                    "schema_version": manifest.get("schema_version"),
+                    "generated_at": manifest.get("generated_at"),
+                    "source": manifest.get("source"),
+                    "entry_count": len(manifest.get("entries") or []),
+                    "unresolved_count": len(manifest.get("unresolved") or []),
+                    "unresolved": manifest.get("unresolved") or [],
+                },
+            }
+        )
+
+
+def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(lower, min(parsed, upper))
 
 
 class ArtifactListView(LoginRequiredJsonMixin, View):
@@ -932,7 +1032,10 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
             return err
 
         search = request.GET.get("search", "").strip()
-        queryset = Artifact.objects.filter(workspace=workspace)
+        queryset = Artifact.objects.filter(
+            workspace=workspace,
+            artifact_type__in=ArtifactType.values,
+        )
         if search:
             queryset = queryset.filter(
                 Q(title__icontains=search) | Q(description__icontains=search)
@@ -945,7 +1048,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
                 "description": a.description,
                 "artifact_type": a.artifact_type,
                 "version": a.version,
-                "has_live_queries": bool(a.source_queries),
+                "has_live_queries": bool(a.semantic_queries),
                 "created_by_name": creator_display_name(a.created_by),
                 "created_at": a.created_at.isoformat(),
                 "updated_at": a.updated_at.isoformat(),
@@ -965,7 +1068,12 @@ class ArtifactDetailView(LoginRequiredJsonMixin, View):
         workspace, err = resolve_workspace(request.user, workspace_id)
         if err:
             return None, err
-        artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
+        artifact = get_object_or_404(
+            Artifact,
+            pk=artifact_id,
+            workspace=workspace,
+            artifact_type__in=ArtifactType.values,
+        )
         return artifact, None
 
     def patch(self, request: HttpRequest, workspace_id, artifact_id: str) -> JsonResponse:
@@ -1036,7 +1144,10 @@ class ArtifactExportView(LoginRequiredJsonMixin, View):
         filename = exporter.get_download_filename(format)
 
         if format == "html":
-            content = exporter.export_html()
+            try:
+                content = exporter.export_html()
+            except ValueError as error:
+                return JsonResponse({"error": str(error)}, status=400)
             response = HttpResponse(content, content_type="text/html")
             response["Content-Disposition"] = f'attachment; filename="{filename}"'
             return response

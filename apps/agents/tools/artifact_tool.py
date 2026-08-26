@@ -1,8 +1,14 @@
 """
 Artifact creation tools for the Scout data agent platform.
 
-Factory functions for agent tools that create and version interactive artifacts
-(React, HTML, Markdown, Plotly, SVG), optionally linked to source SQL queries.
+This module provides factory functions to create tools that allow the agent
+to generate interactive visualizations and content artifacts. Artifacts can be
+React components, HTML, Markdown, or SVG graphics. Charts use Recharts.
+
+The tools support:
+- Creating new artifacts with code and optional data
+- Updating existing artifacts (creates new versions preserving history)
+- Linking story artifacts to semantic query specs for provenance tracking
 """
 
 import logging
@@ -21,18 +27,18 @@ logger = logging.getLogger(__name__)
 class CreateArtifactInput(BaseModel):
     title: str
     artifact_type: str
-    code: str
+    code: str = ""
     description: str = ""
     data: dict | None = None
-    source_queries: list[dict[str, str]] | None = Field(default=None)
+    semantic_queries: list[dict[str, Any]] | None = Field(default=None)
 
 
 class UpdateArtifactInput(BaseModel):
     artifact_id: str
-    code: str
+    code: str = ""
     title: str | None = None
     data: dict | None = None
-    source_queries: list[dict[str, str]] | None = Field(default=None)
+    semantic_queries: list[dict[str, Any]] | None = Field(default=None)
 
 
 VALID_ARTIFACT_TYPES = frozenset(
@@ -40,8 +46,8 @@ VALID_ARTIFACT_TYPES = frozenset(
         "react",
         "html",
         "markdown",
-        "plotly",
         "svg",
+        "story",
     }
 )
 
@@ -56,7 +62,12 @@ def create_artifact_tools(
 
     @tool(args_schema=CreateArtifactInput)
     async def create_artifact(
-        title, artifact_type, code, description="", data=None, source_queries=None
+        title,
+        artifact_type,
+        code="",
+        description="",
+        data=None,
+        semantic_queries=None,
     ) -> dict[str, Any]:
         """
         Create a new interactive artifact (visualization, chart, or content).
@@ -65,11 +76,9 @@ def create_artifact_tools(
         such as charts, tables, dashboards, or formatted content. The artifact
         will be rendered in an interactive preview.
 
-        IMPORTANT: For data-driven artifacts, always provide source_queries with
-        the SQL queries that produce the data the component needs. The artifact
-        will execute these queries at render time to fetch live data. Do NOT
-        embed query results in the data parameter -- instead, write your
-        component to consume data keyed by the query name.
+        IMPORTANT: Do not use this tool for data-backed semantic graph/story
+        artifacts. Use artifact_manager for charts, tables, dashboards,
+        and reports backed by semantic queries.
 
         Args:
             title: Human-readable title for the artifact. Should describe
@@ -78,46 +87,28 @@ def create_artifact_tools(
 
             artifact_type: Type of artifact to create. Must be one of:
                 - "react": Interactive React component (recommended for dashboards,
-                  complex visualizations). Use Recharts for charts.
-                - "plotly": Plotly chart specification (good for statistical charts).
-                  Pass the Plotly figure spec as the code.
+                  complex visualizations). Use Recharts for every chart; Plotly is
+                  not available in the artifact runtime.
                 - "html": Static HTML content (for simple tables, formatted text).
                 - "markdown": Markdown content (for documentation, reports).
                 - "svg": SVG graphic (for custom diagrams, icons).
+                - "story": Not accepted here. Use artifact_manager.
 
             code: The source code for the artifact:
                 - For "react": JSX code with a default export component.
-                  The component receives a `data` prop whose keys match the
-                  query names from source_queries. For example, if you provide
-                  a query named "monthly_revenue", access it as data.monthly_revenue
-                  (an array of objects with column-name keys).
-                - For "plotly": JSON string of Plotly figure specification
+                  Legacy data-backed React artifacts receive a `data` prop.
                 - For "html": HTML markup
                 - For "markdown": Markdown text
                 - For "svg": SVG markup
+                - For "story": use artifact_manager instead.
 
             description: Optional description of what this artifact visualizes.
                 Helps users understand the artifact's purpose.
 
-            data: Optional static JSON data to pass to the artifact. For
-                data-driven artifacts, prefer source_queries instead so the
-                artifact always shows live data. Use this only for non-query
-                configuration (e.g., color schemes, labels, thresholds).
+            data: Optional static JSON data to pass to the artifact.
 
-            source_queries: List of named SQL queries that provide live data
-                to the artifact. Each entry is a dict with "name" and "sql"
-                keys. The queries are executed at render time against the
-                workspace database, and results are passed to the component
-                under data[name].
-
-                Example:
-                    [
-                        {"name": "monthly_revenue", "sql": "SELECT ..."},
-                        {"name": "top_products", "sql": "SELECT ..."}
-                    ]
-
-                The component then accesses data.monthly_revenue (array of
-                row objects) and data.top_products.
+            semantic_queries: Legacy compatibility field. New data-backed
+                artifacts must use artifact_manager.
 
         Returns:
             A dict containing:
@@ -128,7 +119,10 @@ def create_artifact_tools(
             - render_url: URL path to render the artifact
             - message: Success or error message
         """
-        from apps.artifacts.models import Artifact  # avoid circular import
+        # Import here to avoid circular imports
+        from apps.artifacts.models import Artifact
+        from apps.chat.artifact_links import link_artifact_to_thread
+        from apps.chat.models import ThreadArtifact
 
         if artifact_type not in VALID_ARTIFACT_TYPES:
             return {
@@ -140,7 +134,20 @@ def create_artifact_tools(
                 "message": f"Invalid artifact_type '{artifact_type}'. "
                 f"Must be one of: {', '.join(sorted(VALID_ARTIFACT_TYPES))}",
             }
+        if artifact_type == "story":
+            return {
+                "artifact_id": None,
+                "status": "error",
+                "title": title,
+                "type": artifact_type,
+                "render_url": None,
+                "message": (
+                    "Story artifacts are semantic graph artifacts. Use "
+                    "artifact_manager with action='create' instead."
+                ),
+            }
 
+        # Validate code/story content is provided
         if not code or not code.strip():
             return {
                 "artifact_id": None,
@@ -172,7 +179,14 @@ def create_artifact_tools(
                 data=data or {},
                 version=1,
                 conversation_id=conversation_id or "",
-                source_queries=source_queries or [],
+                source_queries=[],
+                semantic_queries=semantic_queries or [],
+            )
+            await link_artifact_to_thread(
+                artifact,
+                conversation_id,
+                workspace,
+                source=ThreadArtifact.Source.CREATED,
             )
 
             logger.info(
@@ -206,7 +220,7 @@ def create_artifact_tools(
 
     @tool(args_schema=UpdateArtifactInput)
     async def update_artifact(
-        artifact_id, code, title=None, data=None, source_queries=None
+        artifact_id, code="", title=None, data=None, semantic_queries=None
     ) -> dict[str, Any]:
         """
         Update an existing artifact by creating a new version.
@@ -225,8 +239,8 @@ def create_artifact_tools(
             data: Optional new data payload. If not provided, keeps the existing data.
                 Set to an empty dict {} to clear the data.
 
-            source_queries: Optional new list of named SQL queries. Same format
-                as create_artifact. If not provided, keeps existing queries.
+            semantic_queries: Optional new list of named semantic query specs.
+                If not provided, keeps existing semantic queries.
 
         Returns:
             A dict containing:
@@ -238,7 +252,10 @@ def create_artifact_tools(
             - render_url: URL path to render the new version
             - message: Success or error message
         """
-        from apps.artifacts.models import Artifact  # avoid circular import
+        # Import here to avoid circular imports
+        from apps.artifacts.models import Artifact
+        from apps.chat.artifact_links import link_artifact_to_thread
+        from apps.chat.models import ThreadArtifact
 
         if not code or not code.strip():
             return {
@@ -265,11 +282,49 @@ def create_artifact_tools(
                     "message": f"Artifact with ID '{artifact_id}' not found in this workspace.",
                 }
 
+            if original.artifact_type not in VALID_ARTIFACT_TYPES:
+                return {
+                    "artifact_id": None,
+                    "previous_version_id": artifact_id,
+                    "status": "error",
+                    "version": None,
+                    "title": original.title,
+                    "render_url": None,
+                    "message": (
+                        f"Artifact type '{original.artifact_type}' is no longer supported. "
+                        "Create a new React artifact and use Recharts for charts."
+                    ),
+                }
+
+            if original.artifact_type == "story":
+                return {
+                    "artifact_id": None,
+                    "previous_version_id": artifact_id,
+                    "status": "error",
+                    "version": None,
+                    "title": None,
+                    "render_url": None,
+                    "message": (
+                        "Story artifacts are semantic graph artifacts. Use "
+                        "artifact_manager with action='apply' or action='replace'."
+                    ),
+                }
+            if not code or not code.strip():
+                return {
+                    "artifact_id": None,
+                    "previous_version_id": artifact_id,
+                    "status": "error",
+                    "version": None,
+                    "title": None,
+                    "render_url": None,
+                    "message": "Code is required. Please provide the updated artifact source code.",
+                }
+
             # Fall back to the original when the caller omitted a field.
             new_title = title.strip() if title is not None else original.title
             new_data = data if data is not None else original.data
-            new_source_queries = (
-                source_queries if source_queries is not None else original.source_queries
+            new_semantic_queries = (
+                semantic_queries if semantic_queries is not None else original.semantic_queries
             )
 
             # No-op guard (arch #254, finding 09#9): each update copies the full
@@ -279,7 +334,7 @@ def create_artifact_tools(
                 code == original.code
                 and new_title == original.title
                 and new_data == original.data
-                and new_source_queries == original.source_queries
+                and new_semantic_queries == original.semantic_queries
             ):
                 logger.info(
                     "update_artifact no-op for %s (no change) — skipping version copy",
@@ -306,10 +361,17 @@ def create_artifact_tools(
                 data=new_data,
                 version=original.version + 1,
                 parent_artifact=original,
-                conversation_id=original.conversation_id,
-                source_queries=new_source_queries,
+                conversation_id=conversation_id or original.conversation_id,
+                source_queries=[],
+                semantic_queries=new_semantic_queries,
             )
             await new_artifact.asave()
+            await link_artifact_to_thread(
+                new_artifact,
+                conversation_id or new_artifact.conversation_id,
+                workspace,
+                source=ThreadArtifact.Source.UPDATED,
+            )
 
             logger.info(
                 "Created artifact version %s (v%d) from %s for workspace %s",

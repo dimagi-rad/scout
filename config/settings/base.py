@@ -52,12 +52,14 @@ def resolve_deploy_environment(settings_module: str) -> str:
     return "production" if settings_module in PRODUCTION_SETTINGS_MODULES else "development"
 
 
-# Default deployment environment label for Sentry / Task Badger. Derived from the
-# settings module (set before settings load) rather than DEBUG: base.py defaults
-# DEBUG to True and production.py only flips it after this file is imported, so a
-# DEBUG-based default would freeze to "development" even under production settings.
-# An explicit SENTRY_ENVIRONMENT / TASKBADGER_ENVIRONMENT env var still wins.
-DEPLOY_ENVIRONMENT = resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", ""))
+# Default deployment environment label for environment-specific integrations,
+# Sentry, and Task Badger. Staging intentionally uses the production settings
+# module, so it must set DEPLOY_ENVIRONMENT=staging explicitly; production and
+# development continue to derive a safe default from DJANGO_SETTINGS_MODULE.
+DEPLOY_ENVIRONMENT = env(
+    "DEPLOY_ENVIRONMENT",
+    default=resolve_deploy_environment(os.environ.get("DJANGO_SETTINGS_MODULE", "")),
+)
 
 ALLOWED_HOSTS = env("DJANGO_ALLOWED_HOSTS")
 
@@ -88,6 +90,7 @@ INSTALLED_APPS = [
     "apps.recipes",
     "apps.chat",
     "apps.transformations",
+    "apps.semantic",
 ]
 
 MIDDLEWARE = [
@@ -130,6 +133,13 @@ DATABASES = {
 
 # Separate from the application DB to allow future migration to Snowflake etc.
 MANAGED_DATABASE_URL = env("MANAGED_DATABASE_URL", default="")
+
+# Cube semantic-query runtime. Leave empty to disable live Cube calls in tests
+# and local setups that have not started the cube service yet.
+CUBE_API_URL = env("CUBE_API_URL", default="")
+CUBE_VALIDATOR_URL = env("CUBE_VALIDATOR_URL", default="")
+CUBEJS_API_SECRET = env("CUBEJS_API_SECRET", default="")
+CUBE_SCHEMA_VALIDATION_REQUIRED = env.bool("CUBE_SCHEMA_VALIDATION_REQUIRED", default=False)
 
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -283,6 +293,16 @@ DEFAULT_LLM_MODEL = env("DEFAULT_LLM_MODEL", default="claude-opus-4-8")
 # a forever-spinner. Override per-test to exercise the timeout path.
 AGENT_RESUME_TIMEOUT_S = env.int("AGENT_RESUME_TIMEOUT_S", default=120)
 
+# LangGraph checkpoint persistence uses a psycopg pool per Python process.
+# Keep these settings explicit because worker/process fan-out multiplies the
+# effective Postgres connection ceiling.
+LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE", default=1)
+LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE = env.int("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE", default=20)
+LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S = env.int(
+    "LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S",
+    default=10,
+)
+
 # Langfuse observability (optional)
 LANGFUSE_SECRET_KEY = env("LANGFUSE_SECRET_KEY", default="")
 LANGFUSE_PUBLIC_KEY = env("LANGFUSE_PUBLIC_KEY", default="")
@@ -317,8 +337,20 @@ MCP_SERVER_URL = env("MCP_SERVER_URL", default="http://localhost:8100/mcp")
 # (loopback only) disables the check; production deploy configs set it.
 MCP_SHARED_SECRET = env("MCP_SHARED_SECRET", default="")
 
-# CommCare Connect API
-CONNECT_API_URL = env("CONNECT_API_URL", default="https://connect.dimagi.com")
+
+def resolve_connect_api_url(deploy_environment: str) -> str:
+    """Return the Connect host paired with a Scout deployment environment."""
+    if deploy_environment == "staging":
+        return "https://connect-staging.dimagi.com"
+    return "https://connect.dimagi.com"
+
+
+# CommCare Connect API and OAuth host. CONNECT_API_URL remains independently
+# overridable for local development and one-off environments.
+CONNECT_API_URL = env(
+    "CONNECT_API_URL",
+    default=resolve_connect_api_url(DEPLOY_ENVIRONMENT),
+)
 OCS_URL = env("OCS_URL", default="https://www.openchatstudio.com")
 
 
