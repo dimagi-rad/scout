@@ -28,7 +28,7 @@ env:
     CONNECT_API_URL: "https://connect-staging.dimagi.com"
     SENTRY_ENVIRONMENT: "staging"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
-    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     MCP_SERVER_URL: "http://scout-staging-mcp-web:8100/mcp"
     CUBE_API_URL: "http://scout-staging-cube-web:4000"
     CUBE_VALIDATOR_URL: "http://scout-staging-cube-web:4010"
