@@ -14,23 +14,16 @@ Kamal command so the capability never lands in the access log in the first place
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-import yaml
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
-
-
-def _load(name: str) -> dict:
-    with (_CONFIG_DIR / name).open() as f:
-        return yaml.safe_load(f)
+from tests.kamal_config import load_config as _load
 
 
-def test_api_uvicorn_disables_access_log():
+@pytest.mark.parametrize("destination", [None, "staging"])
+def test_api_uvicorn_disables_access_log(destination):
     """The API container's uvicorn command must disable the access log so share
     tokens / OAuth codes in the request line never reach CloudWatch."""
-    cfg = _load("deploy.yml")
+    cfg = _load("deploy.yml", destination)
     cmd = cfg["servers"]["web"]["cmd"]
     assert "uvicorn" in cmd
     assert "--no-access-log" in cmd, (
@@ -40,10 +33,11 @@ def test_api_uvicorn_disables_access_log():
     )
 
 
+@pytest.mark.parametrize("destination", [None, "staging"])
 @pytest.mark.parametrize("name", ["deploy.yml", "deploy-mcp.yml", "deploy-worker.yml"])
-def test_no_uvicorn_access_log_anywhere(name):
+def test_no_uvicorn_access_log_anywhere(name, destination):
     """No container should run uvicorn with the access log enabled."""
-    cfg = _load(name)
+    cfg = _load(name, destination)
     for server in cfg.get("servers", {}).values():
         cmd = server.get("cmd", "")
         if "uvicorn" in cmd:

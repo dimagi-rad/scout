@@ -1,5 +1,7 @@
-# Cube semantic-query runtime — PRODUCTION. Internal only; API, worker, and
-# MCP reach it through scout-cube-web on the shared production network.
+# Cube semantic-query runtime. Internal only; API, worker, and MCP reach it
+# through scout-cube-web on the shared production network.
+#
+# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-cube
 
@@ -48,6 +50,8 @@ builder:
 # Reuse the existing MCP CloudWatch group so the first production rollout does
 # not depend on a separate infrastructure-stack update. Container names keep
 # Cube and MCP streams distinguishable.
+# Production only — see the gate comment in config/deploy.yml.
+#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -55,3 +59,4 @@ logging:
     awslogs-group: /scout/mcp
     awslogs-create-group: "false"
     tag: "{{.Name}}"
+#<% end %>

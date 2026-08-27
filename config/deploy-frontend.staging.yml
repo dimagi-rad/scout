@@ -1,0 +1,21 @@
+# Scout Frontend — STAGING overlay over config/deploy-frontend.yml.
+#   kamal deploy -c config/deploy-frontend.yml -d staging
+#
+# Sole public entry point for the staging host. Shares the host's single
+# kamal-proxy with production; routing is by hostname, so both get their own cert.
+
+servers:
+  web:
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-staging-frontend-web"
+
+builder:
+  args:
+    # Staging-specific conf: proxies to "scout-staging-web" so it resolves to the
+    # staging API, not prod's. A shared alias would collide on the `kamal` network
+    # (see nginx.staging-kamal.conf header and deploy.staging.yml).
+    NGINX_CONF: frontend/nginx.staging-kamal.conf
+
+proxy:
+  host: scout-staging.dimagi.com

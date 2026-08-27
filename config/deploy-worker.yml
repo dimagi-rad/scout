@@ -2,6 +2,8 @@
 # No HTTP interface — runs background tasks and periodic scheduling
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+#
+# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-worker
 
@@ -28,7 +30,7 @@ env:
     CONNECT_API_URL: "https://connect.dimagi.com"
     SENTRY_ENVIRONMENT: "production"
     SENTRY_TRACES_SAMPLE_RATE: "0.1"
-    SENTRY_RELEASE: <%= ENV.fetch('IMAGE_TAG', '') %>
+    SENTRY_RELEASE: "<%= ENV.fetch('IMAGE_TAG', '') %>"
     # Required by resume_thread_after_materialization → get_mcp_tools.
     # Without this the worker falls back to localhost:8100 and every resume
     # task fails with httpx.ConnectError.
@@ -75,6 +77,8 @@ ssh:
 builder:
   arch: amd64
 
+# Production only — see the gate comment in config/deploy.yml.
+#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -82,5 +86,6 @@ logging:
     awslogs-group: /scout/worker
     awslogs-create-group: "false"
     tag: "{{.Name}}"
+#<% end %>
 
 # No proxy — worker has no HTTP interface

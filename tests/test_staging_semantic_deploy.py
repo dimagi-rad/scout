@@ -2,33 +2,29 @@
 
 from pathlib import Path
 
-import yaml
+from tests.kamal_config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _load_config(name: str) -> dict:
-    return yaml.safe_load((REPO_ROOT / "config" / name).read_text())
+def _staging(name: str) -> dict:
+    return load_config(name, destination="staging")
 
 
 def test_staging_services_share_the_cube_runtime_and_signing_secret():
-    for name in (
-        "deploy-staging.yml",
-        "deploy-staging-worker.yml",
-        "deploy-staging-mcp.yml",
-    ):
-        config = _load_config(name)
+    for name in ("deploy.yml", "deploy-worker.yml", "deploy-mcp.yml"):
+        config = _staging(name)
         assert config["env"]["clear"]["CUBE_API_URL"] == ("http://scout-staging-cube-web:4000")
         assert "CUBEJS_API_SECRET" in config["env"]["secret"]
 
-    for name in ("deploy-staging.yml", "deploy-staging-worker.yml"):
-        clear = _load_config(name)["env"]["clear"]
+    for name in ("deploy.yml", "deploy-worker.yml"):
+        clear = _staging(name)["env"]["clear"]
         assert clear["CUBE_VALIDATOR_URL"] == "http://scout-staging-cube-web:4010"
         assert clear["CUBE_SCHEMA_VALIDATION_REQUIRED"] == "True"
 
 
 def test_staging_cube_is_internal_and_uses_the_shared_secret():
-    config = _load_config("deploy-staging-cube.yml")
+    config = _staging("deploy-cube.yml")
     assert config["image"] == "scout/mcp"
     assert config["builder"]["context"] == "cube_config"
     assert config["builder"]["dockerfile"] == "cube_config/Dockerfile"

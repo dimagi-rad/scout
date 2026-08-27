@@ -3,13 +3,9 @@
 import subprocess
 from pathlib import Path
 
-import yaml
+from tests.kamal_config import load_config as _load_config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _load_config(name: str) -> dict:
-    return yaml.safe_load((REPO_ROOT / "config" / name).read_text())
 
 
 def test_production_services_share_the_cube_runtime_and_signing_secret():
@@ -51,7 +47,7 @@ def test_production_workflow_requires_and_deploys_cube_before_dependents():
 
 
 def test_kamal_uses_the_environment_aware_cube_secret_resolver():
-    secrets_file = (REPO_ROOT / ".kamal" / "secrets").read_text()
+    secrets_file = (REPO_ROOT / ".kamal" / "secrets-common").read_text()
     assert "CUBEJS_API_SECRET=$(scripts/resolve-cube-secret.sh)" in secrets_file
 
 

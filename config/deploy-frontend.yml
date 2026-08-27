@@ -2,6 +2,8 @@
 # nginx serving React SPA, proxies /api/ and /admin/ to Django
 #
 # Requires: source .env.deploy (or run scripts/fetch-deploy-env.sh to generate it)
+#
+# Staging deploys from this file too, via `-d staging` — see the .staging.yml overlay.
 
 service: scout-frontend
 
@@ -47,6 +49,8 @@ proxy:
     path: /
     timeout: 3
 
+# Production only — see the gate comment in config/deploy.yml.
+#<% unless ENV["KAMAL_DESTINATION"] %>
 logging:
   driver: awslogs
   options:
@@ -54,3 +58,4 @@ logging:
     awslogs-group: /scout/frontend
     awslogs-create-group: "false"
     tag: "{{.Name}}"
+#<% end %>

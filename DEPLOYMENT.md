@@ -53,6 +53,10 @@ repo's CloudFormation template.
 
 The frontend nginx container reverse-proxies `/api/` and `/mcp/` to the internal services.
 
+Each config is the production definition. Staging deploys from the same files with
+`-d staging`, which deep-merges the matching `config/<name>.staging.yml` overlay over
+it — see [Second environment (staging)](#second-environment-staging).
+
 ## Automated Deployment (CI/CD)
 
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
@@ -88,7 +92,7 @@ The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push 
 ### AWS Secrets Manager
 
 The deploy pipeline fetches these secrets from AWS Secrets Manager via Kamal's
-`aws_secrets_manager` adapter (see `.kamal/secrets`):
+`aws_secrets_manager` adapter (see `.kamal/secrets-common`):
 
 | Secret | Purpose |
 |--------|---------|
@@ -119,13 +123,13 @@ environment. The workflow shares it only among staging's API, worker, MCP, and
 Cube containers so semantic-query security contexts are accepted end to end.
 Production uses the AWS Secrets Manager value `SCOUT_CUBEJS_API_SECRET`, which
 the production workflow validates before building and Kamal resolves through
-`.kamal/secrets`. Generate the two values independently (for example,
+`.kamal/secrets-common`. Generate the two values independently (for example,
 `openssl rand -hex 32`) so a staging credential can never sign a production
 Cube security context.
 
 ### Adding a new secret
 
-The chain runs AWS Secrets Manager → `.kamal/secrets` → `env.secret` in each Kamal
+The chain runs AWS Secrets Manager → `.kamal/secrets-common` → `env.secret` in each Kamal
 config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
 
 1. **Store it in AWS Secrets Manager**, following the `SCOUT_*` naming convention:
@@ -137,7 +141,7 @@ config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
    ```
    (Use `put-secret-value` instead of `create-secret` to rotate an existing one.)
 
-2. **Map it in `.kamal/secrets`** — fetch it from AWS, then extract it into the env
+2. **Map it in `.kamal/secrets-common`** — fetch it from AWS, then extract it into the env
    var name your app reads. Group related keys into one `fetch` call to cut AWS round-trips:
    ```bash
    TASKBADGER_SECRETS=$(kamal secrets fetch --adapter aws_secrets_manager SCOUT_TASKBADGER_API_KEY)
@@ -155,7 +159,7 @@ config. To add one (using `SCOUT_TASKBADGER_API_KEY` as the example):
 4. **Verify and deploy.** `kamal secrets print` resolves the file locally so you can
    confirm the value is non-empty before shipping; then redeploy the affected services.
 
-Only `env.secret` entries are injected from `.kamal/secrets`. Non-sensitive config goes
+Only `env.secret` entries are injected from `.kamal/secrets-common`. Non-sensitive config goes
 in `env.clear` instead, written inline in the Kamal config (no AWS entry needed).
 
 ## Error monitoring (Sentry)
@@ -196,8 +200,14 @@ A staging environment (`scout-staging.dimagi.com`) runs **co-located on the
 production EC2 host** for testing branches. It reuses every AWS Secrets Manager
 value, the ECR repos, and the RDS *instance* — but has **its own database**
 (`agent_platform_staging`) and its own Docker network (`scout_staging_shared`),
-so its data and internal services are isolated from production. Config lives in
-`config/deploy-staging*.yml`.
+so its data and internal services are isolated from production.
+
+Staging has no config files of its own. It deploys the production configs with
+`-d staging`, and Kamal deep-merges `config/<name>.staging.yml` over the base — those
+overlays hold only what differs (network, hostnames, Sentry environment, the API's
+worker count and secret list). Hashes merge key by key; arrays such as `env.secret`
+are replaced wholesale. Secrets resolve from `.kamal/secrets-common`, which Kamal
+reads for every destination.
 
 One thing is *not* isolated: PostgreSQL roles are cluster-scoped, not per-database.
 The `<schema>_ro` / `<schema>_dbt` roles `SchemaManager` mints are named
@@ -272,19 +282,22 @@ git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
 
 # First time
-kamal setup -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal setup -c config/deploy-staging-mcp.yml
-kamal setup -c config/deploy-staging.yml
-kamal setup -c config/deploy-staging-worker.yml
-kamal setup -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
+kamal setup -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
+kamal setup -c config/deploy-mcp.yml -d staging
+kamal setup -d staging
+kamal setup -c config/deploy-worker.yml -d staging
+kamal setup -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
 
 # Subsequent deploys
-kamal deploy -c config/deploy-staging-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal deploy -c config/deploy-staging-mcp.yml
-kamal deploy -c config/deploy-staging.yml
-kamal deploy -c config/deploy-staging-worker.yml
-kamal deploy -c config/deploy-staging-frontend.yml --version=staging-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-mcp.yml -d staging
+kamal deploy -d staging
+kamal deploy -c config/deploy-worker.yml -d staging
+kamal deploy -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
 ```
+
+Omitting `-d staging` deploys **production** — the base configs are the production
+definition.
 
 The frontend commands carry an explicit `--version`. Without it Kamal versions the
 build as the bare git SHA and pushes it as `scout/frontend:<sha>` — the same tag
@@ -294,7 +307,7 @@ frontend proxying to `scout-staging-web`, putting production traffic on the stag
 API. The API/MCP/worker image is environment-agnostic, so those need no override.
 
 Migrations run automatically against the staging database when the API container
-starts. Logs: `kamal app logs -c config/deploy-staging.yml`.
+starts. Logs: `kamal app logs -d staging`.
 
 > Always `source config/staging.env` before staging commands — it points
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)

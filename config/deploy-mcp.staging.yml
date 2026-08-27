@@ -1,0 +1,20 @@
+# Scout MCP Server — STAGING overlay over config/deploy-mcp.yml.
+#   kamal deploy -c config/deploy-mcp.yml -d staging
+#
+# Internal only, reached by the staging API at scout-staging-mcp-web:8100 on the
+# scout_staging_shared network. Secret list is identical to production's.
+#
+# Requires: source .env.deploy && source config/staging.env
+
+servers:
+  web:
+    options:
+      network: "scout_staging_shared"
+      network-alias: "scout-staging-mcp-web"
+
+env:
+  clear:
+    DEPLOY_ENVIRONMENT: "staging"
+    CONNECT_API_URL: "https://connect-staging.dimagi.com"
+    CUBE_API_URL: "http://scout-staging-cube-web:4000"
+    SENTRY_ENVIRONMENT: "staging"
