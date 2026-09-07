@@ -1012,7 +1012,9 @@ def test_teardown_view_schema_drops_role_despite_stale_default_acl(db, managed_d
     conn = managed_db_connection
     c = conn.cursor()
     try:
-        c.execute(psycopg_sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(psycopg_sql.Identifier(sa)))
+        c.execute(
+            psycopg_sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(psycopg_sql.Identifier(sa))
+        )
         c.execute(
             psycopg_sql.SQL("CREATE TABLE IF NOT EXISTS {}.cases (id TEXT)").format(
                 psycopg_sql.Identifier(sa)
@@ -1052,7 +1054,107 @@ def test_teardown_view_schema_drops_role_despite_stale_default_acl(db, managed_d
         c4 = conn.cursor()
         try:
             c4.execute(
-                psycopg_sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(psycopg_sql.Identifier(sa))
+                psycopg_sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg_sql.Identifier(sa)
+                )
+            )
+            for role in (readonly_role_name(sa), dbt_role_name(sa)):
+                c4.execute(
+                    psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(psycopg_sql.Identifier(role))
+                )
+            if vs:
+                c4.execute(
+                    psycopg_sql.SQL("DROP ROLE IF EXISTS {}").format(
+                        psycopg_sql.Identifier(readonly_role_name(vs.schema_name))
+                    )
+                )
+        finally:
+            c4.close()
+        if vs:
+            vs.delete()
+        ts.delete()
+
+
+def test_teardown_view_schema_drops_role_despite_table_acl_from_stale_default_acl(
+    db, managed_db_connection
+):
+    """The stale default-ACL entry stamps SELECT onto every table created in the
+    tenant schema afterwards. Once the schema-level grant is gone (as it is after
+    remediation), those table ACLs are the only thing left holding the role — and
+    a schema-level-only ACL search cannot find them, so DROP ROLE fails and the
+    role dangles. Discovery must look at relation ACLs independently.
+    """
+    User = get_user_model()
+    user = User.objects.create_user(email="leak-relacl@example.com", password="pass")
+    t = Tenant.objects.create(
+        provider="commcare", external_id="leak-relacl-a", canonical_name="leak_relacl_a"
+    )
+    ws = Workspace.objects.create(name="Leak relacl WS", created_by=user)
+    WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
+    WorkspaceTenant.objects.create(workspace=ws, tenant=t)
+    sa = "leak_relacl_a_sch"
+    ts = TenantSchema.objects.create(tenant=t, schema_name=sa, state=SchemaState.ACTIVE)
+
+    conn = managed_db_connection
+    c = conn.cursor()
+    try:
+        c.execute(
+            psycopg_sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(psycopg_sql.Identifier(sa))
+        )
+        c.execute(
+            psycopg_sql.SQL("CREATE TABLE IF NOT EXISTS {}.cases (id TEXT)").format(
+                psycopg_sql.Identifier(sa)
+            )
+        )
+    finally:
+        c.close()
+
+    mgr = SchemaManager()
+    vs = None
+    try:
+        vs = mgr.build_view_schema(ws)
+        view_role = readonly_role_name(vs.schema_name)
+
+        c2 = conn.cursor()
+        try:
+            c2.execute(
+                psycopg_sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA {} "
+                    "GRANT SELECT ON TABLES TO {}"
+                ).format(psycopg_sql.Identifier(sa), psycopg_sql.Identifier(view_role))
+            )
+            # A rematerialization after the stale entry was left behind.
+            c2.execute(
+                psycopg_sql.SQL("CREATE TABLE {}.visits_after (id TEXT)").format(
+                    psycopg_sql.Identifier(sa)
+                )
+            )
+            c2.execute(
+                "SELECT count(*) FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace, aclexplode(c.relacl) AS acl "
+                "JOIN pg_roles r ON r.oid = acl.grantee "
+                "WHERE r.rolname = %s AND n.nspname = %s",
+                (view_role, sa),
+            )
+            assert c2.fetchone()[0] >= 1, "expected the stale default ACL to stamp a table ACL"
+        finally:
+            c2.close()
+
+        mgr.teardown_view_schema(vs)
+
+        c3 = conn.cursor()
+        try:
+            c3.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (view_role,))
+            assert c3.fetchone() is None, f"view role {view_role} dangled after teardown"
+        finally:
+            c3.close()
+    finally:
+        c4 = conn.cursor()
+        try:
+            c4.execute(
+                psycopg_sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    psycopg_sql.Identifier(sa)
+                )
             )
             for role in (readonly_role_name(sa), dbt_role_name(sa)):
                 c4.execute(

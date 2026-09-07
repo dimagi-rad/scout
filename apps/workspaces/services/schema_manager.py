@@ -545,13 +545,27 @@ class SchemaManager:
                     view_schema.schema_name,
                 )
 
-    # Finds schemas where the role holds direct ACL entries — schema-level grants
-    # are the only ones that survive DROP SCHEMA CASCADE and would block DROP ROLE.
+    # Finds schemas where the role holds direct ACL entries that survive DROP SCHEMA
+    # CASCADE and would block DROP ROLE. Relation-level ACLs must be searched
+    # independently of schema-level ones: a leftover pg_default_acl entry stamps
+    # SELECT onto every table created later in that schema, so a schema whose
+    # nspacl grant was already revoked can still accumulate table ACLs and strand
+    # the role. Only the relkinds that "REVOKE ... ON ALL TABLES" can actually
+    # revoke are considered; the role is never granted anything else.
     _SCHEMAS_WITH_ROLE_GRANTS_SQL = """
-        SELECT DISTINCT n.nspname
-        FROM pg_namespace n, aclexplode(n.nspacl) AS acl
-        JOIN pg_roles r ON r.oid = acl.grantee
-        WHERE r.rolname = %s
+        SELECT DISTINCT nspname FROM (
+            SELECT n.nspname
+            FROM pg_namespace n, aclexplode(n.nspacl) AS acl
+            JOIN pg_roles r ON r.oid = acl.grantee
+            WHERE r.rolname = %(role)s
+            UNION
+            SELECT n.nspname
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace,
+                 aclexplode(c.relacl) AS acl
+            JOIN pg_roles r ON r.oid = acl.grantee
+            WHERE r.rolname = %(role)s AND c.relkind IN ('r', 'v', 'm', 'p', 'f')
+        ) s
     """
 
     # Finds (schema, owning-role) pairs where the role is a grantee in a schema's
@@ -574,7 +588,7 @@ class SchemaManager:
         await cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not await cursor.fetchone():
             return
-        await cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        await cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, {"role": role_name})
         schemas_with_grants = [row[0] for row in await cursor.fetchall()]
         for schema in schemas_with_grants:
             await cursor.execute(
@@ -618,7 +632,7 @@ class SchemaManager:
         cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role_name,))
         if not cursor.fetchone():
             return
-        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, {"role": role_name})
         schemas_with_grants = [row[0] for row in cursor.fetchall()]
         for schema in schemas_with_grants:
             cursor.execute(
@@ -770,7 +784,7 @@ class SchemaManager:
         Best-effort per schema: a removed schema that has since been dropped
         from the database leaves no ACL to revoke.
         """
-        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, (role_name,))
+        cursor.execute(self._SCHEMAS_WITH_ROLE_GRANTS_SQL, {"role": role_name})
         granted_schemas = [row[0] for row in cursor.fetchall()]
         for schema in granted_schemas:
             if schema in current_schemas:
@@ -783,6 +797,33 @@ class SchemaManager:
             )
             cursor.execute(
                 psycopg.sql.SQL("REVOKE ALL PRIVILEGES ON SCHEMA {} FROM {}").format(
+                    psycopg.sql.Identifier(schema),
+                    psycopg.sql.Identifier(role_name),
+                )
+            )
+
+    def _revoke_stale_view_role_default_acls(
+        self, cursor, role_name: str, current_schemas: set[str]
+    ) -> None:
+        """Revoke pg_default_acl entries naming the view role outside ``current_schemas``.
+
+        Revoking the direct grants is not enough: an earlier version's
+        ``ALTER DEFAULT PRIVILEGES`` in a tenant schema keeps stamping SELECT onto
+        every table created there afterwards, so the role re-accumulates ACLs and
+        strands itself at teardown. Kept out of ``build_view_schema`` on purpose —
+        ``ALTER DEFAULT PRIVILEGES FOR ROLE`` needs membership in the owning role,
+        so a failure here must not fail a rebuild.
+        """
+        cursor.execute(self._SCHEMAS_WITH_ROLE_DEFAULT_ACLS_SQL, (role_name,))
+        for schema, owner_role in cursor.fetchall():
+            if schema in current_schemas:
+                continue
+            cursor.execute(
+                psycopg.sql.SQL(
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
+                    "REVOKE ALL ON TABLES FROM {}"
+                ).format(
+                    psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
                     psycopg.sql.Identifier(role_name),
                 )

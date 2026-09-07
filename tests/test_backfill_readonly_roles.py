@@ -194,10 +194,51 @@ class TestBackfillReadonlyRoles:
 
         view_role = readonly_role_name(vs.schema_name)
         calls = [str(c) for c in mock_cursor.execute.call_args_list]
-        assert not any(
-            "GRANT" in c and ts.schema_name in c and view_role in c for c in calls
-        ), "view role must not be granted access to raw tenant schemas"
+        assert not any("GRANT" in c and ts.schema_name in c and view_role in c for c in calls), (
+            "view role must not be granted access to raw tenant schemas"
+        )
         assert not any(
             "ALTER DEFAULT PRIVILEGES" in c and ts.schema_name in c and view_role in c
             for c in calls
         )
+
+    def test_view_schema_backfill_revokes_stale_tenant_default_acls(
+        self, tenant_membership, workspace
+    ):
+        """Remediation must also clear the default-ACL entries an earlier version left
+        in the tenant schemas: revoking only the direct grants leaves them stamping
+        SELECT onto every table created there later, which strands the role."""
+        ts = TenantSchema.objects.create(
+            tenant=tenant_membership.tenant,
+            schema_name="ws_tenant",
+            state="active",
+        )
+        workspace.tenants.add(tenant_membership.tenant)
+        vs = WorkspaceViewSchema.objects.create(
+            workspace=workspace,
+            schema_name="ws_view",
+            state="active",
+        )
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.return_value = None
+        # First fetchall: direct-ACL search. Second: default-ACL search.
+        mock_cursor.fetchall.side_effect = [[], [(ts.schema_name, "platform")]]
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            call_command("backfill_readonly_roles")
+
+        view_role = readonly_role_name(vs.schema_name)
+        calls = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert any(
+            "ALTER DEFAULT PRIVILEGES" in c
+            and "REVOKE ALL ON TABLES" in c
+            and ts.schema_name in c
+            and view_role in c
+            for c in calls
+        ), "stale tenant-schema default ACLs must be revoked during backfill"

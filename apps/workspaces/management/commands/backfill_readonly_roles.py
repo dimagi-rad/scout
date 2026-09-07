@@ -113,3 +113,4 @@ class Command(BaseCommand):
         self._backfill_schema(cursor, mgr, vs.schema_name)
         role = readonly_role_name(vs.schema_name)
         mgr._revoke_stale_view_role_grants(cursor, role, {vs.schema_name})
+        mgr._revoke_stale_view_role_default_acls(cursor, role, {vs.schema_name})
