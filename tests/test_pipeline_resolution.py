@@ -6,16 +6,35 @@ provider's table names and descriptions with nothing logged. These tests pin the
 replacement behaviour per surface: resolve, or say so — never guess.
 """
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
+from apps.semantic.models import SemanticModel
+from apps.semantic.services import catalog as catalog_service
+from apps.semantic.services.catalog import SemanticCatalogUnavailable, ensure_semantic_model
+from apps.workspaces.models import SchemaState, TenantSchema
 from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     select_pipeline_config,
 )
+from mcp_server.context import QueryContext
 
 UNKNOWN_PROVIDER = "mystery_provider"
+
+
+@pytest.fixture
+def unresolvable_tenant_schema(db, tenant):
+    """A tenant whose provider has no pipeline YAML, with a live schema."""
+    tenant.provider = UNKNOWN_PROVIDER
+    tenant.save(update_fields=["provider"])
+    return TenantSchema.objects.create(
+        tenant=tenant,
+        schema_name="t_mystery",
+        state=SchemaState.ACTIVE,
+    )
 
 
 class TestSelectPipelineConfig:
@@ -43,3 +62,41 @@ class TestSelectPipelineConfig:
         """A missing pipeline for a supported provider is a deploy defect: it must
         keep reaching Sentry rather than being filtered as routine."""
         assert not issubclass(PipelineResolutionError, ExpectedStateError)
+
+
+class TestSemanticModelBuild:
+    """A wrong pipeline here is cached and promoted, so the build must fail."""
+
+    @pytest.mark.django_db(transaction=True)
+    def test_unresolvable_pipeline_never_reads_commcare_sync_tables(
+        self, monkeypatch, workspace, unresolvable_tenant_schema
+    ):
+        monkeypatch.setattr(
+            catalog_service,
+            "load_workspace_context",
+            AsyncMock(
+                return_value=QueryContext(
+                    tenant_id=str(unresolvable_tenant_schema.tenant_id),
+                    schema_name=unresolvable_tenant_schema.schema_name,
+                    connection_params={},
+                )
+            ),
+        )
+        listed_with = []
+
+        async def spy_pipeline_list_tables(ts, pipeline_config):
+            listed_with.append(pipeline_config)
+            return [{"name": "raw_cases", "type": "table"}]
+
+        monkeypatch.setattr(catalog_service, "pipeline_list_tables", spy_pipeline_list_tables)
+
+        with pytest.raises(SemanticCatalogUnavailable) as exc:
+            ensure_semantic_model(workspace)
+
+        assert listed_with == [], (
+            "resolution failed, so no pipeline may be read from — "
+            f"got {[getattr(c, 'name', c) for c in listed_with]}"
+        )
+        assert UNKNOWN_PROVIDER in str(exc.value)
+        assert exc.value.schema_status == "failed"
+        assert not SemanticModel.objects.filter(workspace=workspace).exists()
