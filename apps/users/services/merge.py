@@ -17,7 +17,7 @@ from allauth.socialaccount.models import SocialAccount
 from django.db import transaction
 
 from apps.users.models import TenantConnection, TenantMembership
-from apps.workspaces.models import TenantMetadata, WorkspaceMembership, WorkspaceRole
+from apps.workspaces.models import WorkspaceMembership, WorkspaceRole
 
 if TYPE_CHECKING:
     from apps.users.models import User
@@ -157,18 +157,15 @@ def _dedupe_email_addresses(canonical: User, duplicate: User) -> tuple[int, int]
     return repointed, deleted
 
 
-def _migrate_conflicting_membership(canon_m: TenantMembership, dup_m: TenantMembership) -> int:
+def _migrate_conflicting_membership(canon_m: TenantMembership, dup_m: TenantMembership) -> None:
     """Carry discovered data from a losing conflicting membership onto the surviving
     one, when the survivor lacks it.
 
-    04#1: ``TenantMetadata`` is a OneToOne(CASCADE) on ``TenantMembership`` and
-    ``provider_metadata``/``connection`` ride on the membership row. Deleting the
-    losing membership cascade-deletes its ``TenantMetadata`` and drops its connection
-    wiring. Before that delete, migrate each of those onto the surviving membership
-    *only when the survivor doesn't already have it* — never clobbering the survivor's
-    own discovered data.
-
-    Returns 1 if a ``TenantMetadata`` row was migrated, else 0.
+    04#1: ``provider_metadata`` and ``connection`` ride on the membership row, so
+    deleting the losing membership drops them. Migrate each onto the surviving
+    membership *only when the survivor doesn't already have it* — never clobbering the
+    survivor's own discovered data. ``TenantMetadata`` is keyed on the tenant (#305),
+    so a merge can no longer move or destroy it.
     """
     canon_changed_fields: list[str] = []
 
@@ -183,36 +180,22 @@ def _migrate_conflicting_membership(canon_m: TenantMembership, dup_m: TenantMemb
     if canon_changed_fields:
         canon_m.save(update_fields=canon_changed_fields)
 
-    metadata_migrated = 0
-    dup_metadata = TenantMetadata.objects.filter(tenant_membership=dup_m).first()
-    if (
-        dup_metadata is not None
-        and not TenantMetadata.objects.filter(tenant_membership=canon_m).exists()
-    ):
-        dup_metadata.tenant_membership = canon_m
-        dup_metadata.save(update_fields=["tenant_membership"])
-        metadata_migrated = 1
 
-    return metadata_migrated
-
-
-def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, int, int]:
-    """Returns (repointed_count, conflict_deleted_count, metadata_migrated_count).
+def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, int]:
+    """Returns (repointed_count, conflict_deleted_count).
 
     Reconciles the two users' memberships to one row per tenant. Uses ``all_objects``
     so archived tombstones are visible, and resolves a same-tenant conflict
     **live-beats-tombstone**: if either side has a live (non-archived) row, the
     survivor is live — a revoked tombstone must never win and silently re-revoke
     access the other side still holds. Before deleting the losing conflicting row,
-    its discovered data (TenantMetadata, provider_metadata, connection wiring) is
-    migrated onto the survivor when the survivor lacks it (04#1), so cascade-delete
-    never destroys the only copy. (Connection *rows* are merged separately by
-    _merge_tenant_connections.)
+    its discovered data (provider_metadata, connection wiring) is migrated onto the
+    survivor when the survivor lacks it (04#1), so the delete never destroys the only
+    copy. (Connection *rows* are merged separately by _merge_tenant_connections.)
     """
     canon_by_tenant = {m.tenant_id: m for m in TenantMembership.all_objects.filter(user=canonical)}
     repointed = 0
     conflict_deleted = 0
-    metadata_migrated = 0
     for dup_m in TenantMembership.all_objects.filter(user=duplicate):
         canon_m = canon_by_tenant.get(dup_m.tenant_id)
         if canon_m is None:
@@ -223,7 +206,7 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
         if dup_m.archived_at is None and canon_m.archived_at is not None:
             # duplicate's live row beats canonical's tombstone: migrate the
             # tombstone's data onto dup_m, delete the tombstone, repoint dup_m.
-            metadata_migrated += _migrate_conflicting_membership(dup_m, canon_m)
+            _migrate_conflicting_membership(dup_m, canon_m)
             canon_m.delete()
             dup_m.user = canonical
             dup_m.save(update_fields=["user"])
@@ -231,10 +214,10 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
         else:
             # canonical's row survives (live, or both tombstones): migrate the
             # duplicate's data onto it, then delete the duplicate.
-            metadata_migrated += _migrate_conflicting_membership(canon_m, dup_m)
+            _migrate_conflicting_membership(canon_m, dup_m)
             dup_m.delete()
             conflict_deleted += 1
-    return repointed, conflict_deleted, metadata_migrated
+    return repointed, conflict_deleted
 
 
 def _merge_tenant_connections(canonical: User, duplicate: User) -> tuple[int, int]:
@@ -426,11 +409,9 @@ def merge_users(
         report.emailaddress_repointed, report.emailaddress_deleted = _dedupe_email_addresses(
             canonical, duplicate
         )
-        (
-            report.tenant_membership_repointed,
-            report.tenant_membership_conflict_deleted,
-            report.tenant_membership_metadata_migrated,
-        ) = _merge_tenant_memberships(canonical, duplicate)
+        report.tenant_membership_repointed, report.tenant_membership_conflict_deleted = (
+            _merge_tenant_memberships(canonical, duplicate)
+        )
         report.tenant_connection_repointed, report.tenant_connection_conflict_merged = (
             _merge_tenant_connections(canonical, duplicate)
         )

@@ -221,9 +221,7 @@ def run_pipeline(
         # Asset generation failures are isolated — load can proceed without assets.
         if pipeline.provider == "commcare":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = TenantMetadata.objects.filter(tenant=tenant_membership.tenant).first()
                 if tenant_meta:
                     asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -241,9 +239,7 @@ def run_pipeline(
         # Asset generation failures are isolated — the pipeline continues regardless.
         if pipeline.provider == "commcare_connect":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = TenantMetadata.objects.filter(tenant=tenant_membership.tenant).first()
                 if tenant_meta:
                     asset_result = upsert_connect_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -558,7 +554,7 @@ def _run_discover_phase(
     metadata = loader.load()
 
     TenantMetadata.objects.update_or_create(
-        tenant_membership=tenant_membership,
+        tenant=tenant_membership.tenant,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)

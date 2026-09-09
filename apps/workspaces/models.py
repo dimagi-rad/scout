@@ -357,24 +357,16 @@ class TenantMetadata(models.Model):
     Completely provider-agnostic — each provider stores whatever structure it needs
     in the ``metadata`` JSON field. Survives schema teardown so re-provisioning can
     skip re-discovery if the data is still current.
+
+    One row per tenant (#305). It used to hang off ``TenantMembership``, which gave
+    a tenant one row per member — rows that could disagree — and cascade-deleted
+    metadata the rest of the tenant still needed when a single member left.
     """
 
-    # #305 in flight: ``tenant`` is being introduced as the real grain and
-    # ``tenant_membership`` retired. Both are nullable for the length of the
-    # backfill (workspaces.0008) so neither column can fail a write mid-deploy.
-    tenant = models.ForeignKey(
+    tenant = models.OneToOneField(
         "users.Tenant",
         on_delete=models.CASCADE,
         related_name="metadata",
-        null=True,
-        blank=True,
-    )
-    tenant_membership = models.OneToOneField(
-        "users.TenantMembership",
-        on_delete=models.CASCADE,
-        related_name="metadata",
-        null=True,
-        blank=True,
     )
     # schema=dict is intentionally untyped: the model is provider-agnostic and
     # each loader defines its own structure. A typed Pydantic schema can be
@@ -397,4 +389,4 @@ class TenantMetadata(models.Model):
         verbose_name_plural = "Tenant Metadata"
 
     def __str__(self) -> str:
-        return f"Metadata for {self.tenant_membership.tenant}"
+        return f"Metadata for {self.tenant}"

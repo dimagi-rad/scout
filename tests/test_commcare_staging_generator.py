@@ -10,6 +10,7 @@ from apps.transformations.services.commcare_staging import (
     slugify_model_name,
     upsert_system_assets,
 )
+from apps.workspaces.models import TenantMetadata
 
 
 @pytest.fixture
@@ -697,15 +698,7 @@ class TestEmptyMetadata:
 
 @pytest.fixture
 def tenant_metadata(tenant):
-    from apps.users.models import TenantMembership, User
-    from apps.workspaces.models import TenantMetadata
-
-    user = User.objects.create_user(email="test@example.com", password="testpass")
-    membership = TenantMembership.objects.create(user=user, tenant=tenant)
-    return TenantMetadata.objects.create(
-        tenant_membership=membership,
-        metadata=_make_full_metadata(),
-    )
+    return TenantMetadata.objects.create(tenant=tenant, metadata=_make_full_metadata())
 
 
 @pytest.mark.django_db
@@ -737,14 +730,7 @@ class TestUpsertSystemAssets:
         assert second["total"] == first["total"] + 1
 
     def test_empty_metadata_returns_zeros(self, tenant):
-        from apps.users.models import TenantMembership, User
-        from apps.workspaces.models import TenantMetadata
-
-        user = User.objects.create_user(email="empty@example.com", password="testpass")
-        membership = TenantMembership.objects.create(user=user, tenant=tenant)
-        empty_meta = TenantMetadata.objects.create(
-            tenant_membership=membership, metadata=_make_metadata()
-        )
+        empty_meta = TenantMetadata.objects.create(tenant=tenant, metadata=_make_metadata())
         result = upsert_system_assets(tenant, empty_meta)
         assert result == {"created": 0, "updated": 0, "total": 0, "deleted": 0}
 
