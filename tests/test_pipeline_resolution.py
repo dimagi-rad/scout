@@ -6,6 +6,7 @@ provider's table names and descriptions with nothing logged. These tests pin the
 replacement behaviour per surface: resolve, or say so — never guess.
 """
 
+import uuid
 from unittest.mock import AsyncMock
 
 import pytest
@@ -20,6 +21,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     select_pipeline_config,
 )
+from mcp_server import server as mcp_server_module
 from mcp_server.context import QueryContext
 
 UNKNOWN_PROVIDER = "mystery_provider"
@@ -100,3 +102,61 @@ class TestSemanticModelBuild:
         assert UNKNOWN_PROVIDER in str(exc.value)
         assert exc.value.schema_status == "failed"
         assert not SemanticModel.objects.filter(workspace=workspace).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+class TestMcpMetadataTools:
+    """The agent must be told resolution failed, not handed another provider's tables."""
+
+    def _patch_context(self, monkeypatch, schema_name):
+        monkeypatch.setattr(
+            mcp_server_module,
+            "load_workspace_context",
+            AsyncMock(
+                return_value=QueryContext(
+                    tenant_id="whoever",
+                    schema_name=schema_name,
+                    connection_params={},
+                )
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_tables_reports_the_failure_instead_of_commcare_tables(
+        self, monkeypatch, unresolvable_tenant_schema
+    ):
+        self._patch_context(monkeypatch, unresolvable_tenant_schema.schema_name)
+        listed_with = []
+
+        async def spy_pipeline_list_tables(ts, pipeline_config):
+            listed_with.append(pipeline_config)
+            return []
+
+        monkeypatch.setattr(mcp_server_module, "pipeline_list_tables", spy_pipeline_list_tables)
+
+        result = await mcp_server_module.list_tables(workspace_id=str(uuid.uuid4()))
+
+        assert result["success"] is False
+        assert result["error"]["code"] == ErrorCode.PIPELINE_UNRESOLVED
+        assert UNKNOWN_PROVIDER in result["error"]["message"]
+        assert listed_with == []
+
+    @pytest.mark.asyncio
+    async def test_describe_table_on_a_view_schema_passes_no_pipeline(self, monkeypatch):
+        """A ws_* view schema has no tenant, so None is the truthful answer — not
+        commcare_sync's source descriptions."""
+        self._patch_context(monkeypatch, "ws_multi")
+        described_with = []
+
+        async def spy_describe(table_name, ctx, tenant_metadata, pipeline_config):
+            described_with.append(pipeline_config)
+            return {"name": table_name, "description": "", "columns": []}
+
+        monkeypatch.setattr(mcp_server_module, "pipeline_describe_table", spy_describe)
+
+        result = await mcp_server_module.describe_table(
+            "raw_visits", workspace_id=str(uuid.uuid4())
+        )
+
+        assert result["success"] is True
+        assert described_with == [None]
