@@ -17,9 +17,10 @@ The rule: **the most-recently-discovered LIVE membership's metadata.**
   semantic catalog and the data dictionary. The ``archived_at IS NULL`` predicate
   is spelled out here because the join can't inherit it.
 - ``discovered_at`` descending, NULLs last, so a row that actually fetched
-  something outranks one that never did. ``pk`` is a stable arbitrary tiebreak
-  (UUID4 — it carries no recency), present only so equal ``discovered_at`` still
-  yields one fixed answer across users, surfaces and requests.
+  something outranks one that never did. ``pk`` is the tiebreak (a
+  ``BigAutoField``, so it resolves to the last-inserted row), present only so
+  equal ``discovered_at`` still yields one fixed answer across users, surfaces
+  and requests.
 
 The grain itself is still wrong; moving these fields onto ``Tenant`` is #305, and
 this module's ordering is the winner rule that migration's dedupe should reuse.
