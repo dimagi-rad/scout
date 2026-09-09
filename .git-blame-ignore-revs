@@ -1,0 +1,10 @@
+# Revisions to skip when running `git blame`.
+#
+# Enable locally with:
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Only add commits that are purely mechanical — a formatter run, a rename
+# sweep — never anything that changes behaviour.
+
+# style: apply ruff format across the repo
+a9b69a1d463fd3dade680785c115001e9a5d9fcd
