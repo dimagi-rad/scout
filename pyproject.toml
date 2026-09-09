@@ -75,6 +75,10 @@ packages = ["apps", "config", "mcp_server"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# ruff 0.16 began formatting Python blocks inside Markdown. Our docs are
+# design records, not source — rewriting their snippets is churn, so the
+# formatter stays off them.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC", "DJ", "S", "SIM", "TRY", "RUF", "PTH"]
