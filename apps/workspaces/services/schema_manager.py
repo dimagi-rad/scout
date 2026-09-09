@@ -607,8 +607,7 @@ class SchemaManager:
         for schema, owner_role in await cursor.fetchall():
             await cursor.execute(
                 psycopg.sql.SQL(
-                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
-                    "REVOKE ALL ON TABLES FROM {}"
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} REVOKE ALL ON TABLES FROM {}"
                 ).format(
                     psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
@@ -651,8 +650,7 @@ class SchemaManager:
         for schema, owner_role in cursor.fetchall():
             cursor.execute(
                 psycopg.sql.SQL(
-                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
-                    "REVOKE ALL ON TABLES FROM {}"
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} REVOKE ALL ON TABLES FROM {}"
                 ).format(
                     psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
@@ -820,8 +818,7 @@ class SchemaManager:
                 continue
             cursor.execute(
                 psycopg.sql.SQL(
-                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} "
-                    "REVOKE ALL ON TABLES FROM {}"
+                    "ALTER DEFAULT PRIVILEGES FOR ROLE {} IN SCHEMA {} REVOKE ALL ON TABLES FROM {}"
                 ).format(
                     psycopg.sql.Identifier(owner_role),
                     psycopg.sql.Identifier(schema),
