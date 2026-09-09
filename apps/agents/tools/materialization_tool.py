@@ -69,19 +69,23 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         # reachable with nothing to name, and a dangling "others did not: ."
         # invites the agent to invent one.
         named = f": {', '.join(str(t) for t in not_loaded)}" if not_loaded else ""
+        all_loaded = bool(summary.get("all_succeeded"))
 
-        if summary.get("all_succeeded") and view_ok:
+        if all_loaded and view_ok:
             status = "completed"
             message = "Data loaded successfully. Continue with the analysis."
-        elif not view_ok:
-            # Every tenant can load and still leave the workspace unqueryable:
-            # build_view_schema's failure is swallowed into view_schema["ok"], and
-            # the Cube build is skipped behind it, so there is no surface to
-            # analyse and a re-run hits the same build.
+        elif all_loaded:
+            # Nothing left to load and still no queryable surface, so the view
+            # build itself is broken (its exception is swallowed into
+            # view_schema["ok"] and the Cube build is skipped behind it).
+            #
+            # Gated on all_loaded, NOT on `not view_ok` alone: when a tenant did
+            # not load, build_view_schema fails *because* that tenant has no
+            # ACTIVE schema, so the fix is the tenant, not the build.
             status = "failed"
             message = (
-                "The tenant data loaded, but the workspace query layer (view schema) "
-                f"failed to build, so nothing is queryable: "
+                "Every tenant loaded, but the workspace query layer (view schema) "
+                "failed to build, so nothing is queryable: "
                 f"{(view_schema or {}).get('error') or 'unknown error'}. Do NOT retry — "
                 "tell the user a system-side fix is required."
             )
@@ -91,6 +95,16 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 f"Some tenants loaded; others did not{named}. Proceed with the available "
                 "data and tell the user which data sources are NOT in the results."
             )
+            if not view_ok:
+                # Not relaying view_schema["error"]: build_view_schema says "run a
+                # data refresh", which cannot succeed until whatever stopped the
+                # missing sources is fixed (#412). The run's own guidance, appended
+                # below, is the advice that actually applies.
+                message += (
+                    " The workspace's combined query layer could not be rebuilt while "
+                    "sources are missing, so query only the sources that loaded and do "
+                    "not present results as spanning the whole workspace."
+                )
         else:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
