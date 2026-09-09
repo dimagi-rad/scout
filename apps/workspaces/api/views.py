@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.common.error_codes import ErrorCode
 from apps.knowledge.models import TableKnowledge
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
@@ -19,10 +20,13 @@ from apps.workspaces.models import (
     TenantSchema,
     WorkspaceRole,
 )
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    resolve_pipeline_config,
+)
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
 from apps.workspaces.tasks import refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
-from mcp_server.pipeline_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,26 @@ def _schema_unavailable_response(tenant) -> Response | None:
         {
             "error": "Data unavailable. Please refresh workspace data.",
             "schema_status": schema_status,
+        },
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _pipeline_unresolved_response(exc: PipelineResolutionError) -> Response:
+    """503 for a tenant whose materialization pipeline cannot be resolved (#155).
+
+    A degraded read rather than a 500: the schema itself may be healthy, Scout
+    just cannot say which loader wrote it — and describing the tables with a
+    guessed pipeline would attribute another provider's names and descriptions
+    to this workspace's data. Logged because a supported provider with no
+    pipeline is a deploy defect, not a workspace setting.
+    """
+    logger.error("Pipeline resolution failed for the data dictionary: %s", exc)
+    return Response(
+        {
+            "error": str(exc),
+            "code": ErrorCode.PIPELINE_UNRESOLVED,
+            "schema_status": "failed",
         },
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
     )
@@ -386,13 +410,10 @@ class DataDictionaryView(APIView):
             .first()
         )
 
-        registry = get_registry()
-        if last_run:
-            pipeline_config = registry.get(last_run.pipeline)
-        else:
-            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
-        if pipeline_config is None:
-            pipeline_config = registry.get("commcare_sync")
+        try:
+            pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
+        except PipelineResolutionError as exc:
+            return _pipeline_unresolved_response(exc)
 
         schema_name = tenant_schema.schema_name
 
@@ -565,7 +586,12 @@ class TableDetailView(APIView):
         return raw_dict.get("tables", {}).get(qualified_name)
 
     def _get_pipeline_table(self, tenant_schema, schema_name, table_name):
-        """Return table data from pipeline models, or None if not found or hidden."""
+        """Return table data from pipeline models, or None if not found or hidden.
+
+        Raises ``PipelineResolutionError`` when the tenant's pipeline is
+        unresolvable: None here becomes a 404 "Table not found", which would be
+        a lie about a table Scout simply cannot describe (#155).
+        """
         if table_name.startswith("stg_"):
             return None
 
@@ -580,13 +606,7 @@ class TableDetailView(APIView):
             .order_by("-completed_at")
             .first()
         )
-        registry = get_registry()
-        if last_run:
-            pipeline_config = registry.get(last_run.pipeline)
-        else:
-            pipeline_config = registry.get_by_provider(tenant_schema.tenant.provider)
-        if pipeline_config is None:
-            pipeline_config = registry.get("commcare_sync")
+        pipeline_config = resolve_pipeline_config(tenant_schema, last_run)
 
         live_table_names = _live_tables_in_schema_sync(schema_name)
         known = {
@@ -620,7 +640,10 @@ class TableDetailView(APIView):
         if unavailable is not None:
             return unavailable
 
-        table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
+        try:
+            table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
+        except PipelineResolutionError as exc:
+            return _pipeline_unresolved_response(exc)
         if table_data is None:
             return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -643,7 +666,10 @@ class TableDetailView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
+        try:
+            table_data = self._get_table_data(workspace, workspace.tenant, qualified_name)
+        except PipelineResolutionError as exc:
+            return _pipeline_unresolved_response(exc)
         if table_data is None:
             return Response({"error": "Table not found."}, status=status.HTTP_404_NOT_FOUND)
 

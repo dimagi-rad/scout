@@ -10,6 +10,7 @@ import uuid
 from unittest.mock import AsyncMock
 
 import pytest
+from rest_framework.test import APIClient
 
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
@@ -160,3 +161,36 @@ class TestMcpMetadataTools:
 
         assert result["success"] is True
         assert described_with == [None]
+
+
+@pytest.mark.django_db
+class TestDataDictionaryViews:
+    """A degraded read, reported truthfully — not a 500 and not a wrong catalog."""
+
+    @pytest.fixture
+    def auth_client(self, user):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return client
+
+    def test_data_dictionary_reports_the_unresolved_pipeline(
+        self, auth_client, workspace, unresolvable_tenant_schema
+    ):
+        resp = auth_client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+
+        assert resp.status_code == 503
+        assert resp.data["code"] == ErrorCode.PIPELINE_UNRESOLVED
+        assert UNKNOWN_PROVIDER in resp.data["error"]
+        assert "tables" not in resp.data
+
+    def test_table_detail_reports_the_unresolved_pipeline_not_a_404(
+        self, auth_client, workspace, unresolvable_tenant_schema
+    ):
+        """404 "Table not found" would be a lie about a table Scout cannot describe."""
+        qualified_name = f"{unresolvable_tenant_schema.schema_name}.raw_cases"
+        resp = auth_client.get(
+            f"/api/workspaces/{workspace.id}/data-dictionary/tables/{qualified_name}/"
+        )
+
+        assert resp.status_code == 503
+        assert resp.data["code"] == ErrorCode.PIPELINE_UNRESOLVED
