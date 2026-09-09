@@ -33,11 +33,24 @@ from django.db.models import F
 from apps.workspaces.models import TenantMetadata
 
 
+def winner_first(queryset):
+    """Order a ``TenantMetadata`` queryset so the row this module serves comes first.
+
+    Factored out so ``workspaces.0008``'s dedupe keeps *exactly* the row the read
+    already answers with — one definition, so a change to the rule under review
+    moves the migration with it. The live-only predicate is applied by the caller
+    because a historical model in a migration has no live-only manager either.
+    """
+    return queryset.order_by(F("discovered_at").desc(nulls_last=True), "-pk")
+
+
 def _live_metadata_qs(tenant_id):
-    return TenantMetadata.objects.filter(
-        tenant_membership__tenant_id=tenant_id,
-        tenant_membership__archived_at__isnull=True,
-    ).order_by(F("discovered_at").desc(nulls_last=True), "-pk")
+    return winner_first(
+        TenantMetadata.objects.filter(
+            tenant_membership__tenant_id=tenant_id,
+            tenant_membership__archived_at__isnull=True,
+        )
+    )
 
 
 def get_tenant_metadata(tenant_id) -> TenantMetadata | None:
