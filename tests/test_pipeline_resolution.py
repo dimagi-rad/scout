@@ -7,11 +7,12 @@ replacement behaviour per surface: resolve, or say so — never guess.
 """
 
 import uuid
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from rest_framework.test import APIClient
 
+from apps.agents.graph import base as graph_base
 from apps.common.error_codes import ErrorCode
 from apps.common.errors import ExpectedStateError
 from apps.semantic.models import SemanticModel
@@ -194,3 +195,38 @@ class TestDataDictionaryViews:
 
         assert resp.status_code == 503
         assert resp.data["code"] == ErrorCode.PIPELINE_UNRESOLVED
+
+
+@pytest.mark.django_db
+class TestAgentPrompt:
+    """The prompt builder degrades truthfully; raising here would kill the chat."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("interactive", [True, False])
+    async def test_unresolvable_provider_yields_guidance_not_commcare_tables(
+        self, monkeypatch, interactive
+    ):
+        tenant = MagicMock()
+        tenant.id = uuid.uuid4()
+        tenant.provider = UNKNOWN_PROVIDER
+        active_schema = MagicMock()
+        active_schema.state = SchemaState.ACTIVE
+        listed_with = []
+
+        async def spy_pipeline_list_tables(ts, pipeline_config):
+            listed_with.append(pipeline_config)
+            return [{"name": "raw_cases", "materialized_at": "2026-03-02T10:00:00"}]
+
+        monkeypatch.setattr(graph_base, "pipeline_list_tables", spy_pipeline_list_tables)
+
+        with patch.object(graph_base, "TenantSchema") as mock_ts_cls:
+            mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=active_schema)
+            result = await graph_base._fetch_schema_context(
+                tenant, MagicMock(), interactive=interactive
+            )
+
+        assert listed_with == []
+        assert "administrator" in result
+        assert "Data is loaded" not in result
+        # The agent must not be told to retry: no tool call fixes a missing pipeline.
+        assert "run_materialization` to start" not in result

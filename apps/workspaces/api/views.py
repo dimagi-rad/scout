@@ -81,7 +81,7 @@ def _pipeline_unresolved_response(exc: PipelineResolutionError) -> Response:
     to this workspace's data. Logged because a supported provider with no
     pipeline is a deploy defect, not a workspace setting.
     """
-    logger.error("Pipeline resolution failed for the data dictionary: %s", exc)
+    logger.exception("Pipeline resolution failed for the data dictionary")
     return Response(
         {
             "error": str(exc),

@@ -119,7 +119,7 @@ def _pipeline_unresolved_response(exc: PipelineResolutionError) -> dict:
     Logged, not just returned: the envelope reaches the agent but never Sentry,
     and a supported provider with no pipeline is a deploy defect that must page.
     """
-    logger.error("Pipeline resolution failed: %s", exc)
+    logger.exception("Pipeline resolution failed")
     return error_response(PIPELINE_UNRESOLVED, str(exc))
 
 
