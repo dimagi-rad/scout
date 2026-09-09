@@ -31,6 +31,10 @@ cd frontend && bun run lint               # Frontend ESLint
 # Linting
 uv run ruff check .                       # Python lint
 uv run ruff format .                      # Python format
+
+# Install the git hooks once per clone — they run ruff check --fix + ruff format
+# on staged files, so formatting never drifts into someone else's diff.
+uv run prek install
 ```
 
 ## Architecture
@@ -85,7 +89,7 @@ Optional:
 
 ## Code style
 
-- **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B/ASYNC/DJ/S/SIM/TRY/RUF/PTH)
+- **Python**: ruff (line-length=100, target py311, rules: E/F/I/UP/B/ASYNC/DJ/S/SIM/TRY/RUF/PTH). The formatter is excluded from `*.md` — ruff 0.16 formats Python blocks inside Markdown, and our docs are design records, not source.
 - **Imports**: Always at module level, never inside function bodies. Exceptions: optional dependencies guarded by `try/except ImportError`, and code that must run before `django.setup()`. When moving inline imports to module level, update any `mock.patch()` targets in tests to point at the consuming module (where the name is used), not the source module.
 - **Frontend**: ESLint with typescript-eslint + react-hooks plugin
 - **No Prettier** configured for frontend
