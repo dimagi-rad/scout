@@ -50,7 +50,6 @@ from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     Workspace,
     WorkspaceMembership,
@@ -58,6 +57,7 @@ from apps.workspaces.models import (
     WorkspaceViewSchema,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.tasks import materialize_workspace
 from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
@@ -230,9 +230,7 @@ async def describe_table(
                 .order_by("-completed_at")
                 .afirst()
             )
-            tenant_metadata = await TenantMetadata.objects.filter(
-                tenant_membership__tenant_id=ts.tenant_id
-            ).afirst()
+            tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
         pipeline_config = await _resolve_pipeline_config(ts, last_run)
 
@@ -294,9 +292,7 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
         )
         pipeline_config = await _resolve_pipeline_config(ts, last_run)
 
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant_id=ts.tenant_id
-        ).afirst()
+        tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
         metadata = await pipeline_get_metadata(ts, ctx, tenant_metadata, pipeline_config)
 
