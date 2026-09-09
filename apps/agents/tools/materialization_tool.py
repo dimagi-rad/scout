@@ -64,26 +64,43 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         view_schema = summary.get("view_schema")
         view_ok = view_schema is None or view_schema.get("ok")
 
+        not_loaded = [t.get("tenant") for t in tenants if not t.get("success")]
+
         if summary.get("all_succeeded") and view_ok:
             status = "completed"
             message = "Data loaded successfully. Continue with the analysis."
         elif loaded:
             status = "partial"
             message = (
-                "Some tenants loaded; others failed. Proceed with the available data "
-                "and note the gap to the user."
+                "Some tenants loaded; others did not: "
+                f"{', '.join(str(t) for t in not_loaded)}. Proceed with the available "
+                "data and tell the user which data sources are NOT in the results."
             )
         else:
             status = "failed"
             message = "Materialization failed; no data was loaded."
 
+        # Advice comes from the run, keyed by error code — this tool must not
+        # write its own (apps/common/errors.py: raise sites describe, one owner
+        # advises).
+        guidance = summary.get("guidance") or []
+        if guidance:
+            message += " " + " ".join(guidance)
+
         logger.info(
-            "Headless materialization for workspace %s: status=%s, tenants_loaded=%d",
+            "Headless materialization for workspace %s: status=%s, tenants_loaded=%d, "
+            "tenants_not_loaded=%d",
             workspace_id,
             status,
             loaded,
+            len(not_loaded),
         )
-        return {"status": status, "tenants_loaded": loaded, "message": message}
+        return {
+            "status": status,
+            "tenants_loaded": loaded,
+            "tenants_not_loaded": not_loaded,
+            "message": message,
+        }
 
     run_materialization.name = "run_materialization"
     return run_materialization

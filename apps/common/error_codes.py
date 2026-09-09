@@ -42,6 +42,18 @@ class ErrorCode(StrEnum):
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
 
+    # A workspace tenant the acting user holds no live membership for, so the
+    # run never attempted it. NOT an invariant violation: workspace access is
+    # ANY-of (``apps/workspaces/access.py``) and #380 decided in favour of
+    # per-tenant query filtering, which makes reaching a subset of a workspace's
+    # tenants a supported steady state — report it at WARNING, never ERROR.
+    #
+    # Distinct from both auth codes because nothing upstream was ever asked: no
+    # retry reaches it, and it is fixed by connecting an account or splitting the
+    # workspace, not by reconnecting an existing one. Never fixed by resolving a
+    # teammate's credential either — their token verifies only their own access.
+    WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

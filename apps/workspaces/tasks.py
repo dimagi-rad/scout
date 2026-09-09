@@ -72,8 +72,9 @@ MATERIALIZATION_FAILED_MESSAGE = (
 logger = logging.getLogger(__name__)
 
 
-# Remediation copy for the credential problems a run can report, keyed by the
-# ``error_code`` the materializer recorded per source (arch #252, finding 14#4).
+# Remediation copy for the problems a run can report, keyed by the ``error_code``
+# recorded against the thing that failed — a source inside a run, or a whole
+# tenant the run never covered (arch #252, finding 14#4).
 #
 # This copy lives here and NOT at the raise site. A loader describes what the
 # provider said; deciding what the user should do about it is a presentation
@@ -94,11 +95,22 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "Ask an admin on the affected provider to restore access, or remove that "
         "data source from the workspace."
     ),
+    ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
+        "in this workspace but not connected to your account, so it was NOT "
+        "loaded and none of its data is in these results — connect that account "
+        "(Settings → Connections) if you should have access, or ask a workspace "
+        "admin to move it to its own workspace."
+    ),
 }
 
 
 class _SourceFailure(NamedTuple):
-    """One failed source, as recorded in ``run.result["sources"][name]``."""
+    """One failure to attribute guidance to.
+
+    Usually a source inside a run, as recorded in ``run.result["sources"][name]``.
+    A tenant the run never covered has no source map to sit in, so it is reported
+    the same way with the tenant's external id as ``name`` (#364).
+    """
 
     name: str
     error: str
@@ -106,7 +118,7 @@ class _SourceFailure(NamedTuple):
 
 
 def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
-    """Return one guidance line per distinct credential problem, naming its sources.
+    """Return one guidance line per distinct problem, naming what it applies to.
 
     Ordered by ``_CREDENTIAL_GUIDANCE`` rather than by encounter order so the
     wording is stable regardless of which source failed first.
@@ -120,6 +132,40 @@ def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
         for code, guidance in _CREDENTIAL_GUIDANCE.items()
         if code in by_code
     ]
+
+
+def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
+    """Every coded failure in a per-tenant summary, at both levels.
+
+    A tenant-level failure — an unreachable tenant, a pre-flight credential
+    refusal, a run-level error — has no entry under ``sources``, and
+    ``MaterializationRun`` rows only exist from inside ``run_pipeline``. Walking
+    ``sources`` alone therefore could not reach its guidance at all (#364).
+
+    Serves both the ``materialize_workspace_core`` return shape and
+    ``_aggregate_materialization_state``'s summary; only ``sources`` differs.
+    """
+    failures: list[_SourceFailure] = []
+    for tenant in tenant_summaries:
+        if tenant.get("error_code"):
+            failures.append(
+                _SourceFailure(
+                    name=str(tenant.get("tenant") or "unknown"),
+                    error=str(tenant.get("error") or ""),
+                    code=str(tenant["error_code"]),
+                )
+            )
+        for name, src in (tenant.get("sources") or {}).items():
+            if not isinstance(src, dict):
+                continue
+            failures.append(
+                _SourceFailure(
+                    name=name,
+                    error=str(src.get("error") or ""),
+                    code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
+                )
+            )
+    return failures
 
 
 def _no_pipeline_error(registry, provider: str) -> str:
@@ -339,22 +385,58 @@ async def materialize_workspace_core(
         logger.exception("materialize_workspace: workspace %s not found", workspace_id)
         return {"error": "Workspace not found"}
 
+    workspace_tenants = {
+        wt.tenant_id: wt.tenant
+        async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related("tenant")
+    }
+
     qs = TenantMembership.objects.select_related("user", "tenant", "connection").filter(
         archived_at__isnull=True,
-        tenant_id__in=[
-            wt.tenant_id
-            async for wt in WorkspaceTenant.objects.filter(workspace=workspace).select_related(
-                "tenant"
-            )
-        ],
+        tenant_id__in=list(workspace_tenants),
     )
     if user_id:
         qs = qs.filter(user_id=user_id)
 
     memberships = [tm async for tm in qs]
+
+    # A workspace tenant the acting user cannot reach is not ours to quietly
+    # drop: it never entered tenant_results, so `all(...)` was vacuous over it
+    # and the run reported success having loaded a subset of the workspace (#364).
+    #
+    # WARNING, not ERROR: workspace access is ANY-of (access.py) and #380 chose
+    # per-tenant query filtering, so this is a supported steady state and ERROR
+    # would page #scout-ops on it. Borrowing a teammate's credential is never the
+    # fix either — their token only ever verifies their own access.
+    reachable = {tm.tenant_id for tm in memberships}
+    unreachable_results = [
+        {
+            "tenant": tenant.external_id,
+            "success": False,
+            "error": (
+                f"no live {tenant.provider} membership for the acting user on "
+                f"'{tenant.external_id}', so this tenant was not attempted"
+            ),
+            "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+        }
+        for tenant_id, tenant in workspace_tenants.items()
+        if tenant_id not in reachable
+    ]
+    for entry in unreachable_results:
+        logger.warning(
+            "materialize_workspace: workspace %s includes tenant %s, which the "
+            "acting user cannot reach; this run does not cover it (#364)",
+            workspace_id,
+            entry["tenant"],
+        )
+
     if not memberships:
         logger.warning("materialize_workspace: no memberships for workspace %s", workspace_id)
-        return {"error": "No tenant memberships found", "tenants": []}
+        return {
+            "error": "No tenant memberships found",
+            "tenants": unreachable_results,
+            "all_succeeded": False,
+            "guidance": _credential_guidance(_summary_failures(unreachable_results)),
+        }
 
     registry = get_registry()
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
@@ -431,7 +513,12 @@ async def materialize_workspace_core(
             logger.exception("Materialization failed for tenant %s", tenant_id)
             tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
 
-    all_succeeded = all(r.get("success") for r in tenant_results)
+    # Two questions, so two flags. `attempted_succeeded` asks whether the data we
+    # did load is self-consistent, and gates the Cube build below exactly as
+    # `all_succeeded` did before #364. `all_succeeded` is the honesty flag callers
+    # read, and a workspace we could not fully cover is not a success.
+    attempted_succeeded = all(r.get("success") for r in tenant_results)
+    all_succeeded = attempted_succeeded and not unreachable_results
 
     # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
     # leaving the workspace's own view schema ACTIVE-but-missing. Rebuild it
@@ -452,8 +539,16 @@ async def materialize_workspace_core(
             )
             view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
 
+    # Gated on `attempted_succeeded`, NOT `all_succeeded`: a workspace that is
+    # permanently only partly reachable would otherwise skip this build forever,
+    # and because _semantic_layer_state reads SemanticModel.metadata["last_build"]
+    # — written only from inside the build — the previous run's {"ok": True} would
+    # be inherited and the semantic layer would report "ready" while stale, trading
+    # a false "all tenants loaded" for a false "semantic model is ready" (the
+    # regression that closed PR #397). Building over the tenants that did load
+    # keeps last_build written by the same run that wrote the data.
     cube_schema_outcome: dict | None = None
-    if all_succeeded and (
+    if attempted_succeeded and (
         workspace_tenant_count <= 1
         or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
     ):
@@ -485,11 +580,13 @@ async def materialize_workspace_core(
         exclude_workspace_id=str(workspace.id),
     )
 
+    all_results = tenant_results + unreachable_results
     return {
-        "tenants": tenant_results,
+        "tenants": all_results,
         "all_succeeded": all_succeeded,
         "view_schema": view_schema_outcome,
         "cube_schema": cube_schema_outcome,
+        "guidance": _credential_guidance(_summary_failures(all_results)),
     }
 
 
