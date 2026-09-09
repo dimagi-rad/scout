@@ -212,30 +212,6 @@ def _tenant_metadata_for_schema(schema_name: str):
     return TenantMetadata.objects.filter(tenant_membership__tenant_id=ts.tenant_id).first()
 
 
-def _pipeline_config_for_schema(schema_name: str):
-    registry = get_registry()
-    ts = TenantSchema.objects.filter(schema_name=schema_name).select_related("tenant").first()
-    if ts is None:
-        return registry.get("commcare_sync")
-
-    last_run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=ts,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
-    )
-    if last_run:
-        cfg = registry.get(last_run.pipeline)
-        if cfg:
-            return cfg
-    return registry.get_by_provider(ts.tenant.provider) or registry.get("commcare_sync")
-
-
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
     ctx = await load_workspace_context(str(workspace.id))
     schema_name = ctx.schema_name
