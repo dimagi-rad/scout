@@ -267,14 +267,10 @@ class TestSchemaManagerRoleCreation:
             f"Expected CREATE ROLE for {role_name} in DDL calls"
         )
         assert any("GRANT USAGE ON SCHEMA" in c for c in calls)
-        assert any(
-            "GRANT SELECT ON ALL TABLES IN SCHEMA" in c and role_name in c for c in calls
-        )
+        assert any("GRANT SELECT ON ALL TABLES IN SCHEMA" in c and role_name in c for c in calls)
         assert any("ALTER DEFAULT PRIVILEGES" in c for c in calls)
         assert any(
-            "ALTER DEFAULT PRIVILEGES FOR ROLE" in c
-            and dbt_role in c
-            and role_name in c
+            "ALTER DEFAULT PRIVILEGES FOR ROLE" in c and dbt_role in c and role_name in c
             for c in calls
         )
 

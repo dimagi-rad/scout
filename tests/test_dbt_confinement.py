@@ -181,9 +181,7 @@ def test_generated_staging_model_resolves_raw_cases(confinement_schemas, setting
             )
         )
         cur.execute(
-            psycopg.sql.SQL("SET search_path TO {}").format(
-                psycopg.sql.Identifier(attacker_schema)
-            )
+            psycopg.sql.SQL("SET search_path TO {}").format(psycopg.sql.Identifier(attacker_schema))
         )
         cur.execute("SELECT count(*) FROM stg_case_patient")
         assert cur.fetchone()[0] == 1

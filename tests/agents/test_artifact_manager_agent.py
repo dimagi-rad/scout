@@ -269,8 +269,7 @@ async def test_artifact_manager_parent_tool_emits_to_injected_queue(monkeypatch)
     assert status["event"]["type"] == "data-subagent-status"
     assert result["subagent_trace"]["events"][0]["type"] == "data-subagent-status"
     assert any(
-        event["type"] == "data-subagent-tool-output"
-        for event in result["subagent_trace"]["events"]
+        event["type"] == "data-subagent-tool-output" for event in result["subagent_trace"]["events"]
     )
 
 
@@ -332,8 +331,7 @@ async def test_artifact_manager_blank_task_returns_structured_failure(monkeypatc
     assert queued[-1]["event"]["data"]["phase"] == "failed"
     trace_events = result["subagent_trace"]["events"]
     assert any(
-        event["type"] == "data-subagent-error"
-        and "non-empty task" in event["data"]["message"]
+        event["type"] == "data-subagent-error" and "non-empty task" in event["data"]["message"]
         for event in trace_events
     )
     assert any(
@@ -397,8 +395,7 @@ async def test_artifact_manager_returns_failed_result_on_recursion_limit(monkeyp
     assert result["artifact_version"] == 1
     assert "Recursion limit of 50" in result["message"]
     assert any(
-        event["type"] == "data-subagent-error"
-        for event in result["subagent_trace"]["events"]
+        event["type"] == "data-subagent-error" for event in result["subagent_trace"]["events"]
     )
     assert any(
         item["event"]["type"] == "data-subagent-status"

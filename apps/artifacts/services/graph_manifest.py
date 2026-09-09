@@ -126,10 +126,9 @@ def _manifest_entry(item: dict[str, Any]) -> dict[str, Any]:
     ]
     members = _query_members(query)
     datasets = sorted({member.split(".", 1)[0] for member in members if "." in member})
-    dependencies = [
-        {"kind": "dataset", "name": dataset}
-        for dataset in datasets
-    ] + [{"kind": "semantic_member", "name": member} for member in members]
+    dependencies = [{"kind": "dataset", "name": dataset} for dataset in datasets] + [
+        {"kind": "semantic_member", "name": member} for member in members
+    ]
     return {
         "key": item["query_key"],
         "query_key": item["query_key"],

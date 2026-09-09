@@ -71,7 +71,7 @@ def _thread_summary(thread, *, history_title: str | None = None):
         "is_public": thread.is_shared,
         "share_token": thread.share_token,
         "last_viewed_at": thread.last_viewed_at.isoformat() if thread.last_viewed_at else None,
-}
+    }
 
 
 def _short_thread_title(title: str) -> str:

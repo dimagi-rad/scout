@@ -4,15 +4,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('artifacts', '0003_artifact_semantic_queries_and_more'),
+        ("artifacts", "0003_artifact_semantic_queries_and_more"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='artifact',
-            name='source_queries',
-            field=models.JSONField(blank=True, default=list, help_text='Disabled legacy query metadata for older artifacts.'),
+            model_name="artifact",
+            name="source_queries",
+            field=models.JSONField(
+                blank=True,
+                default=list,
+                help_text="Disabled legacy query metadata for older artifacts.",
+            ),
         ),
     ]

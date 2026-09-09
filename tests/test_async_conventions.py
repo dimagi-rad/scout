@@ -229,11 +229,7 @@ class _Detector(ast.NodeVisitor):
 
     # --- call form: sync_to_async(<orm expr>) ------------------------------
     def visit_Call(self, node: ast.Call) -> None:
-        if (
-            self._is_sync_to_async(node.func)
-            and node.args
-            and _expr_is_orm(node.args[0])
-        ):
+        if self._is_sync_to_async(node.func) and node.args and _expr_is_orm(node.args[0]):
             self._record(node.lineno)
         self.generic_visit(node)
 
@@ -253,11 +249,7 @@ class _Detector(ast.NodeVisitor):
         if self._orm_outside_atomic(node.body):
             # Report on the first decorator line for a stable location.
             deco_line = min(
-                (
-                    d.lineno
-                    for d in node.decorator_list
-                    if self._is_sync_to_async(d)
-                ),
+                (d.lineno for d in node.decorator_list if self._is_sync_to_async(d)),
                 default=node.lineno,
             )
             self._record(deco_line)
@@ -327,20 +319,16 @@ DISALLOWED_SNIPPETS = [
     "from asgiref.sync import sync_to_async\n"
     "result = sync_to_async(Tenant.objects.create)(name='x')\n",
     # Call form -- bound instance method
-    "from asgiref.sync import sync_to_async\n"
-    "await sync_to_async(obj.save)()\n",
+    "from asgiref.sync import sync_to_async\nawait sync_to_async(obj.save)()\n",
     # Call form -- lambda wrapping ORM
     "from asgiref.sync import sync_to_async\n"
     "await sync_to_async(lambda: Workspace.objects.create(name='x'))()\n",
     # Call form -- async ORM method name
-    "from asgiref.sync import sync_to_async\n"
-    "await sync_to_async(Model.objects.aget)(id=1)\n",
+    "from asgiref.sync import sync_to_async\nawait sync_to_async(Model.objects.aget)(id=1)\n",
     # Fully-qualified attribute call form
-    "import asgiref.sync\n"
-    "await asgiref.sync.sync_to_async(Model.objects.filter)(active=True)\n",
+    "import asgiref.sync\nawait asgiref.sync.sync_to_async(Model.objects.filter)(active=True)\n",
     # Aliased import
-    "from asgiref.sync import sync_to_async as s2a\n"
-    "await s2a(Model.objects.delete)()\n",
+    "from asgiref.sync import sync_to_async as s2a\nawait s2a(Model.objects.delete)()\n",
     # Decorator form -- ORM with NO atomic block
     "from asgiref.sync import sync_to_async\n"
     "@sync_to_async\n"
@@ -358,11 +346,9 @@ DISALLOWED_SNIPPETS = [
 
 ALLOWED_SNIPPETS = [
     # Non-ORM call -- external API
-    "from asgiref.sync import sync_to_async\n"
-    "await sync_to_async(requests.get)('http://x')\n",
+    "from asgiref.sync import sync_to_async\nawait sync_to_async(requests.get)('http://x')\n",
     # Non-ORM call -- dbt / arbitrary callable
-    "from asgiref.sync import sync_to_async\n"
-    "await sync_to_async(runner.invoke)(['build'])\n",
+    "from asgiref.sync import sync_to_async\nawait sync_to_async(runner.invoke)(['build'])\n",
     # Non-ORM call -- close_old_connections (config/procrastinate.py pattern)
     "from asgiref.sync import sync_to_async\n"
     "_acleanup = sync_to_async(close_old_connections, thread_sensitive=True)\n",
@@ -387,9 +373,7 @@ ALLOWED_SNIPPETS = [
     "def fetch():\n"
     "    return requests.get('http://x').json()\n",
     # sync_to_async not even imported from asgiref -- unrelated symbol
-    "def sync_to_async(x):\n"
-    "    return x\n"
-    "sync_to_async(other.helper)()\n",
+    "def sync_to_async(x):\n    return x\nsync_to_async(other.helper)()\n",
 ]
 
 

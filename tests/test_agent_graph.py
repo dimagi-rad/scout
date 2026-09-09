@@ -92,8 +92,7 @@ class TestTeardownSchemaUnbound:
         artifact_schema = next(
             item
             for item in schemas
-            if isinstance(item, dict)
-            and item["function"]["name"] == "artifact_manager"
+            if isinstance(item, dict) and item["function"]["name"] == "artifact_manager"
         )
         props = artifact_schema["function"]["parameters"]["properties"]
         required = artifact_schema["function"]["parameters"]["required"]

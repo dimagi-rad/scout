@@ -44,4 +44,3 @@ async def emit_subagent_event(event: dict[str, Any]) -> None:
     if queue is None:
         return
     await queue.put({"source": "subagent", "event": event})
-

@@ -90,7 +90,7 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
         patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
-                new=AsyncMock(return_value=mock_tables),
+            new=AsyncMock(return_value=mock_tables),
         ),
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",
@@ -135,7 +135,7 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
         patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
-                new=AsyncMock(return_value=mock_tables),
+            new=AsyncMock(return_value=mock_tables),
         ),
         patch(
             "apps.transformations.services.lineage.aget_terminal_assets",

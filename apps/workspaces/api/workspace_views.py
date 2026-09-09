@@ -686,8 +686,10 @@ class WorkspaceInviteDetailView(APIView):
         try:
             invite = WorkspaceInvite.objects.get(id=invite_id, workspace=workspace)
         except WorkspaceInvite.DoesNotExist:
-            return None, None, Response(
-                {"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND
+            return (
+                None,
+                None,
+                Response({"error": "Invite not found."}, status=status.HTTP_404_NOT_FOUND),
             )
         return workspace, invite, None
 
@@ -724,9 +726,9 @@ class MyInvitesView(APIView):
     def get(self, request):
         emails = {
             e.lower()
-            for e in EmailAddress.objects.filter(
-                user=request.user, verified=True
-            ).values_list("email", flat=True)
+            for e in EmailAddress.objects.filter(user=request.user, verified=True).values_list(
+                "email", flat=True
+            )
         }
         if request.user.email:
             emails.add(request.user.email.lower())

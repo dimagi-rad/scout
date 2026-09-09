@@ -7,7 +7,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("artifacts", "0004_alter_artifact_source_queries"),
         ("workspaces", "0002_initial"),
@@ -26,7 +25,12 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="ArtifactSemanticQuery",
             fields=[
-                ("id", models.UUIDField(default=uuid.uuid4, editable=False, primary_key=True, serialize=False)),
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4, editable=False, primary_key=True, serialize=False
+                    ),
+                ),
                 ("query_key", models.CharField(max_length=500)),
                 ("query_hash", models.CharField(db_index=True, max_length=64)),
                 ("query_type", models.CharField(default="semantic", max_length=50)),
@@ -69,10 +73,14 @@ class Migration(migrations.Migration):
         ),
         migrations.AddIndex(
             model_name="artifactsemanticquery",
-            index=models.Index(fields=["workspace", "query_key"], name="artifacts_a_workspa_24aa43_idx"),
+            index=models.Index(
+                fields=["workspace", "query_key"], name="artifacts_a_workspa_24aa43_idx"
+            ),
         ),
         migrations.AddIndex(
             model_name="artifactsemanticquery",
-            index=models.Index(fields=["artifact", "query_key"], name="artifacts_a_artifac_3339f9_idx"),
+            index=models.Index(
+                fields=["artifact", "query_key"], name="artifacts_a_artifac_3339f9_idx"
+            ),
         ),
     ]
