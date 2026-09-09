@@ -62,7 +62,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
     "factory-boy>=3.3",
-    "ruff>=0.5",
+    "ruff>=0.16.6",
 ]
 
 [build-system]
@@ -109,7 +109,7 @@ dev = [
     "pytest-cov>=4.1",
     "pytest-mock>=3.12",
     "factory-boy>=3.3",
-    "ruff>=0.5",
+    "ruff>=0.16.6",
     "zensical>=0.0.21",
     "requests-mock>=1.12.1",
     "pytest-httpx>=0.35",
