@@ -1587,7 +1587,85 @@ async def _persist_synthetic_failure_message(thread_job, text: str) -> None:
         )
 
 
-async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[str, list[dict]]:
+TENANT_NOT_RUN = "not_run"
+"""Summary ``state`` for a workspace tenant this job produced no run row for.
+
+Deliberately not a ``MaterializationRun.RunState`` — there is no run to have a
+state. Consumers must not treat it as one.
+"""
+
+
+async def _uncovered_tenant_summaries(
+    workspace, user_id: str, covered_tenant_ids: set
+) -> list[dict]:
+    """Summary entries for workspace tenants this job produced no run row for.
+
+    ``MaterializationRun`` rows are only created from inside ``run_pipeline``, so
+    every tenant dropped before that point — unreachable for the acting user, no
+    pipeline for its provider, credential refused pre-flight — leaves no row at
+    all. Run rows can say what loaded but never what was missed, so the
+    workspace's tenant list is the only thing that can (#364).
+
+    The reason is classified where it is knowable: no live membership is the
+    supported ANY-of case (#380) and gets its own code plus guidance; anything
+    else means Scout dropped a tenant the user *can* reach, which is a defect and
+    carries no advice, because none would be honest.
+    """
+    uncovered = [
+        wt.tenant
+        async for wt in WorkspaceTenant.objects.filter(workspace=workspace)
+        .exclude(tenant_id__in=covered_tenant_ids)
+        .select_related("tenant")
+    ]
+    if not uncovered:
+        return []
+    reachable: set = set()
+    if user_id:
+        reachable = {
+            tenant_id
+            async for tenant_id in TenantMembership.objects.filter(
+                user_id=user_id,
+                archived_at__isnull=True,
+                tenant_id__in=[t.id for t in uncovered],
+            ).values_list("tenant_id", flat=True)
+        }
+    summaries = []
+    for tenant in uncovered:
+        if tenant.id in reachable:
+            error = (
+                f"this workspace includes {tenant.provider} source "
+                f"'{tenant.external_id}' but the run recorded nothing for it"
+            )
+            code = ErrorCode.INTERNAL_ERROR
+        else:
+            error = (
+                f"no live {tenant.provider} membership for the acting user on "
+                f"'{tenant.external_id}', so this tenant was not attempted"
+            )
+            code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        summaries.append(
+            {
+                "tenant": tenant.external_id,
+                "state": TENANT_NOT_RUN,
+                "materialized_row_counts": {},
+                "sources": {},
+                "error": error,
+                "error_code": code,
+            }
+        )
+        logger.warning(
+            "resume: workspace %s tenant %s has no materialization run for this "
+            "job (%s); reporting it as not loaded (#364)",
+            workspace.id,
+            tenant.external_id,
+            code,
+        )
+    return summaries
+
+
+async def _aggregate_materialization_state(
+    procrastinate_job_id: int, workspace, user_id: str
+) -> tuple[str, list[dict]]:
     """Inspect MaterializationRun rows for this job, return (status, per-tenant summary).
 
     Per-tenant summary entries include per-source detail so the resume prompt
@@ -1607,6 +1685,12 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             ...
         },
     }``
+
+    ``workspace`` and ``user_id`` are required, not optional, because the run
+    rows alone cannot see a tenant that never produced one: they made the status
+    read ``completed`` for a run that covered part of the workspace (#364). Those
+    tenants appear in the summary with ``state=TENANT_NOT_RUN`` and hold the
+    status to ``partial`` at best.
     """
     runs = [
         r
@@ -1614,22 +1698,30 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             procrastinate_job_id=procrastinate_job_id,
         ).select_related("tenant_schema__tenant")
     ]
+    uncovered = await _uncovered_tenant_summaries(
+        workspace,
+        user_id,
+        {r.tenant_schema.tenant_id for r in runs},
+    )
     if not runs:
-        return "no_runs", []
+        return "no_runs", uncovered
     summary: list[dict] = []
     any_cancelled = False
     any_failed = False
-    any_partial = False
-    all_completed = True
+    all_completed = not uncovered
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
         run_error: str | None = None
+        run_error_code: str | None = None
         if isinstance(r.result, dict):
             if r.result.get("error"):
                 run_error = str(r.result["error"])
+                # Carried so a run-level failure can reach the same code-keyed
+                # guidance a per-source failure gets; only "sources" ever could.
+                run_error_code = str(r.result.get("error_code") or "") or None
             for source, info in (r.result.get("sources") or {}).items():
                 if not isinstance(info, dict):
                     continue
@@ -1666,6 +1758,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             tenant_summary["transform_error"] = transform_error
         if run_error:
             tenant_summary["error"] = run_error
+        if run_error_code:
+            tenant_summary["error_code"] = run_error_code
         summary.append(tenant_summary)
         if r.state == MaterializationRun.RunState.CANCELLED:
             any_cancelled = True
@@ -1673,22 +1767,19 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         elif r.state == MaterializationRun.RunState.FAILED:
             any_failed = True
             all_completed = False
-        elif r.state == MaterializationRun.RunState.PARTIAL:
-            any_partial = True
-            all_completed = False
         elif r.state != MaterializationRun.RunState.COMPLETED:
             all_completed = False
+    summary.extend(uncovered)
     if any_cancelled:
         status = "cancelled"
     elif any_failed:
         status = "failed"
     elif all_completed:
         status = "completed"
-    elif any_partial:
-        status = "partial"
     else:
-        # Runs still in flight (LOADING/TRANSFORMING) — partial so the agent
-        # does not falsely claim "all data loaded".
+        # A PARTIAL run, runs still in flight (LOADING/TRANSFORMING), or a
+        # workspace tenant with no run row at all — partial so the agent does
+        # not falsely claim "all data loaded".
         status = "partial"
     return status, summary
 
@@ -1758,31 +1849,26 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         return {"status": "already_claimed"}
     tj.started_at = resume_started_at
 
+    workspace = tj.thread.workspace
+    user = tj.thread.user
+
     # _aggregate_materialization_state is the source of truth for status (not a
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
-    status, summary = await _aggregate_materialization_state(tj.procrastinate_job_id)
-    # Named per source, because a run can carry a dead token on one and revoked
-    # access on another — opposite advice, and the agent has to tell them apart to
-    # relay either honestly.
-    guidance_lines = _credential_guidance(
-        _SourceFailure(
-            name=name,
-            error=str(src.get("error") or ""),
-            code=str(src.get("error_code") or ErrorCode.INTERNAL_ERROR),
-        )
-        for tenant in summary
-        for name, src in (tenant.get("sources") or {}).items()
+    status, summary = await _aggregate_materialization_state(
+        tj.procrastinate_job_id, workspace, str(user.id)
     )
+    uncovered_tenants = [t["tenant"] for t in summary if t.get("state") == TENANT_NOT_RUN]
+    # Named per source *and* per tenant, because a run can carry a dead token on
+    # one and revoked access on another — opposite advice, and the agent has to
+    # tell them apart to relay either honestly.
+    guidance_lines = _credential_guidance(_summary_failures(summary))
     credential_guidance = (
-        " Credential problems, per source — relay these verbatim, naming the "
-        f"source each applies to: {' '.join(guidance_lines)}"
+        " Problems the user must act on, named by the source or data source each "
+        f"applies to — relay these verbatim: {' '.join(guidance_lines)}"
         if guidance_lines
         else ""
     )
-
-    workspace = tj.thread.workspace
-    user = tj.thread.user
 
     # Per-tenant runs can all complete while build_view_schema fails, leaving a
     # multi-tenant workspace with NO queryable surface. Detect it so the agent is
@@ -1854,9 +1940,11 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         )
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization finished without running any "
-            f"pipelines. This typically means the workspace's tenants have no "
-            f"pipeline configured or no credentials set up. Please tell the user "
-            f"what happened and suggest checking the workspace's connection."
+            f"pipelines, so NO data was loaded. This means the workspace's tenants "
+            f"could not be reached by this user, have no pipeline configured, or "
+            f"have no credentials set up. Tell the user what happened and name "
+            f"every data source below that was not loaded."
+            f"{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "partial":
         body = (
@@ -1894,6 +1982,18 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"{SYSTEM_RESUME_MARKER} Materialization just completed "
             f"(status={status}). Please continue with the user's original request "
             f"using the now-loaded data. Per-tenant: {summary}"
+        )
+
+    if uncovered_tenants:
+        # The status branches above describe the runs that happened; a tenant with
+        # no run row is invisible to all of them, and used to leave the agent
+        # claiming the whole workspace had loaded (#364).
+        body += (
+            f" IMPORTANT: this workspace includes data source(s) this run did NOT "
+            f"load at all — {', '.join(uncovered_tenants)}. There is no run record "
+            f"for them, so nothing you query covers their data. Do NOT present your "
+            f"answer as covering the whole workspace; name these sources as missing "
+            f"and say the numbers exclude them."
         )
 
     if semantic_state == "stale":
@@ -2045,11 +2145,21 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             )
         elif status == "no_runs":
             error_summary = (
-                "Materialization finished without running any pipelines. "
-                "Check that the workspace's tenants have credentials configured."
+                "Materialization ran no pipelines, so nothing was loaded"
+                + (f": {', '.join(uncovered_tenants)} not covered. " if uncovered_tenants else ". ")
+                + "Check that the workspace's tenants are connected to your "
+                "account and have credentials configured."
             )
         else:
             error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            if uncovered_tenants:
+                # Composed from run rows, which by definition have nothing to say
+                # about a tenant that produced none — on its own it reads as a
+                # success summary for a run that missed part of the workspace.
+                error_summary = (
+                    "This workspace includes data source(s) this run did not load: "
+                    f"{', '.join(uncovered_tenants)}. {error_summary}"
+                ).strip()
             if not error_summary:
                 error_summary = "Materialization did not complete successfully."
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the

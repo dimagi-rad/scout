@@ -69,7 +69,7 @@ def test_compose_failure_summary_surfaces_top_level_error(tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_aggregate_materialization_state_surfaces_top_level_error(tenant):
+async def test_aggregate_materialization_state_surfaces_top_level_error(workspace, tenant, user):
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="t_failure_aggregate",
@@ -87,7 +87,9 @@ async def test_aggregate_materialization_state_surfaces_top_level_error(tenant):
         },
     )
 
-    status, summary = await workspaces_tasks._aggregate_materialization_state(12345)
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        12345, workspace, str(user.id)
+    )
 
     assert status == "failed"
     assert summary[0]["error"] == "ConnectionError: failed to reach host.docker.internal:8001"
