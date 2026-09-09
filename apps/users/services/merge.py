@@ -93,7 +93,6 @@ class MergeReport:
     emailaddress_deleted: int = 0
     tenant_membership_repointed: int = 0
     tenant_membership_conflict_deleted: int = 0
-    tenant_membership_metadata_migrated: int = 0
     tenant_connection_repointed: int = 0
     tenant_connection_conflict_merged: int = 0
     workspace_membership_repointed: int = 0
