@@ -40,6 +40,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app, task
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -120,24 +121,6 @@ def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
         for code, guidance in _CREDENTIAL_GUIDANCE.items()
         if code in by_code
     ]
-
-
-def _no_pipeline_error(registry, provider: str) -> str:
-    """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
-
-    An unconfigured provider and a pipeline YAML that failed to parse used to
-    share one message that wrongly pointed at workspace config; when the registry
-    recorded load errors, say so explicitly so blame lands on the deploy.
-    """
-    load_errors = registry.load_errors
-    if load_errors:
-        return (
-            f"No pipeline available for provider '{provider}': "
-            f"{len(load_errors)} pipeline definition(s) failed to load "
-            f"({', '.join(sorted(load_errors))}). This is a deploy/config error, "
-            "not a workspace setting — check the pipeline YAML files."
-        )
-    return f"No pipeline configured for provider '{provider}'"
 
 
 def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
@@ -264,7 +247,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         if pipeline_name is None:
             await _drop_schema_and_fail(new_schema)
             return {
-                "error": _no_pipeline_error(registry, membership.tenant.provider),
+                "error": no_pipeline_message(registry, membership.tenant.provider),
             }
         pipeline_config = registry.get(pipeline_name)
         # target_schema forces the load into the new "_r" schema; without it
@@ -367,7 +350,7 @@ async def materialize_workspace_core(
                 {
                     "tenant": tenant_id,
                     "success": False,
-                    "error": _no_pipeline_error(registry, tm.tenant.provider),
+                    "error": no_pipeline_message(registry, tm.tenant.provider),
                 }
             )
             continue
