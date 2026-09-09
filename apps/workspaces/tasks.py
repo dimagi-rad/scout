@@ -1708,7 +1708,7 @@ async def _aggregate_materialization_state(
     summary: list[dict] = []
     any_cancelled = False
     any_failed = False
-    all_completed = not uncovered
+    all_completed = True
     for r in runs:
         tenant_id = r.tenant_schema.tenant.external_id
         materialized_row_counts: dict = {}
@@ -1774,7 +1774,7 @@ async def _aggregate_materialization_state(
         status = "cancelled"
     elif any_failed:
         status = "failed"
-    elif all_completed:
+    elif all_completed and not uncovered:
         status = "completed"
     else:
         # A PARTIAL run, runs still in flight (LOADING/TRANSFORMING), or a
@@ -2144,11 +2144,13 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 "unavailable until a rebuild succeeds."
             )
         elif status == "no_runs":
+            uncovered_note = (
+                f" Not covered: {', '.join(uncovered_tenants)}." if uncovered_tenants else ""
+            )
             error_summary = (
-                "Materialization ran no pipelines, so nothing was loaded"
-                + (f": {', '.join(uncovered_tenants)} not covered. " if uncovered_tenants else ". ")
-                + "Check that the workspace's tenants are connected to your "
-                "account and have credentials configured."
+                "Materialization ran no pipelines, so nothing was loaded."
+                f"{uncovered_note} Check that the workspace's tenants are connected "
+                "to your account and have credentials configured."
             )
         else:
             error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
