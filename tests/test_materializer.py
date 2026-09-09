@@ -454,6 +454,55 @@ class TestRunPipeline:
         # Transform error is recorded in result
         assert "transform_error" in result
 
+    def test_dbt_test_failure_reported_on_its_own_key(self):
+        """Failing dbt tests must not land on ``transform_error`` (#391) — that key
+        means the tables are stale or missing, which is not what happened here."""
+        from mcp_server.pipeline_registry import PipelineConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[],
+        )
+
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
+            patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
+            patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            mock_meta.return_value.load.return_value = {
+                "app_definitions": [],
+                "case_types": [],
+                "form_definitions": {},
+            }
+            conn = MagicMock()
+            mock_conn.return_value = conn
+            conn.cursor.return_value = MagicMock()
+            mock_asset_cls.objects.filter.return_value.exists.return_value = True
+            mock_transform.return_value = {
+                "run_id": "abc",
+                "status": "tests_failed",
+                "asset_count": 1,
+                "error": "1 data-quality test(s) failed on model stg_cases: unique_id (fail)",
+            }
+
+            result = run_pipeline(self._make_tm(), {"type": "api_key", "value": "x"}, pipeline)
+
+        assert run.state == "completed"
+        assert result["status"] == "completed"
+        assert "transform_error" not in result
+        assert "stg_cases" in result["transform_test_failures"]
+
     def test_unknown_source_raises(self):
         from mcp_server.services.materializer import _load_source
 

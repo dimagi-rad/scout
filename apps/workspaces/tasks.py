@@ -1529,6 +1529,7 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
+        transform_test_failures: str | None = None
         run_error: str | None = None
         if isinstance(r.result, dict):
             if r.result.get("error"):
@@ -1553,10 +1554,15 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
             # Surface a failed transform phase (issue #241, 04#4): run state stays
             # COMPLETED (transform failures are isolated from the raw load), but
             # staging/derived tables are stale and the agent must disclose that.
+            # TESTS_FAILED goes to its own key, never transform_error: the tables
+            # built and hold data, so "transforms failed" prose would make the
+            # agent disown data that is present (#391).
             transforms = r.result.get("transforms")
             if isinstance(transforms, dict):
                 if transforms.get("status") == TransformationRunStatus.FAILED:
                     transform_error = transforms.get("error") or "transform phase failed"
+                elif transforms.get("status") == TransformationRunStatus.TESTS_FAILED:
+                    transform_test_failures = transforms.get("error") or "dbt tests failed"
                 elif transforms.get("error"):
                     transform_error = transforms["error"]
         tenant_summary = {
@@ -1567,6 +1573,8 @@ async def _aggregate_materialization_state(procrastinate_job_id: int) -> tuple[s
         }
         if transform_error:
             tenant_summary["transform_error"] = transform_error
+        if transform_test_failures:
+            tenant_summary["transform_test_failures"] = transform_test_failures
         if run_error:
             tenant_summary["error"] = run_error
         summary.append(tenant_summary)
@@ -1797,6 +1805,24 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"{SYSTEM_RESUME_MARKER} Materialization just completed "
             f"(status={status}). Please continue with the user's original request "
             f"using the now-loaded data. Per-tenant: {summary}"
+        )
+
+    # Per-tenant, so a multi-tenant workspace names every affected tenant rather
+    # than only the first one that failed.
+    test_failure_notes = [
+        f"{t['tenant']}: {t['transform_test_failures']}"
+        for t in summary
+        if t.get("transform_test_failures")
+    ]
+    if test_failure_notes:
+        body += (
+            f" Note: the transform models BUILT and their tables are populated, but "
+            f"data-quality tests on them FAILED after this load "
+            f"({'; '.join(test_failure_notes)}). This is NOT a build failure and NOT "
+            f"missing data — do NOT report it as a failed transform, and do NOT "
+            f"re-run materialization for it. Tell the user the data loaded and that "
+            f"the named data-quality tests failed on the named models, and treat "
+            f"figures drawn from those models as unverified."
         )
 
     if semantic_state == "stale":
