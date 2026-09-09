@@ -65,20 +65,35 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         view_ok = view_schema is None or view_schema.get("ok")
 
         not_loaded = [t.get("tenant") for t in tenants if not t.get("success")]
+        # Only name sources we actually have names for — the branches below are
+        # reachable with nothing to name, and a dangling "others did not: ."
+        # invites the agent to invent one.
+        named = f": {', '.join(str(t) for t in not_loaded)}" if not_loaded else ""
 
         if summary.get("all_succeeded") and view_ok:
             status = "completed"
             message = "Data loaded successfully. Continue with the analysis."
+        elif not view_ok:
+            # Every tenant can load and still leave the workspace unqueryable:
+            # build_view_schema's failure is swallowed into view_schema["ok"], and
+            # the Cube build is skipped behind it, so there is no surface to
+            # analyse and a re-run hits the same build.
+            status = "failed"
+            message = (
+                "The tenant data loaded, but the workspace query layer (view schema) "
+                f"failed to build, so nothing is queryable: "
+                f"{(view_schema or {}).get('error') or 'unknown error'}. Do NOT retry — "
+                "tell the user a system-side fix is required."
+            )
         elif loaded:
             status = "partial"
             message = (
-                "Some tenants loaded; others did not: "
-                f"{', '.join(str(t) for t in not_loaded)}. Proceed with the available "
+                f"Some tenants loaded; others did not{named}. Proceed with the available "
                 "data and tell the user which data sources are NOT in the results."
             )
         else:
             status = "failed"
-            message = "Materialization failed; no data was loaded."
+            message = f"Materialization failed; no data was loaded{named}."
 
         # Advice comes from the run, keyed by error code — this tool must not
         # write its own (apps/common/errors.py: raise sites describe, one owner

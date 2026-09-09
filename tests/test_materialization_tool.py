@@ -88,3 +88,30 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
     assert result["tenants_not_loaded"] == ["not-mine"]
     assert "not-mine" in result["message"]
     assert "connect that account" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_tool_reports_an_unqueryable_workspace(workspace, user, monkeypatch):
+    """Every tenant can load and still leave nothing queryable, so this branch is
+    reachable with no tenant to name — it must not emit "others did not: ." and
+    must say what actually went wrong."""
+
+    async def _fake_core(workspace_id, user_id="", job_id=None):
+        return {
+            "all_succeeded": True,
+            "tenants": [{"tenant": "t1", "success": True}, {"tenant": "t2", "success": True}],
+            "view_schema": {"ok": False, "error": "canonical name collision on 'x'"},
+            "cube_schema": None,
+            "guidance": [],
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
+
+    tool = create_materialization_tool(workspace, user)
+    result = await tool.ainvoke({})
+
+    assert result["status"] == "failed"
+    assert result["tenants_not_loaded"] == []
+    assert "others did not: ." not in result["message"]
+    assert "canonical name collision" in result["message"]
