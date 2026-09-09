@@ -110,6 +110,18 @@ relationships:
         assert registry.get("good") is not None
         assert "broken.yml" in registry.load_errors
 
+    def test_pipeline_without_a_provider_is_a_load_error_not_a_commcare_pipeline(self, tmp_path):
+        """#155: a forgotten ``provider:`` used to register as commcare, so a
+        commcare tenant could resolve to a completely unrelated pipeline."""
+        (tmp_path / "nameless.yml").write_text(
+            "pipeline: nameless\ndescription: N\nversion: '1.0'\nsources: []\n"
+        )
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+
+        assert registry.get("nameless") is None
+        assert registry.get_by_provider("commcare") is None
+        assert "nameless.yml" in registry.load_errors
+
     def test_source_config_physical_table_name_defaults_to_raw_prefix(self):
         from mcp_server.pipeline_registry import SourceConfig
 
