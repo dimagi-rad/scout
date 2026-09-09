@@ -162,7 +162,9 @@ def _apply_one(canvas, model, index: int, raw_op, user) -> dict[str, Any]:
     op = raw_op.get("op")
     if op not in SUPPORTED_OPS:
         raise CanvasOperationError(
-            index, "UNKNOWN_OP", f"Unknown op '{op}'. Supported: {', '.join(sorted(SUPPORTED_OPS))}."
+            index,
+            "UNKNOWN_OP",
+            f"Unknown op '{op}'. Supported: {', '.join(sorted(SUPPORTED_OPS))}.",
         )
     handler = {
         "add_existing": _op_add_existing,
@@ -695,7 +697,9 @@ def _normalize_currency(index: int, value: str) -> str:
     if not value:
         return ""
     if not re.fullmatch(r"[A-Z]{3}", value):
-        raise CanvasOperationError(index, "INVALID_CURRENCY", "currency must be a 3-letter ISO code.")
+        raise CanvasOperationError(
+            index, "INVALID_CURRENCY", "currency must be a 3-letter ISO code."
+        )
     return value
 
 

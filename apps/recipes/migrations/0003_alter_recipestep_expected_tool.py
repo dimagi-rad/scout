@@ -4,15 +4,18 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('recipes', '0002_initial'),
+        ("recipes", "0002_initial"),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='recipestep',
-            name='expected_tool',
-            field=models.CharField(blank=True, help_text="Optional: expected tool the agent should use (e.g., 'semantic_query').", max_length=100),
+            model_name="recipestep",
+            name="expected_tool",
+            field=models.CharField(
+                blank=True,
+                help_text="Optional: expected tool the agent should use (e.g., 'semantic_query').",
+                max_length=100,
+            ),
         ),
     ]

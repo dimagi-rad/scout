@@ -96,7 +96,9 @@ def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> di
     payload = {
         "name": field.name,
         "sql": _cube_sql(field.expression),
-        "type": "time" if field.field_type == SemanticField.FieldType.TIME_DIMENSION else _cube_type(field.data_type),
+        "type": "time"
+        if field.field_type == SemanticField.FieldType.TIME_DIMENSION
+        else _cube_type(field.data_type),
     }
     if is_primary_key:
         payload["primary_key"] = True

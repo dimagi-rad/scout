@@ -57,7 +57,11 @@ def _production_files():
         for path in (REPO_ROOT / d).rglob("*.py"):
             if path == AUTHORIZER:
                 continue
-            if "/migrations/" in str(path) or "/tests/" in str(path) or path.name.startswith("test_"):
+            if (
+                "/migrations/" in str(path)
+                or "/tests/" in str(path)
+                or path.name.startswith("test_")
+            ):
                 continue
             yield path
 

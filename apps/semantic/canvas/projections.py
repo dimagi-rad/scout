@@ -30,7 +30,9 @@ def canvas_projection(canvas: SemanticCanvas) -> dict[str, Any]:
             name = change.fields.get("name", str(change.object_uuid))
             label = change.fields.get("label", "")
             dataset_name = change.fields.get("dataset_name", "")
-            diff = {key: {"from": None, "to": value} for key, value in draft_fields.items() if value}
+            diff = {
+                key: {"from": None, "to": value} for key, value in draft_fields.items() if value
+            }
             if change.object_type == ObjectType.CUSTOM_DATASET:
                 validation = change.fields.get("_validation") or {}
                 draft_fields["columns"] = validation.get("columns", [])
@@ -115,9 +117,7 @@ def render_projection_text(projection: dict[str, Any], selector: str = "graph") 
         for entry in pending:
             lines.append(f"{entry['key']} [{entry['state']}]")
             for key, delta in sorted(entry["diff"].items()):
-                lines.append(
-                    f"  {key}: {_short(delta.get('from'))} -> {_short(delta.get('to'))}"
-                )
+                lines.append(f"  {key}: {_short(delta.get('from'))} -> {_short(delta.get('to'))}")
     if selector in {"diagnostics", "all"}:
         if not diagnostics:
             lines.append("Diagnostics: clean")

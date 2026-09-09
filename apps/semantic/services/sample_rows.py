@@ -32,7 +32,9 @@ def sample_dataset_rows(
         in {SemanticField.FieldType.DIMENSION, SemanticField.FieldType.TIME_DIMENSION}
     ]
     measures = [
-        field.member_name for field in selected if field.field_type == SemanticField.FieldType.MEASURE
+        field.member_name
+        for field in selected
+        if field.field_type == SemanticField.FieldType.MEASURE
     ]
     query_spec = {
         "dimensions": dimensions,
@@ -87,13 +89,13 @@ def _selected_fields(dataset: SemanticDataset, field_refs: list[str] | None) -> 
         ]
         if not selected:
             selected = [
-                field
-                for field in visible
-                if field.field_type == SemanticField.FieldType.MEASURE
+                field for field in visible if field.field_type == SemanticField.FieldType.MEASURE
             ][:1]
     selected = selected[:MAX_SAMPLE_FIELDS]
     if not selected:
-        raise SemanticCatalogUnavailable(f"Dataset '{dataset.name}' has no visible fields to sample.")
+        raise SemanticCatalogUnavailable(
+            f"Dataset '{dataset.name}' has no visible fields to sample."
+        )
     return selected
 
 
@@ -122,7 +124,4 @@ def _row_objects(columns: list[str], rows: list) -> list[dict[str, Any]]:
         return []
     if isinstance(rows[0], dict):
         return rows
-    return [
-        {column: value for column, value in zip(columns, row, strict=True)}
-        for row in rows
-    ]
+    return [{column: value for column, value in zip(columns, row, strict=True)} for row in rows]

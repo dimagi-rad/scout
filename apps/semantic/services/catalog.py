@@ -316,10 +316,13 @@ def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
     except Exception as exc:
         tenant = workspace.tenant
         schema_status = "unavailable"
-        if tenant is not None and TenantSchema.objects.filter(
-            tenant=tenant,
-            state=SchemaState.PROVISIONING,
-        ).exists():
+        if (
+            tenant is not None
+            and TenantSchema.objects.filter(
+                tenant=tenant,
+                state=SchemaState.PROVISIONING,
+            ).exists()
+        ):
             schema_status = "provisioning"
         raise SemanticCatalogUnavailable(
             "Data unavailable. Please refresh workspace data.",
@@ -385,7 +388,9 @@ def ensure_semantic_model(workspace) -> SemanticModel:
                     "semantic_model": model,
                     "label": _humanize_name(table.name),
                     "description": (
-                        annotation.description if annotation and annotation.description else table.description
+                        annotation.description
+                        if annotation and annotation.description
+                        else table.description
                     ),
                     "source_kind": SemanticDataset.SourceKind.PHYSICAL,
                     "custom_dataset": None,
@@ -412,9 +417,7 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         SemanticDataset.objects.filter(
             workspace=workspace,
             source_kind=SemanticDataset.SourceKind.PHYSICAL,
-        ).exclude(
-            id__in=existing_physical_dataset_ids
-        ).update(is_visible=False)
+        ).exclude(id__in=existing_physical_dataset_ids).update(is_visible=False)
 
         diagnostics = _sync_custom_datasets(model, workspace, schema_name)
         _sync_relationships(model, workspace)
@@ -438,7 +441,9 @@ def get_active_semantic_model(workspace) -> SemanticModel:
     return model
 
 
-def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> list[dict[str, Any]]:
+def _sync_custom_datasets(
+    model: SemanticModel, workspace, schema_name: str
+) -> list[dict[str, Any]]:
     """Compile active custom datasets into queryable semantic datasets."""
     diagnostics: list[dict[str, Any]] = []
     valid_custom_ids: set[str] = set()
@@ -524,7 +529,9 @@ def _sync_custom_datasets(model: SemanticModel, workspace, schema_name: str) -> 
         source_kind=SemanticDataset.SourceKind.CUSTOM,
     )
     if valid_custom_ids:
-        stale_custom_datasets = stale_custom_datasets.exclude(custom_dataset_id__in=valid_custom_ids)
+        stale_custom_datasets = stale_custom_datasets.exclude(
+            custom_dataset_id__in=valid_custom_ids
+        )
     stale_custom_datasets.update(is_visible=False)
     return diagnostics
 
@@ -585,9 +592,7 @@ def _sync_relationships(model: SemanticModel, workspace) -> None:
                 to_field = visible_field(to_dataset, rel.to_column)
                 if from_field is None or to_field is None:
                     continue
-                name = semantic_name(
-                    f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}"
-                )
+                name = semantic_name(f"{from_dataset.name}_{rel.from_column}_to_{to_dataset.name}")
                 relationship_type = (
                     SemanticRelationship.RelationshipType.ONE_TO_ONE
                     if rel.from_column == from_dataset.primary_key
@@ -741,9 +746,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
     ):
         fields = [f for f in dataset.fields.all() if f.is_visible]
         dimensions = [
-            _serialize_field(f)
-            for f in fields
-            if f.field_type == SemanticField.FieldType.DIMENSION
+            _serialize_field(f) for f in fields if f.field_type == SemanticField.FieldType.DIMENSION
         ]
         time_dimensions = [
             _serialize_field(f)
@@ -751,9 +754,7 @@ def serialize_catalog(model: SemanticModel) -> dict[str, Any]:
             if f.field_type == SemanticField.FieldType.TIME_DIMENSION
         ]
         measures = [
-            _serialize_field(f)
-            for f in fields
-            if f.field_type == SemanticField.FieldType.MEASURE
+            _serialize_field(f) for f in fields if f.field_type == SemanticField.FieldType.MEASURE
         ]
         relationships = [
             {**serialize_relationship(r), "direction": "outgoing"}

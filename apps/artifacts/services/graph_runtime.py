@@ -15,7 +15,9 @@ MAX_CHECK_QUERIES = 25
 
 
 async def check_graph_artifact(artifact, *, user_id: str = "") -> dict[str, Any]:
-    doc = normalize_doc((artifact.data or {}).get("story_doc") if isinstance(artifact.data, dict) else {})
+    doc = normalize_doc(
+        (artifact.data or {}).get("story_doc") if isinstance(artifact.data, dict) else {}
+    )
     diagnostics = validate_doc(doc)
     manifest = build_semantic_query_manifest(doc)
     entries = manifest.get("entries", [])[:MAX_CHECK_QUERIES]

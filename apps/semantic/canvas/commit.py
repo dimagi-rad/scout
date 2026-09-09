@@ -56,9 +56,7 @@ def commit_canvas(canvas, user=None) -> dict[str, Any]:
 
     diagnostics = compute_diagnostics(canvas, changes)
     blocking = [d for d in diagnostics if d["severity"] == "error" and d["code"] != "CONFLICT"]
-    conflicts = [
-        _conflict_entry(canvas, c) for c in changes if _state_of(canvas, c) == "conflict"
-    ]
+    conflicts = [_conflict_entry(canvas, c) for c in changes if _state_of(canvas, c) == "conflict"]
     if blocking:
         return {
             "committed": [],

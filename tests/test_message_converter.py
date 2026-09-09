@@ -98,7 +98,7 @@ def test_artifact_manager_subagent_trace_survives_reload():
                                     "subagentName": "artifact_manager",
                                     "toolCallId": "artifact_manager:child",
                                     "toolName": "artifact_write",
-                                    "output": "{\"status\":\"created\"}",
+                                    "output": '{"status":"created"}',
                                 },
                             },
                         ],

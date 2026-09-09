@@ -33,7 +33,9 @@ def _get_pool_config() -> tuple[int, int, int]:
     if max_size < 1:
         raise ValueError("LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE must be >= 1")
     if min_size > max_size:
-        raise ValueError("LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE must be <= LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE")
+        raise ValueError(
+            "LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE must be <= LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE"
+        )
     if open_timeout < 1:
         raise ValueError("LANGGRAPH_CHECKPOINT_POOL_OPEN_TIMEOUT_S must be >= 1")
 

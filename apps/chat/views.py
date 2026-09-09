@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 THREAD_TITLE_PREVIEW_CHARS = 200
 
+
 def _short_thread_title(title: str) -> str:
     clean = title.strip()
     if len(clean) > THREAD_TITLE_PREVIEW_CHARS:

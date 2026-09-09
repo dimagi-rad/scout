@@ -28,7 +28,9 @@ def describe_workspace_sources(workspace) -> str:
     labels = []
     for wt in workspace.workspace_tenants.select_related("tenant"):
         tenant = wt.tenant
-        product, noun = _PROVIDER_SOURCE_NOUNS.get(tenant.provider, (tenant.provider, "data source"))
+        product, noun = _PROVIDER_SOURCE_NOUNS.get(
+            tenant.provider, (tenant.provider, "data source")
+        )
         labels.append(f"the {product} {noun} '{tenant.canonical_name}'")
     if not labels:
         return "this workspace's data source"

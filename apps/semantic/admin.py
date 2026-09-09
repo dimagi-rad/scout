@@ -78,7 +78,14 @@ class CustomDatasetAdmin(admin.ModelAdmin):
 
 @admin.register(CubeSchema)
 class CubeSchemaAdmin(admin.ModelAdmin):
-    list_display = ("filename", "workspace", "semantic_model", "status", "content_hash", "updated_at")
+    list_display = (
+        "filename",
+        "workspace",
+        "semantic_model",
+        "status",
+        "content_hash",
+        "updated_at",
+    )
     list_filter = ("status", "workspace")
     search_fields = ("filename", "content_hash", "content")
     raw_id_fields = ("workspace", "semantic_model")

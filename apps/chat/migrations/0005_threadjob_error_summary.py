@@ -4,15 +4,14 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('chat', '0004_thread_last_viewed_at'),
+        ("chat", "0004_thread_last_viewed_at"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='threadjob',
-            name='error_summary',
-            field=models.TextField(blank=True, default=''),
+            model_name="threadjob",
+            name="error_summary",
+            field=models.TextField(blank=True, default=""),
         ),
     ]

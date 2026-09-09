@@ -172,7 +172,9 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
                 )
             )
         except Exception:
-            logger.exception("Failed to invalidate Cube schema cache for workspace %s", workspace.id)
+            logger.exception(
+                "Failed to invalidate Cube schema cache for workspace %s", workspace.id
+            )
 
     try:
         transaction.on_commit(invalidate_cube_schema_cache)
@@ -185,7 +187,9 @@ def _build_validate_and_promote(workspace, model: SemanticModel) -> CubeSchema:
     return cube_schema
 
 
-def _set_last_build(model: SemanticModel, *, ok: bool, error: str = "", content_hash: str = "") -> None:
+def _set_last_build(
+    model: SemanticModel, *, ok: bool, error: str = "", content_hash: str = ""
+) -> None:
     entry: dict[str, Any] = {"ok": ok, "at": timezone.now().isoformat()}
     if error:
         entry["error"] = error[:500]

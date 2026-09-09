@@ -209,9 +209,7 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
     never destroys the only copy. (Connection *rows* are merged separately by
     _merge_tenant_connections.)
     """
-    canon_by_tenant = {
-        m.tenant_id: m for m in TenantMembership.all_objects.filter(user=canonical)
-    }
+    canon_by_tenant = {m.tenant_id: m for m in TenantMembership.all_objects.filter(user=canonical)}
     repointed = 0
     conflict_deleted = 0
     metadata_migrated = 0

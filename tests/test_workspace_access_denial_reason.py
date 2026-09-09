@@ -58,9 +58,7 @@ def test_member_without_live_tenant_gets_tenant_access_lost():
 @pytest.mark.django_db
 def test_member_with_live_tenant_is_granted():
     user = User.objects.create_user(email="denial-ok@example.com", password="pass")
-    tenant = Tenant.objects.create(
-        provider="commcare", external_id="live", canonical_name="Live"
-    )
+    tenant = Tenant.objects.create(provider="commcare", external_id="live", canonical_name="Live")
     ws = Workspace.objects.create(name="Live WS", created_by=user)
     WorkspaceMembership.objects.create(workspace=ws, user=user, role=WorkspaceRole.MANAGE)
     WorkspaceTenant.objects.create(workspace=ws, tenant=tenant)

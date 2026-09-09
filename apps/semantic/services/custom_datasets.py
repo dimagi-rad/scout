@@ -85,7 +85,10 @@ def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str,
     """Probe a compiled custom dataset query and return catalog-style columns."""
     ctx = async_to_sync(load_workspace_context)(str(workspace.id))
     try:
-        with psycopg.connect(**ctx.connection_params, autocommit=True) as conn, conn.cursor() as cursor:
+        with (
+            psycopg.connect(**ctx.connection_params, autocommit=True) as conn,
+            conn.cursor() as cursor,
+        ):
             cursor.execute(psql.SQL("SET ROLE {}").format(psql.Identifier(ctx.readonly_role)))
             try:
                 cursor.execute(
