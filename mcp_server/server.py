@@ -1274,13 +1274,17 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             if last_run:
                 if last_run.completed_at:
                     last_materialized_at = last_run.completed_at.isoformat()
-                result_data = last_run.result or {}
-                if "tables" in result_data:
-                    tables = result_data["tables"]
-                elif "table" in result_data and "rows_loaded" in result_data:
-                    tables = [
-                        {"name": result_data["table"], "row_count": result_data["rows_loaded"]}
-                    ]
+                # Go through the catalog rather than indexing ``result`` here.
+                # The keys this used to read (``tables``, ``table``,
+                # ``rows_loaded``) are the pre-#12 single-table result shape;
+                # nothing has written them since the per-source ``sources`` map
+                # replaced it, so this always reported zero tables for a
+                # workspace full of data (03#4). ``pipeline_list_tables`` reads
+                # ``sources`` and reconciles against information_schema, and is
+                # the same call the multi-tenant branch below makes, so both
+                # branches now return identically-shaped entries.
+                pipeline_config = await _resolve_pipeline_config(ts, last_run)
+                tables = await pipeline_list_tables(ts, pipeline_config)
 
             tc["result"] = success_response(
                 {
