@@ -20,6 +20,11 @@ jobs:
       - name: Lint Python
         run: uv run --extra dev ruff check .
 
+      # Separate step from `ruff check`: they enforce different things, and
+      # having only the former is how 43 files drifted unformatted (#418).
+      - name: Check Python formatting
+        run: uv run --extra dev ruff format --check .
+
   lint-frontend:
     runs-on: ubuntu-latest
     steps:
