@@ -359,10 +359,22 @@ class TenantMetadata(models.Model):
     skip re-discovery if the data is still current.
     """
 
+    # #305 in flight: ``tenant`` is being introduced as the real grain and
+    # ``tenant_membership`` retired. Both are nullable for the length of the
+    # backfill (workspaces.0008) so neither column can fail a write mid-deploy.
+    tenant = models.ForeignKey(
+        "users.Tenant",
+        on_delete=models.CASCADE,
+        related_name="metadata",
+        null=True,
+        blank=True,
+    )
     tenant_membership = models.OneToOneField(
         "users.TenantMembership",
         on_delete=models.CASCADE,
         related_name="metadata",
+        null=True,
+        blank=True,
     )
     # schema=dict is intentionally untyped: the model is provider-agnostic and
     # each loader defines its own structure. A typed Pydantic schema can be
