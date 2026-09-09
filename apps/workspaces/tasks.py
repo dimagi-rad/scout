@@ -168,6 +168,20 @@ def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
     return failures
 
 
+def _unreachable_tenant_error(tenant) -> str:
+    """Describe a workspace tenant the acting user holds no live membership for.
+
+    Describes only. What the user should do about it is keyed by
+    ``WORKSPACE_TENANT_UNREACHABLE`` in ``_CREDENTIAL_GUIDANCE``, because the
+    run summary and the chat resume both report this and neither should phrase
+    the advice itself (see ``apps/common/errors.py``).
+    """
+    return (
+        f"no live {tenant.provider} membership for the acting user on "
+        f"'{tenant.external_id}', so this tenant was not attempted"
+    )
+
+
 def _no_pipeline_error(registry, provider: str) -> str:
     """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
 
@@ -412,10 +426,7 @@ async def materialize_workspace_core(
         {
             "tenant": tenant.external_id,
             "success": False,
-            "error": (
-                f"no live {tenant.provider} membership for the acting user on "
-                f"'{tenant.external_id}', so this tenant was not attempted"
-            ),
+            "error": _unreachable_tenant_error(tenant),
             "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
         }
         for tenant_id, tenant in workspace_tenants.items()
@@ -1638,10 +1649,7 @@ async def _uncovered_tenant_summaries(
             )
             code = ErrorCode.INTERNAL_ERROR
         else:
-            error = (
-                f"no live {tenant.provider} membership for the acting user on "
-                f"'{tenant.external_id}', so this tenant was not attempted"
-            )
+            error = _unreachable_tenant_error(tenant)
             code = ErrorCode.WORKSPACE_TENANT_UNREACHABLE
         summaries.append(
             {
