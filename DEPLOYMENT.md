@@ -442,6 +442,50 @@ historical streams are preserved with their 30-day retention — no data is lost
 
 ## Infrastructure Changes
 
+> ### ⚠️ `update-stack` can replace the EC2 instance, and it does not need your permission
+>
+> `EC2Instance.ImageId` (`infra/scout-stack.yml:241`) is
+> `{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}`
+> — it resolves to whatever Canonical published **most recently**, at every stack operation. When a
+> new 24.04 image has appeared since the last one (roughly monthly), the resolved AMI ID differs,
+> CloudFormation sees `ImageId` change, and **replaces the instance — whatever else you changed.**
+> Changing `UserData` also forces replacement on its own.
+>
+> This is what happened on **2026-07-06**: an `update-stack` applying long-unapplied changes
+> replaced the instance and took the site down. See `HANDOVER-ses-invites-2026-07-06.md`.
+>
+> **What a replacement costs.** A new instance boots from the template with a fresh EBS root
+> volume. The Elastic IP re-associates, but everything on disk is gone. Since
+> `UserData` reinstalls `scout`'s `authorized_keys` and recreates the `scout_shared` /
+> `scout_staging_shared` networks, so CI can reconnect and `kamal deploy` restores the containers
+> — **that is the whole reason those lines exist; do not remove them.** Before they were added,
+> recovery required a human with the EC2 keypair to copy the key across by hand.
+>
+> **Do not run this command unless:**
+> 1. you know the current instance may be replaced and that is acceptable right now;
+> 2. the co-located staging stack going down with it is acceptable;
+> 3. you have the EC2 keypair to hand, in case `UserData` fails part-way; and
+> 4. you are prepared to re-run `kamal deploy` for every destination afterwards.
+>
+> To find out **before** you commit, create a change set instead of updating directly and inspect
+> the `Replacement` column for `EC2Instance`:
+>
+> ```bash
+> aws cloudformation create-change-set \
+>   --stack-name scout-production --change-set-name preflight \
+>   --template-body file://infra/scout-stack.yml \
+>   --capabilities CAPABILITY_NAMED_IAM \
+>   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
+>   --profile scout --region us-east-1
+> aws cloudformation describe-change-set \
+>   --stack-name scout-production --change-set-name preflight \
+>   --query 'Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}' \
+>   --profile scout --region us-east-1
+> ```
+>
+> If you need to pin the AMI so routine updates stop being replacement-prone, replace the
+> `current` SSM path with a fixed AMI ID and bump it deliberately.
+
 The CloudFormation stack is at `infra/scout-stack.yml`. To update:
 
 ```bash
