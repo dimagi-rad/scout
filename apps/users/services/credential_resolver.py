@@ -63,27 +63,72 @@ def _social_token_qs(user, provider: str):
     - ``"ocs"`` matches tokens whose provider equals ``"ocs"``.
     - Any other provider matches tokens starting with ``"commcare"`` but
       excludes ``"commcare_connect"``.
+
+    Ordered newest-identity-first. A user can now hold several team-scoped
+    tokens for one provider (#156), so the ``.afirst()`` reads below would
+    otherwise return whichever row the ORM happened to yield — the unordered-read
+    defect #415 fixed for ``TenantMetadata``. Callers that must cover *every*
+    team use ``aiter_social_tokens``; the ones that legitimately want a single
+    representative token get the most recently authorised identity.
     """
     if provider == "commcare_connect":
-        return SocialToken.objects.filter(
+        qs = SocialToken.objects.filter(
             account__user=user,
             account__provider__startswith="commcare_connect",
         )
-    if provider == "ocs":
-        return SocialToken.objects.filter(
+    elif provider == "ocs":
+        qs = SocialToken.objects.filter(
             account__user=user,
             account__provider="ocs",
         )
-
-    return SocialToken.objects.filter(
-        account__user=user,
-        account__provider__startswith="commcare",
-    ).exclude(account__provider__startswith="commcare_connect")
+    else:
+        qs = SocialToken.objects.filter(
+            account__user=user,
+            account__provider__startswith="commcare",
+        ).exclude(account__provider__startswith="commcare_connect")
+    return qs.order_by("-account__date_joined", "-account__id")
 
 
 async def aget_social_token(user, provider: str) -> SocialToken | None:
-    """Return the SocialToken for *user* and *provider*, or None."""
+    """Return the newest SocialToken for *user* and *provider*, or None."""
     return await _social_token_qs(user, provider).afirst()
+
+
+async def aiter_social_tokens(user, provider: str) -> list[SocialToken]:
+    """Every SocialToken *user* holds for *provider*, newest identity first.
+
+    One per team for a scoped provider like OCS. Callers that resolve or refresh
+    upstream access must iterate all of them: picking one would silently ignore
+    the teams the user is not "currently" signed in to, which is exactly the
+    lockout #156 exists to remove.
+    """
+    return [
+        token async for token in _social_token_qs(user, provider).select_related("account", "app")
+    ]
+
+
+async def aget_connection_token(conn) -> SocialToken | None:
+    """The SocialToken belonging to *conn*'s own allauth identity.
+
+    Resolving through ``conn.social_account`` is what makes N tokens per provider
+    safe: the connection names the identity whose token it is, so no ordering
+    heuristic decides which team Scout authenticates as. Connections written
+    before the scope backfill have no linked account and fall back to the
+    provider-wide (now ordered) read.
+    """
+    if conn.social_account_id:
+        return (
+            await SocialToken.objects.filter(account_id=conn.social_account_id)
+            .select_related("account", "app")
+            .afirst()
+        )
+    # user_id, not user: callers select_related("connection") but not its user, so
+    # touching conn.user here would be a sync FK fetch inside an async view.
+    return (
+        await _social_token_qs(conn.user_id, conn.provider)
+        .select_related("account", "app")
+        .afirst()
+    )
 
 
 async def aget_fresh_access_token(user, provider: str) -> str | None:
@@ -108,17 +153,23 @@ async def aget_fresh_access_token(user, provider: str) -> str | None:
     return cred["value"]
 
 
-def _oauth_team_mismatch(membership, token_obj) -> bool:
-    """True when the chatbot's team is known and the live OAuth token is scoped elsewhere.
+def _oauth_team_mismatch(membership, conn, token_obj) -> bool:
+    """True when the chatbot's team is known and this connection is scoped elsewhere.
 
-    The chatbot's team lives on the membership (``team_slug``); the team the
-    current OAuth token is scoped to is the OIDC ``team`` claim stored in the
-    SocialAccount's ``extra_data``. When they differ we must not use this token
-    (it has moved to another OCS team) — fail closed.
+    The chatbot's team lives on the membership (``team_slug``). The team the
+    connection speaks for is ``conn.scope_key``, recorded when the credential was
+    authorised; the OIDC ``team`` claim on the token's own account is the fallback
+    for connections predating that field. When they differ we must not use this
+    token — fail closed.
+
+    Still needed after multi-token OAuth: memberships that a single shared
+    connection accumulated across two teams keep pointing at it until the user
+    re-authorises the second team, and serving them team A's token would be the
+    cross-team read this check was written to stop.
     """
     if not membership.team_slug:
         return False
-    current = (getattr(token_obj.account, "extra_data", None) or {}).get("team")
+    current = conn.scope_key or (getattr(token_obj.account, "extra_data", None) or {}).get("team")
     return bool(current) and current != membership.team_slug
 
 
@@ -143,26 +194,50 @@ async def aresolve_credential(membership) -> dict | None:
             logger.exception("Failed to decrypt API key for membership %s", membership.id)
             return None
 
-    token_obj = (
-        await _social_token_qs(membership.user, conn.provider)
-        .select_related("account", "app")
-        .afirst()
-    )
+    token_obj = await aget_connection_token(conn)
     if not token_obj:
         return None
-    if _oauth_team_mismatch(membership, token_obj):
-        # The user is signed in to a different team than this chatbot. Fail
-        # closed (never serve another team's token), but surface a distinct,
-        # actionable error so the user is told to re-connect — not the generic
-        # "No credential configured" (arch #245 finding 07#3).
+    if _oauth_team_mismatch(membership, conn, token_obj):
+        # This connection's credential belongs to a different team than this
+        # chatbot. Fail closed (never serve another team's token), but surface a
+        # distinct, actionable error so the user is told to connect that team —
+        # not the generic "No credential configured" (arch #245 finding 07#3).
         raise CredentialResolutionError(
             AUTH_TOKEN_EXPIRED,
             "Your sign-in is scoped to a different team than this chatbot's "
-            f"team ({membership.team_slug}). Please re-connect to team "
+            f"team ({membership.team_slug}). Please connect team "
             f"'{membership.team_slug}' to materialize it.",
         )
 
     return await _aresolve_oauth_credential(token_obj, conn.provider)
+
+
+async def arefresh_connection(conn) -> str:
+    """Refresh *conn*'s own OAuth token and report its health.
+
+    Returns ``"connected"``, ``"expired"`` (no usable credential — reconnect this
+    scope) or ``"unknown"`` for a connection that holds no OAuth token at all.
+
+    Refresh is per connection, not per provider: a user holding two OCS teams has
+    two independent tokens with independent expiries, and renewing "the user's OCS
+    token" would leave the other team's silently stale.
+    """
+    if conn.credential_type != TenantConnection.OAUTH:
+        return "unknown"
+    token_obj = await aget_connection_token(conn)
+    if token_obj is None:
+        return "expired"
+    token_url = get_token_url(conn.provider)
+    can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
+    if not token_needs_refresh(token_obj.expires_at, can_refresh=can_refresh):
+        return "connected"
+    if not can_refresh:
+        return "expired"
+    try:
+        await refresh_oauth_token(token_obj, token_url)
+    except TokenRefreshError:
+        return "expired"
+    return "connected"
 
 
 def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:

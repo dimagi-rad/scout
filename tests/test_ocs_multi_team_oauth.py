@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import importlib
+from datetime import timedelta
+from unittest.mock import AsyncMock
 
 import pytest
-from allauth.socialaccount.models import SocialAccount, SocialApp
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from asgiref.sync import sync_to_async
 from django.apps import apps as global_apps
+from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider, team_slug_from_uid
+from apps.users.services.credential_resolver import (
+    CredentialResolutionError,
+    aiter_social_tokens,
+    arefresh_connection,
+    aresolve_credential,
+)
+from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
 
 def _provider() -> OCSProvider:
@@ -168,3 +179,117 @@ def test_every_operation_is_reversible(migration_name):
         type(op).__name__ for op in migration("x", "users").operations if not op.reversible
     ]
     assert not irreversible
+
+
+def _ocs_identity(user, *, team, token, secret="", expires_in_hours=5, app=None):
+    """One team-scoped OCS identity: allauth account + token + a scoped connection."""
+    account = SocialAccount.objects.create(
+        user=user, provider="ocs", uid=f"42#{team}", extra_data={"sub": "42", "team": team}
+    )
+    SocialToken.objects.create(
+        account=account,
+        app=app,
+        token=token,
+        token_secret=secret,
+        expires_at=timezone.now() + timedelta(hours=expires_in_hours),
+    )
+    conn = TenantConnection.objects.create(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key=team,
+        scope_label=team.title(),
+        social_account=account,
+    )
+    return account, conn
+
+
+def _chatbot(user, conn, *, team, external_id):
+    tenant = Tenant.objects.create(
+        provider="ocs", external_id=external_id, canonical_name=external_id
+    )
+    return TenantMembership.objects.create(
+        user=user, tenant=tenant, connection=conn, team_slug=team, team_name=team.title()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_each_team_resolves_its_own_token(user):
+    """The point of the whole change: two teams, two tokens, no ordering guesswork.
+
+    Under the old provider-wide ``.afirst()`` both memberships would have
+    resolved to whichever token the ORM returned first.
+    """
+    _, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
+    _, conn_b = await sync_to_async(_ocs_identity)(user, team="globex", token="tok-globex")
+    tm_a = await sync_to_async(_chatbot)(user, conn_a, team="acme", external_id="bot-a")
+    tm_b = await sync_to_async(_chatbot)(user, conn_b, team="globex", external_id="bot-b")
+
+    tm_a = await TenantMembership.objects.select_related("connection").aget(id=tm_a.id)
+    tm_b = await TenantMembership.objects.select_related("connection").aget(id=tm_b.id)
+
+    assert await aresolve_credential(tm_a) == {"type": "oauth", "value": "tok-acme"}
+    assert await aresolve_credential(tm_b) == {"type": "oauth", "value": "tok-globex"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_chatbot_of_another_team_still_fails_closed(user):
+    """A membership left pointing at the wrong team's connection must not resolve."""
+    _, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
+    tm = await sync_to_async(_chatbot)(user, conn_a, team="globex", external_id="bot-b")
+    tm = await TenantMembership.objects.select_related("connection").aget(id=tm.id)
+
+    with pytest.raises(CredentialResolutionError) as exc:
+        await aresolve_credential(tm)
+    assert exc.value.code == AUTH_TOKEN_EXPIRED
+    assert "globex" in str(exc.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_is_per_connection(user, mocker):
+    """Renewing one team's near-expiry token must not touch the other team's."""
+    app = await sync_to_async(SocialApp.objects.create)(
+        provider="ocs", name="OCS", client_id="cid", secret="sec"
+    )
+    _, conn_a = await sync_to_async(_ocs_identity)(
+        user, team="acme", token="stale-a", secret="refresh-a", expires_in_hours=-1, app=app
+    )
+    _, conn_b = await sync_to_async(_ocs_identity)(
+        user, team="globex", token="fresh-b", secret="refresh-b", expires_in_hours=5, app=app
+    )
+    refresh = mocker.patch(
+        "apps.users.services.credential_resolver.refresh_oauth_token",
+        new=AsyncMock(return_value="new-a"),
+    )
+
+    assert await arefresh_connection(conn_a) == "connected"
+    assert await arefresh_connection(conn_b) == "connected"
+
+    assert refresh.await_count == 1
+    (refreshed_token, _url), _kwargs = refresh.await_args
+    assert refreshed_token.token == "stale-a"
+    assert refreshed_token.token_secret == "refresh-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_reports_expired_when_a_connection_cannot_be_renewed(user):
+    _, conn = await sync_to_async(_ocs_identity)(
+        user, team="acme", token="stale", secret="", expires_in_hours=-1
+    )
+    assert await arefresh_connection(conn) == "expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_every_team_token_is_enumerable(user):
+    """Callers that must cover all teams get all of them, deterministically ordered."""
+    await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
+    await sync_to_async(_ocs_identity)(user, team="globex", token="tok-globex")
+
+    tokens = await aiter_social_tokens(user, "ocs")
+
+    assert {t.token for t in tokens} == {"tok-acme", "tok-globex"}
