@@ -61,7 +61,7 @@ class TestMeViewResolveBothProviders:
         commcare_called = False
         connect_called = False
 
-        async def mock_resolve_commcare(user, token):
+        async def mock_resolve_commcare(user, token, *, social_account=None):
             nonlocal commcare_called
             commcare_called = True
             t, _ = await Tenant.objects.aget_or_create(
@@ -79,7 +79,7 @@ class TestMeViewResolveBothProviders:
             await tm.asave(update_fields=["connection"])
             return [tm]
 
-        async def mock_resolve_connect(user, token):
+        async def mock_resolve_connect(user, token, *, social_account=None):
             nonlocal connect_called
             connect_called = True
             t, _ = await Tenant.objects.aget_or_create(

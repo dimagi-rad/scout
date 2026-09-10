@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
-from apps.users.services.credential_resolver import aget_fresh_access_token
+from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -64,25 +64,32 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
     the target's last Scout login — without the target manually reconnecting.
     Returns True if the target had a usable token for at least one provider (used
     to distinguish "no access upstream" from "needs to reconnect" in the error).
+
+    Every identity per provider is refreshed. A target holding two OCS teams has
+    a token per team, and refreshing only one would report them as not covering a
+    tenant they can in fact reach — the false negative multi-token OAuth exists
+    to remove (#156).
     """
     tried = False
     for provider in providers:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        token = await aget_fresh_access_token(target, provider)
-        if not token:
-            continue
-        tried = True
-        try:
-            await asyncio.wait_for(resolve(target, token), timeout=SHARE_REFRESH_TIMEOUT)
-        except Exception:
-            logger.warning(
-                "Share-time refresh failed for target=%s provider=%s",
-                target.id,
-                provider,
-                exc_info=True,
-            )
+        for account, token in await aiter_fresh_access_tokens(target, provider):
+            tried = True
+            try:
+                await asyncio.wait_for(
+                    resolve(target, token, social_account=account),
+                    timeout=SHARE_REFRESH_TIMEOUT,
+                )
+            except Exception:
+                logger.warning(
+                    "Share-time refresh failed for target=%s provider=%s account=%s",
+                    target.id,
+                    provider,
+                    account.pk,
+                    exc_info=True,
+                )
     return tried
 
 

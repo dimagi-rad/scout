@@ -29,6 +29,7 @@ from django.utils import timezone
 
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.providers.ocs.provider import team_slug_from_uid
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,54 @@ logger = logging.getLogger(__name__)
 COMMCARE_DOMAIN_API = "https://www.commcarehq.org/api/user_domains/v1/"
 
 
-async def _ocs_team_slug(user) -> str:
-    """The OCS team slug the user's current OAuth token is scoped to (OIDC claim)."""
-    acct = await SocialAccount.objects.filter(user=user, provider="ocs").afirst()
-    return (acct.extra_data or {}).get("team", "") if acct else ""
+def _account_team_slug(account) -> str:
+    """The OCS team the identity *account*'s token is scoped to.
+
+    Prefers the uid suffix (written by ``OCSProvider.extract_uid``) over the raw
+    ``team`` OIDC claim in ``extra_data``: the uid is what allauth keys the
+    identity on, so it cannot drift from the token the account holds.
+    """
+    if account is None:
+        return ""
+    from_uid = team_slug_from_uid(account.uid)
+    return from_uid or str((account.extra_data or {}).get("team") or "").strip()
+
+
+async def _anewest_account(user, provider: str):
+    """The user's most recently authorised identity for *provider*.
+
+    Only a fallback for callers that did not say which identity they are
+    resolving. Ordered, because a user can hold one identity per team and an
+    unordered read would attribute a fetch to an arbitrary one of them.
+    """
+    return (
+        await SocialAccount.objects.filter(user=user, provider=provider)
+        .order_by("-date_joined", "-id")
+        .afirst()
+    )
+
+
+async def _aoauth_connection(user, provider: str, *, scope_key: str, scope_label: str, account):
+    """Get-or-create the OAuth connection for one (user, provider, scope).
+
+    Keyed on ``scope_key`` rather than ``provider``, which is what turns
+    re-authorising into *adding* a connection: a team the user already holds
+    updates its own row (no duplicate, no orphaned memberships), and a new team
+    gets a row of its own instead of overwriting the first (#156).
+    """
+    defaults: dict = {}
+    if account is not None:
+        defaults["social_account"] = account
+    if scope_label:
+        defaults["scope_label"] = scope_label
+    conn, _ = await TenantConnection.objects.aupdate_or_create(
+        user=user,
+        provider=provider,
+        credential_type=TenantConnection.OAUTH,
+        scope_key=scope_key,
+        defaults=defaults,
+    )
+    return conn
 
 
 class TenantResolutionError(Exception):
@@ -95,11 +140,21 @@ async def _sync_memberships(
     return memberships
 
 
-async def resolve_commcare_domains(user, access_token: str) -> list[TenantMembership]:
-    """Fetch the user's CommCare domains and full-sync TenantMembership records."""
+async def resolve_commcare_domains(
+    user, access_token: str, *, social_account=None
+) -> list[TenantMembership]:
+    """Fetch the user's CommCare domains and full-sync TenantMembership records.
+
+    A CommCare HQ token is account-wide, so this stays one connection per user
+    (``scope_key=""``); ``social_account`` only pins which identity holds it.
+    """
     domains = await _fetch_all_domains(access_token)  # complete or raises
-    conn, _ = await TenantConnection.objects.aget_or_create(
-        user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+    conn = await _aoauth_connection(
+        user,
+        "commcare",
+        scope_key="",
+        scope_label="",
+        account=social_account,
     )
     fresh = []
     for domain in domains:
@@ -115,8 +170,14 @@ async def resolve_commcare_domains(user, access_token: str) -> list[TenantMember
     return memberships
 
 
-async def resolve_connect_opportunities(user, access_token: str) -> list[TenantMembership]:
-    """Fetch the user's Connect opportunities and full-sync TenantMembership records."""
+async def resolve_connect_opportunities(
+    user, access_token: str, *, social_account=None
+) -> list[TenantMembership]:
+    """Fetch the user's Connect opportunities and full-sync TenantMembership records.
+
+    A Connect token is account-wide, so this stays one connection per user
+    (``scope_key=""``); ``social_account`` only pins which identity holds it.
+    """
     base_url = getattr(settings, "CONNECT_API_URL", "https://connect.dimagi.com")
     url = f"{base_url.rstrip('/')}/export/opp_org_program_list/"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -133,8 +194,12 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
         raise TenantResolutionError("Connect response missing 'opportunities' key")
     opportunities = payload["opportunities"]
 
-    conn, _ = await TenantConnection.objects.aget_or_create(
-        user=user, provider="commcare_connect", credential_type=TenantConnection.OAUTH
+    conn = await _aoauth_connection(
+        user,
+        "commcare_connect",
+        scope_key="",
+        scope_label="",
+        account=social_account,
     )
     fresh = []
     for opp in opportunities:
@@ -150,7 +215,9 @@ async def resolve_connect_opportunities(user, access_token: str) -> list[TenantM
     return memberships
 
 
-async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership]:
+async def resolve_ocs_chatbots(
+    user, access_token: str, *, social_account=None
+) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and full-sync TenantMembership records.
 
     OCS tokens are **team-scoped** — a successful ``/api/experiments/`` fetch returns
@@ -160,11 +227,16 @@ async def resolve_ocs_chatbots(user, access_token: str) -> list[TenantMembership
     """
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
 
-    team_slug = await _ocs_team_slug(user)
+    account = social_account if social_account is not None else await _anewest_account(user, "ocs")
+    team_slug = _account_team_slug(account)
     team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
 
-    conn, _ = await TenantConnection.objects.aget_or_create(
-        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+    conn = await _aoauth_connection(
+        user,
+        "ocs",
+        scope_key=team_slug,
+        scope_label=team_name,
+        account=account,
     )
 
     experiments: list[dict] = []

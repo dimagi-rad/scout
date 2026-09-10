@@ -20,6 +20,7 @@ from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
+from apps.users.services.credential_resolver import aget_social_token, aiter_social_tokens
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
@@ -34,11 +35,47 @@ logger = logging.getLogger(__name__)
 
 
 async def _aget_token_value(user, provider: str) -> str | None:
-    """Return the user's OAuth access token string for *provider*, or None."""
-    from apps.users.services.credential_resolver import _social_token_qs
-
-    token = await _social_token_qs(user, provider).afirst()
+    """Return the user's newest OAuth access token string for *provider*, or None."""
+    token = await aget_social_token(user, provider)
     return token.token if token else None
+
+
+# provider -> resolver, for the lazy refresh tenant_list_view runs on poll.
+_PROVIDER_RESOLVERS = {
+    "commcare": resolve_commcare_domains,
+    "commcare_connect": resolve_connect_opportunities,
+    "ocs": resolve_ocs_chatbots,
+}
+
+
+async def _arefresh_all_identities(user) -> None:
+    """Refresh upstream memberships for every identity the user holds.
+
+    The TTL is keyed per *identity*, not per provider. A user with two OCS teams
+    holds one token per team, and a single ``tenant_refresh:<user>:ocs`` key meant
+    the first team refreshed cheaply and then suppressed the second for an hour —
+    so the second team's chatbots could stay missing indefinitely (#156).
+
+    Each identity is independent: one team's failure must not stop the others, and
+    a raise means "skip refresh" (never revoke on an inconclusive fetch), so the
+    TTL is only written on success.
+    """
+    for provider, resolve in _PROVIDER_RESOLVERS.items():
+        for token_obj in await aiter_social_tokens(user, provider):
+            cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
+            if await cache.aget(cache_key):
+                continue
+            try:
+                await resolve(user, token_obj.token, social_account=token_obj.account)
+            except Exception:
+                logger.warning(
+                    "Failed to refresh %s tenants for account %s",
+                    provider,
+                    token_obj.account_id,
+                    exc_info=True,
+                )
+                continue
+            await cache.aset(cache_key, True, TENANT_REFRESH_TTL)
 
 
 # Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
@@ -84,40 +121,12 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
 async def tenant_list_view(request):
     """GET /api/auth/tenants/ — List the user's tenant memberships.
 
-    If the user has a CommCare OAuth token, refreshes domain list from
-    CommCare API before returning results.
+    Refreshes each connected identity's upstream access (TTL-throttled) before
+    returning, so a team the user authorised elsewhere shows up on the next poll.
     """
     user = request._authenticated_user
 
-    commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
-    if not await cache.aget(commcare_cache_key):
-        access_token = await _aget_token_value(user, "commcare")
-        if access_token:
-            try:
-                await resolve_commcare_domains(user, access_token)
-                await cache.aset(commcare_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh CommCare domains", exc_info=True)
-
-    connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
-    if not await cache.aget(connect_cache_key):
-        connect_token = await _aget_token_value(user, "commcare_connect")
-        if connect_token:
-            try:
-                await resolve_connect_opportunities(user, connect_token)
-                await cache.aset(connect_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh Connect opportunities", exc_info=True)
-
-    ocs_cache_key = f"tenant_refresh:{user.id}:ocs"
-    if not await cache.aget(ocs_cache_key):
-        ocs_token = await _aget_token_value(user, "ocs")
-        if ocs_token:
-            try:
-                await resolve_ocs_chatbots(user, ocs_token)
-                await cache.aset(ocs_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh OCS chatbots", exc_info=True)
+    await _arefresh_all_identities(user)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(

@@ -20,7 +20,7 @@ from django.views.decorators.http import require_GET, require_POST
 from apps.users.decorators import async_login_required, login_required_json
 from apps.users.models import TenantConnection, TenantMembership
 from apps.users.rate_limiting import check_rate_limit, record_attempt
-from apps.users.services.credential_resolver import aget_social_token
+from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -68,16 +68,20 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     ``True`` while the persisted state stayed incomplete (arch #254, 07#4). The
     caller derives the authoritative flag from the persisted membership state,
     not from this return value.
+
+    Every identity the user holds for the provider is resolved, not just one: an
+    OCS token is team-scoped, so stopping at the first would leave a second
+    team's chatbots undiscovered (#156). One team failing must not skip the rest.
     """
-    token_obj = await aget_social_token(user, provider)
-    if not token_obj:
-        return False
-    try:
-        resolved = await resolve_fn(user, token_obj.token)
-    except Exception:
-        logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
-        return False
-    return bool(resolved)  # falsy/empty = "resolved nothing" so the flag can't flap
+    resolved_any = False
+    for token_obj in await aiter_social_tokens(user, provider):
+        try:
+            resolved = await resolve_fn(user, token_obj.token, social_account=token_obj.account)
+        except Exception:
+            logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
+            continue
+        resolved_any = resolved_any or bool(resolved)
+    return resolved_any  # falsy/empty = "resolved nothing" so the flag can't flap
 
 
 async def _aonboarding_complete(user) -> bool:

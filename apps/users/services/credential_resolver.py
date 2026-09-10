@@ -153,6 +153,25 @@ async def aget_fresh_access_token(user, provider: str) -> str | None:
     return cred["value"]
 
 
+async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
+    """Every usable ``(identity, access token)`` pair for *user*/*provider*.
+
+    The plural form of ``aget_fresh_access_token``, for callers deciding whether a
+    user's upstream access covers something: with one token per OCS team, asking
+    for "the" token answers about one team and silently ignores the rest.
+    Identities whose token cannot be renewed are dropped rather than raised on —
+    a dead credential for one team must not abort the others.
+    """
+    pairs = []
+    for token_obj in await aiter_social_tokens(user, provider):
+        try:
+            cred = await _aresolve_oauth_credential(token_obj, provider)
+        except CredentialResolutionError:
+            continue
+        pairs.append((token_obj.account, cred["value"]))
+    return pairs
+
+
 def _oauth_team_mismatch(membership, conn, token_obj) -> bool:
     """True when the chatbot's team is known and this connection is scoped elsewhere.
 

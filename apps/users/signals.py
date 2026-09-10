@@ -118,7 +118,14 @@ def auto_create_workspace_on_membership(sender, instance, created, **kwargs):
 
 
 def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
-    """After CommCare/Connect OAuth, resolve tenants and create TenantMembership records."""
+    """After CommCare/Connect/OCS OAuth, resolve tenants and create TenantMembership records.
+
+    ``sociallogin.account`` is threaded through so the resolver attributes the
+    fetch to *this* identity. It matters because an OCS token is team-scoped and a
+    user may hold several: allauth fires ``social_account_added`` for a newly
+    authorised team and ``social_account_updated`` for one they already had, which
+    is exactly the add-vs-update distinction the connection's ``scope_key`` needs.
+    """
     provider = sociallogin.account.provider
 
     token = sociallogin.token
@@ -131,17 +138,23 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     # identical to "account has no opportunities", with nobody told (07#6).
     elif provider == "commcare_connect":
         try:
-            async_to_sync(resolve_connect_opportunities)(sociallogin.user, token.token)
+            async_to_sync(resolve_connect_opportunities)(
+                sociallogin.user, token.token, social_account=sociallogin.account
+            )
         except Exception:
             logger.exception("Failed to resolve Connect opportunities after OAuth")
     elif provider == "ocs":
         try:
-            async_to_sync(resolve_ocs_chatbots)(sociallogin.user, token.token)
+            async_to_sync(resolve_ocs_chatbots)(
+                sociallogin.user, token.token, social_account=sociallogin.account
+            )
         except Exception:
             logger.exception("Failed to resolve OCS chatbots after OAuth")
     elif provider.startswith("commcare"):
         try:
-            async_to_sync(resolve_commcare_domains)(sociallogin.user, token.token)
+            async_to_sync(resolve_commcare_domains)(
+                sociallogin.user, token.token, social_account=sociallogin.account
+            )
         except Exception:
             logger.exception("Failed to resolve CommCare domains after OAuth")
 
