@@ -113,39 +113,24 @@ FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset(
     }
 )
 
-# System catalog relations that resolve via the implicit ``pg_catalog`` schema
-# even when written UNqualified. These are world-readable in PG16+ regardless of
-# SET ROLE, so an unqualified reference (where the AST carries no schema) leaks
-# cross-tenant metadata: tenant schema names derive from customer identifiers and
-# ``pg_class.reltuples`` exposes row counts. Schema-qualified ``pg_catalog.*`` is
-# already rejected by ``_validate_table_access``; this set closes the unqualified
-# gap. Names are matched case-insensitively against the bare relation name.
-SYSTEM_CATALOG_RELATIONS: frozenset[str] = frozenset(
-    {
-        "pg_namespace",
-        "pg_class",
-        "pg_views",
-        "pg_tables",
-        "pg_matviews",
-        "pg_attribute",
-        "pg_proc",
-        "pg_roles",
-        "pg_user",
-        "pg_shadow",
-        "pg_authid",
-        "pg_database",
-        "pg_stat_activity",
-        "pg_stat_user_tables",
-        "pg_stat_all_tables",
-        "pg_statio_user_tables",
-        "pg_index",
-        "pg_indexes",
-        "pg_constraint",
-        "pg_type",
-        "pg_description",
-        "pg_settings",
-    }
-)
+# Prefix reserved by PostgreSQL for system objects, and the reason unqualified
+# catalog reads have to be rejected by name rather than by schema.
+#
+# An unqualified relation resolves via the implicit ``pg_catalog`` schema, and
+# many of those views (``pg_class``, ``pg_statio_all_tables``,
+# ``pg_stat_user_indexes``, ...) keep the default PUBLIC SELECT grant with no
+# ``has_table_privilege`` filter, so they are readable regardless of SET ROLE and
+# leak cross-tenant metadata: tenant schema names derive from customer
+# identifiers and ``pg_class.reltuples`` exposes row counts. The AST carries no
+# schema for those references, so ``_validate_table_access`` — which only checks
+# a reference that names a schema — never sees them.
+#
+# Matching the whole ``pg_`` namespace rather than an enumerated list is
+# deliberate: an exact-match set silently missed siblings from the very same view
+# family (it held ``pg_stat_all_tables`` but not ``pg_statio_all_tables``).
+# PostgreSQL reserves ``pg_`` for system objects, so no tenant or dbt table can
+# collide with it.
+SYSTEM_CATALOG_PREFIX = "pg_"
 
 
 class SQLValidationError(Exception):
@@ -300,14 +285,15 @@ class SQLValidator:
     def _validate_no_system_catalogs(self, statement: exp.Expression, sql: str) -> None:
         """Reject references to PostgreSQL system catalogs.
 
-        Unqualified catalog relations (``pg_class``, ``pg_namespace``, ...)
-        resolve via the implicit ``pg_catalog`` schema and are world-readable
-        regardless of ``SET ROLE``, leaking cross-tenant metadata. Schema-
-        qualified ``pg_catalog.*`` is already blocked by ``_validate_table_access``;
-        this catches the unqualified form the AST records with no schema.
+        Unqualified catalog relations (``pg_class``, ``pg_statio_all_tables``, ...)
+        resolve via the implicit ``pg_catalog`` schema and stay readable regardless
+        of ``SET ROLE``, leaking cross-tenant metadata. Schema-qualified
+        ``pg_catalog.*`` is already blocked by ``_validate_table_access``; this
+        catches the unqualified form, which the AST records with no schema and
+        which the schema allowlist therefore never inspects.
         """
         for table in statement.find_all(exp.Table):
-            if table.name.lower() in SYSTEM_CATALOG_RELATIONS:
+            if table.name.lower().startswith(SYSTEM_CATALOG_PREFIX):
                 raise SQLValidationError(
                     f"Access to system catalog '{table.name}' is not permitted. "
                     "Use the describe_table and list_tables tools to inspect schema.",
@@ -479,7 +465,7 @@ class SQLValidator:
 __all__ = [
     "DANGEROUS_FUNCTIONS",
     "FORBIDDEN_STATEMENT_TYPES",
-    "SYSTEM_CATALOG_RELATIONS",
+    "SYSTEM_CATALOG_PREFIX",
     "SQLValidationError",
     "SQLValidator",
 ]

@@ -606,6 +606,42 @@ class TestCteAliasCannotShadowQualifiedTable:
         assert validator.get_tables_accessed(statement) == []
 
 
+class TestWholePgNamespaceIsRejected:
+    """An enumerated denylist missed catalog views from the same family it listed
+    (it had pg_stat_all_tables but not pg_statio_all_tables). These views keep the
+    default PUBLIC SELECT grant, so they list every tenant's schema and table
+    names regardless of SET ROLE. The rule is the reserved `pg_` prefix."""
+
+    @pytest.mark.parametrize(
+        "relation",
+        [
+            "pg_statio_all_tables",
+            "pg_stat_user_indexes",
+            "pg_stat_all_indexes",
+            "pg_rewrite",
+            "pg_available_extensions",
+            "pg_locks",
+            "pg_prepared_statements",
+        ],
+    )
+    def test_unqualified_pg_relation_is_rejected(self, relation):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog"):
+            validator.validate(f"SELECT * FROM {relation}")
+
+    def test_qualified_pg_relation_is_rejected(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
+            validator.validate("SELECT * FROM pg_catalog.pg_statio_all_tables")
+
+    def test_tenant_tables_are_unaffected(self):
+        """`pg_` is reserved for system objects, so the prefix rule cannot
+        collide with a tenant or dbt table."""
+        validator = SQLValidator(schema="ws_demo")
+        statement = validator.validate("SELECT * FROM page_views JOIN programs USING (id)")
+        assert sorted(validator.get_tables_accessed(statement)) == ["page_views", "programs"]
+
+
 class TestTokenizerErrors:
     """An unterminated quote raises sqlglot's TokenError, a sibling of ParseError
     rather than a subclass — it must still come back as a validation error, not
