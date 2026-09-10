@@ -209,7 +209,6 @@ class SQLValidator:
         Raises:
             SQLValidationError: If the query fails any validation check
         """
-        # Parse the SQL into an AST
         try:
             statements = sqlglot.parse(sql, dialect=self.dialect)
         except sqlglot.errors.ParseError as e:
@@ -219,7 +218,6 @@ class SQLValidator:
                 error_type="parse_error",
             ) from e
 
-        # Check for empty or multiple statements
         if not statements:
             raise SQLValidationError(
                 "Empty SQL statement",
@@ -246,16 +244,11 @@ class SQLValidator:
 
         statement = valid_statements[0]
 
-        # Check statement type - only SELECT allowed
         self._validate_statement_type(statement, sql)
-
-        # Check for dangerous functions
         self._validate_no_dangerous_functions(statement, sql)
-
-        # Reject unqualified system-catalog reads (cross-tenant disclosure)
+        # Rejects unqualified system-catalog reads (cross-tenant disclosure) that
+        # the schema allowlist below cannot see.
         self._validate_no_system_catalogs(statement, sql)
-
-        # Check table access permissions
         self._validate_table_access(statement, sql)
 
         return statement
@@ -291,11 +284,9 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
-        # Check if it's a SELECT statement
         if not isinstance(statement, exp.Select):
             # Also allow UNION, INTERSECT, EXCEPT which wrap SELECT statements
             if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
-                # These are valid compound SELECT operations
                 return
 
             # If not a SELECT and not explicitly forbidden, still reject
@@ -378,7 +369,6 @@ class SQLValidator:
         """
         tables: list[dict[str, str]] = []
 
-        # Collect CTE aliases to exclude them from table references
         cte_aliases: set[str] = set()
         for cte in statement.find_all(exp.CTE):
             if cte.alias:
@@ -386,8 +376,12 @@ class SQLValidator:
 
         for table in statement.find_all(exp.Table):
             table_name = table.name
-            # Skip CTE aliases - they're not real tables
-            if table_name.lower() in cte_aliases:
+            # A CTE name can never be schema-qualified, so only a bare reference can
+            # be one. Skipping qualified references too let a CTE shadow a real table
+            # out of the list `_validate_table_access` checks, so
+            # `WITH schemata AS (...) SELECT * FROM information_schema.schemata`
+            # slipped past the schema allowlist (and out of the audit trail).
+            if not table.db and not table.catalog and table_name.lower() in cte_aliases:
                 continue
             table_info: dict[str, str] = {"table": table_name}
             if table.db:

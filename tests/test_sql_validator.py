@@ -579,6 +579,33 @@ class TestDataModifyingStatements:
         assert statement is not None
 
 
+class TestCteAliasCannotShadowQualifiedTable:
+    """A CTE whose name matches a schema-qualified table must not hide that table
+    from the schema allowlist (or from the audit trail)."""
+
+    def test_cte_named_after_information_schema_relation(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="information_schema"):
+            validator.validate(
+                "WITH schemata AS (SELECT 1) SELECT * FROM information_schema.schemata"
+            )
+
+    def test_cte_named_after_another_tenants_table(self):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="t_othertenant"):
+            validator.validate("WITH users AS (SELECT 1) SELECT * FROM t_othertenant.users")
+
+    def test_qualified_table_shadowed_by_cte_still_reported(self):
+        validator = SQLValidator(schema="ws_demo")
+        statement = validator.validate("WITH visits AS (SELECT 1) SELECT * FROM ws_demo.visits")
+        assert validator.get_tables_accessed(statement) == ["visits"]
+
+    def test_bare_cte_reference_is_still_not_a_table(self):
+        validator = SQLValidator(schema="ws_demo")
+        statement = validator.validate("WITH visits AS (SELECT 1 AS n) SELECT * FROM visits")
+        assert validator.get_tables_accessed(statement) == []
+
+
 class TestDangerousTimingFunctions:
     """Issue #244: pg_sleep (DoS) and set_config (session tampering)."""
 
