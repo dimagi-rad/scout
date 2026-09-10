@@ -254,8 +254,14 @@ Resources:
         # template.
         #
         # DO NOT raise HttpPutResponseHopLimit to 2 to "fix" email. That re-opens the
-        # SSRF-to-IMDS hole arch #329 closed, and email is not broken. This policy is
-        # retained for the API's own SES use and is prunable if that ends.
+        # SSRF-to-IMDS hole arch #329 closed, and email is not broken.
+        #
+        # Nothing currently uses this policy, and it is safe to prune. The API does not
+        # call SES -- invite_notifications.py only does send_email.defer(), and the
+        # send_mail lives in the worker-executed task in apps/users/tasks.py -- it has
+        # no AWS_SES_* credentials (those appear only in config/deploy-worker.yml), and
+        # it runs on scout_shared too (config/deploy.yml), so it could not assume this
+        # role even if it tried.
         - PolicyName: scout-ses-send
           PolicyDocument:
             Version: '2012-10-17'

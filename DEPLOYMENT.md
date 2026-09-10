@@ -454,10 +454,13 @@ historical streams are preserved with their 30-day retention — no data is lost
 > (and still replaces the instance). Changing `UserData` also forces replacement on its own.
 >
 > This is what happened on **2026-07-06**: an `update-stack` applying long-unapplied changes
-> replaced the instance and took the site down. See `HANDOVER-ses-invites-2026-07-06.md`.
+> replaced the instance and took the site down. Full detail is in the 2026-07-06 SES/invites
+> incident handover, which is kept **outside this repo** — it carries the account ID, the Elastic
+> IP and the instance ID, and this repository is public. Ask in `#scout` for it. Everything an
+> operator needs in the moment is in this block.
 >
 > **What a replacement costs.** A new instance boots from the template with a fresh EBS root
-> volume. The Elastic IP re-associates, but everything on disk is gone. Since
+> volume. The Elastic IP re-associates, but everything on disk is gone.
 > `UserData` reinstalls `scout`'s `authorized_keys` and recreates the `scout_shared` /
 > `scout_staging_shared` networks, so CI can reconnect and `kamal deploy` restores the containers
 > — **that is the whole reason those lines exist; do not remove them.** Before they were added,
@@ -470,7 +473,14 @@ historical streams are preserved with their 30-day retention — no data is lost
 > 4. you are prepared to re-run `kamal deploy` for every destination afterwards.
 >
 > To find out **before** you commit, create a change set instead of updating directly and inspect
-> the `Replacement` column for `EC2Instance`:
+> the `Replacement` column for `EC2Instance`.
+>
+> Two traps in doing this by hand, both of which produce *empty output that reads as
+> &ldquo;no replacement&rdquo;*: `EC2AmiId` has no default, so it must be satisfied on every
+> update-type change set or the call is rejected outright; and `create-change-set` returns as soon
+> as the set is `CREATE_PENDING`, so describing it immediately shows an empty `Changes` list. The
+> `wait` is what makes the answer trustworthy — a genuine no-replacement result prints rows with
+> `Replace: False`, never nothing.
 >
 > ```bash
 > aws cloudformation create-change-set \
@@ -478,12 +488,22 @@ historical streams are preserved with their 30-day retention — no data is lost
 >   --template-body file://infra/scout-stack.yml \
 >   --capabilities CAPABILITY_NAMED_IAM \
 >   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
+>                ParameterKey=EC2AmiId,UsePreviousValue=true \
 >   --profile scout --region us-east-1
+>
+> aws cloudformation wait change-set-create-complete \
+>   --stack-name scout-production --change-set-name preflight \
+>   --profile scout --region us-east-1
+>
 > aws cloudformation describe-change-set \
 >   --stack-name scout-production --change-set-name preflight \
->   --query 'Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}' \
+>   --query '{Status:Status,Changes:Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}}' \
 >   --profile scout --region us-east-1
 > ```
+>
+> On the **first** preflight against a stack that predates `EC2AmiId`, `UsePreviousValue=true`
+> cannot work — there is no previous value. Pass the running instance's AMI explicitly, using the
+> `describe-instances` lookup below.
 >
 
 The CloudFormation stack is at `infra/scout-stack.yml`. To update:
