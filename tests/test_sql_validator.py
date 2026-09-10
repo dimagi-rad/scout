@@ -610,7 +610,8 @@ class TestWholePgNamespaceIsRejected:
     """An enumerated denylist missed catalog views from the same family it listed
     (it had pg_stat_all_tables but not pg_statio_all_tables). These views keep the
     default PUBLIC SELECT grant, so they list every tenant's schema and table
-    names regardless of SET ROLE. The rule is the reserved `pg_` prefix."""
+    names regardless of SET ROLE. The rule is the `pg_` prefix, applied to the
+    unqualified references the schema allowlist cannot see."""
 
     @pytest.mark.parametrize(
         "relation",
@@ -635,11 +636,25 @@ class TestWholePgNamespaceIsRejected:
             validator.validate("SELECT * FROM pg_catalog.pg_statio_all_tables")
 
     def test_tenant_tables_are_unaffected(self):
-        """`pg_` is reserved for system objects, so the prefix rule cannot
-        collide with a tenant or dbt table."""
         validator = SQLValidator(schema="ws_demo")
         statement = validator.validate("SELECT * FROM page_views JOIN programs USING (id)")
         assert sorted(validator.get_tables_accessed(statement)) == ["page_views", "programs"]
+
+    def test_tenant_table_named_pg_something_stays_reachable_when_qualified(self):
+        """Postgres reserves `pg_` for schema names, not table names, so a tenant
+        table really can be called `pg_notes`. Qualifying it is how you reach it;
+        the allowlist, not the prefix rule, decides."""
+        validator = SQLValidator(schema="ws_demo")
+        statement = validator.validate("SELECT * FROM ws_demo.pg_notes")
+        assert validator.get_tables_accessed(statement) == ["pg_notes"]
+
+    def test_unqualified_pg_name_is_still_rejected_even_if_a_tenant_owns_one(self):
+        """Unqualified, `pg_notes` resolves through the implicit pg_catalog first,
+        so refusing it is the safe reading — and the qualified form above is the
+        way through."""
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError, match="(?i)system catalog"):
+            validator.validate("SELECT * FROM pg_notes")
 
 
 class TestTokenizerErrors:

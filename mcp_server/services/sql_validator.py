@@ -128,8 +128,13 @@ FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset(
 # Matching the whole ``pg_`` namespace rather than an enumerated list is
 # deliberate: an exact-match set silently missed siblings from the very same view
 # family (it held ``pg_stat_all_tables`` but not ``pg_statio_all_tables``).
-# PostgreSQL reserves ``pg_`` for system objects, so no tenant or dbt table can
-# collide with it.
+#
+# PostgreSQL reserves ``pg_`` for schema names but not for table names, so a
+# tenant table could in principle be called ``pg_notes``. The check therefore
+# applies only to an UNqualified reference — the form that resolves through
+# ``pg_catalog`` and the only form the schema allowlist cannot see. Qualified
+# ``ws_x.pg_notes`` is left to the allowlist, which permits the tenant's own
+# schema and rejects ``pg_catalog``.
 SYSTEM_CATALOG_PREFIX = "pg_"
 
 
@@ -293,6 +298,8 @@ class SQLValidator:
         which the schema allowlist therefore never inspects.
         """
         for table in statement.find_all(exp.Table):
+            if table.db or table.catalog:
+                continue
             if table.name.lower().startswith(SYSTEM_CATALOG_PREFIX):
                 raise SQLValidationError(
                     f"Access to system catalog '{table.name}' is not permitted. "
