@@ -20,6 +20,8 @@ interface OAuthProvider {
   login_url: string
   connected: boolean
   status?: "connected" | "expired" | "disconnected" | null
+  /** True when one token covers one scope (an OCS team), so several can coexist. */
+  supports_multiple_scopes?: boolean
 }
 
 const providerBadgeStyles: Record<string, string> = {
@@ -43,8 +45,15 @@ function ProviderBadge({ provider }: { provider: string }) {
 }
 
 function teamLabelFor(conn: ApiKeyConnection): string {
+  // scope_label is the credential's own team; the chatbot fallback covers
+  // connections created before the scope was recorded on the connection.
+  if (conn.scope_label) return conn.scope_label
   const named = conn.chatbots.find((cb) => cb.team_name)
   return named?.team_name || conn.provider
+}
+
+function connectUrlFor(provider: OAuthProvider): string {
+  return `${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`
 }
 
 type DialogState =
@@ -142,6 +151,7 @@ export function ConnectionsPage() {
     try {
       await api.delete(`/api/auth/connections/${connectionId}/`)
       await fetchConnections()
+      await fetchProviders()
       await fetchStoreDomains()
       // Removing a connection can drop the workspaces backed only by it. The
       // connection payload carries no workspace id (chatbots hold
@@ -170,6 +180,7 @@ export function ConnectionsPage() {
     try {
       await api.post(`/api/auth/providers/${providerId}/disconnect/`)
       await fetchProviders()
+      await fetchConnections()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to disconnect provider.")
     } finally {
@@ -218,30 +229,41 @@ export function ConnectionsPage() {
                         : "Not connected"}
                   </p>
                 </div>
-                {provider.status === "connected" ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleDisconnect(provider.id)}
-                    disabled={disconnecting === provider.id}
-                    data-testid={`disconnect-${provider.id}`}
-                  >
-                    {disconnecting === provider.id ? "Disconnecting..." : "Disconnect"}
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    asChild
-                    data-testid={`connect-${provider.id}`}
-                  >
-                    <a
-                      href={`${BASE_PATH}${provider.login_url}?process=connect&next=${BASE_PATH}/settings/connections`}
+                <div className="flex shrink-0 gap-2">
+                  {provider.status === "connected" &&
+                    provider.supports_multiple_scopes && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        asChild
+                        data-testid={`connect-another-${provider.id}`}
+                      >
+                        <a href={connectUrlFor(provider)}>Connect another team</a>
+                      </Button>
+                    )}
+                  {provider.status === "connected" ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDisconnect(provider.id)}
+                      disabled={disconnecting === provider.id}
+                      data-testid={`disconnect-${provider.id}`}
                     >
-                      {provider.status === "expired" ? "Reconnect" : "Connect"}
-                    </a>
-                  </Button>
-                )}
+                      {disconnecting === provider.id ? "Disconnecting..." : "Disconnect all"}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      asChild
+                      data-testid={`connect-${provider.id}`}
+                    >
+                      <a href={connectUrlFor(provider)}>
+                        {provider.status === "expired" ? "Reconnect" : "Connect"}
+                      </a>
+                    </Button>
+                  )}
+                </div>
               </CardContent>
             </Card>
           ))
@@ -314,20 +336,33 @@ export function ConnectionsPage() {
                               <Badge variant="secondary">
                                 {isApiKey ? "API Key" : "OAuth"}
                               </Badge>
+                              {conn.status === "expired" && (
+                                <Badge
+                                  variant="secondary"
+                                  className="bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+                                  data-testid={`connection-expired-${conn.connection_id}`}
+                                >
+                                  Reconnect needed
+                                </Badge>
+                              )}
                             </div>
                           </div>
-                          {isApiKey && !isConfirming && (
+                          {!isConfirming && (
                             <div className="flex shrink-0 gap-2">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() =>
-                                  setDialogState({ mode: "edit", editing: conn })
-                                }
-                                data-testid={`edit-connection-${conn.connection_id}`}
-                              >
-                                Edit
-                              </Button>
+                              {isApiKey && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() =>
+                                    setDialogState({ mode: "edit", editing: conn })
+                                  }
+                                  data-testid={`edit-connection-${conn.connection_id}`}
+                                >
+                                  Edit
+                                </Button>
+                              )}
+                              {/* Removing one OAuth connection disconnects that team
+                                  only, leaving the user's other teams signed in. */}
                               <Button
                                 variant="ghost"
                                 size="sm"

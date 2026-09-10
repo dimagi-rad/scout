@@ -10,6 +10,8 @@ import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
 from asgiref.sync import sync_to_async
 from django.apps import apps as global_apps
+from django.contrib.sites.models import Site
+from django.test import AsyncClient
 from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
@@ -21,6 +23,15 @@ from apps.users.services.credential_resolver import (
     aresolve_credential,
 )
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
+
+
+@pytest.fixture
+def site(db):
+    """The default Site allauth's SocialApp lookup needs."""
+    obj, _ = Site.objects.get_or_create(
+        id=1, defaults={"domain": "testserver", "name": "Test Server"}
+    )
+    return obj
 
 
 def _provider() -> OCSProvider:
@@ -293,3 +304,100 @@ async def test_every_team_token_is_enumerable(user):
     tokens = await aiter_social_tokens(user, "ocs")
 
     assert {t.token for t in tokens} == {"tok-acme", "tok-globex"}
+
+
+# --- self-remediation surface ------------------------------------------------
+
+
+async def _login(user):
+    client = AsyncClient()
+    await sync_to_async(client.login)(email=user.email, password="testpass123")
+    return client
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_connections_endpoint_lists_each_connected_team(user):
+    """Without this the user cannot see which teams they hold — half of "no
+    self-remediation" would still be unsolved."""
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
+    await sync_to_async(_ocs_identity)(user, team="acme", token="tok-a", app=app)
+    # Team B's token is past expiry with no refresh token, so it must report
+    # "expired" independently of team A's health.
+    await sync_to_async(_ocs_identity)(
+        user, team="globex", token="tok-b", expires_in_hours=-1, app=app
+    )
+
+    client = await _login(user)
+    resp = await client.get("/api/auth/connections/")
+    assert resp.status_code == 200
+
+    by_scope = {row["scope_key"]: row for row in resp.json()}
+    assert set(by_scope) == {"acme", "globex"}
+    assert by_scope["acme"]["scope_label"] == "Acme"
+    assert by_scope["acme"]["status"] == "connected"
+    assert by_scope["globex"]["status"] == "expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_removing_one_team_leaves_the_other_connected(user):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
+    acct_a, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-a", app=app)
+    acct_b, conn_b = await sync_to_async(_ocs_identity)(user, team="globex", token="tok-b", app=app)
+    tm_a = await sync_to_async(_chatbot)(user, conn_a, team="acme", external_id="bot-a")
+    tm_b = await sync_to_async(_chatbot)(user, conn_b, team="globex", external_id="bot-b")
+
+    client = await _login(user)
+    resp = await client.delete(f"/api/auth/connections/{conn_a.id}/")
+    assert resp.status_code == 200
+
+    # Team A is gone: its token, connection and chatbot access.
+    assert not await SocialToken.objects.filter(account=acct_a).aexists()
+    assert not await TenantConnection.objects.filter(id=conn_a.id).aexists()
+    assert (await TenantMembership.all_objects.aget(id=tm_a.id)).archived_at is not None
+
+    # Team B is untouched — the whole point of per-connection disconnect.
+    assert await SocialToken.objects.filter(account=acct_b).aexists()
+    assert await TenantConnection.objects.filter(id=conn_b.id).aexists()
+    assert (await TenantMembership.all_objects.aget(id=tm_b.id)).archived_at is None
+    # The login identity survives, as it does for provider-wide disconnect.
+    assert await SocialAccount.objects.filter(id=acct_a.id).aexists()
+
+
+@pytest.mark.django_db
+def test_providers_view_advertises_a_scoped_provider(user, client, site):
+    """The UI needs to know it may offer "connect another team" for OCS."""
+    ocs = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    ocs.sites.add(site)
+    commcare = SocialApp.objects.create(
+        provider="commcare", name="CommCare", client_id="c", secret="s"
+    )
+    commcare.sites.add(site)
+
+    client.force_login(user)
+    entries = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+
+    assert entries["ocs"]["supports_multiple_scopes"] is True
+    assert entries["commcare"]["supports_multiple_scopes"] is False
+
+
+@pytest.mark.django_db
+def test_one_healthy_team_keeps_the_provider_connected(user, client, site):
+    """Provider status was last-row-wins across tokens, so a healthy team could be
+    reported expired purely on queryset order once a user held two."""
+    app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    app.sites.add(site)
+    healthy = SocialAccount.objects.create(user=user, provider="ocs", uid="42#acme")
+    SocialToken.objects.create(
+        account=healthy, app=app, token="a", expires_at=timezone.now() + timedelta(hours=5)
+    )
+    dead = SocialAccount.objects.create(user=user, provider="ocs", uid="42#globex")
+    SocialToken.objects.create(
+        account=dead, app=app, token="b", expires_at=timezone.now() - timedelta(hours=1)
+    )
+
+    client.force_login(user)
+    entries = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+
+    assert entries["ocs"]["status"] == "connected"

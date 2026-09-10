@@ -95,6 +95,11 @@ PROVIDER_CHOICES = [
     ("ocs", "Open Chat Studio"),
 ]
 
+# Providers whose OAuth token authorises one *scope* (an OCS team) rather than the
+# whole account, so a user may legitimately hold several connections for it. The
+# UI reads this to offer "connect another" instead of only connect/disconnect.
+SCOPED_OAUTH_PROVIDERS = frozenset({"ocs"})
+
 # Per-provider templates applied to a workspace's stored name to produce a display name.
 # Fields available: {name} (workspace name), plus any field on the source Tenant
 # (e.g. {canonical_name}, {external_id}, {provider}).

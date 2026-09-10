@@ -18,7 +18,11 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.users.decorators import async_login_required, login_required_json
-from apps.users.models import TenantConnection, TenantMembership
+from apps.users.models import (
+    SCOPED_OAUTH_PROVIDERS,
+    TenantConnection,
+    TenantMembership,
+)
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aiter_social_tokens
 from apps.users.services.tenant_resolution import (
@@ -223,7 +227,12 @@ def signup_view(request):
 @require_POST
 @login_required_json
 def disconnect_provider_view(request, provider_id):
-    """Revoke OAuth API token for a provider, keeping the SocialAccount for login."""
+    """Revoke every OAuth token for a provider, keeping the SocialAccounts for login.
+
+    Provider-wide by design: for a scoped provider this signs the user out of
+    *all* their teams. Removing a single team is
+    ``DELETE /api/auth/connections/<id>/``.
+    """
     # Check both provider class id and provider_id (see SocialAccount.provider note below).
     tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
     if not tokens.exists():
@@ -258,6 +267,10 @@ def disconnect_provider_view(request, provider_id):
     return JsonResponse({"status": "disconnected"})
 
 
+def _record_status(seen: dict[str, set[str]], provider: str, status: str) -> None:
+    seen.setdefault(provider, set()).add(status)
+
+
 @require_GET
 def providers_view(request):
     """Return OAuth providers configured for this site, with connection status if authenticated."""
@@ -279,6 +292,12 @@ def providers_view(request):
         tokens = SocialToken.objects.filter(
             account__user=request.user,
         ).select_related("account", "app")
+        # provider -> every one of its identities' statuses. A scoped provider now
+        # has one token per team (#156), and the old per-provider assignment was
+        # last-row-wins, so a healthy team could be reported as expired purely on
+        # queryset order. Reduced below to "connected while at least one works";
+        # the per-team detail lives on /api/auth/connections/.
+        seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:
             provider = social_token.account.provider
             token_url = get_token_url(provider)
@@ -287,11 +306,11 @@ def providers_view(request):
                 if can_refresh:
                     try:
                         async_to_sync(refresh_oauth_token)(social_token, token_url)
-                        token_status[provider] = "connected"
+                        _record_status(seen_statuses, provider, "connected")
                     except TokenRefreshError:
-                        token_status[provider] = "expired"
+                        _record_status(seen_statuses, provider, "expired")
                 else:
-                    token_status[provider] = "expired"
+                    _record_status(seen_statuses, provider, "expired")
             elif social_token.expires_at is None and token_url is not None:
                 # Unknown expiry and no refresh token to test it with, so we
                 # cannot vouch for this credential. Reporting "connected" on the
@@ -307,9 +326,13 @@ def providers_view(request):
                 # "expired" forever, with a Reconnect that cannot clear it and a
                 # Disconnect button hidden (ConnectionsPage only renders it for
                 # "connected").
-                token_status[provider] = "expired"
+                _record_status(seen_statuses, provider, "expired")
             else:
-                token_status[provider] = "connected"
+                _record_status(seen_statuses, provider, "connected")
+        token_status = {
+            provider: ("connected" if "connected" in statuses else "expired")
+            for provider, statuses in seen_statuses.items()
+        }
 
     providers = []
     for app in apps:
@@ -326,6 +349,11 @@ def providers_view(request):
                 app.provider in connected_providers or app.provider_id in connected_providers
             )
             entry["connected"] = is_connected
+            # Lets the UI offer "connect another team" rather than only
+            # connect/disconnect, for a provider whose token covers one scope.
+            entry["supports_multiple_scopes"] = (
+                app.provider in SCOPED_OAUTH_PROVIDERS or app.provider_id in SCOPED_OAUTH_PROVIDERS
+            )
             if is_connected:
                 # No token_status entry means the SocialAccount exists but no token
                 # (user revoked API access) — treat as disconnected
