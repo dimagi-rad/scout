@@ -13,6 +13,7 @@ Tests cover security-critical functionality:
 
 import pytest
 
+from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 
@@ -592,8 +593,8 @@ class TestDangerousTimingFunctions:
             validator.validate("SELECT set_config('search_path', 'pg_catalog', false)")
 
 
-class TestSystemCatalogRejection:
-    """System-catalog reads leak cross-tenant metadata and must be rejected."""
+class TestPromptValidatorAlignment:
+    """Meta-tests ensuring the system prompt matches the validator's real behavior."""
 
     def test_information_schema_qualified_is_rejected(self):
         validator = SQLValidator(schema="ws_demo")
@@ -614,3 +615,25 @@ class TestSystemCatalogRejection:
         ):
             with pytest.raises(SQLValidationError, match="(?i)system catalog|pg_catalog"):
                 validator.validate(sql)
+
+    def test_prompt_mentions_information_schema_restriction(self):
+        prompt = BASE_SYSTEM_PROMPT.lower()
+        assert "information_schema" in prompt
+        assert "describe_table" in prompt
+        assert "list_tables" in prompt
+
+    def test_prompt_does_not_advertise_pg_catalog_reachability(self):
+        """The prompt must NOT advertise unqualified pg_catalog views as
+        reachable — doing so invites chat users / prompt-injected content to
+        enumerate the shared DB's customer list (issue #244)."""
+        prompt = BASE_SYSTEM_PROMPT.lower()
+        advertised_phrases = [
+            "are reachable",
+            "is reachable",
+            "if you really need raw system-state introspection",
+        ]
+        for phrase in advertised_phrases:
+            assert phrase not in prompt, (
+                f"Prompt still advertises pg_catalog reachability ({phrase!r}), but the "
+                "validator now rejects unqualified pg_* views (issue #244)."
+            )

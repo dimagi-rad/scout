@@ -100,16 +100,7 @@ LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 # (schemas are re-provisioned automatically on the next materialization). It is
 # therefore filtered out before tools are bound to the LLM. The MCP server still
 # defines the tool so operator/HTTP callers are unaffected.
-AGENT_EXCLUDED_MCP_TOOLS = frozenset(
-    {
-        "teardown_schema",
-        # Semantic-model mode: keep raw table-inspection tools server-side for
-        # internal and operator callers, but do not expose them to the LLM.
-        "list_tables",
-        "describe_table",
-        "get_metadata",
-    }
-)
+AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
 
 # Context params the graph injects into every MCP tool call server-side. They
 # are hidden from the LLM-facing tool schema (so the model never sets them) and
@@ -258,7 +249,9 @@ def _semantic_catalog_context_sync(workspace) -> str:
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
         "to page through dataset summaries, `describe_dataset` for one dataset's "
-        "members, and `semantic_query` for analysis. Do not write SQL."
+        "members, and `semantic_query` for analysis. When the semantic model "
+        "cannot express the question, fall back to `list_tables`, "
+        "`describe_table`, and read-only `query` SQL."
     )
 
 
@@ -434,8 +427,11 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
 
 _MULTI_TENANT_NAMESPACE_HINT = (
-    "This is a multi-tenant workspace. Use the semantic catalog rather than "
-    "raw tenant tables; semantic datasets handle the workspace scope."
+    "This is a multi-tenant workspace. Prefer the semantic catalog — semantic "
+    "datasets already handle the workspace scope. If you fall back to raw SQL, "
+    "note that tables are namespaced views prefixed with the tenant name using a "
+    "double underscore: `{tenant_name}__{table_name}`, and querying across "
+    "tenants needs explicit JOINs between namespaced tables."
 )
 
 
@@ -1042,10 +1038,13 @@ Use dataset tools by intent:
 - Discover available data: `list_workspaces` and `list_datasets`.
 - Inspect one dataset's fields, labels, descriptions, formats, and
   relationships: `describe_dataset`.
-- Answer analytical questions: `semantic_query` over semantic members only.
+- Answer analytical questions: `semantic_query` over semantic members.
+- Reach data the semantic model does not express (raw text columns, columns with
+  no semantic member): `list_tables` and `describe_table` to find them, then
+  read-only `query` SQL.
 - Change dataset definitions, labels, descriptions, fields, relationships, or
   display metadata: use the Semantic Canvas instructions below when available;
-  do not invent raw SQL or mutate datasets directly from the parent chat agent.
+  do not mutate datasets directly from the parent chat agent.
 
 Dataset editing vocabulary:
 - Create a new dataset: ask the canvas manager to create a CTE/SQL-derived
