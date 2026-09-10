@@ -668,3 +668,77 @@ def test_merge_conflict_does_not_clobber_canonical_metadata():
     md = TenantMetadata.objects.get(tenant_membership=surviving)
     assert md.metadata == {"owner": "canonical"}
     assert TenantMetadata.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_merge_keeps_two_ocs_teams_separate():
+    """A merge must not fold a second OCS team's connection into the first team's.
+
+    Uniqueness is (user, provider, scope_key), so only a same-scope collision is a
+    conflict. Keying on provider alone would repoint team B's chatbots onto team
+    A's credential — the wrong team's token for that data (#156).
+    """
+    canonical = User.objects.create_user(email="canon@example.com", password="p")
+    duplicate = User.objects.create_user(email="dup@example.com", password="p")
+
+    canon_a = TenantConnection.objects.create(
+        user=canonical,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="team-a",
+    )
+    dup_b = TenantConnection.objects.create(
+        user=duplicate,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="team-b",
+    )
+    tenant_b = Tenant.objects.create(provider="ocs", external_id="bot-b", canonical_name="B")
+    tm_b = TenantMembership.objects.create(
+        user=duplicate, tenant=tenant_b, connection=dup_b, team_slug="team-b"
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    # Team B survives as its own connection, still owning its own chatbot.
+    dup_b.refresh_from_db()
+    tm_b.refresh_from_db()
+    assert dup_b.user_id == canonical.id
+    assert tm_b.connection_id == dup_b.id
+    assert tm_b.connection_id != canon_a.id
+    assert (
+        TenantConnection.objects.filter(
+            user=canonical, provider="ocs", credential_type=TenantConnection.OAUTH
+        ).count()
+        == 2
+    )
+
+
+@pytest.mark.django_db
+def test_merge_still_collapses_a_same_scope_collision():
+    """The same team on both users is a real conflict and must still merge."""
+    canonical = User.objects.create_user(email="canon2@example.com", password="p")
+    duplicate = User.objects.create_user(email="dup2@example.com", password="p")
+
+    canon_a = TenantConnection.objects.create(
+        user=canonical,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="team-a",
+    )
+    dup_a = TenantConnection.objects.create(
+        user=duplicate,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="team-a",
+    )
+    tenant = Tenant.objects.create(provider="ocs", external_id="bot-a", canonical_name="A")
+    tm = TenantMembership.objects.create(
+        user=duplicate, tenant=tenant, connection=dup_a, team_slug="team-a"
+    )
+
+    merge_users(canonical=canonical, duplicate=duplicate)
+
+    tm.refresh_from_db()
+    assert tm.connection_id == canon_a.id
+    assert not TenantConnection.objects.filter(id=dup_a.id).exists()
