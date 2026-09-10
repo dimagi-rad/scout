@@ -286,6 +286,34 @@ Resources:
 
           # uv (Python package manager)
           curl -LsSf https://astral.sh/uv/install.sh | sudo -u scout bash
+
+          # Kamal connects as `scout` (config/deploy.yml plus the five other
+          # destinations), but the KeyName above is injected by cloud-init into the
+          # AMI's default `ubuntu` user only. Without this copy, a replaced instance
+          # is unreachable by CI -- which runs `kamal deploy` and nothing else, never
+          # `kamal setup` -- and recovery needs a human with the EC2 keypair. That is
+          # the 2026-07-06 outage; see HANDOVER-ses-invites-2026-07-06.md.
+          # cloud-init writes the default user's authorized_keys during its config
+          # stage, before UserData runs in the final stage, so this file exists here.
+          if [ ! -f /home/ubuntu/.ssh/authorized_keys ]; then
+            echo "FATAL: /home/ubuntu/.ssh/authorized_keys missing -- cannot" >&2
+            echo "provision scout's deploy access. Check the EC2KeyPairName param." >&2
+            exit 1
+          fi
+          install -d -o scout -g scout -m 700 /home/scout/.ssh
+          install -o scout -g scout -m 600 /home/ubuntu/.ssh/authorized_keys \
+            /home/scout/.ssh/authorized_keys
+
+          # .kamal/hooks/pre-connect creates these too, but it reaches the host over
+          # SSH *as scout*, so it cannot bootstrap an instance that has never been
+          # deployed to. Idempotent create mirrors that hook: concurrent prod and
+          # staging deploys race, and `create` losing to an existing network is fine.
+          systemctl is-active --quiet docker || systemctl start docker
+          for net in scout_shared scout_staging_shared; do
+            docker network inspect "$net" >/dev/null 2>&1 \
+              || docker network create "$net" >/dev/null \
+              || docker network inspect "$net" >/dev/null
+          done
       Tags:
         - Key: Name
           Value: scout-web
