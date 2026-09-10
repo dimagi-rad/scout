@@ -1,14 +1,20 @@
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from django.utils import timezone
 
+from apps.common.errors import ExpectedUpstreamError
 from apps.users.models import Tenant
 from apps.workspaces.models import MaterializationRun, TenantSchema
+from mcp_server.loaders.commcare_base import CommCareBaseLoader
+from mcp_server.loaders.connect_base import ConnectBaseLoader
+from mcp_server.loaders.ocs_base import OCSBaseLoader
 from mcp_server.services.materializer import (
+    _MAX_ERROR_CHARS,
     _connect_visit_total,
     _load_prior_resume_cursors,
+    _summarize_error,
 )
 
 
@@ -1641,3 +1647,80 @@ class TestLoadPriorResumeCursors:
         )
 
         assert _load_prior_resume_cursors(schema, exclude_run_id=current.id) == {}
+
+
+_CREDENTIAL = {"type": "oauth", "value": "tok"}
+
+
+class TestSummarizeError:
+    """``_summarize_error``'s output is what the failure card and the resume
+    prompt display, so its length bound is a user-facing decision."""
+
+    def test_a_real_ocs_403_survives_intact(self):
+        """The message that motivated the change: 215 chars with a UUID.
+
+        At the old 200-char bound this truncated on every single occurrence,
+        mid-word, so the user read "the access may ...".
+        """
+        experiment_id = "e6f39a71-2b2f-4c3d-9f11-0d8a5b7c1e42"
+        message = (
+            f"Open Chat Studio denied access to chatbot {experiment_id} (HTTP 403). "
+            "The sign-in is still valid and has no access to that chatbot — it may "
+            "have moved teams, or the access may have been removed."
+        )
+        assert len(message) > 200, "guard: this test is only meaningful above the old bound"
+
+        summarized = _summarize_error(ValueError(message))
+
+        assert summarized.endswith("removed.")
+        assert "..." not in summarized
+
+    def test_foreign_text_is_still_bounded_and_cut_on_a_word(self):
+        """The bound exists for an upstream body echoed into a message, and a
+        genuine truncation must not land mid-word."""
+        summarized = _summarize_error(ValueError(" ".join(["upstream"] * 200)))
+
+        assert len(summarized) < 600
+        assert summarized.endswith("upstream...")
+
+    def test_only_the_first_line_survives(self):
+        assert _summarize_error(ValueError("first line\nsecond line")) == "ValueError: first line"
+
+    def test_an_empty_message_falls_back_to_the_class_name(self):
+        assert _summarize_error(ValueError("")) == "ValueError: ValueError"
+
+    @pytest.mark.parametrize("status", [401, 403], ids=["401", "403"])
+    def test_no_loader_auth_message_reaches_the_bound(self, status):
+        """The bound has to sit above Scout's *own* prose, so derive it from the
+        raise sites rather than from a copy of one message.
+
+        Identifiers are at their realistic maximum (a UUID experiment id, a
+        long HQ project space) because they are interpolated into the message
+        and were what pushed the OCS 403 over the old 200.
+        """
+        resp = Mock(status_code=status, ok=False, headers={})
+        loaders = [
+            (
+                OCSBaseLoader(
+                    "e6f39a71-2b2f-4c3d-9f11-0d8a5b7c1e42",
+                    _CREDENTIAL,
+                    base_url="https://ocs.test",
+                ),
+                "https://ocs.test/api/experiments/x/",
+            ),
+            (
+                CommCareBaseLoader("a-long-lived-project-space-name", _CREDENTIAL),
+                "https://hq.test/a/x/api/case/v2/",
+            ),
+            (
+                ConnectBaseLoader(999999999, _CREDENTIAL, base_url="https://connect.test"),
+                "https://connect.test/export/opportunity/999999999/meta/",
+            ),
+        ]
+        for loader, url in loaders:
+            with patch.object(loader._session, "get", return_value=resp):
+                with pytest.raises(ExpectedUpstreamError) as exc:
+                    loader._get(url)
+            summarized = _summarize_error(exc.value)
+            assert len(str(exc.value)) < _MAX_ERROR_CHARS, summarized
+            assert not summarized.endswith("..."), summarized
