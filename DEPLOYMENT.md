@@ -475,31 +475,49 @@ historical streams are preserved with their 30-day retention — no data is lost
 > To find out **before** you commit, create a change set instead of updating directly and inspect
 > the `Replacement` column for `EC2Instance`.
 >
-> Two traps in doing this by hand, both of which produce *empty output that reads as
+> **Three traps in doing this by hand.** The first two produce *empty output that reads as
 > &ldquo;no replacement&rdquo;*: `EC2AmiId` has no default, so it must be satisfied on every
 > update-type change set or the call is rejected outright; and `create-change-set` returns as soon
 > as the set is `CREATE_PENDING`, so describing it immediately shows an empty `Changes` list. The
 > `wait` is what makes the answer trustworthy — a genuine no-replacement result prints rows with
 > `Replace: False`, never nothing.
 >
+> The third is worse, because its output *looks* trustworthy. `ChangeSetName` must be unique per
+> stack, and this procedure never executes the set — a direct `update-stack` only marks a pending
+> set `OBSOLETE`, it does not delete it. With a fixed name, the second preflight fails to create,
+> then describes **the previous run's set**: a confident `Replace:` table computed from the old
+> template. Hence the timestamped name below; reuse `$CS` in all three calls, and never hard-code
+> `preflight`.
+>
 > ```bash
+> CS=preflight-$(date +%s)
+>
 > aws cloudformation create-change-set \
->   --stack-name scout-production --change-set-name preflight \
+>   --stack-name scout-production --change-set-name "$CS" \
 >   --template-body file://infra/scout-stack.yml \
 >   --capabilities CAPABILITY_NAMED_IAM \
 >   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
 >                ParameterKey=EC2AmiId,UsePreviousValue=true \
->   --profile scout --region us-east-1
->
+>   --profile scout --region us-east-1 &&
 > aws cloudformation wait change-set-create-complete \
->   --stack-name scout-production --change-set-name preflight \
+>   --stack-name scout-production --change-set-name "$CS" \
 >   --profile scout --region us-east-1
 >
 > aws cloudformation describe-change-set \
->   --stack-name scout-production --change-set-name preflight \
->   --query '{Status:Status,Changes:Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}}' \
+>   --stack-name scout-production --change-set-name "$CS" \
+>   --query '{Status:Status,Exec:ExecutionStatus,Why:StatusReason,Changes:Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}}' \
+>   --profile scout --region us-east-1
+>
+> aws cloudformation delete-change-set \
+>   --stack-name scout-production --change-set-name "$CS" \
 >   --profile scout --region us-east-1
 > ```
+>
+> `create` and `wait` are `&&`-chained so a rejected create cannot fall through to a misleading
+> describe. `describe` runs unchained on purpose: when the waiter fails because the template
+> produces *no* changes, `Status`/`Why` are what tell you that, and with a unique name a failed
+> create makes `describe` error loudly rather than answer from stale state. Deleting the set at the
+> end is hygiene, not correctness — the unique name already makes an abandoned run harmless.
 >
 > On the **first** preflight against a stack that predates `EC2AmiId`, `UsePreviousValue=true`
 > cannot work — there is no previous value. Pass the running instance's AMI explicitly, using the
