@@ -197,7 +197,7 @@ class TestDataDictionaryViews:
         assert resp.data["code"] == ErrorCode.PIPELINE_UNRESOLVED
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 class TestAgentPrompt:
     """The prompt builder degrades truthfully; raising here would kill the chat."""
 
