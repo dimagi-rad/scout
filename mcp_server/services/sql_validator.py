@@ -391,10 +391,7 @@ class SQLValidator:
         Returns:
             The modified expression with appropriate LIMIT
         """
-        # Handle compound queries (UNION, INTERSECT, EXCEPT)
         if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
-            # For compound queries, we need to wrap in a subquery or apply limit to outer
-            # Get existing limit if any
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
@@ -411,7 +408,6 @@ class SQLValidator:
                 statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
             return statement
 
-        # Handle regular SELECT
         if isinstance(statement, exp.Select):
             existing_limit = statement.args.get("limit")
             if existing_limit:
