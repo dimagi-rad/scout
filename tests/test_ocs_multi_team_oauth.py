@@ -22,6 +22,18 @@ from apps.users.services.credential_resolver import (
     arefresh_connection,
     aresolve_credential,
 )
+from apps.users.services.tenant_resolution import resolve_ocs_chatbots
+from apps.workspaces.access import (
+    _ashares_live_tenant,
+    acovers_live_tenants,
+    covers_live_tenants,
+)
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+)
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
 
@@ -32,6 +44,28 @@ def site(db):
         id=1, defaults={"domain": "testserver", "name": "Test Server"}
     )
     return obj
+
+
+def _mock_httpx(mocker, fake_get):
+    client = mocker.MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    client.get = AsyncMock(side_effect=fake_get)
+    mocker.patch("httpx.AsyncClient", return_value=client)
+    return client
+
+
+def _ocs_sessions(results):
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": results, "next": None}
+
+    return R()
 
 
 def _provider() -> OCSProvider:
@@ -192,19 +226,19 @@ def test_every_operation_is_reversible(migration_name):
     assert not irreversible
 
 
-def _ocs_identity(user, *, team, token, secret="", expires_in_hours=5, app=None):
+async def _aocs_identity(user, *, team, token, secret="", expires_in_hours=5, app=None):
     """One team-scoped OCS identity: allauth account + token + a scoped connection."""
-    account = SocialAccount.objects.create(
+    account = await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid=f"42#{team}", extra_data={"sub": "42", "team": team}
     )
-    SocialToken.objects.create(
+    await SocialToken.objects.acreate(
         account=account,
         app=app,
         token=token,
         token_secret=secret,
         expires_at=timezone.now() + timedelta(hours=expires_in_hours),
     )
-    conn = TenantConnection.objects.create(
+    conn = await TenantConnection.objects.acreate(
         user=user,
         provider="ocs",
         credential_type=TenantConnection.OAUTH,
@@ -215,11 +249,11 @@ def _ocs_identity(user, *, team, token, secret="", expires_in_hours=5, app=None)
     return account, conn
 
 
-def _chatbot(user, conn, *, team, external_id):
-    tenant = Tenant.objects.create(
+async def _achatbot(user, conn, *, team, external_id):
+    tenant = await Tenant.objects.acreate(
         provider="ocs", external_id=external_id, canonical_name=external_id
     )
-    return TenantMembership.objects.create(
+    return await TenantMembership.objects.acreate(
         user=user, tenant=tenant, connection=conn, team_slug=team, team_name=team.title()
     )
 
@@ -232,10 +266,10 @@ async def test_each_team_resolves_its_own_token(user):
     Under the old provider-wide ``.afirst()`` both memberships would have
     resolved to whichever token the ORM returned first.
     """
-    _, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
-    _, conn_b = await sync_to_async(_ocs_identity)(user, team="globex", token="tok-globex")
-    tm_a = await sync_to_async(_chatbot)(user, conn_a, team="acme", external_id="bot-a")
-    tm_b = await sync_to_async(_chatbot)(user, conn_b, team="globex", external_id="bot-b")
+    _, conn_a = await _aocs_identity(user, team="acme", token="tok-acme")
+    _, conn_b = await _aocs_identity(user, team="globex", token="tok-globex")
+    tm_a = await _achatbot(user, conn_a, team="acme", external_id="bot-a")
+    tm_b = await _achatbot(user, conn_b, team="globex", external_id="bot-b")
 
     tm_a = await TenantMembership.objects.select_related("connection").aget(id=tm_a.id)
     tm_b = await TenantMembership.objects.select_related("connection").aget(id=tm_b.id)
@@ -248,8 +282,8 @@ async def test_each_team_resolves_its_own_token(user):
 @pytest.mark.django_db(transaction=True)
 async def test_a_chatbot_of_another_team_still_fails_closed(user):
     """A membership left pointing at the wrong team's connection must not resolve."""
-    _, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
-    tm = await sync_to_async(_chatbot)(user, conn_a, team="globex", external_id="bot-b")
+    _, conn_a = await _aocs_identity(user, team="acme", token="tok-acme")
+    tm = await _achatbot(user, conn_a, team="globex", external_id="bot-b")
     tm = await TenantMembership.objects.select_related("connection").aget(id=tm.id)
 
     with pytest.raises(CredentialResolutionError) as exc:
@@ -262,13 +296,11 @@ async def test_a_chatbot_of_another_team_still_fails_closed(user):
 @pytest.mark.django_db(transaction=True)
 async def test_refresh_is_per_connection(user, mocker):
     """Renewing one team's near-expiry token must not touch the other team's."""
-    app = await sync_to_async(SocialApp.objects.create)(
-        provider="ocs", name="OCS", client_id="cid", secret="sec"
-    )
-    _, conn_a = await sync_to_async(_ocs_identity)(
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
+    _, conn_a = await _aocs_identity(
         user, team="acme", token="stale-a", secret="refresh-a", expires_in_hours=-1, app=app
     )
-    _, conn_b = await sync_to_async(_ocs_identity)(
+    _, conn_b = await _aocs_identity(
         user, team="globex", token="fresh-b", secret="refresh-b", expires_in_hours=5, app=app
     )
     refresh = mocker.patch(
@@ -288,9 +320,7 @@ async def test_refresh_is_per_connection(user, mocker):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_refresh_reports_expired_when_a_connection_cannot_be_renewed(user):
-    _, conn = await sync_to_async(_ocs_identity)(
-        user, team="acme", token="stale", secret="", expires_in_hours=-1
-    )
+    _, conn = await _aocs_identity(user, team="acme", token="stale", secret="", expires_in_hours=-1)
     assert await arefresh_connection(conn) == "expired"
 
 
@@ -298,12 +328,112 @@ async def test_refresh_reports_expired_when_a_connection_cannot_be_renewed(user)
 @pytest.mark.django_db(transaction=True)
 async def test_every_team_token_is_enumerable(user):
     """Callers that must cover all teams get all of them, deterministically ordered."""
-    await sync_to_async(_ocs_identity)(user, team="acme", token="tok-acme")
-    await sync_to_async(_ocs_identity)(user, team="globex", token="tok-globex")
+    await _aocs_identity(user, team="acme", token="tok-acme")
+    await _aocs_identity(user, team="globex", token="tok-globex")
 
     tokens = await aiter_social_tokens(user, "ocs")
 
     assert {t.token for t in tokens} == {"tok-acme", "tok-globex"}
+
+
+# --- the #380 unblock proof --------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_two_team_user_covers_an_all_of_workspace(user, mocker):
+    """The reason #156 gates #380: a two-team user now passes a covering-all check.
+
+    #380 will change `_shares_live_tenant` from "shares at least one of the
+    workspace's tenants" to "has a live membership for every one of them". That
+    was blocked because `unique_oauth_connection_per_user_provider` let a user
+    prove only one OCS team, so a workspace spanning two would have denied them
+    with no self-remediation — trading a data-exposure bug for a lockout.
+
+    This drives the whole flow for real (two OAuth authorisations, no stubbed
+    memberships) and asserts the covering predicate the flip will use. The gate
+    itself is deliberately untouched and still any-of; this asserts the flip is
+    now *safe*, not that it has happened.
+    """
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
+
+    async def _authorize(team, chatbot_id):
+        account = await SocialAccount.objects.acreate(
+            user=user, provider="ocs", uid=f"42#{team}", extra_data={"sub": "42", "team": team}
+        )
+        await SocialToken.objects.acreate(
+            account=account,
+            app=app,
+            token=f"tok-{team}",
+            expires_at=timezone.now() + timedelta(hours=5),
+        )
+
+        async def fake_get(url, headers=None, params=None):
+            if "sessions" in url:
+                return _ocs_sessions([{"team": {"slug": team, "name": team.title()}}])
+            return _ocs_sessions([{"id": chatbot_id, "name": chatbot_id}])
+
+        _mock_httpx(mocker, fake_get)
+        return await resolve_ocs_chatbots(user, f"tok-{team}", social_account=account)
+
+    await _authorize("team-a", "bot-a")
+    await _authorize("team-b", "bot-b")
+
+    # Two live connections, one per team — the structural limitation is gone.
+    assert (
+        await TenantConnection.objects.filter(
+            user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+        ).acount()
+        == 2
+    )
+
+    tenant_a = await Tenant.objects.aget(provider="ocs", external_id="bot-a")
+    tenant_b = await Tenant.objects.aget(provider="ocs", external_id="bot-b")
+    # A live membership for each, each backed by its OWN team's connection.
+    for tenant, team in ((tenant_a, "team-a"), (tenant_b, "team-b")):
+        tm = await TenantMembership.objects.select_related("connection").aget(
+            user=user, tenant=tenant
+        )
+        assert tm.archived_at is None
+        assert tm.connection.scope_key == team
+
+    workspace = await Workspace.objects.acreate(name="Both teams", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant_a)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant_b)
+    await WorkspaceMembership.objects.acreate(
+        workspace=workspace, user=user, role=WorkspaceRole.MANAGE
+    )
+
+    tenant_ids = [tenant_a.id, tenant_b.id]
+
+    # THE PROOF: covering-all now passes for a user who holds both teams.
+    assert await acovers_live_tenants(user, tenant_ids) is True
+    assert await sync_to_async(covers_live_tenants)(user, tenant_ids) is True
+
+    # And it is a real all-of check, not a tautology: losing one tenant fails it
+    # while today's any-of gate would still grant access.
+    await TenantMembership.objects.filter(user=user, tenant=tenant_b).aupdate(
+        archived_at=timezone.now()
+    )
+    assert await acovers_live_tenants(user, tenant_ids) is False
+    assert await _ashares_live_tenant(user, tenant_ids) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_single_team_user_still_fails_a_covering_check(user, other_user):
+    """The predicate must not be satisfiable by a teammate's membership.
+
+    A credential is never borrowed across users, so one member covering a tenant
+    says nothing about another's coverage (#380's standing security decision).
+    """
+    tenant_a = await Tenant.objects.acreate(provider="ocs", external_id="a", canonical_name="a")
+    tenant_b = await Tenant.objects.acreate(provider="ocs", external_id="b", canonical_name="b")
+    await TenantMembership.objects.acreate(user=user, tenant=tenant_a)
+    await TenantMembership.objects.acreate(user=other_user, tenant=tenant_b)
+
+    assert await acovers_live_tenants(user, [tenant_a.id, tenant_b.id]) is False
+    assert await acovers_live_tenants(user, [tenant_a.id]) is True
 
 
 # --- self-remediation surface ------------------------------------------------
@@ -321,12 +451,10 @@ async def test_connections_endpoint_lists_each_connected_team(user):
     """Without this the user cannot see which teams they hold — half of "no
     self-remediation" would still be unsolved."""
     app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
-    await sync_to_async(_ocs_identity)(user, team="acme", token="tok-a", app=app)
+    await _aocs_identity(user, team="acme", token="tok-a", app=app)
     # Team B's token is past expiry with no refresh token, so it must report
     # "expired" independently of team A's health.
-    await sync_to_async(_ocs_identity)(
-        user, team="globex", token="tok-b", expires_in_hours=-1, app=app
-    )
+    await _aocs_identity(user, team="globex", token="tok-b", expires_in_hours=-1, app=app)
 
     client = await _login(user)
     resp = await client.get("/api/auth/connections/")
@@ -343,10 +471,10 @@ async def test_connections_endpoint_lists_each_connected_team(user):
 @pytest.mark.django_db(transaction=True)
 async def test_removing_one_team_leaves_the_other_connected(user):
     app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
-    acct_a, conn_a = await sync_to_async(_ocs_identity)(user, team="acme", token="tok-a", app=app)
-    acct_b, conn_b = await sync_to_async(_ocs_identity)(user, team="globex", token="tok-b", app=app)
-    tm_a = await sync_to_async(_chatbot)(user, conn_a, team="acme", external_id="bot-a")
-    tm_b = await sync_to_async(_chatbot)(user, conn_b, team="globex", external_id="bot-b")
+    acct_a, conn_a = await _aocs_identity(user, team="acme", token="tok-a", app=app)
+    acct_b, conn_b = await _aocs_identity(user, team="globex", token="tok-b", app=app)
+    tm_a = await _achatbot(user, conn_a, team="acme", external_id="bot-a")
+    tm_b = await _achatbot(user, conn_b, team="globex", external_id="bot-b")
 
     client = await _login(user)
     resp = await client.delete(f"/api/auth/connections/{conn_a.id}/")
