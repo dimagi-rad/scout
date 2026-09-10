@@ -57,13 +57,32 @@ def test_connection_is_credential_only_and_links_memberships(user):
 
 
 @pytest.mark.django_db
-def test_one_oauth_connection_per_user_provider(user):
+def test_one_oauth_connection_per_user_provider_scope(user):
+    """Multi-token OAuth (#156) narrowed uniqueness to the scope, not the provider.
+
+    Two teams of one provider are legal; the same team twice is still not.
+    """
     TenantConnection.objects.create(
-        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="acme"
+    )
+    TenantConnection.objects.create(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="globex"
     )
     with pytest.raises(IntegrityError):
         TenantConnection.objects.create(
-            user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+            user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="acme"
+        )
+
+
+@pytest.mark.django_db
+def test_account_wide_providers_still_get_one_oauth_connection(user):
+    """``scope_key=""`` is a real value, so the constraint still collapses on it."""
+    TenantConnection.objects.create(
+        user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+    )
+    with pytest.raises(IntegrityError):
+        TenantConnection.objects.create(
+            user=user, provider="commcare", credential_type=TenantConnection.OAUTH
         )
 
 
