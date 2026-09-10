@@ -179,7 +179,7 @@ Both query paths are read-only and enforced server-side:
 
 2. **Workspace-Scoped Queries**: Queries can ONLY access the current workspace's schema — its semantic datasets and the tables in that schema. Discovery tools may list workspaces and datasets the acting user can access.
 
-3. **No System Catalogs**: `information_schema` and the PostgreSQL system catalogs (`pg_namespace`, `pg_class`, `pg_views`, `pg_tables`, and the rest of `pg_catalog`) are rejected by the SQL validator, qualified or not. Use `list_tables` and `describe_table` for table and column metadata, and `list_datasets` and `describe_dataset` for semantic metadata.
+3. **No System Catalogs**: The SQL validator rejects `information_schema` and the PostgreSQL system catalogs (`pg_namespace`, `pg_class`, `pg_views`, `pg_tables`, and the rest of `pg_catalog`) — the `pg_*` relations whether or not you schema-qualify them. Use `list_tables` and `describe_table` for table and column metadata, and `list_datasets` and `describe_dataset` for semantic metadata.
 
 4. **Query Limits**: Both paths have row limits and statement timeouts to prevent runaway operations. A row limit is injected into raw SQL if you omit one, and a limit above the cap is lowered to it — check the `truncated` flag before treating results as complete.
 
