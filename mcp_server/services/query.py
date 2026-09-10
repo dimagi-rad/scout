@@ -56,7 +56,10 @@ async def _execute_async_parameterized(
                 psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
             )
             await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
-            await cursor.execute(sql, params)
+            # An empty tuple is not None, so psycopg would still scan the SQL for
+            # placeholders and reject any literal '%' — which breaks the LIKE
+            # '%term%' patterns agent SQL relies on (issue #406).
+            await cursor.execute(sql, params or None)
 
             columns: list[str] = []
             rows: list[list[Any]] = []

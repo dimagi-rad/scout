@@ -29,6 +29,7 @@ from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
 from mcp_server.services.pool import close_all_pools
+from mcp_server.services.query import execute_query
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -1288,6 +1289,19 @@ class TestExecuteAsyncIntegration:
         assert result["columns"] == ["name", "value"]
         assert result["rows"] == [["beta", 2], ["gamma", 3]]
         assert result["row_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_sql_can_use_like_patterns(self):
+        """Free-text search is the whole point of re-enabling raw SQL (issue #406).
+        A literal '%' must survive to the server: psycopg only skips placeholder
+        parsing when params is None, and an empty tuple is not None."""
+        result = await execute_query(
+            self._ctx(), "SELECT name FROM items WHERE name LIKE '%a%' ORDER BY name"
+        )
+
+        assert result["columns"] == ["name"]
+        assert result["rows"] == [["alpha"], ["beta"], ["gamma"]]
+        assert "items" in result["tables_accessed"]
 
     @pytest.mark.asyncio
     async def test_search_path_is_applied(self):
