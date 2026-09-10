@@ -32,6 +32,26 @@ Parameters:
     Type: AWS::EC2::KeyPair::KeyName
     Description: SSH key pair for EC2 instance (used by Kamal for deploys)
 
+  EC2AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      Ubuntu 24.04 AMI for the web instance. Pinned deliberately and with NO default:
+      this used to be {{resolve:ssm:.../24.04/stable/current/...}}, which meant every
+      stack operation after Canonical published a new image saw ImageId change and
+      REPLACED the instance regardless of what was edited (the 2026-07-06 outage).
+      Pass UsePreviousValue=true on routine updates. To find the value the running
+      instance is already on -- pass THAT on the first update, or you will trigger the
+      very replacement this parameter exists to prevent:
+        aws ec2 describe-instances --profile scout --region us-east-1 \
+          --filters Name=tag:Name,Values=scout-web \
+                    Name=instance-state-name,Values=running \
+          --query 'Reservations[].Instances[].ImageId' --output text
+      To take a newer Ubuntu image, look one up and pass it explicitly, accepting that
+      doing so replaces the instance:
+        aws ssm get-parameter --profile scout --region us-east-1 \
+          --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+          --query Parameter.Value --output text
+
   EC2InstanceType:
     Type: String
     Default: t3.medium
@@ -250,7 +270,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref EC2InstanceType
-      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      ImageId: !Ref EC2AmiId
       KeyName: !Ref EC2KeyPairName
       SubnetId: !Ref PublicSubnetA
       SecurityGroupIds:

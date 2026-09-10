@@ -444,12 +444,14 @@ historical streams are preserved with their 30-day retention — no data is lost
 
 > ### ⚠️ `update-stack` can replace the EC2 instance, and it does not need your permission
 >
-> `EC2Instance.ImageId` (`infra/scout-stack.yml:241`) is
+> `EC2Instance.ImageId` **used to be**
 > `{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}`
-> — it resolves to whatever Canonical published **most recently**, at every stack operation. When a
-> new 24.04 image has appeared since the last one (roughly monthly), the resolved AMI ID differs,
-> CloudFormation sees `ImageId` change, and **replaces the instance — whatever else you changed.**
-> Changing `UserData` also forces replacement on its own.
+> — resolving to whatever Canonical published **most recently**, at every stack operation. When a new
+> 24.04 image appeared since the last one (roughly monthly), the resolved AMI ID differed,
+> CloudFormation saw `ImageId` change, and **replaced the instance — whatever else you changed.**
+> It is now the explicit `EC2AmiId` parameter, so routine updates no longer replace the instance;
+> pass `ParameterKey=EC2AmiId,UsePreviousValue=true`. Taking a newer image is now a deliberate act
+> (and still replaces the instance). Changing `UserData` also forces replacement on its own.
 >
 > This is what happened on **2026-07-06**: an `update-stack` applying long-unapplied changes
 > replaced the instance and took the site down. See `HANDOVER-ses-invites-2026-07-06.md`.
@@ -483,8 +485,6 @@ historical streams are preserved with their 30-day retention — no data is lost
 >   --profile scout --region us-east-1
 > ```
 >
-> If you need to pin the AMI so routine updates stop being replacement-prone, replace the
-> `current` SSM path with a fixed AMI ID and bump it deliberately.
 
 The CloudFormation stack is at `infra/scout-stack.yml`. To update:
 
@@ -494,8 +494,20 @@ aws cloudformation update-stack \
   --template-body file://infra/scout-stack.yml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
+               ParameterKey=EC2AmiId,UsePreviousValue=true \
   --profile scout \
   --region us-east-1
+```
+
+`EC2AmiId` has no default, by design — see the parameter's own description in
+`infra/scout-stack.yml`. **On the first update after this change, pass the AMI the running
+instance is already on**, not the latest Ubuntu image, or you trigger the replacement the pin
+exists to prevent:
+
+```bash
+aws ec2 describe-instances --profile scout --region us-east-1 \
+  --filters Name=tag:Name,Values=scout-web Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].ImageId' --output text
 ```
 
 After infra changes, re-run `./scripts/fetch-deploy-env.sh` and update GitHub secrets
