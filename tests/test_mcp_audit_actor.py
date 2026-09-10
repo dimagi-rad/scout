@@ -14,7 +14,7 @@ import logging
 import pytest
 
 from mcp_server.envelope import tool_context
-from mcp_server.server import semantic_query
+from mcp_server.server import query, semantic_query
 
 
 @pytest.mark.asyncio
@@ -76,3 +76,23 @@ async def test_semantic_query_tool_threads_actor_into_audit(caplog):
     assert "thread_id='actor-thread-1'" in msg, (
         f"semantic_query did not thread actor thread: {msg!r}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_query_tool_threads_actor_into_audit(caplog):
+    """Raw SQL is the highest-value thing to attribute, so the ``query`` tool must
+    thread the injected user/thread into the audit record too."""
+    with caplog.at_level(logging.INFO, logger="mcp_server.audit"):
+        await query(
+            sql="SELECT 1",
+            workspace_id="",
+            user_id="actor-user-1",
+            thread_id="actor-thread-1",
+        )
+
+    records = [r for r in caplog.records if r.name == "mcp_server.audit"]
+    assert records, "expected an MCP audit record from query"
+    msg = records[0].getMessage()
+    assert "user_id='actor-user-1'" in msg, f"query did not thread actor user: {msg!r}"
+    assert "thread_id='actor-thread-1'" in msg, f"query did not thread actor thread: {msg!r}"

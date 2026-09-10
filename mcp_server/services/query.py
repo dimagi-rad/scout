@@ -1,8 +1,11 @@
 """
 Query execution service for the MCP server.
 
-Executes trusted, backend-authored parameterized SQL against a tenant's
-database schema. User and agent-authored SQL is not accepted here.
+Validates and executes read-only SQL against a tenant's database schema.
+Agent-authored SQL goes through ``execute_query``, which enforces the
+SQLValidator rules and row limits; backend-authored parameterized SQL goes
+through ``execute_internal_query``. Both share the same pooled executor, so
+both run under the tenant's read-only role.
 """
 
 from __future__ import annotations
@@ -23,8 +26,18 @@ from mcp_server.envelope import (
     error_response,
 )
 from mcp_server.services.pool import get_pool
+from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 logger = logging.getLogger(__name__)
+
+
+def _build_validator(ctx: QueryContext) -> SQLValidator:
+    """Create a SQLValidator configured from the query context."""
+    return SQLValidator(
+        schema=ctx.schema_name,
+        allowed_schemas=[],
+        max_limit=ctx.max_rows_per_query,
+    )
 
 
 async def _execute_async_parameterized(
@@ -70,6 +83,45 @@ async def execute_internal_query(ctx: QueryContext, sql: str, params: tuple = ()
         code, message = _classify_error(e)
         logger.error("Internal query error: %s", message, exc_info=True)
         return error_response(code, message)
+
+
+async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
+    """Validate and execute agent-authored SQL, returning a structured result dict."""
+    validator = _build_validator(ctx)
+
+    try:
+        statement = validator.validate(sql)
+    except SQLValidationError as e:
+        logger.warning("SQL validation failed for tenant %s: %s", ctx.tenant_id, e.message)
+        return error_response(VALIDATION_ERROR, e.message)
+
+    tables_accessed = validator.get_tables_accessed(statement)
+
+    requested_limit = validator.limit_value(statement)
+    sql_executed = validator.inject_limit(statement).sql(dialect=validator.dialect)
+
+    truncated = requested_limit is not None and requested_limit > validator.max_limit
+
+    try:
+        result = await _execute_async_parameterized(
+            ctx, sql_executed, (), ctx.max_query_timeout_seconds
+        )
+    except Exception as e:
+        code, message = _classify_error(e)
+        logger.error("Query error for tenant %s: %s", ctx.tenant_id, message, exc_info=True)
+        return error_response(code, message)
+
+    if result["row_count"] == validator.max_limit:
+        truncated = True
+
+    return {
+        "columns": result["columns"],
+        "rows": result["rows"],
+        "row_count": result["row_count"],
+        "truncated": truncated,
+        "sql_executed": sql_executed,
+        "tables_accessed": tables_accessed,
+    }
 
 
 def _classify_error(exc: Exception) -> tuple[str, str]:

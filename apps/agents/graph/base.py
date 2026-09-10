@@ -67,6 +67,7 @@ MCP_TOOL_NAMES = frozenset(
     {
         "list_tables",
         "describe_table",
+        "query",
         "get_metadata",
         "list_workspaces",
         "list_datasets",

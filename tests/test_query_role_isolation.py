@@ -5,7 +5,11 @@ import psycopg.errors
 import pytest
 
 from mcp_server.context import QueryContext
-from mcp_server.services.query import _classify_error, _execute_async_parameterized
+from mcp_server.services.query import (
+    _classify_error,
+    _execute_async_parameterized,
+    execute_query,
+)
 
 
 class TestQueryContextReadonlyRole:
@@ -75,6 +79,30 @@ class TestSetRoleIsolation:
         assert "test_domain_ro" in first_call_str
         # Cleanup before the pooled connection returns: RESET ROLE then RESET ALL.
         call_strs = [str(c) for c in execute_calls]
+        assert any("RESET ROLE" in c for c in call_strs)
+        assert "RESET ALL" in call_strs[-1]
+
+    @pytest.mark.asyncio
+    async def test_agent_sql_runs_pooled_under_the_readonly_role(self):
+        """Agent-authored SQL must reach the DB the same way internal SQL does:
+        from the shared pool, under the tenant's read-only role (issue #406)."""
+        mock_cursor = AsyncMock()
+        mock_cursor.description = [("col1",)]
+        mock_cursor.fetchall.return_value = [("val1",)]
+
+        mock_conn = _make_async_conn(mock_cursor)
+
+        with patch(
+            "mcp_server.services.query.get_pool",
+            new=_make_pool_for_conn(mock_conn),
+        ):
+            result = await execute_query(self._make_ctx(), "SELECT col1 FROM messages")
+
+        assert result["row_count"] == 1
+        call_strs = [str(c) for c in mock_cursor.execute.call_args_list]
+        assert "SET ROLE" in call_strs[0]
+        assert "test_domain_ro" in call_strs[0]
+        assert any("LIMIT" in c.upper() for c in call_strs)
         assert any("RESET ROLE" in c for c in call_strs)
         assert "RESET ALL" in call_strs[-1]
 
