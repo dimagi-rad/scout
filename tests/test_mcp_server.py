@@ -137,6 +137,15 @@ class TestExecuteQuery:
         assert result["error"]["code"] == VALIDATION_ERROR
 
     @pytest.mark.asyncio
+    async def test_unterminated_quote_returns_envelope(self, project_context):
+        """A tokenizer error must come back as an envelope the agent can read and
+        correct, not as an unhandled exception out of the tool."""
+        result = await execute_query(project_context, "SELECT * FROM notes WHERE a = 'O'Brien'")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "parse error" in result["error"]["message"].lower()
+
+    @pytest.mark.asyncio
     @patch(POOLED_EXEC)
     async def test_successful_query(self, mock_exec, project_context):
         mock_exec.return_value = {

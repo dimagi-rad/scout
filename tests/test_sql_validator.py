@@ -606,6 +606,26 @@ class TestCteAliasCannotShadowQualifiedTable:
         assert validator.get_tables_accessed(statement) == []
 
 
+class TestTokenizerErrors:
+    """An unterminated quote raises sqlglot's TokenError, a sibling of ParseError
+    rather than a subclass — it must still come back as a validation error, not
+    escape as an unhandled exception."""
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT * FROM notes WHERE author = 'O'Brien'",
+            'SELECT * FROM "unterminated',
+            "SELECT * FROM notes WHERE body = 'no closing quote",
+        ],
+    )
+    def test_unterminated_literal_is_a_validation_error(self, sql):
+        validator = SQLValidator(schema="ws_demo")
+        with pytest.raises(SQLValidationError) as exc_info:
+            validator.validate(sql)
+        assert exc_info.value.error_type == "parse_error"
+
+
 class TestDangerousTimingFunctions:
     """Issue #244: pg_sleep (DoS) and set_config (session tampering)."""
 

@@ -211,7 +211,7 @@ class SQLValidator:
         """
         try:
             statements = sqlglot.parse(sql, dialect=self.dialect)
-        except sqlglot.errors.ParseError as e:
+        except (sqlglot.errors.ParseError, sqlglot.errors.TokenError) as e:
             raise SQLValidationError(
                 f"SQL parse error: {e}",
                 sql=sql,
