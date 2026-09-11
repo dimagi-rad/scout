@@ -8,7 +8,12 @@ from django.utils import timezone
 
 from apps.common.identifiers import tenant_schema_name
 from apps.users.models import Tenant
-from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
+from apps.workspaces.models import (
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 from apps.workspaces.services.schema_manager import SchemaManager, dbt_role_name, readonly_role_name
 
 
@@ -519,6 +524,121 @@ class TestBuildViewSchemaProviderSafety:
             vs = SchemaManager().build_view_schema(workspace)
 
         assert vs.state == SchemaState.ACTIVE
+
+
+@pytest.mark.django_db
+class TestBuildViewSchemaTenantCoverage:
+    @staticmethod
+    def _mock_conn():
+        conn = MagicMock()
+        cursor = MagicMock()
+        conn.cursor.return_value = cursor
+        conn.closed = False
+        cursor.fetchall.return_value = []
+        cursor.fetchone.return_value = None
+        return conn
+
+    def test_partial_active_tenant_set_builds_and_reports_exclusion(self, workspace, tenant):
+        excluded = Tenant.objects.create(
+            provider="commcare_connect",
+            external_id="excluded-opp",
+            canonical_name="Excluded opportunity",
+        )
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=excluded)
+        TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name="included_schema",
+            state=SchemaState.ACTIVE,
+        )
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=self._mock_conn(),
+        ):
+            view_schema = SchemaManager().build_view_schema(workspace)
+
+        view_schema.refresh_from_db()
+        assert view_schema.state == SchemaState.ACTIVE
+        assert view_schema.last_error == ""
+        assert view_schema.tenant_coverage == {
+            "included_tenants": [
+                {
+                    "tenant_id": str(tenant.id),
+                    "provider": tenant.provider,
+                    "external_id": tenant.external_id,
+                }
+            ],
+            "excluded_tenants": [
+                {
+                    "tenant_id": str(excluded.id),
+                    "provider": excluded.provider,
+                    "external_id": excluded.external_id,
+                }
+            ],
+        }
+
+    def test_zero_active_tenants_fails_and_records_full_exclusion(self, workspace, tenant):
+        with (
+            patch(
+                "apps.workspaces.services.schema_manager.get_managed_db_connection"
+            ) as mock_connection,
+            pytest.raises(ValueError, match="no active schema"),
+        ):
+            SchemaManager().build_view_schema(workspace)
+
+        mock_connection.assert_not_called()
+        view_schema = WorkspaceViewSchema.objects.get(workspace=workspace)
+        assert view_schema.state == SchemaState.FAILED
+        assert "no active schema" in view_schema.last_error
+        assert view_schema.tenant_coverage == {
+            "included_tenants": [],
+            "excluded_tenants": [
+                {
+                    "tenant_id": str(tenant.id),
+                    "provider": tenant.provider,
+                    "external_id": tenant.external_id,
+                }
+            ],
+        }
+
+    def test_full_rebuild_clears_prior_exclusions(self, workspace, tenant):
+        second = Tenant.objects.create(
+            provider="commcare_connect",
+            external_id="later-active-opp",
+            canonical_name="Later active opportunity",
+        )
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+        TenantSchema.objects.create(
+            tenant=tenant,
+            schema_name="always_active_schema",
+            state=SchemaState.ACTIVE,
+        )
+        mock_conn = self._mock_conn()
+
+        with patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection",
+            return_value=mock_conn,
+        ):
+            first_build = SchemaManager().build_view_schema(workspace)
+            assert [
+                entry["tenant_id"] for entry in first_build.tenant_coverage["excluded_tenants"]
+            ] == [str(second.id)]
+
+            TenantSchema.objects.create(
+                tenant=second,
+                schema_name="later_active_schema",
+                state=SchemaState.ACTIVE,
+            )
+            full_build = SchemaManager().build_view_schema(workspace)
+
+        full_build.refresh_from_db()
+        assert full_build.state == SchemaState.ACTIVE
+        assert full_build.last_error == ""
+        assert full_build.tenant_coverage["excluded_tenants"] == []
+        assert {entry["tenant_id"] for entry in full_build.tenant_coverage["included_tenants"]} == {
+            str(tenant.id),
+            str(second.id),
+        }
 
 
 @pytest.mark.django_db

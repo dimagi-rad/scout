@@ -277,9 +277,11 @@ class SchemaManager:
         recreated from scratch each call, so a rebuild after an underlying table's
         columns changed succeeds rather than failing on view-column mismatches.
 
-        Raises ValueError if any tenant has no active schema, if two tenants
-        produce the same view prefix or full view name, or if a composed view
-        name would exceed PostgreSQL's 63-byte identifier limit.
+        A workspace with at least one active tenant schema remains queryable: tenants
+        without one are recorded in ``tenant_coverage`` and omitted from this build.
+        Raises ValueError if no tenant has an active schema, if two included tenants
+        produce the same view prefix or full view name, or if a composed view name
+        would exceed PostgreSQL's 63-byte identifier limit.
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
@@ -296,23 +298,38 @@ class SchemaManager:
         vs.save(update_fields=["schema_name", "state"])
 
         try:
-            tenants = list(workspace.tenants.all())
+            tenants = sorted(
+                workspace.tenants.all(),
+                key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
+            )
             if not tenants:
+                vs.tenant_coverage = {
+                    "included_tenants": [],
+                    "excluded_tenants": [],
+                }
+                vs.save(update_fields=["tenant_coverage"])
                 raise ValueError(f"Workspace {workspace.id} has no tenants")
 
             active_schemas = {
                 ts.tenant_id: ts
                 for ts in TenantSchema.objects.filter(tenant__in=tenants, state=SchemaState.ACTIVE)
             }
-            tenant_schemas: list[tuple[str, Tenant]] = []  # (schema_name, tenant)
-            for tenant in tenants:
-                ts = active_schemas.get(tenant.id)
-                if ts is None:
-                    raise ValueError(
-                        f"Tenant '{tenant.external_id}' has no active schema. "
-                        "Run a data refresh for this tenant before building the view schema."
-                    )
-                tenant_schemas.append((ts.schema_name, tenant))
+            included_tenants = [tenant for tenant in tenants if tenant.id in active_schemas]
+            excluded_tenants = [tenant for tenant in tenants if tenant.id not in active_schemas]
+            tenant_schemas: list[tuple[str, Tenant]] = [
+                (active_schemas[tenant.id].schema_name, tenant) for tenant in included_tenants
+            ]
+            vs.tenant_coverage = {
+                "included_tenants": [self._tenant_coverage_entry(t) for t in included_tenants],
+                "excluded_tenants": [self._tenant_coverage_entry(t) for t in excluded_tenants],
+            }
+            vs.save(update_fields=["tenant_coverage"])
+
+            if not tenant_schemas:
+                raise ValueError(
+                    f"Workspace {workspace.id} has no active schema for any tenant. "
+                    "Run a data refresh before building the view schema."
+                )
         except ValueError as exc:
             vs.state = SchemaState.FAILED
             vs.last_error = str(exc)[:500]
@@ -476,6 +493,14 @@ class SchemaManager:
             views_created,
         )
         return vs
+
+    @staticmethod
+    def _tenant_coverage_entry(tenant: Tenant) -> dict[str, str]:
+        return {
+            "tenant_id": str(tenant.id),
+            "provider": tenant.provider,
+            "external_id": tenant.external_id,
+        }
 
     def teardown_view_schema(self, view_schema: WorkspaceViewSchema) -> None:
         """Drop the physical PostgreSQL schema for a WorkspaceViewSchema.

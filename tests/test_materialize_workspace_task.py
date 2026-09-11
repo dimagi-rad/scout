@@ -324,6 +324,7 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
             return_value={"status": "completed"},
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure,
         patch("apps.workspaces.tasks._defer_resume_for_job", defer_mock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
@@ -337,6 +338,8 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
     # exception is swallowed, and the resume task is still deferred.
     assert result["all_succeeded"] is True
     mock_manager.build_view_schema.assert_called_once()
+    record_failure.assert_called_once()
+    assert "view schema build failed" in record_failure.call_args.args[1]
     defer_mock.assert_awaited_once()
 
 
@@ -1196,8 +1199,10 @@ async def _add_second_tenant(workspace, *, external_id="teammate-domain", provid
     return other
 
 
-async def _materialize_as(user, workspace, *, pipeline_side_effect=None):
+async def _materialize_as(user, workspace, *, pipeline_side_effect=None, view_schema_coverage=None):
     """Run the core as `user`, with the pipeline and both schema builds mocked."""
+    schema_manager = MagicMock()
+    schema_manager.build_view_schema.return_value.tenant_coverage = view_schema_coverage or {}
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
         patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
@@ -1206,7 +1211,7 @@ async def _materialize_as(user, workspace, *, pipeline_side_effect=None):
             return_value={"status": "completed"},
             side_effect=pipeline_side_effect,
         ),
-        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=schema_manager),
         patch("apps.workspaces.tasks.build_and_promote_cube_schema") as mock_cube,
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
@@ -1334,11 +1339,32 @@ async def test_unreachable_tenant_does_not_skip_the_cube_build(
     separately from the honesty flag, and the build still runs over the tenants
     that did load.
     """
-    await _add_second_tenant(workspace, external_id="unreachable-for-cube")
+    other = await _add_second_tenant(workspace, external_id="unreachable-for-cube")
+    coverage = {
+        "included_tenants": [
+            {
+                "tenant_id": str(tenant.id),
+                "provider": tenant.provider,
+                "external_id": tenant.external_id,
+            }
+        ],
+        "excluded_tenants": [
+            {
+                "tenant_id": str(other.id),
+                "provider": other.provider,
+                "external_id": other.external_id,
+            }
+        ],
+    }
 
-    result, mock_cube = await _materialize_as(user, workspace)
+    result, mock_cube = await _materialize_as(user, workspace, view_schema_coverage=coverage)
 
     assert result["all_succeeded"] is False
+    assert result["view_schema"] == {
+        "ok": True,
+        "error": None,
+        "tenant_coverage": coverage,
+    }
     mock_cube.assert_called_once()
     assert result["cube_schema"] is not None, "the build ran, so last_build was rewritten"
 
@@ -1346,14 +1372,80 @@ async def test_unreachable_tenant_does_not_skip_the_cube_build(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
-    multi_tenant_workspace, tenant_membership_obj, user
+    multi_tenant_workspace, tenant, tenant_membership_obj, user
 ):
-    """The #404 gate is unchanged for a tenant we actually tried and lost: its
-    data is half-written, so promoting a schema over it is not safe."""
+    """An attempted failure with an old ACTIVE schema remains in the view, so
+    promoting a semantic schema over its potentially mixed snapshot is unsafe."""
+    failed_tenant = await multi_tenant_workspace.tenants.exclude(id=tenant.id).aget()
+
+    def fail_second(tenant_membership, *_args):
+        if tenant_membership.tenant_id == failed_tenant.id:
+            raise RuntimeError("load blew up")
+        return {"status": "completed"}
+
+    coverage = {
+        "included_tenants": [
+            {
+                "tenant_id": str(included.id),
+                "provider": included.provider,
+                "external_id": included.external_id,
+            }
+            for included in (tenant, failed_tenant)
+        ],
+        "excluded_tenants": [],
+    }
+    with patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure:
+        result, mock_cube = await _materialize_as(
+            user,
+            multi_tenant_workspace,
+            pipeline_side_effect=fail_second,
+            view_schema_coverage=coverage,
+        )
+
+    assert result["all_succeeded"] is False
+    assert sorted(r["success"] for r in result["tenants"]) == [False, True]
+    mock_cube.assert_not_called()
+    record_failure.assert_called_once()
+    assert "safe tenant snapshot" in record_failure.call_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cube_build_runs_when_every_failed_attempted_tenant_is_excluded(
+    multi_tenant_workspace, tenant, tenant_membership_obj, user
+):
+    failed_tenant = await multi_tenant_workspace.tenants.exclude(id=tenant.id).aget()
+
+    def fail_second(tenant_membership, *_args):
+        if tenant_membership.tenant_id == failed_tenant.id:
+            raise RuntimeError("load blew up")
+        return {"status": "completed"}
+
+    coverage = {
+        "included_tenants": [
+            {
+                "tenant_id": str(tenant.id),
+                "provider": tenant.provider,
+                "external_id": tenant.external_id,
+            }
+        ],
+        "excluded_tenants": [
+            {
+                "tenant_id": str(failed_tenant.id),
+                "provider": failed_tenant.provider,
+                "external_id": failed_tenant.external_id,
+            }
+        ],
+    }
+
     result, mock_cube = await _materialize_as(
-        user, multi_tenant_workspace, pipeline_side_effect=RuntimeError("load blew up")
+        user,
+        multi_tenant_workspace,
+        pipeline_side_effect=fail_second,
+        view_schema_coverage=coverage,
     )
 
     assert result["all_succeeded"] is False
-    assert [r["success"] for r in result["tenants"]] == [False, False]
-    mock_cube.assert_not_called()
+    assert result["view_schema"]["tenant_coverage"] == coverage
+    mock_cube.assert_called_once()
+    assert result["cube_schema"] is not None
