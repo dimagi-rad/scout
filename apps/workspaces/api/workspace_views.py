@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 # Bounded so a slow upstream export can't tie up the sync DRF worker thread.
 SHARE_REFRESH_TIMEOUT = 8  # seconds
 
+# A PARTIAL run loaded some sources but not all — the data it wrote is present
+# and queryable, so it counts as a sync. Excluding it made a workspace whose runs
+# are perpetually PARTIAL report last_synced_at=null alongside
+# schema_status="available", i.e. "never synced" about data the agent can query.
+# Every other read of the "latest data-bearing run" already uses this pair (e.g.
+# mcp_server/services/metadata.py, apps/workspaces/api/views.py).
+SYNCED_RUN_STATES = (
+    MaterializationRun.RunState.COMPLETED,
+    MaterializationRun.RunState.PARTIAL,
+)
+
 _PROVIDER_RESOLVERS = {
     "commcare": resolve_commcare_domains,
     "commcare_connect": resolve_connect_opportunities,
@@ -215,9 +226,13 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # completed_at__isnull=False because Postgres sorts NULLs first under
+        # DESC — one state-bearing run without a timestamp would otherwise shadow
+        # every real one and return null.
         latest_run = (
             MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=SYNCED_RUN_STATES,
+                completed_at__isnull=False,
                 tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
             )
             .order_by("-completed_at")
@@ -374,16 +389,17 @@ class WorkspaceDetailView(APIView):
             view_schema_state=view_schema_state,
         )
 
-        latest_completed = (
+        last_run_at = (
             MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=SYNCED_RUN_STATES,
+                completed_at__isnull=False,
                 tenant_schema__tenant__in=tenants,
             )
             .order_by("-completed_at")
             .values_list("completed_at", flat=True)
             .first()
         )
-        last_synced_at = latest_completed.isoformat() if latest_completed else None
+        last_synced_at = last_run_at.isoformat() if last_run_at else None
 
         first_tenant = tenants[0] if tenants else None
         display_name = (
