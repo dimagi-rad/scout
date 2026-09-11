@@ -475,13 +475,14 @@ historical streams are preserved with their 30-day retention — no data is lost
 > recovery required a human with the EC2 keypair to copy the key across by hand.
 >
 > **Do not run this command unless:**
-> 1. you know the current instance may be replaced and that is acceptable right now;
+> 1. you know the current instance may be replaced or restarted and that is acceptable right now;
 > 2. the co-located staging stack going down with it is acceptable;
 > 3. you have the EC2 keypair to hand, in case `UserData` fails part-way; and
 > 4. you are prepared to re-run `kamal deploy` for every destination afterwards.
 >
 > To find out **before** you commit, create a change set instead of updating directly and inspect
-> the `Replacement` column for `EC2Instance`.
+> the `Replacement` column for `EC2Instance`. `Conditional` needs further inspection;
+> neither it nor `False` rules out the restart outage described above.
 >
 > **Three traps in doing this by hand.** The first two produce *empty output that reads as
 > &ldquo;no replacement&rdquo;*: `EC2AmiId` has no default, so it must be satisfied on every

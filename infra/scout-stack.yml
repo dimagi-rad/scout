@@ -36,7 +36,7 @@ Parameters:
     Type: AWS::EC2::Image::Id
     Description: >-
       Ubuntu 24.04 AMI for the web instance. Pinned deliberately and with NO default:
-      this used to be {{resolve:ssm:.../24.04/stable/current/...}}, which meant every
+      this used to be an SSM reference to the latest Ubuntu image, which meant every
       stack operation after Canonical published a new image saw ImageId change and
       REPLACED the instance regardless of what was edited (the 2026-07-06 outage).
       Pass UsePreviousValue=true on routine updates. To find the value the running
@@ -330,8 +330,8 @@ Resources:
           # AMI's default `ubuntu` user only. Without this copy, a replaced instance
           # is unreachable by CI -- which runs `kamal deploy` and nothing else, never
           # `kamal setup` -- and recovery needs a human with the EC2 keypair. That is
-          # the 2026-07-06 outage; see HANDOVER-ses-invites-2026-07-06.md.
-          # cloud-init writes the default user's authorized_keys during its config
+          # the 2026-07-06 SES/invites incident (handover kept outside this repo; ask in #scout).
+          # cloud-init writes the default user's authorized_keys during its init
           # stage, before UserData runs in the final stage, so this file exists here.
           if [ ! -f /home/ubuntu/.ssh/authorized_keys ]; then
             echo "FATAL: /home/ubuntu/.ssh/authorized_keys missing -- cannot" >&2
