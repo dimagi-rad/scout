@@ -188,7 +188,43 @@ async def test_raw_materialization_run_id_preserves_existing_response():
         "pipeline": "commcare_sync",
         "state": MaterializationRun.RunState.COMPLETED,
         "result": None,
+        "progress": {"current": 100, "total": 100},
         "started_at": run.started_at.isoformat(),
         "completed_at": None,
         "tenant_id": "status-raw-tenant",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_thread_job_excludes_runs_for_tenants_outside_workspace():
+    user, workspace, job = await _make_materialization_job(
+        email="outside-status@example.com", job_id=71005
+    )
+    other_workspace = await Workspace.objects.acreate(name="Unrelated", created_by=user)
+    await _add_tenant_run(
+        workspace=other_workspace,
+        job=job,
+        external_id="outside-status",
+        state=MaterializationRun.RunState.LOADING,
+        progress={"current": 2},
+    )
+    result = await get_materialization_status(
+        run_id=str(job.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+    assert result["success"] is True
+    assert result["data"]["runs"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_non_materialization_job_is_not_found():
+    user, workspace, job = await _make_materialization_job(
+        email="other-job-status@example.com", job_id=71006
+    )
+    await ThreadJob.objects.filter(id=job.id).aupdate(job_type="other")
+    result = await get_materialization_status(
+        run_id=str(job.id), workspace_id=str(workspace.id), user_id=str(user.id)
+    )
+    assert result["success"] is False
+    assert result["error"]["code"] == "NOT_FOUND"

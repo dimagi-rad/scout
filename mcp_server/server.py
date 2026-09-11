@@ -897,8 +897,12 @@ async def get_materialization_status(
 ) -> dict:
     """Retrieve materialization status by run ID or background-job ID.
 
-    Primarily a fallback for reconnection scenarios — live progress is delivered
-    via MCP progress notifications during an active run_materialization call.
+    Use each run's state and progress to describe data loading. For ThreadJob
+    responses, the top-level state tracks conversation continuation: pending
+    includes active materialization, and running means the resume agent is
+    executing after loading. Top-level started_at is the resume claim time,
+    not the start of data loading. An empty runs list does not prove that the
+    data load has started.
 
     Args:
         run_id: UUID of either a MaterializationRun or the ThreadJob returned by
@@ -1012,6 +1016,7 @@ async def get_materialization_status(
                 "pipeline": run.pipeline,
                 "state": run.state,
                 "result": run.result,
+                "progress": run.progress,
                 "started_at": run.started_at.isoformat() if run.started_at else None,
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "tenant_id": tenant_id,
