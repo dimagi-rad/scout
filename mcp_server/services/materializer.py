@@ -52,7 +52,7 @@ from psycopg import sql as psql
 
 from apps.common.error_codes import code_of
 from apps.knowledge.services.column_note_generator import sync_column_notes
-from apps.transformations.models import TransformationAsset
+from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
@@ -511,7 +511,6 @@ def run_pipeline(
             "Update total_steps if you add/remove report() calls."
         )
 
-    transform_error = transform_result.get("error")
     result: dict = {
         "status": "completed",
         "run_id": str(run.id),
@@ -520,8 +519,13 @@ def run_pipeline(
         "sources": source_results,
         "rows_loaded": total_rows,
     }
-    if transform_error:
-        result["transform_error"] = transform_error
+    # Kept on separate keys: transform_error means the tables are stale or
+    # missing, transform_test_failures means they built and are populated but
+    # their data-quality assertions did not pass (#391).
+    if transform_result.get("status") == TransformationRunStatus.TESTS_FAILED:
+        result["transform_test_failures"] = transform_result.get("error") or "dbt tests failed"
+    elif transform_result.get("error"):
+        result["transform_error"] = transform_result["error"]
     return result
 
 
@@ -677,6 +681,9 @@ def _has_committed_cursor(entry: dict) -> bool:
     return isinstance(cs, dict) and isinstance(cs.get("last_id"), int)
 
 
+_MAX_ERROR_CHARS = 500
+
+
 def _summarize_error(exc: BaseException) -> str:
     """Return a short, single-line error description for ``result["sources"][n].error``.
 
@@ -690,9 +697,6 @@ def _summarize_error(exc: BaseException) -> str:
       ``ThreadJob.error_summary``, which ``jobs/active/`` returns under
       ``recent_terminations`` and ``MaterializationFailure.tsx`` renders.
 
-    Caveat on the user path: only the *first* failed source's message survives —
-    ``_compose_failure_summary`` collapses the rest to bare names.
-
     Both hops are pinned in ``tests/test_resume_thread_task.py`` (search
     ``Connect 500``), and the API hop in ``tests/test_jobs_endpoints.py``.
 
@@ -700,10 +704,20 @@ def _summarize_error(exc: BaseException) -> str:
     failure read the sibling ``error_code`` — never this string. The class name
     stays on the front for operator legibility in logs and prompts, not as
     something to match on.
+
+    The length bound defends against *foreign* text — an upstream error body
+    echoed into a message — not against Scout's own prose. At the old 200 an OCS
+    403 (215 characters once the UUID experiment id is interpolated) truncated on
+    every occurrence, mid-word. 500 is the same bound every other stored error
+    string in the repo uses (``str(exc)[:500]``, 13 call sites), and
+    ``tests/test_materializer.py::TestSummarizeError`` fails if a loader message
+    ever grows into it.
     """
     msg = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
-    if len(msg) > 200:
-        msg = msg[:197] + "..."
+    if len(msg) > _MAX_ERROR_CHARS:
+        head = msg[: _MAX_ERROR_CHARS - 3]
+        cut = head.rsplit(" ", 1)[0] if " " in head else head
+        msg = cut + "..."
     return f"{exc.__class__.__name__}: {msg}"
 
 
