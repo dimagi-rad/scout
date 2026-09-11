@@ -9,6 +9,8 @@ from apps.agents.graph.base import (
     _fetch_schema_context,
     _fetch_semantic_model_context,
 )
+from apps.semantic.models import SemanticModel
+from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
 
 @pytest.fixture
@@ -32,9 +34,6 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
     workspace, tenant, interactive
 ):
     """A last-known-good model must not hide a materialization in flight."""
-    from apps.semantic.models import SemanticModel
-    from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
-
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_domain_active",
@@ -65,9 +64,6 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
 @pytest.mark.django_db(transaction=True)
 async def test_semantic_context_completed_run_does_not_hide_active_model(workspace, tenant):
     """A terminal run is historical and must not replace ready-model guidance."""
-    from apps.semantic.models import SemanticModel
-    from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
-
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="test_domain_completed",
