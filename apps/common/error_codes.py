@@ -32,6 +32,11 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
 
+    # No materialization pipeline could be resolved for a tenant's provider.
+    # Distinct from SCHEMA_BUILD_FAILED: the schema may be perfectly healthy —
+    # Scout just cannot say which loader wrote it, so it must not guess (#155).
+    PIPELINE_UNRESOLVED = "PIPELINE_UNRESOLVED"
+
     # HTTP 401 upstream: the credential is dead and reconnecting mints a working
     # one. Shared deliberately by the loaders and by credential_resolver's
     # pre-flight check — one condition, one code, however it is detected.

@@ -40,6 +40,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.schema_manager import SchemaManager
 from config.procrastinate import app, task
 from mcp_server.loaders.connect_base import ConnectExportError
@@ -182,24 +183,6 @@ def _unreachable_tenant_error(tenant) -> str:
     )
 
 
-def _no_pipeline_error(registry, provider: str) -> str:
-    """Build the 'no pipeline for provider' error, distinguishing cause (07#7).
-
-    An unconfigured provider and a pipeline YAML that failed to parse used to
-    share one message that wrongly pointed at workspace config; when the registry
-    recorded load errors, say so explicitly so blame lands on the deploy.
-    """
-    load_errors = registry.load_errors
-    if load_errors:
-        return (
-            f"No pipeline available for provider '{provider}': "
-            f"{len(load_errors)} pipeline definition(s) failed to load "
-            f"({', '.join(sorted(load_errors))}). This is a deploy/config error, "
-            "not a workspace setting — check the pipeline YAML files."
-        )
-    return f"No pipeline configured for provider '{provider}'"
-
-
 def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     """Compose a human-readable failure summary for ``ThreadJob.error_summary``.
 
@@ -324,7 +307,7 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         if pipeline_name is None:
             await _drop_schema_and_fail(new_schema)
             return {
-                "error": _no_pipeline_error(registry, membership.tenant.provider),
+                "error": no_pipeline_message(registry, membership.tenant.provider),
             }
         pipeline_config = registry.get(pipeline_name)
         # target_schema forces the load into the new "_r" schema; without it
@@ -460,7 +443,7 @@ async def materialize_workspace_core(
                 {
                     "tenant": tenant_id,
                     "success": False,
-                    "error": _no_pipeline_error(registry, tm.tenant.provider),
+                    "error": no_pipeline_message(registry, tm.tenant.provider),
                 }
             )
             continue
@@ -1297,14 +1280,17 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
         # The task itself failed/was aborted/cancelled — no result for a resume to
         # narrate, so flip straight to FAILED instead of deferring a resume with
         # nothing to say.
-        summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+        summary = (
+            await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            or MATERIALIZATION_FAILED_MESSAGE
+        )
         updated = await ThreadJob.objects.filter(
             id=tj.id,
             state=ThreadJob.State.PENDING,
         ).aupdate(
             state=ThreadJob.State.FAILED,
             completed_at=timezone.now(),
-            error_summary=summary or MATERIALIZATION_FAILED_MESSAGE,
+            error_summary=summary,
         )
         if not updated:
             return None
@@ -1314,7 +1300,7 @@ async def reconcile_stale_thread_job(tj: ThreadJob) -> str | None:
             tj.procrastinate_job_id,
             status,
         )
-        await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+        await _persist_synthetic_failure_message(tj, summary)
         return "failed"
     if status != _PROCRASTINATE_SUCCEEDED_STATUS:
         # Unknown/future procrastinate status: never fall into the resume act
@@ -1417,7 +1403,7 @@ async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) 
             error_summary=summary,
         )
         if updated:
-            await _persist_synthetic_failure_message(tj, MATERIALIZATION_FAILED_MESSAGE)
+            await _persist_synthetic_failure_message(tj, summary)
 
 
 async def _fail_zombie_materialization_run(run: MaterializationRun, reason: str) -> bool:
@@ -1726,6 +1712,7 @@ async def _aggregate_materialization_state(
         materialized_row_counts: dict = {}
         sources_detail: dict = {}
         transform_error: str | None = None
+        transform_test_failures: str | None = None
         run_error: str | None = None
         run_error_code: str | None = None
         if isinstance(r.result, dict):
@@ -1754,10 +1741,15 @@ async def _aggregate_materialization_state(
             # Surface a failed transform phase (issue #241, 04#4): run state stays
             # COMPLETED (transform failures are isolated from the raw load), but
             # staging/derived tables are stale and the agent must disclose that.
+            # TESTS_FAILED goes to its own key, never transform_error: the tables
+            # built and hold data, so "transforms failed" prose would make the
+            # agent disown data that is present (#391).
             transforms = r.result.get("transforms")
             if isinstance(transforms, dict):
                 if transforms.get("status") == TransformationRunStatus.FAILED:
                     transform_error = transforms.get("error") or "transform phase failed"
+                elif transforms.get("status") == TransformationRunStatus.TESTS_FAILED:
+                    transform_test_failures = transforms.get("error") or "dbt tests failed"
                 elif transforms.get("error"):
                     transform_error = transforms["error"]
         tenant_summary = {
@@ -1768,6 +1760,8 @@ async def _aggregate_materialization_state(
         }
         if transform_error:
             tenant_summary["transform_error"] = transform_error
+        if transform_test_failures:
+            tenant_summary["transform_test_failures"] = transform_test_failures
         if run_error:
             tenant_summary["error"] = run_error
         if run_error_code:
@@ -2016,6 +2010,24 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"for them, so nothing you query covers their data. Do NOT present your "
             f"answer as covering the whole workspace; name these sources as missing "
             f"and say the numbers exclude them."
+        )
+
+    # Per-tenant, so a multi-tenant workspace names every affected tenant rather
+    # than only the first one that failed.
+    test_failure_notes = [
+        f"{t['tenant']}: {t['transform_test_failures']}"
+        for t in summary
+        if t.get("transform_test_failures")
+    ]
+    if test_failure_notes:
+        body += (
+            f" Note: the transform models BUILT and their tables are populated, but "
+            f"data-quality tests on them FAILED after this load "
+            f"({'; '.join(test_failure_notes)}). This is NOT a build failure and NOT "
+            f"missing data — do NOT report it as a failed transform, and do NOT "
+            f"re-run materialization for it. Tell the user the data loaded and that "
+            f"the named data-quality tests failed on the named models, and treat "
+            f"figures drawn from those models as unverified."
         )
 
     if semantic_state == "stale":

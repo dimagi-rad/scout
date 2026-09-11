@@ -746,6 +746,99 @@ async def test_aggregate_no_transform_error_when_transforms_succeed():
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+async def test_aggregate_surfaces_dbt_test_failures_separately():
+    """A run whose models built but whose dbt tests failed must surface
+    ``transform_test_failures`` and NOT ``transform_error`` (#391): the tables
+    exist and hold data, so build-failure prose would make the agent disown
+    data that is present."""
+    tenant = await Tenant.objects.acreate(
+        external_id="t-xform-tests",
+        provider="commcare",
+        canonical_name="Xform Tests Tenant",
+    )
+    schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_xform_tests")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare",
+        state=MaterializationRun.RunState.COMPLETED,
+        procrastinate_job_id=778901,
+        result={
+            "pipeline": "commcare",
+            "sources": {"cases": {"state": "completed", "rows": 10}},
+            "transforms": {
+                "run_id": "abc",
+                "status": "tests_failed",
+                "asset_count": 3,
+                "error": (
+                    "2 data-quality test(s) failed on models stg_cases: "
+                    "unique_stg_cases_case_id (fail), not_null_stg_cases_owner (fail)"
+                ),
+            },
+        },
+    )
+
+    user = await User.objects.acreate_user(email="xform-tests@example.com", password="x")
+    workspace = await Workspace.objects.acreate(name="Xform tests", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    status, summary = await _aggregate_materialization_state(778901, workspace, str(user.id))
+
+    assert status == "completed"
+    assert "transform_error" not in summary[0]
+    assert "stg_cases" in summary[0]["transform_test_failures"]
+    assert "unique_stg_cases_case_id" in summary[0]["transform_test_failures"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_discloses_dbt_test_failures_without_claiming_build_failure():
+    """The agent must be told the data loaded AND that named data-quality tests
+    failed — not that the transforms failed (#391)."""
+    _user, _ws, _thread, tj = await _make_thread_job_ready_to_resume(
+        email="dbt-tests@b.c",
+        ws_name="WDbtTests",
+        ext_id="t_dbt_tests",
+        schema_name="s_dbt_tests",
+        pj_id=9391,
+        tool_call="tc9391",
+    )
+    await MaterializationRun.objects.filter(procrastinate_job_id=9391).aupdate(
+        result={
+            "pipeline": "commcare_sync",
+            "sources": {"cases": {"state": "completed", "rows": 10}},
+            "transforms": {
+                "run_id": "abc",
+                "status": "tests_failed",
+                "asset_count": 2,
+                "error": (
+                    "1 data-quality test(s) failed on model stg_cases: "
+                    "unique_stg_cases_case_id (fail)"
+                ),
+            },
+        }
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=mock_agent),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    assert result["terminal_state"] == ThreadJob.State.COMPLETED
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "data-quality tests" in body
+    assert "unique_stg_cases_case_id" in body
+    assert "stg_cases" in body
+    # The load succeeded, so the prompt must still say so and must not tell the
+    # agent the transforms failed.
+    assert "completed" in body.lower()
+    assert "transforms failed" not in body.lower()
+    assert "NOT a build failure" in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
 async def test_resume_cas_rejects_already_running_threadjob():
     """If a ThreadJob is already in RUNNING state (a concurrent resume
     claimed it first), a second invocation must NOT proceed to ainvoke."""

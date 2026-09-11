@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
+import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 
 // TenantMembership kept as alias so existing imports continue to work
 export type TenantMembership = WorkspaceListItem & {
@@ -57,6 +58,7 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     },
 
     setActiveDomain: (id: string) => {
+      recordWorkspaceUse(id)
       // Switching workspaces must NOT carry the thread over: grafting the old
       // workspace's thread id onto the new URL produces a "Thread not found"
       // chat. Reset to a fresh id. Deep links (URL → store) overwrite this via
