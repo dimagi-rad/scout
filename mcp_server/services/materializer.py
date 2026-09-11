@@ -52,7 +52,7 @@ from psycopg import sql as psql
 
 from apps.common.error_codes import code_of
 from apps.knowledge.services.column_note_generator import sync_column_notes
-from apps.transformations.models import TransformationAsset
+from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
@@ -515,7 +515,6 @@ def run_pipeline(
             "Update total_steps if you add/remove report() calls."
         )
 
-    transform_error = transform_result.get("error")
     result: dict = {
         "status": "completed",
         "run_id": str(run.id),
@@ -524,8 +523,13 @@ def run_pipeline(
         "sources": source_results,
         "rows_loaded": total_rows,
     }
-    if transform_error:
-        result["transform_error"] = transform_error
+    # Kept on separate keys: transform_error means the tables are stale or
+    # missing, transform_test_failures means they built and are populated but
+    # their data-quality assertions did not pass (#391).
+    if transform_result.get("status") == TransformationRunStatus.TESTS_FAILED:
+        result["transform_test_failures"] = transform_result.get("error") or "dbt tests failed"
+    elif transform_result.get("error"):
+        result["transform_error"] = transform_result["error"]
     return result
 
 
