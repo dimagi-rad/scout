@@ -21,7 +21,7 @@ from apps.agents.mcp_client import get_mcp_tools
 from apps.chat.checkpointer import ensure_checkpointer
 from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
-from apps.common.error_codes import ErrorCode
+from apps.common.error_codes import ErrorCode, code_of
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
 from apps.transformations.models import TransformationRunStatus
@@ -519,10 +519,14 @@ async def materialize_workspace_core(
             )
             sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
             sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
-            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
+            tenant_results.append(
+                {"tenant": tenant_id, "success": False, "error": str(e), "error_code": code_of(e)}
+            )
         except Exception as e:
             logger.exception("Materialization failed for tenant %s", tenant_id)
-            tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
+            tenant_results.append(
+                {"tenant": tenant_id, "success": False, "error": str(e), "error_code": code_of(e)}
+            )
 
     # Two questions, so two flags. `attempted_succeeded` asks whether the data we
     # did load is self-consistent, and gates the Cube build below exactly as
@@ -1903,7 +1907,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     semantic_unavailable = semantic_state == "unavailable"
 
     if view_schema_failed:
-        if VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        if credential_guidance:
+            body = (
+                f"{SYSTEM_RESUME_MARKER} Materialization left incomplete tenant coverage, "
+                f"and the workspace query layer (view schema) is unavailable. There is "
+                f"currently NO queryable surface for this workspace. Error: {view_schema_error}. "
+                f"Do not query or claim that every tenant loaded. Address the account/access "
+                f"problems below before retrying materialization; if the view still fails "
+                f"after access is restored, an administrator must investigate the build error."
+                f"{credential_guidance} Per-tenant: {summary}"
+            )
+        elif VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: FAILED from a cascade teardown, not a build defect — re-running
             # materialization IS the fix, so the advice must invite a re-run.
             body = (
@@ -1937,7 +1951,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"re-run materialization — the data is already loaded and a re-run "
             f"would likely hit the same build error. Tell the user plainly that "
             f"the data loaded but the semantic layer failed to build, and quote "
-            f"the error. Per-tenant: {summary}"
+            f"the error.{credential_guidance} Per-tenant: {summary}"
         )
     elif status == "no_runs":
         logger.warning(
@@ -2132,7 +2146,12 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     )
     error_summary = ""
     if terminal == ThreadJob.State.FAILED:
-        if view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
+        if view_schema_failed and credential_guidance:
+            error_summary = (
+                "Some tenant data did not load, and the workspace query layer (view schema) "
+                f"is unavailable: {view_schema_error}. {' '.join(guidance_lines)}"
+            )
+        elif view_schema_failed and VIEW_SCHEMA_CASCADE_TEARDOWN_MARKER in view_schema_error:
             # 07#9: cascade teardown — re-running materialization IS the fix.
             error_summary = (
                 "The workspace query layer (view schema) is unavailable because a "

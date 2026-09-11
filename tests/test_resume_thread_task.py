@@ -1397,12 +1397,14 @@ async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advi
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_resume_prompt_names_a_tenant_the_run_did_not_load():
+@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.FAILED])
+async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state):
     """The chat resume prompt — the path this issue was found on."""
     _user, _ws, uncovered, tj = await _make_partly_covered_job(
         email="resume-uncovered@b.c", ws_name="W-res-unc", pj_id=90003
     )
 
+    await WorkspaceViewSchema.objects.filter(workspace=_ws).aupdate(state=view_state)
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
     with patch(
@@ -1418,6 +1420,8 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load():
     # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
     # tenant with no run row could not reach any guidance path before (#364).
     assert "not connected to your account" in body
+    assert "Per-tenant data loaded successfully" not in body
+    assert "a system-side fix is required" not in body
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert uncovered.external_id in tj.error_summary

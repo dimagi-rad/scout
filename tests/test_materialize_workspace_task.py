@@ -1357,3 +1357,31 @@ async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
     assert result["all_succeeded"] is False
     assert [r["success"] for r in result["tenants"]] == [False, False]
     mock_cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("code", [ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_ACCESS_DENIED])
+async def test_core_preserves_coded_pipeline_failure_guidance(
+    workspace, tenant_membership_obj, user, code
+):
+    with (
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            AsyncMock(return_value={"type": "api_key", "value": "k"}),
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            side_effect=CredentialResolutionError(code, "upstream rejected token"),
+        ),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+    assert result["all_succeeded"] is False
+    assert result["tenants"][0]["error_code"] == code
+    assert result["guidance"]
+    expected = (
+        "reconnect the affected account" if code == ErrorCode.AUTH_TOKEN_EXPIRED else "Ask an admin"
+    )
+    assert expected in result["guidance"][0]
