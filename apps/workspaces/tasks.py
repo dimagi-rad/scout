@@ -392,6 +392,8 @@ async def materialize_workspace_core(
     when the run has been marked CANCELLED, triggering a transaction rollback.
     """
     tenant_results: list[dict] = []
+    attempted_tenant_ids: set[str] = set()
+    successful_attempted_tenant_ids: set[str] = set()
 
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)
@@ -453,6 +455,7 @@ async def materialize_workspace_core(
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
 
     for tm in memberships:
+        attempted_tenant_ids.add(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
@@ -500,6 +503,7 @@ async def materialize_workspace_core(
                 pipeline_config,
                 job_id,
             )
+            successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
         except MaterializationCancelled:
             tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
@@ -524,11 +528,12 @@ async def materialize_workspace_core(
             logger.exception("Materialization failed for tenant %s", tenant_id)
             tenant_results.append({"tenant": tenant_id, "success": False, "error": str(e)})
 
-    # Two questions, so two flags. `attempted_succeeded` asks whether the data we
-    # did load is self-consistent, and gates the Cube build below exactly as
-    # `all_succeeded` did before #364. `all_succeeded` is the honesty flag callers
-    # read, and a workspace we could not fully cover is not a success.
+    # Two questions, so two flags. `attempted_succeeded` asks whether every
+    # attempted load succeeded; the coverage-aware Cube gate below can refine it
+    # for a failed tenant omitted from a degraded view. `all_succeeded` is the
+    # honesty flag callers read, and an uncovered workspace is not a success.
     attempted_succeeded = all(r.get("success") for r in tenant_results)
+    failed_attempted_tenant_ids = attempted_tenant_ids - successful_attempted_tenant_ids
     all_succeeded = attempted_succeeded and not unreachable_results
 
     # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
@@ -538,8 +543,15 @@ async def materialize_workspace_core(
     workspace_tenant_count = await workspace.workspace_tenants.acount()
     if workspace_tenant_count > 1:
         try:
-            await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
-            view_schema_outcome = {"ok": True, "error": None}
+            view_schema = await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
+            tenant_coverage = (
+                view_schema.tenant_coverage if isinstance(view_schema.tenant_coverage, dict) else {}
+            )
+            view_schema_outcome = {
+                "ok": True,
+                "error": None,
+                "tenant_coverage": tenant_coverage,
+            }
         except Exception as exc:
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
@@ -548,18 +560,43 @@ async def materialize_workspace_core(
                 "Post-materialization view schema rebuild failed for workspace %s",
                 workspace_id,
             )
-            view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+            failed_view_schema = await WorkspaceViewSchema.objects.filter(
+                workspace=workspace
+            ).afirst()
+            tenant_coverage = (
+                failed_view_schema.tenant_coverage
+                if failed_view_schema is not None
+                and isinstance(failed_view_schema.tenant_coverage, dict)
+                else {}
+            )
+            view_schema_outcome = {
+                "ok": False,
+                "error": str(exc)[:500],
+                "tenant_coverage": tenant_coverage,
+            }
 
-    # Gated on `attempted_succeeded`, NOT `all_succeeded`: a workspace that is
-    # permanently only partly reachable would otherwise skip this build forever,
-    # and because _semantic_layer_state reads SemanticModel.metadata["last_build"]
-    # — written only from inside the build — the previous run's {"ok": True} would
-    # be inherited and the semantic layer would report "ready" while stale, trading
-    # a false "all tenants loaded" for a false "semantic model is ready" (the
-    # regression that closed PR #397). Building over the tenants that did load
-    # keeps last_build written by the same run that wrote the data.
+    # An unattempted tenant never blocks the Cube build (#364). An attempted
+    # failure can also be safe when the degraded view build explicitly excluded
+    # that tenant; an old ACTIVE schema means it remains included and must block.
+    cube_input_is_safe = attempted_succeeded
+    if view_schema_outcome is not None and view_schema_outcome.get("ok"):
+        tenant_coverage = view_schema_outcome.get("tenant_coverage") or {}
+        excluded_tenant_ids = {
+            str(entry.get("tenant_id"))
+            for entry in tenant_coverage.get("excluded_tenants", [])
+            if isinstance(entry, dict) and entry.get("tenant_id")
+        }
+        included_tenant_ids = {
+            str(entry.get("tenant_id"))
+            for entry in tenant_coverage.get("included_tenants", [])
+            if isinstance(entry, dict) and entry.get("tenant_id")
+        }
+        cube_input_is_safe = failed_attempted_tenant_ids.issubset(
+            excluded_tenant_ids
+        ) and failed_attempted_tenant_ids.isdisjoint(included_tenant_ids)
+
     cube_schema_outcome: dict | None = None
-    if attempted_succeeded and (
+    if cube_input_is_safe and (
         workspace_tenant_count <= 1
         or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
     ):
@@ -917,13 +954,24 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         # don't re-write state here and risk clobbering a concurrent transition —
         # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
-        return {"error": "Failed to build view schema"}
+        failed_view_schema = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
+        tenant_coverage = (
+            failed_view_schema.tenant_coverage
+            if failed_view_schema is not None
+            and isinstance(failed_view_schema.tenant_coverage, dict)
+            else {}
+        )
+        return {
+            "error": "Failed to build view schema",
+            "tenant_coverage": tenant_coverage,
+        }
 
     logger.info(
         "View schema '%s' is now active for workspace %s",
         vs.schema_name,
         workspace_id,
     )
+    tenant_coverage = vs.tenant_coverage if isinstance(vs.tenant_coverage, dict) else {}
     try:
         cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
     except CubeSchemaBuildError as exc:
@@ -935,6 +983,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         return {
             "status": "active",
             "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
             "cube_schema": {"ok": False, "error": str(exc)[:500]},
         }
     except Exception as exc:
@@ -945,11 +994,13 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         return {
             "status": "active",
             "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
             "cube_schema": {"ok": False, "error": str(exc)[:500]},
         }
     return {
         "status": "active",
         "schema_name": vs.schema_name,
+        "tenant_coverage": tenant_coverage,
         "cube_schema": {
             "ok": True,
             "id": str(cube_schema.id),

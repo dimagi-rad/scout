@@ -331,6 +331,11 @@ class WorkspaceViewSchema(models.Model):
         default="",
         help_text="Most recent build_view_schema failure message; cleared on a successful build.",
     )
+    tenant_coverage = models.JSONField(
+        blank=True,
+        default=dict,
+        help_text=("Tenants included in and excluded from the most recent view-schema build."),
+    )
     last_accessed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

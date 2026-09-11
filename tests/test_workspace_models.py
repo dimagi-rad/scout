@@ -4,7 +4,13 @@ import pytest
 from django.db.utils import IntegrityError
 
 from apps.users.models import Tenant
-from apps.workspaces.models import Workspace, WorkspaceMembership, WorkspaceRole, WorkspaceTenant
+from apps.workspaces.models import (
+    Workspace,
+    WorkspaceMembership,
+    WorkspaceRole,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 
 
 @pytest.mark.django_db
@@ -35,6 +41,16 @@ def test_workspace_membership_roles_exist():
 @pytest.mark.django_db
 def test_workspace_str(workspace):
     assert str(workspace) == workspace.name
+
+
+@pytest.mark.django_db
+def test_workspace_view_schema_tenant_coverage_defaults_empty(workspace):
+    view_schema = WorkspaceViewSchema.objects.create(
+        workspace=workspace,
+        schema_name="ws_0123456789abcdef",
+    )
+
+    assert view_schema.tenant_coverage == {}
 
 
 @pytest.mark.django_db
