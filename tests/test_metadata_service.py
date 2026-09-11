@@ -379,6 +379,29 @@ class TestPipelineDescribeTable:
         }
 
     @pytest.mark.asyncio
+    async def test_no_pipeline_config_yields_no_pipeline_description(self):
+        """#155: a ws_* view schema has no pipeline to attribute, so the table gets
+        no description rather than commcare_sync's."""
+        from mcp_server.services.metadata import pipeline_describe_table
+
+        ctx = self._make_ctx()
+
+        with patch(
+            "mcp_server.services.metadata._execute_async_parameterized",
+            new=AsyncMock(
+                return_value={
+                    "columns": ["column_name", "data_type", "is_nullable", "column_default"],
+                    "rows": [["case_id", "text", "NO", None]],
+                    "row_count": 1,
+                }
+            ),
+        ):
+            result = await pipeline_describe_table("raw_cases", ctx, None, None)
+
+        assert result is not None
+        assert result["description"] == ""
+
+    @pytest.mark.asyncio
     async def test_annotates_properties_column_with_case_types(self):
         from mcp_server.services.metadata import pipeline_describe_table
 

@@ -247,6 +247,7 @@ class WorkspaceListView(APIView):
                 member_count=Count("workspace__memberships", distinct=True),
                 last_synced_at=Subquery(latest_run),
             )
+            .order_by("-workspace__created_at", "-workspace_id")
         )
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])

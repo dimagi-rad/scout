@@ -48,7 +48,10 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from mcp_server.pipeline_registry import get_registry
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    select_pipeline_config,
+)
 from mcp_server.services.metadata import (
     pipeline_list_tables,
     transformation_aware_list_tables,
@@ -353,6 +356,18 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 )
 
 
+# Deliberately mode-agnostic: no "end your turn" (the headless runs have no
+# resume path) and no retry hint, because no amount of waiting or re-running
+# fixes a missing pipeline definition.
+_PIPELINE_UNRESOLVED_GUIDANCE = (
+    "This workspace's data cannot be described: Scout cannot determine which "
+    "pipeline loaded it, which is a configuration error on Scout's side. Do NOT "
+    "call data tools or `run_materialization` — they will fail the same way. "
+    "Tell the user their workspace needs an administrator to configure its "
+    "provider pipeline, and stop there."
+)
+
+
 async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
@@ -366,9 +381,6 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
         tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
-
-    registry = get_registry()
-    pipeline_config = registry.get_by_provider(tenant.provider)
 
     if ts is None:
         if not interactive:
@@ -395,8 +407,15 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
             "when the current materialization completes."
         )
 
-    if pipeline_config is None:
-        pipeline_config = registry.get("commcare_sync")
+    try:
+        pipeline_config = select_pipeline_config(provider=tenant.provider)
+    except PipelineResolutionError:
+        # Guidance, not a raise: this builds the system prompt on every turn, so
+        # raising would take the whole chat down. The detail stays in the log —
+        # the agent only needs to know the workspace is not describable and that
+        # no tool call will change that (#155).
+        logger.exception("Pipeline resolution failed for the agent prompt")
+        return _PIPELINE_UNRESOLVED_GUIDANCE
 
     # transformation-aware listing prefers terminal models over replaced ones
     from apps.transformations.services.lineage import aget_terminal_assets

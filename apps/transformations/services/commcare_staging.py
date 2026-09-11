@@ -114,6 +114,7 @@ def _generate_case_type_asset(
     select_parts: list[str] = []
     # Seed with core column names so custom properties that collide get a suffix.
     seen_aliases: dict[str, int] = {(alias or expr): 1 for expr, alias in _CASE_CORE_COLUMNS}
+    reserved_aliases = set(seen_aliases) | {slugify_model_name(prop) for prop in properties}
 
     for expr, alias in _CASE_CORE_COLUMNS:
         if alias:
@@ -122,7 +123,7 @@ def _generate_case_type_asset(
             select_parts.append(f"    {expr}")
 
     for prop in properties:
-        col = dbt_column_alias(slugify_model_name(prop), seen_aliases)
+        col = dbt_column_alias(slugify_model_name(prop), seen_aliases, reserved=reserved_aliases)
         select_parts.append(f"    properties->>'{_sql_escape(prop)}' AS \"{col}\"")
 
     lines.append(",\n".join(select_parts))
@@ -162,16 +163,17 @@ def _generate_form_asset(
         "app_id": 1,
         "form_data": 1,
     }
+    staged_questions = [q for q in questions if not q.get("repeat") and q.get("value", "")]
+    reserved_aliases = set(seen_aliases) | {
+        _column_name_from_path(q["value"]) for q in staged_questions
+    }
 
-    for q in questions:
-        # Questions inside repeat groups are staged separately.
-        if q.get("repeat"):
-            continue
-        value_path = q.get("value", "")
-        if not value_path:
-            continue
+    for q in staged_questions:
+        value_path = q["value"]
         json_path = _question_path_to_json_path(value_path)
-        col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
+        col_name = dbt_column_alias(
+            _column_name_from_path(value_path), seen_aliases, reserved=reserved_aliases
+        )
         raw_expr = f"form_data #>> {json_path}"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -208,13 +210,17 @@ def _generate_repeat_group_asset(
     ]
     # Seed with fixed column names so child question aliases that collide get a suffix.
     seen_aliases: dict[str, int] = {"form_id": 1, "repeat_index": 1}
+    staged_questions = [q for q in child_questions if q.get("value", "")]
+    reserved_aliases = set(seen_aliases) | {
+        _column_name_from_path(q["value"]) for q in staged_questions
+    }
 
-    for q in child_questions:
-        value_path = q.get("value", "")
-        if not value_path:
-            continue
+    for q in staged_questions:
+        value_path = q["value"]
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(_column_name_from_path(value_path), seen_aliases)
+        col_name = dbt_column_alias(
+            _column_name_from_path(value_path), seen_aliases, reserved=reserved_aliases
+        )
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')

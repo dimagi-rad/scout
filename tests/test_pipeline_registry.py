@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+
+from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from mcp_server.pipeline_registry import PipelineRegistry
 
 
@@ -107,6 +110,18 @@ relationships:
         assert registry.get("good") is not None
         assert "broken.yml" in registry.load_errors
 
+    def test_pipeline_without_a_provider_is_a_load_error_not_a_commcare_pipeline(self, tmp_path):
+        """#155: a forgotten ``provider:`` used to register as commcare, so a
+        commcare tenant could resolve to a completely unrelated pipeline."""
+        (tmp_path / "nameless.yml").write_text(
+            "pipeline: nameless\ndescription: N\nversion: '1.0'\nsources: []\n"
+        )
+        registry = PipelineRegistry(pipelines_dir=str(tmp_path))
+
+        assert registry.get("nameless") is None
+        assert registry.get_by_provider("commcare") is None
+        assert "nameless.yml" in registry.load_errors
+
     def test_source_config_physical_table_name_defaults_to_raw_prefix(self):
         from mcp_server.pipeline_registry import SourceConfig
 
@@ -119,22 +134,14 @@ class TestNoPipelineErrorMessage:
     from a broken deploy (pipeline YAML failed to load)."""
 
     def test_plain_message_when_no_load_errors(self):
-        from types import SimpleNamespace
-
-        from apps.workspaces.tasks import _no_pipeline_error
-
         registry = SimpleNamespace(load_errors=[])
-        msg = _no_pipeline_error(registry, "weird_provider")
+        msg = no_pipeline_message(registry, "weird_provider")
         assert "weird_provider" in msg
         assert "deploy" not in msg.lower()
 
     def test_deploy_hint_when_pipeline_yaml_failed_to_load(self):
-        from types import SimpleNamespace
-
-        from apps.workspaces.tasks import _no_pipeline_error
-
         registry = SimpleNamespace(load_errors=["ocs_sync.yml"])
-        msg = _no_pipeline_error(registry, "ocs")
+        msg = no_pipeline_message(registry, "ocs")
         assert "ocs_sync.yml" in msg
         assert "deploy" in msg.lower()
 
