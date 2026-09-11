@@ -16,7 +16,6 @@ from apps.users.models import TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     WorkspaceRole,
 )
@@ -25,6 +24,7 @@ from apps.workspaces.services.pipeline_resolver import (
     resolve_pipeline_config,
 )
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from apps.workspaces.tasks import refresh_tenant_schema
 from apps.workspaces.workspace_resolver import resolve_workspace_drf as resolve_workspace
 
@@ -314,11 +314,6 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
     return None
 
 
-def _get_tenant_metadata(tenant):
-    """Return TenantMetadata for any membership in the given tenant, or None."""
-    return TenantMetadata.objects.filter(tenant_membership__tenant=tenant).first()
-
-
 def _serialize_annotation(tk):
     """Serialize a TableKnowledge instance to the frontend annotation shape."""
     use_cases = tk.use_cases
@@ -439,8 +434,7 @@ class DataDictionaryView(APIView):
         if not tables_list:
             return Response({"tables": {}, "generated_at": None})
 
-        tenant = tenant_schema.tenant
-        tenant_metadata = _get_tenant_metadata(tenant)
+        tenant_metadata = get_tenant_metadata(tenant_schema.tenant_id)
         annotations = _get_annotations_by_logical_name(workspace)
 
         enriched_tables = {}
@@ -616,8 +610,7 @@ class TableDetailView(APIView):
         if table_name not in known:
             return None
 
-        tenant = tenant_schema.tenant
-        tenant_metadata = _get_tenant_metadata(tenant)
+        tenant_metadata = get_tenant_metadata(tenant_schema.tenant_id)
         source_metadata = _build_source_metadata(table_name, tenant_metadata)
 
         entry = {
