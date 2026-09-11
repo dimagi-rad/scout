@@ -7,6 +7,7 @@ import pytest
 from apps.agents.graph.base import (
     _fetch_multi_tenant_schema_context,
     _fetch_schema_context,
+    _fetch_semantic_model_context,
 )
 
 
@@ -22,6 +23,71 @@ def mock_tenant():
 @pytest.fixture
 def mock_user():
     return MagicMock()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+async def test_semantic_context_active_run_takes_precedence_over_active_model(
+    workspace, tenant, interactive
+):
+    """A last-known-good model must not hide a materialization in flight."""
+    from apps.semantic.models import SemanticModel
+    from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="test_domain_active",
+        state=SchemaState.ACTIVE,
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Existing semantic model",
+        status=SemanticModel.Status.ACTIVE,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+    )
+
+    result = await _fetch_semantic_model_context(workspace, interactive=interactive)
+
+    assert "in progress" in result.lower()
+    if interactive:
+        assert "trigger another" in result.lower()
+    else:
+        assert "waits" in result.lower()
+    assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_semantic_context_completed_run_does_not_hide_active_model(workspace, tenant):
+    """A terminal run is historical and must not replace ready-model guidance."""
+    from apps.semantic.models import SemanticModel
+    from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="test_domain_completed",
+        state=SchemaState.ACTIVE,
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Existing semantic model",
+        status=SemanticModel.Status.ACTIVE,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+    )
+
+    result = await _fetch_semantic_model_context(workspace)
+
+    assert "Data is loaded and ready" in result
+    assert "in progress" not in result.lower()
 
 
 @pytest.mark.asyncio

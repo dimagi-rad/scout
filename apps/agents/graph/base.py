@@ -262,6 +262,25 @@ def _semantic_catalog_context_sync(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+    # TenantSchema/WorkspaceViewSchema MATERIALIZING is a dead state: the
+    # materializer records live work on MaterializationRun instead. Check the
+    # run state before accepting an existing semantic model as ready, otherwise
+    # a refresh in flight is hidden behind the last active catalog and the agent
+    # may start a second materialization.
+    materialization_in_progress = await MaterializationRun.objects.filter(
+        tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
+        state__in=list(MaterializationRun.ACTIVE_STATES),
+    ).aexists()
+    if materialization_in_progress:
+        if not interactive:
+            return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
+        return (
+            "A materialization is already in progress in the background. Do NOT "
+            "trigger another one and do NOT call other data tools. Briefly tell "
+            "the user it's still loading and end your turn — the system will "
+            "resume the conversation automatically when materialization completes."
+        )
+
     try:
         return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
     except SemanticCatalogUnavailable:
