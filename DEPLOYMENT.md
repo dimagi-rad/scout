@@ -451,7 +451,15 @@ historical streams are preserved with their 30-day retention — no data is lost
 > CloudFormation saw `ImageId` change, and **replaced the instance — whatever else you changed.**
 > It is now the explicit `EC2AmiId` parameter, so routine updates no longer replace the instance;
 > pass `ParameterKey=EC2AmiId,UsePreviousValue=true`. Taking a newer image is now a deliberate act
-> (and still replaces the instance). Changing `UserData` also forces replacement on its own.
+> (and still replaces the instance).
+>
+> **A restart is also an outage.** On this EBS-backed instance, changing `UserData`
+> [restarts the instance](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-ec2-instance.html#cfn-ec2-instance-userdata)
+> while retaining its root volume; it does not replace the instance. `Replacement: False`
+> in a change set therefore does **not** mean zero downtime. Updated user data
+> [does not run on restart by default](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html),
+> so these bootstrap additions provision future new instances; updating the stack alone
+> does not apply them to the existing machine.
 >
 > This is what happened on **2026-07-06**: an `update-stack` applying long-unapplied changes
 > replaced the instance and took the site down. Full detail is in the 2026-07-06 SES/invites
