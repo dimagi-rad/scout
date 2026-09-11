@@ -23,7 +23,11 @@ from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
-from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
+from apps.semantic.services.cube_schema import (
+    CubeSchemaBuildError,
+    build_and_promote_cube_schema,
+    record_cube_schema_build_failure,
+)
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import (
@@ -596,10 +600,11 @@ async def materialize_workspace_core(
         ) and failed_attempted_tenant_ids.isdisjoint(included_tenant_ids)
 
     cube_schema_outcome: dict | None = None
-    if cube_input_is_safe and (
+    cube_build_allowed = cube_input_is_safe and (
         workspace_tenant_count <= 1
         or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
-    ):
+    )
+    if cube_build_allowed:
         try:
             cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
             cube_schema_outcome = {
@@ -618,6 +623,22 @@ async def materialize_workspace_core(
         except Exception as exc:
             logger.exception("Semantic Cube schema build failed for workspace %s", workspace_id)
             cube_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+    else:
+        if view_schema_outcome is not None and not view_schema_outcome.get("ok"):
+            skip_reason = (
+                "Semantic Cube schema build skipped because the workspace view schema build failed."
+            )
+        else:
+            skip_reason = (
+                "Semantic Cube schema build skipped because materialization did not produce "
+                "a safe tenant snapshot."
+            )
+        await _to_thread_fresh_db(
+            record_cube_schema_build_failure,
+            workspace,
+            skip_reason,
+        )
+        cube_schema_outcome = {"ok": False, "error": skip_reason}
 
     # Tenant data schemas (t_<id>) are SHARED. Re-materializing drops & recreates
     # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
@@ -954,6 +975,14 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         # don't re-write state here and risk clobbering a concurrent transition —
         # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
+        skip_reason = (
+            "Semantic Cube schema build skipped because the workspace view schema build failed."
+        )
+        await _to_thread_fresh_db(
+            record_cube_schema_build_failure,
+            workspace,
+            skip_reason,
+        )
         failed_view_schema = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
         tenant_coverage = (
             failed_view_schema.tenant_coverage

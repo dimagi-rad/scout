@@ -324,6 +324,7 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
             return_value={"status": "completed"},
         ),
         patch("apps.workspaces.tasks.SchemaManager", return_value=mock_manager),
+        patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure,
         patch("apps.workspaces.tasks._defer_resume_for_job", defer_mock),
     ):
         mock_cred.return_value = {"type": "api_key", "value": "k"}
@@ -337,6 +338,8 @@ async def test_materialize_workspace_view_rebuild_failure_does_not_block_resume(
     # exception is swallowed, and the resume task is still deferred.
     assert result["all_succeeded"] is True
     mock_manager.build_view_schema.assert_called_once()
+    record_failure.assert_called_once()
+    assert "view schema build failed" in record_failure.call_args.args[1]
     defer_mock.assert_awaited_once()
 
 
@@ -1391,16 +1394,19 @@ async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
         ],
         "excluded_tenants": [],
     }
-    result, mock_cube = await _materialize_as(
-        user,
-        multi_tenant_workspace,
-        pipeline_side_effect=fail_second,
-        view_schema_coverage=coverage,
-    )
+    with patch("apps.workspaces.tasks.record_cube_schema_build_failure") as record_failure:
+        result, mock_cube = await _materialize_as(
+            user,
+            multi_tenant_workspace,
+            pipeline_side_effect=fail_second,
+            view_schema_coverage=coverage,
+        )
 
     assert result["all_succeeded"] is False
     assert sorted(r["success"] for r in result["tenants"]) == [False, True]
     mock_cube.assert_not_called()
+    record_failure.assert_called_once()
+    assert "safe tenant snapshot" in record_failure.call_args.args[1]
 
 
 @pytest.mark.asyncio
