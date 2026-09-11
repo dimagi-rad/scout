@@ -22,12 +22,15 @@ from apps.semantic.services.custom_datasets import (
     compile_custom_dataset_sql,
     infer_custom_dataset_columns,
 )
-from apps.users.models import Tenant
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
     TenantSchema,
     WorkspaceViewSchema,
+)
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    aresolve_pipeline_config,
 )
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
 from mcp_server.context import load_workspace_context
@@ -212,30 +215,6 @@ def _tenant_metadata_for_schema(schema_name: str):
     return get_tenant_metadata(ts.tenant_id)
 
 
-def _pipeline_config_for_schema(schema_name: str):
-    registry = get_registry()
-    ts = TenantSchema.objects.filter(schema_name=schema_name).select_related("tenant").first()
-    if ts is None:
-        return registry.get("commcare_sync")
-
-    last_run = (
-        MaterializationRun.objects.filter(
-            tenant_schema=ts,
-            state__in=[
-                MaterializationRun.RunState.COMPLETED,
-                MaterializationRun.RunState.PARTIAL,
-            ],
-        )
-        .order_by("-completed_at")
-        .first()
-    )
-    if last_run:
-        cfg = registry.get(last_run.pipeline)
-        if cfg:
-            return cfg
-    return registry.get_by_provider(ts.tenant.provider) or registry.get("commcare_sync")
-
-
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
     ctx = await load_workspace_context(str(workspace.id))
     schema_name = ctx.schema_name
@@ -246,39 +225,32 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         state=SchemaState.ACTIVE,
     ).aexists()
 
-    if is_view_schema:
+    ts = None
+    if not is_view_schema:
+        ts = await TenantSchema.objects.filter(schema_name=schema_name).afirst()
+
+    if ts is None:
+        # A multi-tenant ws_* view schema (or a schema with no TenantSchema row)
+        # has no single tenant, so there is no pipeline to attribute: read the
+        # tables from information_schema and carry no pipeline descriptions.
         table_entries = await workspace_list_tables(ctx)
-        pipeline_config = get_registry().get("commcare_sync")
+        pipeline_config = None
         tenant_metadata = None
     else:
-        ts = await TenantSchema.objects.filter(schema_name=schema_name).afirst()
-        if ts is None:
-            table_entries = await workspace_list_tables(ctx)
-            pipeline_config = get_registry().get("commcare_sync")
-            tenant_metadata = None
-        else:
-            last_run = (
-                await MaterializationRun.objects.filter(
-                    tenant_schema=ts,
-                    state__in=[
-                        MaterializationRun.RunState.COMPLETED,
-                        MaterializationRun.RunState.PARTIAL,
-                    ],
-                )
-                .order_by("-completed_at")
-                .afirst()
+        last_run = (
+            await MaterializationRun.objects.filter(
+                tenant_schema=ts,
+                state__in=[
+                    MaterializationRun.RunState.COMPLETED,
+                    MaterializationRun.RunState.PARTIAL,
+                ],
             )
-            registry = get_registry()
-            pipeline_config = None
-            if last_run:
-                pipeline_config = registry.get(last_run.pipeline)
-            if pipeline_config is None:
-                tenant = await Tenant.objects.aget(id=ts.tenant_id)
-                pipeline_config = registry.get_by_provider(tenant.provider)
-            if pipeline_config is None:
-                pipeline_config = registry.get("commcare_sync")
-            table_entries = await pipeline_list_tables(ts, pipeline_config)
-            tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
+            .order_by("-completed_at")
+            .afirst()
+        )
+        pipeline_config = await aresolve_pipeline_config(ts, last_run)
+        table_entries = await pipeline_list_tables(ts, pipeline_config)
+        tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
     primary_keys = await pipeline_table_primary_keys(ctx)
     physical_tables: list[PhysicalTable] = []
@@ -311,6 +283,12 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
 def load_physical_tables(workspace) -> tuple[str, list[PhysicalTable]]:
     try:
         return async_to_sync(_load_physical_tables_async)(workspace)
+    except PipelineResolutionError as exc:
+        # Fail the build rather than describing the tables with a guessed
+        # pipeline: this model gets cached and promoted to ACTIVE, so a wrong
+        # guess outlives the request. Reported as its own message because
+        # "refresh workspace data" cannot fix a missing pipeline (#155).
+        raise SemanticCatalogUnavailable(str(exc), schema_status="failed") from exc
     except Exception as exc:
         tenant = workspace.tenant
         schema_status = "unavailable"

@@ -37,6 +37,9 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 # inside the function body, so we must patch on the source module.
 PATCH_INTERNAL_QUERY = "mcp_server.services.query.execute_internal_query"
 PATCH_WORKSPACE_CONTEXT = "mcp_server.server.load_workspace_context"
+# Pipeline resolution moved into apps.workspaces.services.pipeline_resolver,
+# so the tenant lookup is patched where it is now consumed.
+PATCH_RESOLVER_TENANT = "apps.workspaces.services.pipeline_resolver.Tenant"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -307,7 +310,7 @@ class TestListTablesTool:
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
+            patch(PATCH_RESOLVER_TENANT) as mock_tenant_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
         ):
@@ -560,7 +563,7 @@ class TestDescribeTableTool:
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
+            patch(PATCH_RESOLVER_TENANT) as mock_tenant_cls,
             patch("mcp_server.server.aget_tenant_metadata", new_callable=AsyncMock) as mock_tm,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),

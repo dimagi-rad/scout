@@ -45,7 +45,7 @@ from apps.semantic.services.catalog import (
 )
 from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import TenantMembership, User
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
@@ -56,6 +56,10 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    aresolve_pipeline_config,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.tasks import materialize_workspace
@@ -65,6 +69,7 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
     NOT_FOUND,
+    PIPELINE_UNRESOLVED,
     SCHEMA_BUILD_FAILED,
     VALIDATION_ERROR,
     error_response,
@@ -95,26 +100,27 @@ async def _resolve_mcp_context(workspace_id: str):
 
 
 async def _resolve_pipeline_config(ts, last_run):
-    """Pick the right PipelineConfig for a TenantSchema.
+    """Pick the right PipelineConfig for a TenantSchema, or None if there is no tenant.
 
-    Prefers the last run's pipeline, then the tenant provider's, then
-    ``commcare_sync`` (preserves historical behavior).
-
-    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``); we
-    can't infer a tenant-specific pipeline there, so fall back to commcare_sync
-    (per-tenant routing happens at load time, not metadata-describe time).
+    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``): there
+    is no tenant whose pipeline could be inferred, and per-tenant routing happens
+    at load time rather than metadata-describe time. That case returns None —
+    "no pipeline", which the metadata layer renders as no pipeline-derived
+    descriptions. For a real tenant, resolution raises rather than guessing (#155).
     """
-    registry = get_registry()
-    if last_run:
-        cfg = registry.get(last_run.pipeline)
-        if cfg:
-            return cfg
-    if ts is not None:
-        tenant = await Tenant.objects.aget(id=ts.tenant_id)
-        cfg = registry.get_by_provider(tenant.provider)
-        if cfg:
-            return cfg
-    return registry.get("commcare_sync")
+    if ts is None:
+        return None
+    return await aresolve_pipeline_config(ts, last_run)
+
+
+def _pipeline_unresolved_response(exc: PipelineResolutionError) -> dict:
+    """Report an unresolvable pipeline to the agent.
+
+    Logged, not just returned: the envelope reaches the agent but never Sentry,
+    and a supported provider with no pipeline is a deploy defect that must page.
+    """
+    logger.exception("Pipeline resolution failed")
+    return error_response(PIPELINE_UNRESOLVED, str(exc))
 
 
 @mcp.tool()
@@ -173,7 +179,11 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             .order_by("-completed_at")
             .afirst()
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
         tables = await pipeline_list_tables(ts, pipeline_config)
 
@@ -232,7 +242,11 @@ async def describe_table(
             )
             tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
         table = await pipeline_describe_table(table_name, ctx, tenant_metadata, pipeline_config)
         if table is None:
@@ -290,7 +304,11 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             .order_by("-completed_at")
             .afirst()
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
         tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
@@ -1270,13 +1288,17 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             if last_run:
                 if last_run.completed_at:
                     last_materialized_at = last_run.completed_at.isoformat()
-                result_data = last_run.result or {}
-                if "tables" in result_data:
-                    tables = result_data["tables"]
-                elif "table" in result_data and "rows_loaded" in result_data:
-                    tables = [
-                        {"name": result_data["table"], "row_count": result_data["rows_loaded"]}
-                    ]
+                # Go through the catalog rather than indexing ``result`` here.
+                # The keys this used to read (``tables``, ``table``,
+                # ``rows_loaded``) are the pre-#12 single-table result shape;
+                # nothing has written them since the per-source ``sources`` map
+                # replaced it, so this always reported zero tables for a
+                # workspace full of data (03#4). ``pipeline_list_tables`` reads
+                # ``sources`` and reconciles against information_schema, and is
+                # the same call the multi-tenant branch below makes, so both
+                # branches now return identically-shaped entries.
+                pipeline_config = await _resolve_pipeline_config(ts, last_run)
+                tables = await pipeline_list_tables(ts, pipeline_config)
 
             tc["result"] = success_response(
                 {

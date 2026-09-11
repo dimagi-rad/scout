@@ -87,7 +87,6 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
 
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
             new=AsyncMock(return_value=mock_tables),
@@ -98,7 +97,6 @@ async def test_fetch_schema_context_active_compact(mock_tenant, mock_user):
         ),
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        mock_registry.return_value.get.return_value = MagicMock()
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
@@ -132,7 +130,6 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
 
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
             new=AsyncMock(return_value=mock_tables),
@@ -143,7 +140,6 @@ async def test_fetch_schema_context_active_full(mock_tenant, mock_user):
         ),
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        mock_registry.return_value.get.return_value = MagicMock()
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
@@ -164,7 +160,6 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
 
     with (
         patch("apps.agents.graph.base.TenantSchema") as MockTS,
-        patch("apps.agents.graph.base.get_registry") as mock_registry,
         patch(
             "apps.agents.graph.base.pipeline_list_tables",
             new=AsyncMock(return_value=[]),
@@ -175,7 +170,6 @@ async def test_fetch_schema_context_no_get_schema_status_instruction(mock_tenant
         ),
     ):
         MockTS.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-        mock_registry.return_value.get.return_value = MagicMock()
 
         result = await _fetch_schema_context(mock_tenant, mock_user)
 
