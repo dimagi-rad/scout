@@ -71,6 +71,23 @@ class TestWorkspaceList:
         resp = client.get("/api/workspaces/")
         assert resp.status_code == 403
 
+    def test_list_orders_newest_created_workspace_first(self, client, user, workspace, db):
+        newer_workspace = Workspace.objects.create(name="Newest", created_by=user)
+        WorkspaceMembership.objects.create(
+            workspace=newer_workspace,
+            user=user,
+            role=WorkspaceRole.MANAGE,
+        )
+
+        client.force_login(user)
+        resp = client.get("/api/workspaces/")
+
+        assert resp.status_code == 200
+        assert [item["id"] for item in resp.json()] == [
+            str(newer_workspace.id),
+            str(workspace.id),
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Workspace create

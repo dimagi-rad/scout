@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceThreadSync } from "@/hooks/useWorkspaceThreadSync"
+import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 
 // Workspace ids with EMPTY names so workspacePath yields the bare
@@ -35,6 +36,7 @@ function Probe() {
 
 describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)", () => {
   beforeEach(() => {
+    localStorage.clear()
     useAppStore.setState({
       domains: [domain(WS_A), domain(WS_B)],
       domainsStatus: "loaded",
@@ -94,5 +96,17 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
       )
       expect(useAppStore.getState().threadId).toBe(THREAD_A)
     })
+  })
+
+  it("records an opened workspace even when it is already active", async () => {
+    render(
+      <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>
+        <Routes>
+          <Route path="/workspaces/:workspaceId/chat/:threadId" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(getRecentWorkspaceIds()).toEqual([WS_A]))
   })
 })
