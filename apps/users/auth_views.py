@@ -18,15 +18,24 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_GET, require_POST
 
 from apps.users.decorators import async_login_required, login_required_json
-from apps.users.models import TenantConnection, TenantMembership
+from apps.users.models import (
+    SCOPED_OAUTH_PROVIDERS,
+    TenantConnection,
+    TenantMembership,
+)
 from apps.users.rate_limiting import check_rate_limit, record_attempt
-from apps.users.services.credential_resolver import aget_social_token
+from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.oauth_scope import (
+    canonical_provider,
+    is_active_identity,
+    provider_accounts,
+)
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.users.services.token_refresh import get_token_url
+from apps.users.services.token_refresh import credential_fingerprint, get_token_url, token_health
 
 logger = logging.getLogger(__name__)
 
@@ -68,16 +77,22 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     ``True`` while the persisted state stayed incomplete (arch #254, 07#4). The
     caller derives the authoritative flag from the persisted membership state,
     not from this return value.
+
+    Every identity the user holds for the provider is resolved, not just one: an
+    OCS token is team-scoped, so stopping at the first would leave a second
+    team's chatbots undiscovered (#156). One team failing must not skip the rest.
     """
-    token_obj = await aget_social_token(user, provider)
-    if not token_obj:
-        return False
-    try:
-        resolved = await resolve_fn(user, token_obj.token)
-    except Exception:
-        logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
-        return False
-    return bool(resolved)  # falsy/empty = "resolved nothing" so the flag can't flap
+    resolved_any = False
+    for token_obj in await aiter_social_tokens(user, provider):
+        try:
+            resolved = await resolve_fn(
+                user, token_obj.token, social_account=token_obj.account, allow_replace=False
+            )
+        except Exception:
+            logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
+            continue
+        resolved_any = resolved_any or bool(resolved)
+    return resolved_any  # falsy/empty = "resolved nothing" so the flag can't flap
 
 
 async def _aonboarding_complete(user) -> bool:
@@ -219,17 +234,37 @@ def signup_view(request):
 @require_POST
 @login_required_json
 def disconnect_provider_view(request, provider_id):
-    """Revoke OAuth API token for a provider, keeping the SocialAccount for login."""
-    # Check both provider class id and provider_id (see SocialAccount.provider note below).
-    tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
-    if not tokens.exists():
-        app_provider_ids = list(
-            SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
+    """Revoke every OAuth token for a provider, keeping the SocialAccounts for login.
+
+    Provider-wide by design: for a scoped provider this signs the user out of
+    *all* their teams. Removing a single team is
+    ``DELETE /api/auth/connections/<id>/``.
+    """
+    # Data providers may use configured allauth IDs such as commcare_prod.
+    provider = canonical_provider(provider_id)
+    if provider in ("commcare", "commcare_connect", "ocs"):
+        tokens = SocialToken.objects.filter(
+            account__in=provider_accounts(request.user.pk, provider)
         )
-        if app_provider_ids:
+    else:
+        tokens = SocialToken.objects.filter(
+            account__user=request.user, account__provider=provider_id
+        )
+        if not tokens.exists():
+            app_provider_ids = list(
+                SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
+            )
             tokens = SocialToken.objects.filter(
                 account__user=request.user, account__provider__in=app_provider_ids
             )
+    configured_ids = (
+        SocialApp.objects.filter(provider=provider)
+        .exclude(provider_id="")
+        .values_list("provider_id", flat=True)
+    )
+    tokens = tokens | SocialToken.objects.filter(
+        account__user=request.user, account__provider__in=configured_ids
+    )
     if not tokens.exists():
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
@@ -239,7 +274,7 @@ def disconnect_provider_view(request, provider_id):
     # (their conversations/data are retained and restored if reconnected).
     oauth_conns = TenantConnection.objects.filter(
         user=request.user,
-        provider=provider_id,
+        provider=provider,
         credential_type=TenantConnection.OAUTH,
     )
     TenantMembership.objects.filter(connection__in=oauth_conns).update(
@@ -252,6 +287,10 @@ def disconnect_provider_view(request, provider_id):
     cache.delete(_me_onboarding_cache_key(request.user))
 
     return JsonResponse({"status": "disconnected"})
+
+
+def _record_status(seen: dict[str, set[str]], provider: str, status: str) -> None:
+    seen.setdefault(provider, set()).add(status)
 
 
 @require_GET
@@ -275,37 +314,46 @@ def providers_view(request):
         tokens = SocialToken.objects.filter(
             account__user=request.user,
         ).select_related("account", "app")
+        # provider -> every one of its identities' statuses. A scoped provider now
+        # has one token per team (#156), and the old per-provider assignment was
+        # last-row-wins, so a healthy team could be reported as expired purely on
+        # queryset order. Reduced below to "connected while at least one works";
+        # the per-team detail lives on /api/auth/connections/.
+        bindings = {
+            (conn.provider, conn.scope_key): conn.social_account_id
+            for conn in TenantConnection.objects.filter(
+                user=request.user, credential_type=TenantConnection.OAUTH
+            )
+        }
+        seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:
+            if not is_active_identity(social_token.account, bindings):
+                continue
             provider = social_token.account.provider
             token_url = get_token_url(provider)
-            can_refresh = bool(token_url and social_token.token_secret)
-            if token_needs_refresh(social_token.expires_at, can_refresh=can_refresh):
-                if can_refresh:
-                    try:
-                        async_to_sync(refresh_oauth_token)(social_token, token_url)
-                        token_status[provider] = "connected"
-                    except TokenRefreshError:
-                        token_status[provider] = "expired"
-                else:
-                    token_status[provider] = "expired"
-            elif social_token.expires_at is None and token_url is not None:
-                # Unknown expiry and no refresh token to test it with, so we
-                # cannot vouch for this credential. Reporting "connected" on the
-                # strength of no evidence is exactly how a revoked token showed
-                # as healthy right up until it 401'd (#373). "expired" already
-                # renders as an actionable Reconnect prompt.
-                #
-                # Gated on token_url because #373 is about credentials Scout
-                # hands to a data loader. A provider with no token endpoint
-                # (GitHub, Google) is a login-only identity provider whose token
-                # is never used that way — and its OAuth apps return neither
-                # expires_in nor a refresh token, so this branch would pin it at
-                # "expired" forever, with a Reconnect that cannot clear it and a
-                # Disconnect button hidden (ConnectionsPage only renders it for
-                # "connected").
-                token_status[provider] = "expired"
-            else:
-                token_status[provider] = "connected"
+            can_refresh = bool(token_url and social_token.token_secret and social_token.app)
+            refresh_failed = False
+            if can_refresh and token_needs_refresh(social_token.expires_at):
+                try:
+                    async_to_sync(refresh_oauth_token)(social_token, token_url)
+                except TokenRefreshError:
+                    refresh_failed = True
+            refresh_failed = (
+                refresh_failed
+                or TenantConnection.objects.filter(
+                    social_account_id=social_token.account_id,
+                    oauth_refresh_failure_fingerprint=credential_fingerprint(social_token),
+                ).exists()
+            )
+            _record_status(
+                seen_statuses,
+                provider,
+                token_health(social_token, provider, refresh_failed=refresh_failed),
+            )
+        token_status = {
+            provider: ("connected" if "connected" in statuses else "expired")
+            for provider, statuses in seen_statuses.items()
+        }
 
     providers = []
     for app in apps:
@@ -322,6 +370,11 @@ def providers_view(request):
                 app.provider in connected_providers or app.provider_id in connected_providers
             )
             entry["connected"] = is_connected
+            # Lets the UI offer "connect another team" rather than only
+            # connect/disconnect, for a provider whose token covers one scope.
+            entry["supports_multiple_scopes"] = (
+                app.provider in SCOPED_OAUTH_PROVIDERS or app.provider_id in SCOPED_OAUTH_PROVIDERS
+            )
             if is_connected:
                 # No token_status entry means the SocialAccount exists but no token
                 # (user revoked API access) — treat as disconnected

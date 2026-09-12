@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 
+from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
@@ -15,11 +16,16 @@ from django.views.decorators.http import require_http_methods
 
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
-from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership, User
 from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
 )
+from apps.users.services.credential_resolver import (
+    aconnection_status,
+    aiter_social_tokens,
+)
+from apps.users.services.oauth_scope import scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
@@ -33,12 +39,44 @@ TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 logger = logging.getLogger(__name__)
 
 
-async def _aget_token_value(user, provider: str) -> str | None:
-    """Return the user's OAuth access token string for *provider*, or None."""
-    from apps.users.services.credential_resolver import _social_token_qs
+# provider -> resolver, for the lazy refresh tenant_list_view runs on poll.
+_PROVIDER_RESOLVERS = {
+    "commcare": resolve_commcare_domains,
+    "commcare_connect": resolve_connect_opportunities,
+    "ocs": resolve_ocs_chatbots,
+}
 
-    token = await _social_token_qs(user, provider).afirst()
-    return token.token if token else None
+
+async def _arefresh_all_identities(user) -> None:
+    """Refresh upstream memberships for every identity the user holds.
+
+    The TTL is keyed per *identity*, not per provider. A user with two OCS teams
+    holds one token per team, and a single ``tenant_refresh:<user>:ocs`` key meant
+    the first team refreshed cheaply and then suppressed the second for an hour —
+    so the second team's chatbots could stay missing indefinitely (#156).
+
+    Each identity is independent: one team's failure must not stop the others, and
+    a raise means "skip refresh" (never revoke on an inconclusive fetch), so the
+    TTL is only written on success.
+    """
+    for provider, resolve in _PROVIDER_RESOLVERS.items():
+        for token_obj in await aiter_social_tokens(user, provider):
+            cache_key = f"tenant_refresh:{user.id}:{provider}:{token_obj.account_id}"
+            if await cache.aget(cache_key):
+                continue
+            try:
+                await resolve(
+                    user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to refresh %s tenants for account %s",
+                    provider,
+                    token_obj.account_id,
+                    exc_info=True,
+                )
+                continue
+            await cache.aset(cache_key, True, TENANT_REFRESH_TTL)
 
 
 # Wrap the persistence loop in sync_to_async so transaction.atomic() applies.
@@ -84,40 +122,12 @@ def _persist_api_key_connection(user, provider, descriptors, encrypted, team_slu
 async def tenant_list_view(request):
     """GET /api/auth/tenants/ — List the user's tenant memberships.
 
-    If the user has a CommCare OAuth token, refreshes domain list from
-    CommCare API before returning results.
+    Refreshes each connected identity's upstream access (TTL-throttled) before
+    returning, so a team the user authorised elsewhere shows up on the next poll.
     """
     user = request._authenticated_user
 
-    commcare_cache_key = f"tenant_refresh:{user.id}:commcare"
-    if not await cache.aget(commcare_cache_key):
-        access_token = await _aget_token_value(user, "commcare")
-        if access_token:
-            try:
-                await resolve_commcare_domains(user, access_token)
-                await cache.aset(commcare_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh CommCare domains", exc_info=True)
-
-    connect_cache_key = f"tenant_refresh:{user.id}:commcare_connect"
-    if not await cache.aget(connect_cache_key):
-        connect_token = await _aget_token_value(user, "commcare_connect")
-        if connect_token:
-            try:
-                await resolve_connect_opportunities(user, connect_token)
-                await cache.aset(connect_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh Connect opportunities", exc_info=True)
-
-    ocs_cache_key = f"tenant_refresh:{user.id}:ocs"
-    if not await cache.aget(ocs_cache_key):
-        ocs_token = await _aget_token_value(user, "ocs")
-        if ocs_token:
-            try:
-                await resolve_ocs_chatbots(user, ocs_token)
-                await cache.aset(ocs_cache_key, True, TENANT_REFRESH_TTL)
-            except Exception:
-                logger.warning("Failed to refresh OCS chatbots", exc_info=True)
+    await _arefresh_all_identities(user)
 
     memberships = []
     async for tm in TenantMembership.objects.filter(
@@ -187,12 +197,23 @@ async def api_key_providers_view(request):
 @async_login_required
 async def tenant_credential_list_view(request):
     """GET  /api/auth/connections/ — list the user's connections, chatbots grouped
-    POST /api/auth/connections/ — add a new API-key connection"""
+    POST /api/auth/connections/ — add a new API-key connection
+
+    The GET is the surface a user reads to answer "which teams am I connected
+    to, and is each one healthy?". To connect another, they follow the provider's
+    `login_url` from `/api/auth/providers/` — allauth's `?process=connect`
+    round-trip adds an identity for a team they don't hold yet and updates the
+    one they do.
+    """
     user = request._authenticated_user
 
     if request.method == "GET":
         results = []
-        async for conn in TenantConnection.objects.filter(user=user).order_by("-created_at"):
+        async for conn in (
+            TenantConnection.objects.filter(user=user)
+            .select_related("social_account")
+            .order_by("-created_at")
+        ):
             chatbots = []
             async for tm in conn.memberships.filter(archived_at__isnull=True).select_related(
                 "tenant"
@@ -206,11 +227,21 @@ async def tenant_credential_list_view(request):
                         "team_name": tm.team_name,
                     }
                 )
+            is_oauth = conn.credential_type == TenantConnection.OAUTH
             results.append(
                 {
                     "connection_id": str(conn.id),
                     "provider": conn.provider,
                     "credential_type": conn.credential_type,
+                    # The scope this credential authorises, so the user can see
+                    # which teams they hold and which one is unhealthy — the
+                    # self-remediation half of #156. Falls back to the label
+                    # derived from a chatbot for connections predating the field.
+                    "scope_key": conn.scope_key,
+                    "scope_label": conn.scope_label,
+                    # Per connection, not per provider: two teams have independent
+                    # tokens and one can expire while the other is fine.
+                    "status": await aconnection_status(conn) if is_oauth else None,
                     "chatbots": chatbots,
                 }
             )
@@ -278,8 +309,21 @@ async def tenant_credential_list_view(request):
 
 @sync_to_async
 def _archive_and_delete_connection(conn):
-    """Archive the connection's live memberships (retaining data), then delete it."""
+    """Archive the connection's live memberships (retaining data), then delete it.
+
+    For an OAuth connection this deletes every token for its scope, so
+    disconnecting one OCS team leaves the user's other teams connected — the
+    provider-wide `disconnect_provider_view` is the "sign out of everything"
+    action. The SocialAccount survives either way: it is a login identity, not a
+    data credential.
+    """
     with transaction.atomic():
+        # Serialize scope creation/replacement against disconnect, including absent rows.
+        User.objects.select_for_update().get(pk=conn.user_id)
+        if conn.credential_type == TenantConnection.OAUTH:
+            SocialToken.objects.filter(
+                account_id__in=scope_account_ids(conn.user_id, conn.provider, conn.scope_key)
+            ).delete()
         conn.memberships.filter(archived_at__isnull=True).update(
             archived_at=timezone.now(), connection=None
         )
@@ -376,7 +420,8 @@ async def tenant_ensure_view(request):
         )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
-            connect_token = await _aget_token_value(user, "commcare_connect")
+            tokens = await aiter_social_tokens(user, "commcare_connect")
+            connect_token = tokens[0] if tokens else None
             if not connect_token:
                 return JsonResponse(
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
@@ -385,7 +430,9 @@ async def tenant_ensure_view(request):
 
             # Resolve the user's actual opportunities from the Connect API
             # to verify they have access to the requested tenant_id.
-            memberships = await resolve_connect_opportunities(user, connect_token)
+            memberships = await resolve_connect_opportunities(
+                user, connect_token.token, social_account=connect_token.account, allow_replace=False
+            )
             tm = next((m for m in memberships if m.tenant.external_id == tenant_id), None)
             if tm is None:
                 return JsonResponse(

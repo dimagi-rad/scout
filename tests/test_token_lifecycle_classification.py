@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import requests
@@ -27,7 +27,7 @@ from apps.users.services.token_refresh import TokenRefreshError, refresh_oauth_t
 
 
 def _social_token():
-    token = Mock()
+    token = Mock(token="old-access", app_id=1, account_id=1)
     token.app.client_id = "client-abc"
     token.app.secret = "shh"
     token.token_secret = "refresh-token"
@@ -52,6 +52,14 @@ def _post_returning(status: int, body: str):
 
 
 class TestSyncRefreshLogLevels:
+    @pytest.fixture(autouse=True)
+    def _mock_connection_health_storage(self, mocker):
+        connections = mocker.patch(
+            "apps.users.services.token_refresh._token_connections"
+        ).return_value
+        connections.aupdate = AsyncMock()
+        connections.filter.return_value.aupdate = AsyncMock()
+
     def test_invalid_grant_is_a_warning_not_an_exception(self, caplog):
         """A dead refresh token is an expected outcome, not a bug."""
         caplog.set_level(logging.DEBUG)
