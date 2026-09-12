@@ -1479,6 +1479,7 @@ async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advi
         uncovered_reachable=True,
     )
 
+    assert _tj.materialization_preflight_failures == []
     status, summary = await _aggregate_materialization_state(90002, ws, str(user.id))
 
     assert status == "partial"
@@ -1538,6 +1539,8 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     if view_state == SchemaState.ACTIVE:
         assert tj.error_summary.startswith("Materialization did not refresh all data.")
     assert "re-running materialization will not help" not in tj.error_summary
+    assert "  " not in tj.error_summary
+    assert tj.error_summary == tj.error_summary.strip()
 
 
 @pytest.mark.asyncio
@@ -1591,3 +1594,41 @@ async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_r
     await tj.arefresh_from_db()
     assert not tj.error_summary.startswith("Data loaded,")
     assert "did not refresh" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recorded_preflight_reasons_match_uuid_and_provider():
+    user, ws, uncovered, _tj = await _make_partly_covered_job(
+        email="provider-match@b.c", ws_name="W-provider-match", pj_id=90006, covered_run=False
+    )
+    covered = await ws.tenants.exclude(id=uncovered.id).aget()
+    covered.provider = "ocs"
+    covered.external_id = uncovered.external_id
+    await covered.asave(update_fields=["provider", "external_id"])
+    failures = [
+        {
+            "tenant_id": str(covered.id),
+            "provider": "ocs",
+            "error": "OCS credential missing",
+            "error_code": "",
+        },
+        {
+            "tenant_id": str(uncovered.id),
+            "provider": "commcare",
+            "error": "CommCare pipeline missing",
+            "error_code": "PIPELINE_UNRESOLVED",
+        },
+        {
+            "tenant_id": str(covered.id),
+            "provider": "commcare",
+            "error": "wrong provider",
+            "error_code": "",
+        },
+    ]
+    status, summary = await _aggregate_materialization_state(90006, ws, str(user.id), failures)
+    assert status == "no_runs"
+    assert {entry["provider"]: entry["error"] for entry in summary} == {
+        "ocs": "OCS credential missing",
+        "commcare": "CommCare pipeline missing",
+    }

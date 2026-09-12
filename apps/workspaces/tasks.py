@@ -355,6 +355,18 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
     return {"status": "active", "schema_id": schema_id}
 
 
+def _preflight_failure(tenant, error: str, code: str = "") -> dict:
+    return {
+        "tenant": tenant.external_id,
+        "tenant_id": str(tenant.id),
+        "provider": tenant.provider,
+        "state": TENANT_NOT_RUN,
+        "success": False,
+        "error": error,
+        **({"error_code": str(code)} if code else {}),
+    }
+
+
 async def materialize_workspace_core(
     workspace_id: str,
     user_id: str = "",
@@ -405,12 +417,9 @@ async def materialize_workspace_core(
     # ALL-of authorization rollout decided in #380 is outside this reporting fix.
     reachable = {tm.tenant_id for tm in memberships}
     unreachable_results = [
-        {
-            "tenant": tenant.external_id,
-            "success": False,
-            "error": _unreachable_tenant_error(tenant),
-            "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
-        }
+        _preflight_failure(
+            tenant, _unreachable_tenant_error(tenant), ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+        )
         for tenant_id, tenant in workspace_tenants.items()
         if tenant_id not in reachable
     ]
@@ -439,12 +448,11 @@ async def materialize_workspace_core(
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
             tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "success": False,
-                    "error": no_pipeline_message(registry, tm.tenant.provider),
-                    "error_code": str(ErrorCode.PIPELINE_UNRESOLVED),
-                }
+                _preflight_failure(
+                    tm.tenant,
+                    no_pipeline_message(registry, tm.tenant.provider),
+                    ErrorCode.PIPELINE_UNRESOLVED,
+                )
             )
             continue
 
@@ -453,24 +461,13 @@ async def materialize_workspace_core(
         except CredentialResolutionError as e:
             # Actionable failure (e.g. token scoped to a different team) —
             # surface a distinct message + code so the user knows to
-            # re-connect, not the generic "No credential configured"
+            # re-connect, not the generic "No usable credential could be resolved"
             # (arch #245 finding 07#3).
-            tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "success": False,
-                    "error": e.message,
-                    "error_code": e.code,
-                }
-            )
+            tenant_results.append(_preflight_failure(tm.tenant, e.message, e.code))
             continue
         if credential is None:
             tenant_results.append(
-                {
-                    "tenant": tenant_id,
-                    "success": False,
-                    "error": "No usable credential could be resolved",
-                }
+                _preflight_failure(tm.tenant, "No usable credential could be resolved")
             )
             continue
 
@@ -647,13 +644,25 @@ async def materialize_workspace(
     (recipes) can reuse it without the fire-and-resume machinery.
     """
     job_id = context.job.id
+    preflight_failures = None
     try:
-        return await materialize_workspace_core(workspace_id, user_id, job_id)
+        result = await materialize_workspace_core(workspace_id, user_id, job_id)
+        preflight_failures = [
+            {
+                "tenant_id": entry["tenant_id"],
+                "provider": entry["provider"],
+                "error": str(entry["error"])[:1000],
+                "error_code": str(entry.get("error_code") or ""),
+            }
+            for entry in result.get("tenants", [])
+            if entry.get("state") == TENANT_NOT_RUN
+        ]
+        return result
     finally:
-        await _defer_resume_for_job(job_id)
+        await _defer_resume_for_job(job_id, preflight_failures)
 
 
-async def _defer_resume_for_job(job_id: int) -> None:
+async def _defer_resume_for_job(job_id: int, preflight_failures: list[dict] | None = None) -> None:
     """Find the ThreadJob bound to ``job_id`` and defer the resume task.
 
     MCP commits the ThreadJob row *after* defer_async returns the job id, so under
@@ -678,6 +687,11 @@ async def _defer_resume_for_job(job_id: int) -> None:
                 job_id,
             )
             return
+        if preflight_failures is not None:
+            # Commit before enqueue: a failed enqueue can be recovered by the janitor.
+            await ThreadJob.objects.filter(id=tj.id).aupdate(
+                materialization_preflight_failures=preflight_failures
+            )
         await resume_thread_after_materialization.defer_async(thread_job_id=str(tj.id))
     except Exception:
         logger.exception("Failed to defer resume task for job %s", job_id)
@@ -1592,7 +1606,7 @@ state. Consumers must not treat it as one.
 
 
 async def _uncovered_tenant_summaries(
-    workspace, user_id: str, covered_tenant_ids: set
+    workspace, user_id: str, covered_tenant_ids: set, preflight_failures: list[dict] | None = None
 ) -> list[dict]:
     """Summary entries for workspace tenants this job produced no run row for.
 
@@ -1602,10 +1616,9 @@ async def _uncovered_tenant_summaries(
     all. Run rows can say what loaded but never what was missed, so the
     workspace's tenant list is the only thing that can (#364).
 
-    The reason is classified where it is knowable: no live membership is the
-    current partially reachable case and gets its own code plus guidance.
-    A live membership alone cannot establish why no pipeline ran (for example,
-    credentials may be missing), so that case carries no inferred advice.
+    Recorded preflight failures preserve what this job knew before any run was
+    created. Older jobs have no record: membership can establish lack of access,
+    but cannot explain other missing runs, so those carry no inferred advice.
     """
     uncovered = [
         wt.tenant
@@ -1625,9 +1638,18 @@ async def _uncovered_tenant_summaries(
                 tenant_id__in=[t.id for t in uncovered],
             ).values_list("tenant_id", flat=True)
         }
+    recorded_failures = {
+        (entry.get("tenant_id"), entry.get("provider")): entry
+        for entry in preflight_failures or []
+        if isinstance(entry, dict) and entry.get("error")
+    }
     summaries = []
     for tenant in uncovered:
-        if tenant.id in reachable:
+        recorded = recorded_failures.get((str(tenant.id), tenant.provider))
+        if recorded:
+            error = str(recorded["error"])
+            code = str(recorded.get("error_code") or "")
+        elif tenant.id in reachable:
             error = (
                 f"this workspace includes {tenant.provider} source "
                 f"'{tenant.external_id}' but the run recorded nothing for it"
@@ -1644,6 +1666,8 @@ async def _uncovered_tenant_summaries(
                 "sources": {},
                 "error": error,
                 "error_code": str(code),
+                "preflight_recorded": bool(recorded),
+                "provider": tenant.provider,
             }
         )
         logger.warning(
@@ -1657,7 +1681,10 @@ async def _uncovered_tenant_summaries(
 
 
 async def _aggregate_materialization_state(
-    procrastinate_job_id: int, workspace, user_id: str
+    procrastinate_job_id: int,
+    workspace,
+    user_id: str,
+    preflight_failures: list[dict] | None = None,
 ) -> tuple[str, list[dict]]:
     """Inspect MaterializationRun rows for this job, return (status, per-tenant summary).
 
@@ -1695,6 +1722,7 @@ async def _aggregate_materialization_state(
         workspace,
         user_id,
         {r.tenant_schema.tenant_id for r in runs},
+        preflight_failures,
     )
     if not runs:
         return "no_runs", uncovered
@@ -1857,7 +1885,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     # pre-CAS tj.state snapshot, which mislabelled a Stop-click that raced with
     # completion as "cancelled" when the data had actually loaded).
     status, summary = await _aggregate_materialization_state(
-        tj.procrastinate_job_id, workspace, str(user.id)
+        tj.procrastinate_job_id, workspace, str(user.id), tj.materialization_preflight_failures
     )
     uncovered_tenants = [t["tenant"] for t in summary if t.get("state") == TENANT_NOT_RUN]
     # Named per source *and* per tenant, because a run can carry a dead token on
@@ -1971,11 +1999,11 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     elif status == "partial":
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization completed with PARTIAL data "
-            f"(some sources loaded, others failed or were skipped). Verify the provenance "
+            f"(some sources loaded, others failed, were skipped, or did not run). Verify the provenance "
             f"and freshness of available data before using it, and tell the user which sources were "
             f"not refreshed successfully. Older data may still be queryable. Do NOT "
             f"claim that fresh data is loaded for sources marked "
-            f"failed or skipped. A source with state=in_progress or state=failed "
+            f"failed, skipped, or not_run. A source with state=in_progress or state=failed "
             f"and a non-null resume_last_id has partially-loaded rows that the "
             f"next materialization will continue from — do NOT query its table "
             f"as if it were complete.{credential_guidance} Per-tenant: {summary}"
@@ -2014,8 +2042,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             "Any of their data in results may be older."
         )
         body += (
-            f" IMPORTANT: {refresh_coverage_user_note} There is no run record for them; "
-            "older data may still be included in workspace queries. "
+            f" IMPORTANT: This run did not refresh these data sources: {', '.join(uncovered_tenants)}. "
+            "There is no run record for them; older data may still be included in workspace queries. "
             "Refresh coverage does not establish query coverage. Verify the sources "
             "and last successful refresh times used by any answer, disclose stale or unknown "
             "freshness, and do not claim these sources are excluded without checking."
@@ -2201,6 +2229,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
         elif status == "no_runs":
             error_summary = (
                 "Materialization ran no pipelines, so nothing was loaded. "
+                "Check the tenant failure details below."
+                if tj.materialization_preflight_failures
+                else "Materialization ran no pipelines, so nothing was loaded. "
                 "Check that the workspace's tenants are connected to your account "
                 "and have credentials configured."
             )
@@ -2217,8 +2248,23 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             )
             if uncovered_guidance:
                 error_summary += " " + " ".join(uncovered_guidance)
-    if error_summary and refresh_coverage_user_note:
-        error_summary = f"{error_summary} {refresh_coverage_user_note}"
+    if error_summary:
+        recorded_details = [
+            f"{entry['tenant']} ({entry['provider']}): {entry['error']}"
+            for entry in summary
+            if entry.get("preflight_recorded")
+        ]
+        no_runs_guidance = guidance_lines if status == "no_runs" else []
+        error_summary = " ".join(
+            part.strip()
+            for part in [
+                error_summary,
+                *recorded_details,
+                *no_runs_guidance,
+                refresh_coverage_user_note,
+            ]
+            if part.strip()
+        )
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
     # row CANCELLED, so this matches zero rows rather than clobbering it back to a
     # success terminal; we then re-read the actual persisted state below.
