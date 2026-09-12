@@ -25,7 +25,6 @@ from apps.semantic.services.custom_datasets import (
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     WorkspaceViewSchema,
 )
@@ -33,6 +32,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
 )
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
 from mcp_server.context import load_workspace_context
 from mcp_server.pipeline_registry import get_registry
 from mcp_server.services.metadata import (
@@ -212,7 +212,7 @@ def _tenant_metadata_for_schema(schema_name: str):
     ts = TenantSchema.objects.filter(schema_name=schema_name).first()
     if ts is None:
         return None
-    return TenantMetadata.objects.filter(tenant_membership__tenant_id=ts.tenant_id).first()
+    return get_tenant_metadata(ts.tenant_id)
 
 
 async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTable]]:
@@ -250,9 +250,7 @@ async def _load_physical_tables_async(workspace) -> tuple[str, list[PhysicalTabl
         )
         pipeline_config = await aresolve_pipeline_config(ts, last_run)
         table_entries = await pipeline_list_tables(ts, pipeline_config)
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant_id=ts.tenant_id
-        ).afirst()
+        tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
     primary_keys = await pipeline_table_primary_keys(ctx)
     physical_tables: list[PhysicalTable] = []

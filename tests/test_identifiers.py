@@ -165,6 +165,17 @@ class TestDbtNames:
         b = dbt_column_alias("colname", seen)
         assert a != b  # second occurrence disambiguated
 
+    def test_column_alias_skips_literal_suffix_reserved_for_model(self):
+        seen: dict[str, int] = {}
+        reserved = {"status", "status_2"}
+
+        aliases = [
+            dbt_column_alias(base, seen, reserved=reserved)
+            for base in ("status", "status", "status_2")
+        ]
+
+        assert aliases == ["status", "status_3", "status_2"]
+
     def test_long_aliases_sharing_head_distinct_and_bounded(self):
         seen: dict[str, int] = {}
         a = dbt_column_alias("p" * 100 + "_a", seen)
