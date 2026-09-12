@@ -21,7 +21,10 @@ canonical metrics. `teardown_schema` is not exposed to the agent.
 Before execution, the server parses SQL and requires a single SELECT, including
 read-only CTEs, joins, and set operations. It rejects DML, DDL, `SELECT INTO`,
 data-modifying CTEs, row-locking clauses, explicit `OPERATOR(...)` calls, and
-multiple statements. Use `LIMIT` rather than `FETCH FIRST`; unsupported fetch
+multiple statements. Agent-authored queries must contain literal values rather
+than parameter placeholders (`%s`, `?`, `:name`, or `$1`). Calls whose arguments
+would be discarded during parsing or PostgreSQL generation are rejected.
+Use `LIMIT` rather than `FETCH FIRST`; unsupported fetch
 syntax is rejected instead of silently changing the requested row count.
 Qualified table references must
 use the workspace schema or `public`, without a database/catalog qualifier;

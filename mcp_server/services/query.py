@@ -156,17 +156,8 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
             "Schema configuration error. Please contact an administrator.",
         )
 
-    if isinstance(
-        exc,
-        (
-            psycopg.errors.SyntaxError,
-            psycopg.errors.UndefinedFunction,
-            psycopg.errors.UndefinedColumn,
-            psycopg.errors.UndefinedTable,
-            psycopg.errors.UndefinedObject,
-            psycopg.errors.DatatypeMismatch,
-        ),
-    ):
+    sqlstate = getattr(exc, "sqlstate", None) or ""
+    if sqlstate[:2] in {"42", "22", "21"} or sqlstate == "0A000":
         return VALIDATION_ERROR, f"Invalid SQL query: {exc}. Reformulate the query and retry."
 
     if isinstance(exc, psycopg.Error):

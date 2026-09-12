@@ -164,6 +164,17 @@ class TestExecuteQuery:
     @pytest.mark.parametrize(
         "error_type",
         [
+            psycopg.errors.GroupingError,
+            psycopg.errors.AmbiguousColumn,
+            psycopg.errors.WrongObjectType,
+            psycopg.errors.InvalidColumnReference,
+            psycopg.errors.CannotCoerce,
+            psycopg.errors.DuplicateAlias,
+            psycopg.errors.AmbiguousFunction,
+            psycopg.errors.InvalidTextRepresentation,
+            psycopg.errors.DivisionByZero,
+            psycopg.errors.CardinalityViolation,
+            psycopg.errors.FeatureNotSupported,
             psycopg.errors.SyntaxError,
             psycopg.errors.UndefinedFunction,
             psycopg.errors.UndefinedColumn,
@@ -192,6 +203,7 @@ class TestExecuteQuery:
     @pytest.mark.parametrize(
         "error",
         [
+            psycopg.errors.ConnectionFailure("connection lost"),
             psycopg.errors.InsufficientPrivilege("denied"),
             psycopg.errors.InvalidPassword("password authentication failed"),
             psycopg.OperationalError("does not exist is not a SQLSTATE"),

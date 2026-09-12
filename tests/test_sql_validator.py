@@ -1023,9 +1023,9 @@ class TestGenerationReviewRegressions:
             SQLValidator().validate("SELECT @ x")
 
     @pytest.mark.parametrize("name", sorted(ALLOWED_ANALYTICS_FUNCTIONS))
-    @pytest.mark.parametrize("arity", range(5))
+    @pytest.mark.parametrize("arity", range(6))
     def test_real_parser_alias_calls_generate_or_reject(self, name, arity):
-        arguments = ", ".join("a" for _ in range(arity))
+        arguments = ", ".join(f"scout_arg_{index}" for index in range(arity))
         validator = SQLValidator()
         try:
             statement = validator.validate(f"SELECT {name}({arguments}) FROM t")
@@ -1033,6 +1033,8 @@ class TestGenerationReviewRegressions:
             return
         rendered = validator.inject_limit(statement).sql(dialect="postgres")
         assert rendered
+        for index in range(arity):
+            assert f"scout_arg_{index}" in rendered.lower()
 
 
 class TestInvalidInputRecovery:
@@ -1054,3 +1056,98 @@ class TestInvalidInputRecovery:
     def test_custom_rewrite_does_not_drop_extra_arguments(self, expression):
         with pytest.raises(SQLValidationError, match="arguments"):
             SQLValidator().validate(f"SELECT {expression}")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(DISTINCT a), array_agg(a ORDER BY a DESC) FILTER (WHERE a > 0) FROM (VALUES (1), (2), (2)) t(a)",
+        "SELECT string_agg(DISTINCT a, ',' ORDER BY a) FROM (VALUES ('a'), ('b')) t(a)",
+        "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY a) FROM (VALUES (1), (2)) t(a)",
+        "SELECT sum(a) OVER (ORDER BY a ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM (VALUES (1), (2)) t(a)",
+        "SELECT CASE WHEN true THEN coalesce(NULL, 1) ELSE 2 END",
+        "SELECT trim(BOTH 'x' FROM 'xxabcx'), trim('abc'), btrim('xxa', 'x'), ltrim('xxa', 'x'), rtrim('axx', 'x')",
+        "SELECT substring('abcdef' FROM 2 FOR 3), substring('abcdef' FOR 3 FROM 2), substring('abcdef', 2, 3)",
+        "SELECT extract(year FROM DATE '2026-01-01'), date_part('year', DATE '2026-01-01')",
+        "SELECT date_trunc('day', TIMESTAMP '2026-01-01 12:00:00'), date_trunc('day', TIMESTAMPTZ '2026-01-01 12:00:00Z', 'UTC')",
+        "SELECT round(1.235, 2), mod(7, 3), lpad('a', 5, '.'), rpad('a', 5, '.')",
+        "SELECT to_char(TIMESTAMP '2026-01-01', 'YYYY-MM-DD'), to_date('2026-01-01', 'YYYY-MM-DD'), to_number('12', '99')",
+        "SELECT to_timestamp(0), to_timestamp('2026-01-01', 'YYYY-MM-DD')",
+        "SELECT json_build_object('a', 1, 'b', 2), jsonb_build_object('a', 1), json_build_array(1, 'a'), jsonb_build_array(1, 'b')",
+        "SELECT json_object_agg(a,b), jsonb_object_agg(a,b), json_agg(b), jsonb_agg(b) FROM (VALUES ('x',1),('y',2)) t(a,b)",
+        "SELECT jsonb_array_elements('[1,2]'::jsonb)",
+        "SELECT '{\"a\":1}'::jsonb @> '{\"a\":1}', '{\"a\":1}'::jsonb ? 'a', '{\"a\":1}'::jsonb @@ '$.a == 1'",
+        "SELECT regexp_like('ABC', 'abc', 'i'), regexp_like('abc', 'b'), 'abc' ~ 'b', 'ABC' ~* 'b'",
+        "SELECT current_time, current_time(3), current_timestamp(0), localtime(3)",
+        "SELECT position('b' IN 'abc'), char_length('abc'), length('abc'), upper('abc'), concat('a','b','c')",
+        "SELECT (ARRAY[1,2,3])[1]",
+        "SELECT array_length(ARRAY[1,2],1), cardinality(ARRAY[1,2]), array_to_string(ARRAY[1,2], ',')",
+        "SELECT EXISTS(SELECT 1, 2), EXISTS(SELECT 1 WHERE false)",
+        "SELECT greatest(1,2,3), least(1,2), nullif(1,2), coalesce(NULL,1,2)",
+        "SELECT generate_series(1,3), power(2,3), log(10,100), trunc(1.235,2)",
+        "SELECT bool_and(a), bool_or(a) FROM (VALUES (true),(false)) t(a)",
+        "SELECT variance(a), var_pop(a), stddev(a), corr(a,a) FROM (VALUES (1),(2),(3)) t(a)",
+        "SELECT CAST('1' AS numeric(10,2)), CAST(ARRAY[1,2] AS integer[])",
+        "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<3) SELECT sum(n) FROM seq",
+        "SELECT a, sum(a) FROM (VALUES (1),(2)) t(a) GROUP BY ROLLUP(a) ORDER BY a NULLS LAST",
+        "SELECT x.a, y.b FROM (VALUES (1),(2)) x(a) CROSS JOIN LATERAL (SELECT x.a+1 AS b) y ORDER BY x.a",
+    ],
+)
+def test_valid_postgres_argument_shapes_preserved(sql):
+    validator = SQLValidator()
+    assert validator.inject_limit(validator.validate(sql)).sql(dialect="postgres")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(DISTINCT (a,b)) FROM (VALUES (1,2),(1,3)) t(a,b)",
+        "SELECT array_agg(CASE WHEN a>0 THEN ARRAY[a,2] ELSE ARRAY[0,2] END ORDER BY b) FROM (VALUES (1,2)) t(a,b)",
+        "SELECT coalesce((SELECT 1), CASE WHEN true THEN 2 ELSE 3 END)",
+    ],
+)
+def test_nested_operand_shapes_preserved(sql):
+    validator = SQLValidator()
+    assert validator.inject_limit(validator.validate(sql)).sql(dialect="postgres")
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "array_agg(a,b)",
+        "array_agg(a,b ORDER BY c)",
+        "round(1.235,2,1)",
+        "mod(7,3,1)",
+        "ltrim('xxa','x','y')",
+        "rtrim('axx','x','y')",
+        "substring('abcdef',2,3,4)",
+        "lpad('a',5,'.','x')",
+        "length('abc','utf8','x')",
+        "to_char(current_timestamp,'YYYY','x')",
+        "date_trunc('day',current_timestamp,'UTC','x')",
+        "string_agg(a,b,c)",
+        "string_agg(a,b,c ORDER BY a)",
+        "regexp_i_like('a','b','i')",
+    ],
+)
+def test_discarded_source_arguments_rejected(expression):
+    with pytest.raises(SQLValidationError, match="arguments"):
+        SQLValidator().validate(f"SELECT {expression} FROM t")
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        "json_extract_path",
+        "json_extract_path_text",
+        "jsonb_extract_path",
+        "jsonb_extract_path_text",
+    ],
+)
+def test_variadic_json_path_arguments_preserved(function):
+    rendered = (
+        SQLValidator()
+        .validate(f"SELECT {function}(document, 'a', 'b') FROM t")
+        .sql(dialect="postgres")
+    )
+    assert "'a', 'b'" in rendered

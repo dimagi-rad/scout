@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 
 import sqlglot
 from sqlglot import exp
+from sqlglot.dialects.postgres import Postgres
+from sqlglot.tokens import TokenType
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +417,49 @@ FORBIDDEN_STATEMENT_TYPES: frozenset[type] = frozenset(
 SYSTEM_CATALOG_PREFIX = "pg_"
 
 
+def _argument_count(expression: exp.Expression) -> int:
+    # Count operand expressions, not dialect flags such as trim direction.
+    return sum(1 for _ in expression.iter_expressions())
+
+
+class _PreservingPostgres(Postgres):
+    """Retain call arity before SQLGlot normalizes away unsupported arguments."""
+
+    class Parser(Postgres.Parser):
+        def _parse_function_call(self, *args, **kwargs):
+            source_arity = None
+            source_name = self._curr.text if self._curr else ""
+            if self._next and self._next.token_type == TokenType.L_PAREN:
+                depth = 0
+                source_arity = 0
+                for token in self._tokens[self._index + 1 :]:
+                    kind = token.token_type
+                    if kind in (TokenType.L_PAREN, TokenType.L_BRACKET):
+                        depth += 1
+                        if depth > 1 and source_arity == 0:
+                            source_arity = 1
+                    elif kind in (TokenType.R_PAREN, TokenType.R_BRACKET):
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    elif depth == 1:
+                        # Aggregate ORDER BY and EXISTS SELECT lists are not args.
+                        if kind in (TokenType.ORDER_BY, TokenType.SELECT):
+                            break
+                        if kind == TokenType.COMMA:
+                            source_arity += 1
+                        elif source_arity == 0:
+                            source_arity = 1
+            result = super()._parse_function_call(*args, **kwargs)
+            function = result
+            while isinstance(function, exp.Window | exp.Filter | exp.WithinGroup):
+                function = function.this
+            if function is not None and source_arity is not None:
+                function.meta["scout_source_arity"] = source_arity
+                function.meta["scout_source_name"] = source_name
+            return result
+
+
 class SQLValidationError(Exception):
     """
     Raised when SQL validation fails.
@@ -477,7 +522,9 @@ class SQLValidator:
             SQLValidationError: If the query fails any validation check
         """
         try:
-            statements = sqlglot.parse(sql, dialect=self.dialect)
+            statements = sqlglot.parse(
+                sql, dialect=_PreservingPostgres if self.dialect == "postgres" else self.dialect
+            )
         except (sqlglot.errors.ParseError, sqlglot.errors.TokenError) as e:
             raise SQLValidationError(
                 f"SQL parse error: {e}",
@@ -514,6 +561,7 @@ class SQLValidator:
         self._validate_statement_type(statement, sql)
         self._validate_no_dangerous_functions(statement, sql)
         self._validate_cast_types(statement, sql)
+        self._validate_argument_preservation(statement, sql)
         # Rejects unqualified system-catalog reads (cross-tenant disclosure) that
         # the schema allowlist below cannot see.
         self._validate_no_system_catalogs(statement, sql)
@@ -620,6 +668,48 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
+    def _validate_argument_preservation(self, statement: exp.Expression, sql: str) -> None:
+        for node in statement.walk():
+            source_arity = node.meta.get("scout_source_arity", 0)
+            if not source_arity:
+                continue
+            expected = max(source_arity, _argument_count(node))
+            name = node.meta.get("scout_source_name", node.key)
+            rendered_node = node
+            if isinstance(node, exp.CurrentTimestamp) and node.this is not None:
+                rendered_node = exp.Anonymous(
+                    this="CURRENT_TIMESTAMP", expressions=[node.this.copy()]
+                )
+            elif isinstance(node, exp.RegexpLike) and node.args.get("flag") is not None:
+                rendered_node = exp.Anonymous(
+                    this="regexp_like",
+                    expressions=[
+                        node.this.copy(),
+                        node.expression.copy(),
+                        node.args["flag"].copy(),
+                    ],
+                )
+            try:
+                reparsed = sqlglot.parse_one(
+                    rendered_node.sql(dialect=self.dialect),
+                    dialect=_PreservingPostgres if self.dialect == "postgres" else self.dialect,
+                )
+                retained = max(
+                    reparsed.meta.get("scout_source_arity", 0), _argument_count(reparsed)
+                )
+            except (sqlglot.errors.ParseError, TypeError, ValueError) as error:
+                raise SQLValidationError(
+                    f"Function '{name}' arguments cannot be represented in supported PostgreSQL syntax.",
+                    sql=sql,
+                    error_type="function_not_allowed",
+                ) from error
+            if retained < expected:
+                raise SQLValidationError(
+                    f"Function '{name}' has unsupported arguments that would be discarded.",
+                    sql=sql,
+                    error_type="function_not_allowed",
+                )
+
     def _validate_cast_types(self, statement: exp.Expression, sql: str) -> None:
         for target in statement.find_all(exp.DataType):
             if isinstance(target, exp.ObjectIdentifier) or target.this not in ALLOWED_CAST_TYPES:
@@ -662,15 +752,6 @@ class SQLValidator:
                     f"Function '{func_name}' is not allowed for security reasons.",
                     sql=sql,
                     error_type="dangerous_function",
-                )
-
-            if (isinstance(func, exp.RegexpLike) and func.args.get("full_match") is not None) or (
-                isinstance(func, exp.CurrentTimestamp) and func.args.get("sysdate") is not None
-            ):
-                raise SQLValidationError(
-                    f"Function '{func_name}' has unsupported extra arguments.",
-                    sql=sql,
-                    error_type="function_not_allowed",
                 )
 
             if isinstance(func, exp.MatchAgainst) and not isinstance(
