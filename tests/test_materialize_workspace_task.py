@@ -7,6 +7,7 @@ import pytest
 from django.test import AsyncClient
 from django.utils import timezone
 
+from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
@@ -1420,3 +1421,35 @@ async def test_core_preserves_coded_pipeline_failure_guidance(
         "reconnect the affected account" if code == ErrorCode.AUTH_TOKEN_EXPIRED else "Ask an admin"
     )
     assert expected in result["guidance"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("missing", ["pipeline", "credential"])
+async def test_headless_preflight_failure_preserves_real_core_reason(
+    workspace, tenant_membership_obj, user, missing
+):
+    registry = _mock_registry("commcare")
+    if missing == "pipeline":
+        registry.list.return_value = []
+    summaries = []
+
+    async def run_core(*args):
+        summary = await workspaces_tasks.materialize_workspace_core(*args)
+        summaries.append(summary)
+        return summary
+
+    with (
+        patch("apps.workspaces.tasks.materialize_workspace_blocking", run_core),
+        patch("apps.workspaces.tasks.get_registry", return_value=registry),
+        patch("apps.workspaces.tasks.aresolve_credential", AsyncMock(return_value=None)),
+    ):
+        result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "failed"
+    if missing == "pipeline":
+        assert "pipeline" in result["message"].lower()
+        assert summaries[0]["tenants"][0]["error_code"] == ErrorCode.PIPELINE_UNRESOLVED
+    else:
+        assert "No usable credential could be resolved" in result["message"]
+        assert "error_code" not in summaries[0]["tenants"][0]
+    assert "expired" not in result["message"]

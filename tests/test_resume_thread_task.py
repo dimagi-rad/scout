@@ -1517,6 +1517,8 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     assert uncovered.external_id in body
     assert "did not refresh" in body
     assert "older data may still be included" in body
+    assert "none of its data is in these results" not in body
+    assert "<ErrorCode." not in body
     assert "nothing you query covers" not in body
     assert "say the numbers exclude them" not in body
     # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
@@ -1528,7 +1530,13 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, rea
     await tj.arefresh_from_db()
     assert uncovered.external_id in tj.error_summary
     assert "did not refresh" in tj.error_summary
-    assert "older data may still be included" in tj.error_summary
+    assert "Any of their data in results may be older" in tj.error_summary
+    assert "Verify the sources" not in tj.error_summary
+    assert "do not claim" not in tj.error_summary
+    assert "none of its data is in these results" not in tj.error_summary
+    assert ("Settings → Connections" in tj.error_summary) is not reachable
+    if view_state == SchemaState.ACTIVE:
+        assert tj.error_summary.startswith("Materialization did not refresh all data.")
     assert "re-running materialization will not help" not in tj.error_summary
 
 
@@ -1555,6 +1563,7 @@ async def test_resume_no_runs_prompt_names_the_tenants_and_carries_guidance():
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert uncovered.external_id in tj.error_summary
+    assert " Not refreshed:" not in tj.error_summary
 
 
 @pytest.mark.asyncio

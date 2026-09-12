@@ -111,6 +111,14 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
 
+        failure_details = [
+            f"{tenant.get('tenant') or 'unknown'}: {tenant['error']}"
+            for tenant in tenants
+            if not tenant.get("success") and tenant.get("error")
+        ]
+        if failure_details:
+            message += " Failure details: " + "; ".join(failure_details) + "."
+
         # Advice comes from the run, keyed by error code — this tool must not
         # write its own (apps/common/errors.py: raise sites describe, one owner
         # advises).

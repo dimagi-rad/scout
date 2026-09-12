@@ -97,8 +97,8 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "data source from the workspace."
     ),
     ErrorCode.WORKSPACE_TENANT_UNREACHABLE: (
-        "in this workspace but not connected to your account, so it was NOT "
-        "loaded and none of its data is in these results — connect that account "
+        "in this workspace but not connected to your account, so this run did not "
+        "refresh it — connect that account "
         "(Settings → Connections) if you should have access, or ask a workspace "
         "admin to move it to its own workspace."
     ),
@@ -443,6 +443,7 @@ async def materialize_workspace_core(
                     "tenant": tenant_id,
                     "success": False,
                     "error": no_pipeline_message(registry, tm.tenant.provider),
+                    "error_code": str(ErrorCode.PIPELINE_UNRESOLVED),
                 }
             )
             continue
@@ -468,7 +469,7 @@ async def materialize_workspace_core(
                 {
                     "tenant": tenant_id,
                     "success": False,
-                    "error": "No credential configured",
+                    "error": "No usable credential could be resolved",
                 }
             )
             continue
@@ -1642,7 +1643,7 @@ async def _uncovered_tenant_summaries(
                 "materialized_row_counts": {},
                 "sources": {},
                 "error": error,
-                "error_code": code,
+                "error_code": str(code),
             }
         )
         logger.warning(
@@ -2006,16 +2007,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             f"using the now-loaded data. Per-tenant: {summary}"
         )
 
-    refresh_coverage_note = ""
+    refresh_coverage_user_note = ""
     if uncovered_tenants:
-        refresh_coverage_note = (
+        refresh_coverage_user_note = (
             f"This run did not refresh these data sources: {', '.join(uncovered_tenants)}. "
-            "There is no run record for them; older data may still be included in workspace "
-            "queries. Refresh coverage does not establish query coverage. Verify the sources "
+            "Any of their data in results may be older."
+        )
+        body += (
+            f" IMPORTANT: {refresh_coverage_user_note} There is no run record for them; "
+            "older data may still be included in workspace queries. "
+            "Refresh coverage does not establish query coverage. Verify the sources "
             "and last successful refresh times used by any answer, disclose stale or unknown "
             "freshness, and do not claim these sources are excluded without checking."
         )
-        body += f" IMPORTANT: {refresh_coverage_note}"
 
     # Per-tenant, so a multi-tenant workspace names every affected tenant rather
     # than only the first one that failed.
@@ -2195,20 +2199,26 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 "unavailable until a rebuild succeeds."
             )
         elif status == "no_runs":
-            uncovered_note = (
-                f" Not refreshed: {', '.join(uncovered_tenants)}." if uncovered_tenants else ""
-            )
             error_summary = (
-                "Materialization ran no pipelines, so nothing was loaded."
-                f"{uncovered_note} Check that the workspace's tenants are connected "
-                "to your account and have credentials configured."
+                "Materialization ran no pipelines, so nothing was loaded. "
+                "Check that the workspace's tenants are connected to your account "
+                "and have credentials configured."
             )
         else:
             error_summary = await _build_failure_summary_for_job(tj.procrastinate_job_id)
+            if status == "partial" or uncovered_tenants:
+                error_summary = f"Materialization did not refresh all data. {error_summary}".strip()
             if not error_summary:
                 error_summary = "Materialization did not complete successfully."
-    if error_summary and refresh_coverage_note:
-        error_summary = f"{error_summary} {refresh_coverage_note}"
+            # Run summaries already carry source guidance; no-run tenants have
+            # no run row and need their own account remediation added here.
+            uncovered_guidance = _credential_guidance(
+                _summary_failures(t for t in summary if t.get("state") == TENANT_NOT_RUN)
+            )
+            if uncovered_guidance:
+                error_summary += " " + " ".join(uncovered_guidance)
+    if error_summary and refresh_coverage_user_note:
+        error_summary = f"{error_summary} {refresh_coverage_user_note}"
     # CAS-scoped to state=RUNNING: a concurrent cancel during ainvoke leaves the
     # row CANCELLED, so this matches zero rows rather than clobbering it back to a
     # success terminal; we then re-read the actual persisted state below.
