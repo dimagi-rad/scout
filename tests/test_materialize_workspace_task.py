@@ -1550,6 +1550,10 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     await tj.arefresh_from_db()
     assert expected in body
     assert expected in tj.error_summary
+    if reason == "credential":
+        assert "resolved." in tj.error_summary
+        assert "resolved This" not in tj.error_summary
+    assert "preflight_recorded" not in body
     assert "run recorded nothing" not in body
     assert "  " not in tj.error_summary
     if reason == "expired":

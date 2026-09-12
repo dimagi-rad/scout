@@ -1638,6 +1638,7 @@ async def _uncovered_tenant_summaries(
                 tenant_id__in=[t.id for t in uncovered],
             ).values_list("tenant_id", flat=True)
         }
+    # Provider-scoped failures must not advise against a replacement provider's credentials.
     recorded_failures = {
         (entry.get("tenant_id"), entry.get("provider")): entry
         for entry in preflight_failures or []
@@ -1648,7 +1649,7 @@ async def _uncovered_tenant_summaries(
         recorded = recorded_failures.get((str(tenant.id), tenant.provider))
         if recorded:
             error = str(recorded["error"])
-            code = str(recorded.get("error_code") or "")
+            code = str(recorded.get("error_code") or ErrorCode.INTERNAL_ERROR)
         elif tenant.id in reachable:
             error = (
                 f"this workspace includes {tenant.provider} source "
@@ -1887,6 +1888,14 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
     status, summary = await _aggregate_materialization_state(
         tj.procrastinate_job_id, workspace, str(user.id), tj.materialization_preflight_failures
     )
+    recorded_details = []
+    for entry in summary:
+        if entry.pop("preflight_recorded", False):
+            error = entry["error"].strip()
+            if error:
+                if not error.endswith((".", "!", "?")):
+                    error += "."
+                recorded_details.append(f"{entry['tenant']} ({entry['provider']}): {error}")
     uncovered_tenants = [t["tenant"] for t in summary if t.get("state") == TENANT_NOT_RUN]
     # Named per source *and* per tenant, because a run can carry a dead token on
     # one and revoked access on another — opposite advice, and the agent has to
@@ -2230,7 +2239,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             error_summary = (
                 "Materialization ran no pipelines, so nothing was loaded. "
                 "Check the tenant failure details below."
-                if tj.materialization_preflight_failures
+                if recorded_details
                 else "Materialization ran no pipelines, so nothing was loaded. "
                 "Check that the workspace's tenants are connected to your account "
                 "and have credentials configured."
@@ -2249,11 +2258,6 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
             if uncovered_guidance:
                 error_summary += " " + " ".join(uncovered_guidance)
     if error_summary:
-        recorded_details = [
-            f"{entry['tenant']} ({entry['provider']}): {entry['error']}"
-            for entry in summary
-            if entry.get("preflight_recorded")
-        ]
         no_runs_guidance = guidance_lines if status == "no_runs" else []
         error_summary = " ".join(
             part.strip()

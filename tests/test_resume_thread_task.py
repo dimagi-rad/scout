@@ -1628,7 +1628,41 @@ async def test_recorded_preflight_reasons_match_uuid_and_provider():
     ]
     status, summary = await _aggregate_materialization_state(90006, ws, str(user.id), failures)
     assert status == "no_runs"
+    assert (
+        next(entry for entry in summary if entry["provider"] == "ocs")["error_code"]
+        == ErrorCode.INTERNAL_ERROR
+    )
     assert {entry["provider"]: entry["error"] for entry in summary} == {
         "ocs": "OCS credential missing",
         "commcare": "CommCare pipeline missing",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("change", ["removed", "provider_changed"])
+async def test_no_runs_banner_does_not_advertise_unmatched_recorded_details(change):
+    _user, ws, uncovered, tj = await _make_partly_covered_job(
+        email="unmatched@b.c", ws_name="W-unmatched", pj_id=90007, covered_run=False
+    )
+    tj.materialization_preflight_failures = [
+        {
+            "tenant_id": str(uncovered.id),
+            "provider": uncovered.provider,
+            "error": "Old provider credential failed",
+            "error_code": "AUTH_TOKEN_EXPIRED",
+        }
+    ]
+    await tj.asave(update_fields=["materialization_preflight_failures"])
+    if change == "removed":
+        await WorkspaceTenant.objects.filter(workspace=ws, tenant=uncovered).adelete()
+    else:
+        uncovered.provider = "ocs"
+        await uncovered.asave(update_fields=["provider"])
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        await resume_thread_after_materialization(None, str(tj.id))
+    await tj.arefresh_from_db()
+    assert "failure details below" not in tj.error_summary
+    assert "Old provider credential failed" not in tj.error_summary
+    assert "credentials configured" in tj.error_summary
