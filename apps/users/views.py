@@ -16,7 +16,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.users.adapters import encrypt_credential
 from apps.users.decorators import async_login_required
-from apps.users.models import Tenant, TenantConnection, TenantMembership
+from apps.users.models import Tenant, TenantConnection, TenantMembership, User
 from apps.users.services.api_key_providers import (
     STRATEGIES,
     CredentialVerificationError,
@@ -26,6 +26,7 @@ from apps.users.services.credential_resolver import (
     aiter_social_tokens,
     arefresh_connection,
 )
+from apps.users.services.oauth_scope import scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
@@ -71,7 +72,9 @@ async def _arefresh_all_identities(user) -> None:
             if await cache.aget(cache_key):
                 continue
             try:
-                await resolve(user, token_obj.token, social_account=token_obj.account)
+                await resolve(
+                    user, token_obj.token, social_account=token_obj.account, allow_replace=False
+                )
             except Exception:
                 logger.warning(
                     "Failed to refresh %s tenants for account %s",
@@ -315,15 +318,19 @@ async def tenant_credential_list_view(request):
 def _archive_and_delete_connection(conn):
     """Archive the connection's live memberships (retaining data), then delete it.
 
-    For an OAuth connection this deletes the token of *its own* identity, so
+    For an OAuth connection this deletes every token for its scope, so
     disconnecting one OCS team leaves the user's other teams connected — the
     provider-wide `disconnect_provider_view` is the "sign out of everything"
     action. The SocialAccount survives either way: it is a login identity, not a
     data credential.
     """
     with transaction.atomic():
-        if conn.credential_type == TenantConnection.OAUTH and conn.social_account_id:
-            SocialToken.objects.filter(account_id=conn.social_account_id).delete()
+        # Serialize scope creation/replacement against disconnect, including absent rows.
+        User.objects.select_for_update().get(pk=conn.user_id)
+        if conn.credential_type == TenantConnection.OAUTH:
+            SocialToken.objects.filter(
+                account_id__in=scope_account_ids(conn.user_id, conn.provider, conn.scope_key)
+            ).delete()
         conn.memberships.filter(archived_at__isnull=True).update(
             archived_at=timezone.now(), connection=None
         )

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from allauth.account.models import EmailAddress
-from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.db import transaction
 
 from apps.users.models import TenantConnection, TenantMembership
@@ -262,6 +262,8 @@ def _merge_tenant_connections(canonical: User, duplicate: User) -> tuple[int, in
             # all_objects: repoint tombstones too, or they'd dangle on the deleted
             # connection (conn.memberships is live-only after the manager change).
             TenantMembership.all_objects.filter(connection=conn).update(connection=existing)
+            if conn.social_account_id != existing.social_account_id:
+                SocialToken.objects.filter(account_id=conn.social_account_id).delete()
             conn.delete()
             conflict_merged += 1
         else:

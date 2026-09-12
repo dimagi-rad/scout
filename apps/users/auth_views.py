@@ -25,6 +25,7 @@ from apps.users.models import (
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aiter_social_tokens
+from apps.users.services.oauth_scope import is_active_identity
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -80,7 +81,9 @@ async def _atry_resolve_provider(user, provider, resolve_fn, provider_name):
     resolved_any = False
     for token_obj in await aiter_social_tokens(user, provider):
         try:
-            resolved = await resolve_fn(user, token_obj.token, social_account=token_obj.account)
+            resolved = await resolve_fn(
+                user, token_obj.token, social_account=token_obj.account, allow_replace=False
+            )
         except Exception:
             logger.warning("Failed to resolve %s in me_view", provider_name, exc_info=True)
             continue
@@ -297,8 +300,16 @@ def providers_view(request):
         # last-row-wins, so a healthy team could be reported as expired purely on
         # queryset order. Reduced below to "connected while at least one works";
         # the per-team detail lives on /api/auth/connections/.
+        bindings = {
+            (conn.provider, conn.scope_key): conn.social_account_id
+            for conn in TenantConnection.objects.filter(
+                user=request.user, credential_type=TenantConnection.OAUTH
+            )
+        }
         seen_statuses: dict[str, set[str]] = {}
         for social_token in tokens:
+            if not is_active_identity(social_token.account, bindings):
+                continue
             provider = social_token.account.provider
             token_url = get_token_url(provider)
             can_refresh = bool(token_url and social_token.token_secret)

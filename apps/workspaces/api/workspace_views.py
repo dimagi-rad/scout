@@ -90,7 +90,7 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
             tried = True
             try:
                 await asyncio.wait_for(
-                    resolve(target, token, social_account=account),
+                    resolve(target, token, social_account=account, allow_replace=False),
                     timeout=SHARE_REFRESH_TIMEOUT,
                 )
             except Exception:

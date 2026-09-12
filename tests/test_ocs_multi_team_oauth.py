@@ -7,10 +7,11 @@ from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
-from allauth.socialaccount.models import SocialAccount, SocialApp, SocialToken
+from allauth.socialaccount.models import SocialAccount, SocialApp, SocialLogin, SocialToken
 from asgiref.sync import sync_to_async
 from django.apps import apps as global_apps
 from django.contrib.sites.models import Site
+from django.core.cache import cache
 from django.test import AsyncClient
 from django.utils import timezone
 
@@ -22,7 +23,9 @@ from apps.users.services.credential_resolver import (
     arefresh_connection,
     aresolve_credential,
 )
-from apps.users.services.tenant_resolution import resolve_ocs_chatbots
+from apps.users.services.merge import merge_users
+from apps.users.services.tenant_resolution import _sync_memberships, resolve_ocs_chatbots
+from apps.users.views import _arefresh_all_identities
 from apps.workspaces.access import (
     _ashares_live_tenant,
     acovers_live_tenants,
@@ -529,3 +532,193 @@ def test_one_healthy_team_keeps_the_provider_connected(user, client, site):
     entries = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
 
     assert entries["ocs"]["status"] == "connected"
+
+
+async def _asecond_identity(user, team="acme"):
+    account = await SocialAccount.objects.acreate(
+        user=user, provider="ocs", uid=f"99#{team}", extra_data={"team": team}
+    )
+    await SocialToken.objects.acreate(account=account, token="replacement")
+    return account
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_failed_replacement_preserves_active_team_identity(user, mocker):
+    original, conn = await _aocs_identity(user, team="acme", token="healthy")
+    replacement = await _asecond_identity(user)
+    mocker.patch(
+        "apps.users.services.tenant_resolution.adetect_team_name_from_oauth",
+        AsyncMock(return_value="Acme"),
+    )
+    _mock_httpx(mocker, AsyncMock(side_effect=RuntimeError("revoked")))
+    with pytest.raises(RuntimeError, match="revoked"):
+        await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
+    await conn.arefresh_from_db()
+    assert conn.social_account_id == original.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_successful_replacement_retires_only_same_team_tokens(user, mocker):
+    original, conn = await _aocs_identity(user, team="acme", token="healthy")
+    other, _ = await _aocs_identity(user, team="globex", token="other-team")
+    replacement = await _asecond_identity(user)
+    _mock_httpx(mocker, AsyncMock(return_value=_ocs_sessions([])))
+    await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
+    await conn.arefresh_from_db()
+    assert conn.social_account_id == replacement.id
+    assert not await SocialToken.objects.filter(account=original).aexists()
+    assert await SocialToken.objects.filter(account=other).aexists()
+    assert await SocialAccount.objects.filter(id=original.id).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_poll_ignores_inactive_identity_for_same_team(user, mocker):
+    original, _ = await _aocs_identity(user, team="acme", token="healthy")
+    await _asecond_identity(user)
+    tokens = await aiter_social_tokens(user, "ocs")
+    assert [token.account_id for token in tokens] == [original.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_delete_team_cannot_be_revived_by_other_subject_token(user, mocker):
+    _, conn = await _aocs_identity(user, team="acme", token="healthy")
+    replacement = await _asecond_identity(user)
+    other, _ = await _aocs_identity(user, team="globex", token="other")
+    client = await _login(user)
+    assert (await client.delete(f"/api/auth/connections/{conn.id}/")).status_code == 200
+    assert not await SocialToken.objects.filter(account=replacement).aexists()
+    assert [t.account_id for t in await aiter_social_tokens(user, "ocs")] == [other.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_unknown_expiry_without_refresh_reports_reconnect(user):
+    account, conn = await _aocs_identity(user, team="acme", token="unknown")
+    await SocialToken.objects.filter(account=account).aupdate(expires_at=None)
+    assert await arefresh_connection(conn) == "expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_retired_identity_can_reconnect_via_allauth(user, mocker):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    original, conn = await _aocs_identity(user, team="acme", token="old", app=app)
+    replacement = await _asecond_identity(user)
+    _mock_httpx(mocker, AsyncMock(return_value=_ocs_sessions([])))
+    await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
+    assert not await SocialToken.objects.filter(account=original).aexists()
+
+    # Existing-account lookup emits the resolution signal before storing its new token.
+    login = SocialLogin(
+        user=type(user)(),
+        account=SocialAccount(provider="ocs", uid=original.uid, extra_data={"team": "acme"}),
+    )
+    login.token = SocialToken(
+        app=app, token="reconnected", expires_at=timezone.now() + timedelta(hours=5)
+    )
+    await sync_to_async(login.lookup)()
+    await conn.arefresh_from_db()
+    assert conn.social_account_id == original.id
+    assert (await SocialToken.objects.aget(account=original)).token == "reconnected"
+    assert not await SocialToken.objects.filter(account=replacement).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_background_fetch_cannot_restore_retired_identity(user, mocker):
+    original, conn = await _aocs_identity(user, team="acme", token="old")
+    replacement = await _asecond_identity(user)
+    _mock_httpx(mocker, AsyncMock(return_value=_ocs_sessions([])))
+    await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
+    await resolve_ocs_chatbots(user, "old", social_account=original, allow_replace=False)
+    await conn.arefresh_from_db()
+    assert conn.social_account_id == replacement.id
+    client = await _login(user)
+    await client.delete(f"/api/auth/connections/{conn.id}/")
+    await resolve_ocs_chatbots(user, "replacement", social_account=replacement, allow_replace=False)
+    assert not await TenantConnection.objects.filter(user=user, scope_key="acme").aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_merge_keeps_canonical_binding_during_poll_and_disconnect(user, other_user, mocker):
+    original, conn = await _aocs_identity(user, team="acme", token="canonical")
+    duplicate = await _asecond_identity(other_user)
+    await TenantConnection.objects.acreate(
+        user=other_user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="acme",
+        social_account=duplicate,
+    )
+    other, _ = await _aocs_identity(other_user, team="globex", token="other-team")
+    await sync_to_async(merge_users)(canonical=user, duplicate=other_user)
+    assert not await SocialToken.objects.filter(account=duplicate).aexists()
+    await cache.aclear()
+    _mock_httpx(mocker, AsyncMock(return_value=_ocs_sessions([])))
+    await _arefresh_all_identities(user)
+    await conn.arefresh_from_db()
+    assert conn.social_account_id == original.id
+    client = await _login(user)
+    await client.delete(f"/api/auth/connections/{conn.id}/")
+    await cache.aclear()
+    await _arefresh_all_identities(user)
+    assert not await TenantConnection.objects.filter(user=user, scope_key="acme").aexists()
+    assert await SocialToken.objects.filter(account=other).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_superseded_fetch_cannot_archive_replacement_memberships(user, mocker):
+    _, stale_connection = await _aocs_identity(user, team="acme", token="old")
+    replacement = await _asecond_identity(user)
+    _mock_httpx(mocker, AsyncMock(return_value=_ocs_sessions([{"id": "new-bot"}])))
+    await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
+    # The first fetch already bound its connection, but resumes syncing after replacement.
+    assert await _sync_memberships(user, stale_connection, [], archive_team_slug="acme") == []
+    membership = await TenantMembership.all_objects.aget(tenant__external_id="new-bot")
+    assert membership.archived_at is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_disconnected_fetch_cannot_restore_memberships(user):
+    _, conn = await _aocs_identity(user, team="acme", token="old")
+    membership = await _achatbot(user, conn, team="acme", external_id="old-bot")
+    tenant = await Tenant.objects.aget(id=membership.tenant_id)
+    client = await _login(user)
+    await client.delete(f"/api/auth/connections/{conn.id}/")
+    assert await _sync_memberships(user, conn, [tenant], archive_team_slug="acme") == []
+    await membership.arefresh_from_db()
+    assert membership.archived_at is not None
+
+
+@pytest.mark.django_db
+def test_provider_health_ignores_unvalidated_same_scope_identity(user, client, site):
+    app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    app.sites.add(site)
+    active = SocialAccount.objects.create(user=user, provider="ocs", uid="42#acme")
+    SocialToken.objects.create(
+        account=active, app=app, token="expired", expires_at=timezone.now() - timedelta(hours=1)
+    )
+    TenantConnection.objects.create(
+        user=user,
+        provider="ocs",
+        credential_type=TenantConnection.OAUTH,
+        scope_key="acme",
+        social_account=active,
+    )
+    inactive = SocialAccount.objects.create(user=user, provider="ocs", uid="99#acme")
+    SocialToken.objects.create(
+        account=inactive,
+        app=app,
+        token="unvalidated",
+        expires_at=timezone.now() + timedelta(hours=5),
+    )
+    client.force_login(user)
+    providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
+    assert providers["ocs"]["status"] == "expired"

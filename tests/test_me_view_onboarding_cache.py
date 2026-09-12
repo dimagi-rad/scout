@@ -78,7 +78,7 @@ def test_me_view_served_from_cache_on_second_call(client, token_only_user):
 
     calls = {"n": 0}
 
-    async def resolve_counting(user, token, *, social_account=None):
+    async def resolve_counting(user, token, *, social_account=None, allow_replace=True):
         calls["n"] += 1
         return []
 

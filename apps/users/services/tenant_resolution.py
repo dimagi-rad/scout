@@ -23,31 +23,20 @@ import logging
 from urllib.parse import urljoin
 
 import httpx
-from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialAccount, SocialToken
+from asgiref.sync import sync_to_async
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
-from apps.users.models import Tenant, TenantConnection, TenantMembership
-from apps.users.providers.ocs.provider import team_slug_from_uid
+from apps.users.models import Tenant, TenantConnection, TenantMembership, User
+from apps.users.services.oauth_scope import account_scope, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 
 logger = logging.getLogger(__name__)
 
 COMMCARE_DOMAIN_API = "https://www.commcarehq.org/api/user_domains/v1/"
-
-
-def _account_team_slug(account) -> str:
-    """The OCS team the identity *account*'s token is scoped to.
-
-    Prefers the uid suffix (written by ``OCSProvider.extract_uid``) over the raw
-    ``team`` OIDC claim in ``extra_data``: the uid is what allauth keys the
-    identity on, so it cannot drift from the token the account holds.
-    """
-    if account is None:
-        return ""
-    from_uid = team_slug_from_uid(account.uid)
-    return from_uid or str((account.extra_data or {}).get("team") or "").strip()
 
 
 async def _anewest_account(user, provider: str):
@@ -64,27 +53,47 @@ async def _anewest_account(user, provider: str):
     )
 
 
-async def _aoauth_connection(user, provider: str, *, scope_key: str, scope_label: str, account):
-    """Get-or-create the OAuth connection for one (user, provider, scope).
+@sync_to_async
+def _aoauth_connection(
+    user, provider: str, *, scope_key: str, scope_label: str, account, allow_replace=True
+):
+    """Bind a validated identity and retire superseded credentials for this scope.
 
-    Keyed on ``scope_key`` rather than ``provider``, which is what turns
-    re-authorising into *adding* a connection: a team the user already holds
-    updates its own row (no duplicate, no orphaned memberships), and a new team
-    gets a row of its own instead of overwriting the first (#156).
+    Background fetches may finish after reconnect/disconnect. They must not
+    replace the current binding or recreate a connection from a retired token.
+    SocialAccount rows remain available for a later deliberate OAuth login.
     """
-    defaults: dict = {}
-    if account is not None:
-        defaults["social_account"] = account
-    if scope_label:
-        defaults["scope_label"] = scope_label
-    conn, _ = await TenantConnection.objects.aupdate_or_create(
-        user=user,
-        provider=provider,
-        credential_type=TenantConnection.OAUTH,
-        scope_key=scope_key,
-        defaults=defaults,
-    )
-    return conn
+    with transaction.atomic():
+        # Serialize scope creation/replacement against disconnect, including absent rows.
+        User.objects.select_for_update().get(pk=user.pk)
+        conn = TenantConnection.objects.filter(
+            user=user,
+            provider=provider,
+            credential_type=TenantConnection.OAUTH,
+            scope_key=scope_key,
+        ).first()
+        if not allow_replace and account is not None:
+            if not SocialToken.objects.filter(account=account).exists():
+                return None
+            if conn and conn.social_account_id not in (None, account.pk):
+                return None
+        defaults = {}
+        if account is not None:
+            defaults["social_account"] = account
+        if scope_label:
+            defaults["scope_label"] = scope_label
+        conn, _ = TenantConnection.objects.update_or_create(
+            user=user,
+            provider=provider,
+            credential_type=TenantConnection.OAUTH,
+            scope_key=scope_key,
+            defaults=defaults,
+        )
+        if account is not None:
+            SocialToken.objects.filter(
+                account_id__in=scope_account_ids(user.pk, provider, scope_key)
+            ).exclude(account=account).delete()
+        return conn
 
 
 class TenantResolutionError(Exception):
@@ -95,7 +104,8 @@ class TenantResolutionError(Exception):
     """
 
 
-async def _sync_memberships(
+@sync_to_async
+def _sync_memberships(
     user,
     connection: TenantConnection,
     fresh_tenants: list[Tenant],
@@ -114,34 +124,41 @@ async def _sync_memberships(
     must be left intact). If a team-scoped provider has no resolvable team slug,
     archival is skipped entirely (additive only) since it can't be scoped safely.
     """
-    fresh_ids: set = set()
-    memberships: list[TenantMembership] = []
-    for tenant in fresh_tenants:
-        tm, _ = await TenantMembership.all_objects.aget_or_create(user=user, tenant=tenant)
-        tm.connection = connection
-        tm.archived_at = None
-        fields = ["connection", "archived_at"]
-        if membership_extra:
-            for attr, val in membership_extra.items():
-                setattr(tm, attr, val)  # team_slug/team_name setters mutate provider_metadata
-            fields.append("provider_metadata")
-        await tm.asave(update_fields=fields)
-        memberships.append(tm)
-        fresh_ids.add(tenant.id)
+    with transaction.atomic():
+        # A reconnect/disconnect must not interleave between this check and archival.
+        User.objects.select_for_update().get(pk=user.pk)
+        if not TenantConnection.objects.filter(
+            pk=connection.pk, user=user, social_account_id=connection.social_account_id
+        ).exists():
+            return []
+        fresh_ids: set = set()
+        memberships: list[TenantMembership] = []
+        for tenant in fresh_tenants:
+            tm, _ = TenantMembership.all_objects.get_or_create(user=user, tenant=tenant)
+            tm.connection = connection
+            tm.archived_at = None
+            fields = ["connection", "archived_at"]
+            if membership_extra:
+                for attr, val in membership_extra.items():
+                    setattr(tm, attr, val)  # team_slug/team_name setters mutate provider_metadata
+                fields.append("provider_metadata")
+            tm.save(update_fields=fields)
+            memberships.append(tm)
+            fresh_ids.add(tenant.id)
 
-    archive_qs = TenantMembership.all_objects.filter(
-        user=user, connection=connection, archived_at__isnull=True
-    ).exclude(tenant_id__in=fresh_ids)
-    if archive_team_slug is not None:
-        if not archive_team_slug:
-            return memberships  # team-scoped provider without a team → never revoke
-        archive_qs = archive_qs.filter(provider_metadata__team_slug=archive_team_slug)
-    await archive_qs.aupdate(archived_at=timezone.now())
-    return memberships
+        archive_qs = TenantMembership.all_objects.filter(
+            user=user, connection=connection, archived_at__isnull=True
+        ).exclude(tenant_id__in=fresh_ids)
+        if archive_team_slug is not None:
+            if not archive_team_slug:
+                return memberships  # team-scoped provider without a team → never revoke
+            archive_qs = archive_qs.filter(provider_metadata__team_slug=archive_team_slug)
+        archive_qs.update(archived_at=timezone.now())
+        return memberships
 
 
 async def resolve_commcare_domains(
-    user, access_token: str, *, social_account=None
+    user, access_token: str, *, social_account=None, allow_replace=True
 ) -> list[TenantMembership]:
     """Fetch the user's CommCare domains and full-sync TenantMembership records.
 
@@ -155,7 +172,10 @@ async def resolve_commcare_domains(
         scope_key="",
         scope_label="",
         account=social_account,
+        allow_replace=allow_replace,
     )
+    if conn is None:
+        return []
     fresh = []
     for domain in domains:
         tenant, _ = await Tenant.objects.aupdate_or_create(
@@ -171,7 +191,7 @@ async def resolve_commcare_domains(
 
 
 async def resolve_connect_opportunities(
-    user, access_token: str, *, social_account=None
+    user, access_token: str, *, social_account=None, allow_replace=True
 ) -> list[TenantMembership]:
     """Fetch the user's Connect opportunities and full-sync TenantMembership records.
 
@@ -200,7 +220,10 @@ async def resolve_connect_opportunities(
         scope_key="",
         scope_label="",
         account=social_account,
+        allow_replace=allow_replace,
     )
+    if conn is None:
+        return []
     fresh = []
     for opp in opportunities:
         tenant, _ = await Tenant.objects.aupdate_or_create(
@@ -216,7 +239,7 @@ async def resolve_connect_opportunities(
 
 
 async def resolve_ocs_chatbots(
-    user, access_token: str, *, social_account=None
+    user, access_token: str, *, social_account=None, allow_replace=True
 ) -> list[TenantMembership]:
     """Fetch the user's OCS chatbots (experiments) and full-sync TenantMembership records.
 
@@ -228,16 +251,8 @@ async def resolve_ocs_chatbots(
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
 
     account = social_account if social_account is not None else await _anewest_account(user, "ocs")
-    team_slug = _account_team_slug(account)
+    team_slug = account_scope(account)
     team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
-
-    conn = await _aoauth_connection(
-        user,
-        "ocs",
-        scope_key=team_slug,
-        scope_label=team_name,
-        account=account,
-    )
 
     experiments: list[dict] = []
     url: str | None = f"{base_url}/api/experiments/"
@@ -255,6 +270,18 @@ async def resolve_ocs_chatbots(
                 raise TenantResolutionError("OCS response missing 'results' key")
             experiments.extend(payload["results"])
             url = payload.get("next")
+
+    conn = await _aoauth_connection(
+        user,
+        "ocs",
+        scope_key=team_slug,
+        scope_label=team_name,
+        account=account,
+        allow_replace=allow_replace,
+    )
+
+    if conn is None:
+        return []
 
     fresh = []
     for exp in experiments:

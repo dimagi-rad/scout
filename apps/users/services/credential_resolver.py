@@ -9,6 +9,7 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
+from apps.users.services.oauth_scope import is_active_identity
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     get_token_url,
@@ -95,15 +96,24 @@ async def aget_social_token(user, provider: str) -> SocialToken | None:
 
 
 async def aiter_social_tokens(user, provider: str) -> list[SocialToken]:
-    """Every SocialToken *user* holds for *provider*, newest identity first.
+    """Active SocialTokens for *user* and *provider*, newest identity first.
 
-    One per team for a scoped provider like OCS. Callers that resolve or refresh
+    Existing scope bindings exclude superseded or unvalidated identities.
+    Callers that resolve or refresh
     upstream access must iterate all of them: picking one would silently ignore
     the teams the user is not "currently" signed in to, which is exactly the
     lockout #156 exists to remove.
     """
+    bindings = {
+        (conn.provider, conn.scope_key): conn.social_account_id
+        async for conn in TenantConnection.objects.filter(
+            user=user, provider=provider, credential_type=TenantConnection.OAUTH
+        )
+    }
     return [
-        token async for token in _social_token_qs(user, provider).select_related("account", "app")
+        token
+        async for token in _social_token_qs(user, provider).select_related("account", "app")
+        if is_active_identity(token.account, bindings, provider=provider)
     ]
 
 
@@ -249,6 +259,8 @@ async def arefresh_connection(conn) -> str:
     token_url = get_token_url(conn.provider)
     can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
     if not token_needs_refresh(token_obj.expires_at, can_refresh=can_refresh):
+        if token_obj.expires_at is None and token_url is not None:
+            return "expired"
         return "connected"
     if not can_refresh:
         return "expired"
