@@ -9,7 +9,7 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
-from apps.users.services.oauth_scope import is_active_identity
+from apps.users.services.oauth_scope import is_active_identity, provider_accounts
 from apps.users.services.token_refresh import (
     TokenRefreshError,
     get_token_url,
@@ -57,42 +57,9 @@ class CredentialResolutionError(Exception):
 
 
 def _social_token_qs(user, provider: str):
-    """Return a SocialToken queryset filtered by provider-prefix rules.
-
-    - ``"commcare_connect"`` matches tokens whose provider starts with
-      ``"commcare_connect"``.
-    - ``"ocs"`` matches tokens whose provider equals ``"ocs"``.
-    - Any other provider matches tokens starting with ``"commcare"`` but
-      excludes ``"commcare_connect"``.
-
-    Ordered newest-identity-first. A user can now hold several team-scoped
-    tokens for one provider (#156), so the ``.afirst()`` reads below would
-    otherwise return whichever row the ORM happened to yield — the unordered-read
-    defect #415 fixed for ``TenantMetadata``. Callers that must cover *every*
-    team use ``aiter_social_tokens``; the ones that legitimately want a single
-    representative token get the most recently authorised identity.
-    """
-    if provider == "commcare_connect":
-        qs = SocialToken.objects.filter(
-            account__user=user,
-            account__provider__startswith="commcare_connect",
-        )
-    elif provider == "ocs":
-        qs = SocialToken.objects.filter(
-            account__user=user,
-            account__provider="ocs",
-        )
-    else:
-        qs = SocialToken.objects.filter(
-            account__user=user,
-            account__provider__startswith="commcare",
-        ).exclude(account__provider__startswith="commcare_connect")
+    """Use the shared provider mapping, ordered newest identity first."""
+    qs = SocialToken.objects.filter(account__in=provider_accounts(user, provider))
     return qs.order_by("-account__date_joined", "-account__id")
-
-
-async def aget_social_token(user, provider: str) -> SocialToken | None:
-    """Return the newest SocialToken for *user* and *provider*, or None."""
-    return await _social_token_qs(user, provider).afirst()
 
 
 async def aiter_social_tokens(user, provider: str) -> list[SocialToken]:
@@ -141,34 +108,11 @@ async def aget_connection_token(conn) -> SocialToken | None:
     )
 
 
-async def aget_fresh_access_token(user, provider: str) -> str | None:
-    """Return a usable OAuth access token for *user*/*provider*, refreshing it if
-    near expiry, or None if the user has no usable token.
-
-    Unlike a raw token read, this refreshes an expired token — important for
-    server-side refresh on behalf of a user who hasn't logged in recently (their
-    access token is likely stale). Returns the same token value the materializer
-    would use for this user+provider.
-    """
-    token_obj = await _social_token_qs(user, provider).select_related("account", "app").afirst()
-    if token_obj is None:
-        return None
-    try:
-        cred = await _aresolve_oauth_credential(token_obj, provider)
-    except CredentialResolutionError:
-        # A refresh failure means no usable token. Callers of this helper only
-        # want a live token (e.g. share-time tenant-access refresh) and treat
-        # None as "skip"; surface None rather than raising into them.
-        return None
-    return cred["value"]
-
-
 async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
     """Every usable ``(identity, access token)`` pair for *user*/*provider*.
 
-    The plural form of ``aget_fresh_access_token``, for callers deciding whether a
-    user's upstream access covers something: with one token per OCS team, asking
-    for "the" token answers about one team and silently ignores the rest.
+    For callers checking upstream access, one representative token answers only
+    about its team and silently ignores the rest.
     Identities whose token cannot be renewed are dropped rather than raised on —
     a dead credential for one team must not abort the others.
     """
@@ -241,15 +185,11 @@ async def aresolve_credential(membership) -> dict | None:
     return await _aresolve_oauth_credential(token_obj, conn.provider)
 
 
-async def arefresh_connection(conn) -> str:
-    """Refresh *conn*'s own OAuth token and report its health.
+async def aconnection_status(conn) -> str:
+    """Read connection health without rotating credentials or doing network I/O.
 
-    Returns ``"connected"``, ``"expired"`` (no usable credential — reconnect this
-    scope) or ``"unknown"`` for a connection that holds no OAuth token at all.
-
-    Refresh is per connection, not per provider: a user holding two OCS teams has
-    two independent tokens with independent expiries, and renewing "the user's OCS
-    token" would leave the other team's silently stale.
+    providers_view owns the settings page's proactive refresh. The client reads
+    this status after that request completes so it sees the updated expiry.
     """
     if conn.credential_type != TenantConnection.OAUTH:
         return "unknown"
@@ -262,13 +202,7 @@ async def arefresh_connection(conn) -> str:
         if token_obj.expires_at is None and token_url is not None:
             return "expired"
         return "connected"
-    if not can_refresh:
-        return "expired"
-    try:
-        await refresh_oauth_token(token_obj, token_url)
-    except TokenRefreshError:
-        return "expired"
-    return "connected"
+    return "expired"
 
 
 def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:

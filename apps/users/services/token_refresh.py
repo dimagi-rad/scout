@@ -22,6 +22,8 @@ import requests
 from django.conf import settings
 from django.utils import timezone
 
+from apps.users.services.oauth_scope import canonical_provider
+
 logger = logging.getLogger(__name__)
 
 # Refresh tokens that expire within this window
@@ -43,6 +45,7 @@ PROVIDER_TOKEN_URLS = {
 
 def get_token_url(provider: str) -> str | None:
     """Return the OAuth token endpoint for a provider, or None if unknown."""
+    provider = canonical_provider(provider)
     if provider == "ocs":
         return _ocs_token_url()
     if provider == "commcare_connect":
@@ -91,6 +94,8 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
     Raises:
         TokenRefreshError: If the refresh request fails.
     """
+    if social_token.app is None:
+        raise TokenRefreshError("OAuth application is missing; reconnect this account.")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
@@ -142,6 +147,8 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
     refresh sees it; a persistence failure is non-fatal — the in-memory token is
     still usable for the remainder of this run.
     """
+    if social_token.app is None:
+        raise TokenRefreshError("OAuth application is missing; reconnect this account.")
     try:
         response = requests.post(
             token_url,

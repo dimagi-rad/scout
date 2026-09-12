@@ -25,7 +25,11 @@ from apps.users.models import (
 )
 from apps.users.rate_limiting import check_rate_limit, record_attempt
 from apps.users.services.credential_resolver import aiter_social_tokens
-from apps.users.services.oauth_scope import is_active_identity
+from apps.users.services.oauth_scope import (
+    canonical_provider,
+    is_active_identity,
+    provider_accounts,
+)
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -236,13 +240,18 @@ def disconnect_provider_view(request, provider_id):
     *all* their teams. Removing a single team is
     ``DELETE /api/auth/connections/<id>/``.
     """
-    # Check both provider class id and provider_id (see SocialAccount.provider note below).
-    tokens = SocialToken.objects.filter(account__user=request.user, account__provider=provider_id)
-    if not tokens.exists():
-        app_provider_ids = list(
-            SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
+    # Data providers may use configured allauth IDs such as commcare_prod.
+    provider = canonical_provider(provider_id)
+    if provider in ("commcare", "commcare_connect", "ocs"):
+        tokens = SocialToken.objects.filter(account__in=provider_accounts(request.user, provider))
+    else:
+        tokens = SocialToken.objects.filter(
+            account__user=request.user, account__provider=provider_id
         )
-        if app_provider_ids:
+        if not tokens.exists():
+            app_provider_ids = list(
+                SocialApp.objects.filter(provider=provider_id).values_list("provider_id", flat=True)
+            )
             tokens = SocialToken.objects.filter(
                 account__user=request.user, account__provider__in=app_provider_ids
             )
@@ -255,7 +264,7 @@ def disconnect_provider_view(request, provider_id):
     # (their conversations/data are retained and restored if reconnected).
     oauth_conns = TenantConnection.objects.filter(
         user=request.user,
-        provider=provider_id,
+        provider=provider,
         credential_type=TenantConnection.OAUTH,
     )
     TenantMembership.objects.filter(connection__in=oauth_conns).update(
@@ -312,7 +321,7 @@ def providers_view(request):
                 continue
             provider = social_token.account.provider
             token_url = get_token_url(provider)
-            can_refresh = bool(token_url and social_token.token_secret)
+            can_refresh = bool(token_url and social_token.token_secret and social_token.app)
             if token_needs_refresh(social_token.expires_at, can_refresh=can_refresh):
                 if can_refresh:
                     try:

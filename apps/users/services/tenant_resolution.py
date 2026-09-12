@@ -23,7 +23,7 @@ import logging
 from urllib.parse import urljoin
 
 import httpx
-from allauth.socialaccount.models import SocialAccount, SocialToken
+from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db import transaction
@@ -31,7 +31,7 @@ from django.utils import timezone
 
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
-from apps.users.services.oauth_scope import account_scope, scope_account_ids
+from apps.users.services.oauth_scope import account_scope, provider_accounts, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
 
 logger = logging.getLogger(__name__)
@@ -46,11 +46,7 @@ async def _anewest_account(user, provider: str):
     resolving. Ordered, because a user can hold one identity per team and an
     unordered read would attribute a fetch to an arbitrary one of them.
     """
-    return (
-        await SocialAccount.objects.filter(user=user, provider=provider)
-        .order_by("-date_joined", "-id")
-        .afirst()
-    )
+    return await provider_accounts(user, provider).order_by("-date_joined", "-id").afirst()
 
 
 @sync_to_async

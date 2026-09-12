@@ -106,8 +106,7 @@ export function ConnectionsPage() {
   }, [])
 
   useEffect(() => {
-    fetchProviders()
-    fetchConnections()
+    void fetchProviders().then(fetchConnections)
   }, [fetchProviders, fetchConnections])
 
   const providerFilterGroup = useMemo((): FilterGroup => {
@@ -150,8 +149,8 @@ export function ConnectionsPage() {
     setError(null)
     try {
       await api.delete(`/api/auth/connections/${connectionId}/`)
-      await fetchConnections()
       await fetchProviders()
+      await fetchConnections()
       await fetchStoreDomains()
       // Removing a connection can drop the workspaces backed only by it. The
       // connection payload carries no workspace id (chatbots hold
@@ -381,7 +380,7 @@ export function ConnectionsPage() {
                             <p className="text-sm font-medium">
                               Remove{" "}
                               <span className="font-semibold">{teamLabel}</span>? Its
-                              chatbots will be hidden. This cannot be undone.
+                              chatbots will be hidden and its saved credentials removed. You can reconnect later.
                             </p>
                             <div className="flex shrink-0 gap-2">
                               <Button

@@ -19,12 +19,17 @@ from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.providers.ocs.provider import OCSProvider, team_slug_from_uid
 from apps.users.services.credential_resolver import (
     CredentialResolutionError,
+    aconnection_status,
     aiter_social_tokens,
-    arefresh_connection,
     aresolve_credential,
 )
 from apps.users.services.merge import merge_users
 from apps.users.services.tenant_resolution import _sync_memberships, resolve_ocs_chatbots
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    refresh_oauth_token,
+    refresh_oauth_token_sync,
+)
 from apps.users.views import _arefresh_all_identities
 from apps.workspaces.access import (
     _ashares_live_tenant,
@@ -297,8 +302,8 @@ async def test_a_chatbot_of_another_team_still_fails_closed(user):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_refresh_is_per_connection(user, mocker):
-    """Renewing one team's near-expiry token must not touch the other team's."""
+async def test_health_is_per_connection_without_refresh(user, mocker):
+    """An expired team is reported independently, without refreshing either token."""
     app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
     _, conn_a = await _aocs_identity(
         user, team="acme", token="stale-a", secret="refresh-a", expires_in_hours=-1, app=app
@@ -311,20 +316,17 @@ async def test_refresh_is_per_connection(user, mocker):
         new=AsyncMock(return_value="new-a"),
     )
 
-    assert await arefresh_connection(conn_a) == "connected"
-    assert await arefresh_connection(conn_b) == "connected"
+    assert await aconnection_status(conn_a) == "expired"
+    assert await aconnection_status(conn_b) == "connected"
 
-    assert refresh.await_count == 1
-    (refreshed_token, _url), _kwargs = refresh.await_args
-    assert refreshed_token.token == "stale-a"
-    assert refreshed_token.token_secret == "refresh-a"
+    refresh.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_refresh_reports_expired_when_a_connection_cannot_be_renewed(user):
     _, conn = await _aocs_identity(user, team="acme", token="stale", secret="", expires_in_hours=-1)
-    assert await arefresh_connection(conn) == "expired"
+    assert await aconnection_status(conn) == "expired"
 
 
 @pytest.mark.asyncio
@@ -599,7 +601,7 @@ async def test_delete_team_cannot_be_revived_by_other_subject_token(user, mocker
 async def test_unknown_expiry_without_refresh_reports_reconnect(user):
     account, conn = await _aocs_identity(user, team="acme", token="unknown")
     await SocialToken.objects.filter(account=account).aupdate(expires_at=None)
-    assert await arefresh_connection(conn) == "expired"
+    assert await aconnection_status(conn) == "expired"
 
 
 @pytest.mark.asyncio
@@ -722,3 +724,133 @@ def test_provider_health_ignores_unvalidated_same_scope_identity(user, client, s
     client.force_login(user)
     providers = {p["id"]: p for p in client.get("/api/auth/providers/").json()["providers"]}
     assert providers["ocs"]["status"] == "expired"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_connections_health_does_not_rotate_tokens(user, mocker):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    await _aocs_identity(
+        user, team="acme", token="old", secret="refresh", expires_in_hours=-1, app=app
+    )
+    refresh = mocker.patch(
+        "apps.users.services.credential_resolver.refresh_oauth_token", AsyncMock()
+    )
+    client = await _login(user)
+    response = await client.get("/api/auth/connections/")
+    assert response.status_code == 200
+    refresh.assert_not_awaited()
+    assert response.json()[0]["status"] == "expired"
+
+
+@pytest.mark.parametrize("provider", ["commcare_prod", "commcare_connect_staging", "ocs_staging"])
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_prefixed_provider_disconnect_stays_removed_on_poll(user, mocker, provider):
+    canonical = (
+        "commcare_connect" if provider.startswith("commcare_connect") else provider.split("_")[0]
+    )
+    scope = "acme" if canonical == "ocs" else ""
+    account = await SocialAccount.objects.acreate(user=user, provider=provider, uid="42#acme")
+    await SocialToken.objects.acreate(account=account, token="prefixed")
+    conn = await TenantConnection.objects.acreate(
+        user=user,
+        provider=canonical,
+        credential_type=TenantConnection.OAUTH,
+        scope_key=scope,
+        social_account=account,
+    )
+    assert [t.account_id for t in await aiter_social_tokens(user, canonical)] == [account.id]
+    other_provider = "commcare_connect_other" if canonical == "commcare" else "commcare_other"
+    other = await SocialAccount.objects.acreate(user=user, provider=other_provider, uid="other")
+    await SocialToken.objects.acreate(account=other, token="other-provider")
+    client = await _login(user)
+    await client.delete(f"/api/auth/connections/{conn.id}/")
+    assert not await SocialToken.objects.filter(account=account).aexists()
+    assert await SocialToken.objects.filter(account=other).aexists()
+    resolver = AsyncMock()
+    mocker.patch.dict("apps.users.views._PROVIDER_RESOLVERS", {canonical: resolver}, clear=True)
+    await cache.aclear()
+    await _arefresh_all_identities(user)
+    resolver.assert_not_awaited()
+
+
+@pytest.mark.django_db
+def test_missing_social_app_reports_expired_without_refresh(user, client, site, mocker):
+    app = SocialApp.objects.create(provider="ocs", name="OCS", client_id="c", secret="s")
+    app.sites.add(site)
+    account = SocialAccount.objects.create(user=user, provider="ocs", uid="42#acme")
+    SocialToken.objects.create(
+        account=account, token="old", token_secret="refresh", expires_at=timezone.now()
+    )
+    refresh = mocker.patch("apps.users.services.token_refresh.refresh_oauth_token", AsyncMock())
+    client.force_login(user)
+    response = client.get("/api/auth/providers/")
+    assert response.status_code == 200
+    refresh.assert_not_awaited()
+    assert response.json()["providers"][0]["status"] == "expired"
+
+
+def test_uid_migration_requires_json_extra_data_schema():
+    migration = TestUidQualificationMigration._module().Migration
+    assert ("socialaccount", "0006_alter_socialaccount_extra_data") in migration.dependencies
+
+
+@pytest.mark.parametrize("sync_refresh", [False, True])
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_refresh_without_application_raises_actionable_error(user, sync_refresh):
+    account = await SocialAccount.objects.acreate(user=user, provider="ocs", uid="no-app")
+    token = await SocialToken.objects.acreate(account=account, token="old", token_secret="refresh")
+    with pytest.raises(TokenRefreshError, match="application is missing"):
+        if sync_refresh:
+            await sync_to_async(refresh_oauth_token_sync)(token, "https://example.com/token")
+        else:
+            await refresh_oauth_token(token, "https://example.com/token")
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_ensure_uses_active_connect_identity(user, mocker):
+    active = await SocialAccount.objects.acreate(
+        user=user, provider="commcare_connect", uid="active"
+    )
+    await SocialToken.objects.acreate(account=active, token="active-token")
+    await TenantConnection.objects.acreate(
+        user=user,
+        provider="commcare_connect",
+        credential_type=TenantConnection.OAUTH,
+        social_account=active,
+    )
+    inactive = await SocialAccount.objects.acreate(
+        user=user, provider="commcare_connect", uid="inactive"
+    )
+    await SocialToken.objects.acreate(account=inactive, token="inactive-token")
+    resolver = mocker.patch(
+        "apps.users.views.resolve_connect_opportunities", AsyncMock(return_value=[])
+    )
+    client = await _login(user)
+    response = await client.post(
+        "/api/auth/tenants/ensure/",
+        {"provider": "commcare_connect", "tenant_id": "missing"},
+        content_type="application/json",
+    )
+    assert response.status_code == 404
+    assert resolver.await_args.args[1] == "active-token"
+    assert resolver.await_args.kwargs == {"social_account": active, "allow_replace": False}
+
+
+@pytest.mark.django_db
+def test_provider_disconnect_includes_prefixed_accounts_but_excludes_connect(user, client):
+    for provider, uid in [
+        ("commcare", "hq"),
+        ("commcare_prod", "prod"),
+        ("commcare_connect_prod", "connect"),
+    ]:
+        account = SocialAccount.objects.create(user=user, provider=provider, uid=uid)
+        SocialToken.objects.create(account=account, token=uid)
+    client.force_login(user)
+    assert client.post("/api/auth/providers/commcare/disconnect/").status_code == 200
+    assert list(SocialToken.objects.filter(account__user=user).values_list("token", flat=True)) == [
+        "connect"
+    ]

@@ -22,9 +22,8 @@ from apps.users.services.api_key_providers import (
     CredentialVerificationError,
 )
 from apps.users.services.credential_resolver import (
-    aget_social_token,
+    aconnection_status,
     aiter_social_tokens,
-    arefresh_connection,
 )
 from apps.users.services.oauth_scope import scope_account_ids
 from apps.users.services.ocs_team import adetect_team_from_api_key
@@ -38,12 +37,6 @@ from apps.workspaces.models import Workspace
 TENANT_REFRESH_TTL = 3600  # seconds (1 hour)
 
 logger = logging.getLogger(__name__)
-
-
-async def _aget_token_value(user, provider: str) -> str | None:
-    """Return the user's newest OAuth access token string for *provider*, or None."""
-    token = await aget_social_token(user, provider)
-    return token.token if token else None
 
 
 # provider -> resolver, for the lazy refresh tenant_list_view runs on poll.
@@ -248,7 +241,7 @@ async def tenant_credential_list_view(request):
                     "scope_label": conn.scope_label,
                     # Per connection, not per provider: two teams have independent
                     # tokens and one can expire while the other is fine.
-                    "status": await arefresh_connection(conn) if is_oauth else None,
+                    "status": await aconnection_status(conn) if is_oauth else None,
                     "chatbots": chatbots,
                 }
             )
@@ -427,7 +420,8 @@ async def tenant_ensure_view(request):
         )
     except TenantMembership.DoesNotExist:
         if provider == "commcare_connect":
-            connect_token = await _aget_token_value(user, "commcare_connect")
+            tokens = await aiter_social_tokens(user, "commcare_connect")
+            connect_token = tokens[0] if tokens else None
             if not connect_token:
                 return JsonResponse(
                     {"error": "No Connect OAuth token. Please log in with Connect first."},
@@ -436,7 +430,9 @@ async def tenant_ensure_view(request):
 
             # Resolve the user's actual opportunities from the Connect API
             # to verify they have access to the requested tenant_id.
-            memberships = await resolve_connect_opportunities(user, connect_token)
+            memberships = await resolve_connect_opportunities(
+                user, connect_token.token, social_account=connect_token.account, allow_replace=False
+            )
             tm = next((m for m in memberships if m.tenant.external_id == tenant_id), None)
             if tm is None:
                 return JsonResponse(

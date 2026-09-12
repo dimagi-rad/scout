@@ -12,6 +12,7 @@ from django.dispatch import receiver
 from django.utils import timezone
 
 from apps.users.services.merge import merge_users
+from apps.users.services.oauth_scope import canonical_provider
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -126,7 +127,7 @@ def resolve_tenant_on_social_login(request, sociallogin, **kwargs):
     authorised team and ``social_account_updated`` for one they already had, which
     is exactly the add-vs-update distinction the connection's ``scope_key`` needs.
     """
-    provider = sociallogin.account.provider
+    provider = canonical_provider(sociallogin.account.provider)
 
     token = sociallogin.token
     if not token or not token.token:

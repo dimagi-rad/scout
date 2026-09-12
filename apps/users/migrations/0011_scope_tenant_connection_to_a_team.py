@@ -37,6 +37,8 @@ def _social_accounts_for(SocialAccount, user_id, provider):
         return qs.filter(provider__startswith="commcare").exclude(
             provider__startswith="commcare_connect"
         )
+    if provider == "ocs":
+        return qs.filter(provider__startswith="ocs")
     return qs.filter(provider=provider)
 
 

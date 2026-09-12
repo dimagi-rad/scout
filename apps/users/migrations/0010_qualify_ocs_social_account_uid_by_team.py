@@ -22,7 +22,7 @@ SEPARATOR = "#"
 
 def forward(apps, schema_editor):
     SocialAccount = apps.get_model("socialaccount", "SocialAccount")
-    for account in SocialAccount.objects.filter(provider="ocs"):
+    for account in SocialAccount.objects.filter(provider__startswith="ocs"):
         if SEPARATOR in (account.uid or ""):
             continue
         team = str((account.extra_data or {}).get("team") or "").strip()
@@ -34,7 +34,7 @@ def forward(apps, schema_editor):
 
 def backward(apps, schema_editor):
     SocialAccount = apps.get_model("socialaccount", "SocialAccount")
-    for account in SocialAccount.objects.filter(provider="ocs"):
+    for account in SocialAccount.objects.filter(provider__startswith="ocs"):
         sub, sep, _team = (account.uid or "").partition(SEPARATOR)
         if not sep:
             continue
@@ -45,7 +45,7 @@ def backward(apps, schema_editor):
 class Migration(migrations.Migration):
     dependencies = [
         ("users", "0009_alter_tenantmembership_options_and_more"),
-        ("socialaccount", "0001_initial"),
+        ("socialaccount", "0006_alter_socialaccount_extra_data"),
     ]
 
     operations = [
