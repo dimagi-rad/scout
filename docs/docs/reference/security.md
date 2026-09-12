@@ -2,19 +2,40 @@
 
 Scout implements multiple layers of security to protect data and prevent abuse.
 
-## Semantic query access
+## Semantic-first query access
 
-Scout does not expose a raw SQL tool to the agent. User questions are answered
-through semantic-model tools:
+The agent prefers the semantic model for analysis and must use `semantic_query`
+for canonical metrics. `list_workspaces`, `list_datasets`, and
+`describe_dataset` discover the available datasets and members. Scout compiles
+structured semantic requests into trusted parameterized database queries.
 
-- `semantic_catalog` lists curated datasets and members.
-- `describe_dataset` returns dataset details.
-- `semantic_query` accepts structured measures, dimensions, filters, time
-  dimensions, orderings, and limits.
+The `query` tool is a read-only SQL fallback for questions the semantic model
+cannot express, including inspecting raw text, exploring columns without
+semantic members, and examining individual rows. The agent uses `list_tables`,
+`describe_table`, and `get_metadata` to inspect the available data first. It must
+explain why it used the fallback and distinguish its own calculations from
+canonical metrics. `teardown_schema` is not exposed to the agent.
 
-Scout backend code compiles those structured requests into trusted,
-parameterized database queries. Generated SQL is not part of the agent-facing
-tool contract.
+### Raw SQL validation
+
+Before execution, the server parses SQL and requires a single SELECT, including
+read-only CTEs, joins, and set operations. It rejects DML, DDL, `SELECT INTO`,
+data-modifying CTEs, and multiple statements. Qualified table references must
+use the workspace schema or `public`; database role grants remain the access
+boundary. System catalog references, including unqualified `pg_*` relations,
+are rejected.
+
+Raw SQL supports an explicit allowlist of core PostgreSQL analytics functions:
+aggregates, windows, dates, text, numeric operations, JSON, and arrays. Unknown,
+custom, and extension functions are rejected. Ordinary allowed calls are bound
+to `pg_catalog` so tenant function overloads cannot change their resolution;
+PostgreSQL special forms such as CASE, CAST, and COALESCE retain their syntax.
+Functions that execute SQL passed as text are not supported. Expanding the
+allowlist requires reviewing the function's behavior.
+
+The server injects or caps the result limit and returns a `truncated` indicator.
+The executed SQL and referenced tables are included with the result for
+provenance.
 
 ## Database isolation
 
@@ -24,7 +45,12 @@ Project database credentials (username and password) are encrypted at rest using
 
 ### Read-only connections
 
-Database connections use a read-only role (when configured) and set the PostgreSQL `search_path` to the project's configured schema, preventing access to other schemas.
+Both query paths run under the workspace's read-only database role. The pooled
+executor sets `search_path` to the workspace schema and enables
+`default_transaction_read_only` before execution. Because pooled connections
+use autocommit, each query runs in a read-only transaction. Role and session
+settings are reset before the connection returns to the pool. `search_path`
+controls name resolution; PostgreSQL role privileges enforce database access.
 
 ### Statement timeout
 

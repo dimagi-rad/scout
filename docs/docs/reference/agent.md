@@ -24,7 +24,7 @@ Key characteristics:
 - **Framework**: LangGraph for conversation flow and state management
 - **Persistence**: PostgreSQL checkpointer for conversation history
 - **Self-correction**: Automatic error detection and retry with diagnosis
-- **Semantic access only**: The agent requests curated datasets and members, not raw SQL
+- **Semantic-first access**: Canonical metrics use the semantic model; read-only SQL is available when the model cannot express the question
 
 ## Agent state
 
@@ -49,6 +49,7 @@ The agent accesses workspace data through a Model Context Protocol (MCP) server 
 
 - **Semantic catalog access** for curated datasets, measures, dimensions, and time dimensions
 - **Structured semantic query execution** with row limits and timeout enforcement
+- **Read-only SQL fallback** with validated functions, schema scope, row limits, and timeouts
 - **Response envelopes** with consistent error codes, timing data, and audit logging
 - **Thread safety** with connection pooling, circuit breaker, and timeout handling
 
@@ -91,8 +92,33 @@ Run a structured query against the semantic model.
 - `members`: Semantic members used by the result
 - `error`: Error message if failed
 
-The agent has no raw SQL tool. Scout backend code compiles semantic query specs
-into trusted parameterized database requests.
+Scout backend code compiles semantic query specs into trusted parameterized
+database requests. Canonical metrics must use this path, even when raw SQL
+would be easier.
+
+### query
+
+Execute read-only SQL when the semantic model cannot express the question, such
+as inspecting text columns, exploring fields without semantic members, or
+examining individual rows. Discover the actual schema with `list_tables`,
+`describe_table`, and `get_metadata` before writing SQL. Explain the fallback
+and label any resulting custom calculations separately from canonical metrics.
+
+**Parameter:** `sql` (string, required), containing a single SELECT. Workspace,
+user, and thread identifiers are injected server-side.
+
+**Result data:** `columns`, `rows`, `row_count`, `truncated`, `sql_executed`, and
+`tables_accessed`, inside the standard MCP response envelope.
+
+The server accepts read-only CTEs, joins, set operations, and an explicit
+allowlist of core PostgreSQL analytics functions. Custom and extension
+functions are not supported. Ordinary allowed functions resolve through
+`pg_catalog`; the database query runs under the workspace's read-only role in
+a read-only transaction. Unsupported statements/functions and system catalog
+reads are rejected before execution. Row limits and timeouts still apply.
+See [Security](security.md#raw-sql-validation) for the enforcement details.
+
+`teardown_schema` remains excluded from the agent's tools.
 
 ### create_artifact
 
@@ -174,7 +200,7 @@ Save conversation workflows as reusable templates.
 
 ### describe_table
 
-Get detailed column information for a table. Only available when the schema has more than 15 tables (too large to fit full details in the system prompt).
+Get detailed column information for a table before using the raw SQL fallback.
 
 **Parameters:**
 - `table_name` (string, required): Name of the table to describe
@@ -191,11 +217,11 @@ Core agent behavior (~150 lines):
 
 - **Core principles**: Precision over speed, data-driven responses, explain reasoning, acknowledge uncertainty
 - **Response format**: Markdown tables for small results, summaries for large results
-- **Query explanation**: Mandatory plain English breakdown for every semantic query
-- **Provenance requirements**: Datasets, semantic members, filters, aggregation method, row counts, time range
+- **Query explanation**: Mandatory plain English breakdown for every semantic or raw SQL query
+- **Provenance requirements**: Datasets or tables, semantic members or SQL filters, aggregation method, row counts, time range
 - **Knowledge entries**: Use metric definitions and business rules from the knowledge base
 - **Error handling**: Explain in plain language, identify cause, suggest fix
-- **Security constraints**: Semantic queries only, workspace-scoped, no system catalogs
+- **Security constraints**: Semantic-first analysis, validated read-only SQL fallback, workspace scope, no system catalogs
 
 ### 2. Artifact prompt
 
