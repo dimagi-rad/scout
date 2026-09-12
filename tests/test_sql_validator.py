@@ -1033,3 +1033,24 @@ class TestGenerationReviewRegressions:
             return
         rendered = validator.inject_limit(statement).sql(dialect="postgres")
         assert rendered
+
+
+class TestInvalidInputRecovery:
+    @pytest.mark.parametrize("placeholder", ["%s", "?", ":name", "$1"])
+    def test_placeholder_rejected(self, placeholder):
+        with pytest.raises(SQLValidationError, match="parameters"):
+            SQLValidator().validate(f"SELECT 1 WHERE 1 = {placeholder}")
+
+    def test_percent_literal_is_not_placeholder(self):
+        assert SQLValidator().validate("SELECT * FROM t WHERE a LIKE '%50%'") is not None
+
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "regexp_like('abc', 'b', 'i', 'extra')",
+            "current_timestamp('a', 'b')",
+        ],
+    )
+    def test_custom_rewrite_does_not_drop_extra_arguments(self, expression):
+        with pytest.raises(SQLValidationError, match="arguments"):
+            SQLValidator().validate(f"SELECT {expression}")

@@ -99,6 +99,14 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
     except SQLValidationError as e:
         logger.warning("SQL validation failed for tenant %s: %s", ctx.tenant_id, e.message)
         return error_response(VALIDATION_ERROR, e.message)
+    except Exception:
+        logger.warning(
+            "SQL validation failed unexpectedly for tenant %s", ctx.tenant_id, exc_info=True
+        )
+        return error_response(
+            VALIDATION_ERROR,
+            "Could not validate supported PostgreSQL syntax. Simplify the query and retry.",
+        )
 
     tables_accessed = validator.get_tables_accessed(statement)
 
@@ -148,6 +156,19 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
             "Schema configuration error. Please contact an administrator.",
         )
 
+    if isinstance(
+        exc,
+        (
+            psycopg.errors.SyntaxError,
+            psycopg.errors.UndefinedFunction,
+            psycopg.errors.UndefinedColumn,
+            psycopg.errors.UndefinedTable,
+            psycopg.errors.UndefinedObject,
+            psycopg.errors.DatatypeMismatch,
+        ),
+    ):
+        return VALIDATION_ERROR, f"Invalid SQL query: {exc}. Reformulate the query and retry."
+
     if isinstance(exc, psycopg.Error):
         msg = str(exc)
         if "password authentication failed" in msg.lower():
@@ -157,8 +178,6 @@ def _classify_error(exc: Exception) -> tuple[str, str]:
             )
         if "could not connect" in msg.lower():
             return CONNECTION_ERROR, "Could not connect to the database. Please try again later."
-        if "does not exist" in msg.lower():
-            return VALIDATION_ERROR, f"Database error: {msg}"
         return CONNECTION_ERROR, f"Query execution failed: {msg}"
 
     return INTERNAL_ERROR, "An unexpected error occurred while executing the query."

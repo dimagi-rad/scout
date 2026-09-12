@@ -565,6 +565,7 @@ class SQLValidator:
         Both pass a naive top-level ``isinstance`` check, so we scan the AST.
         """
         for node_type, message in (
+            (exp.Placeholder, "SQL parameters are not supported. Use literal values in the query."),
             (
                 exp.Parameter,
                 "SQL parameters and unary @ are not supported. Use abs() for absolute values.",
@@ -661,6 +662,15 @@ class SQLValidator:
                     f"Function '{func_name}' is not allowed for security reasons.",
                     sql=sql,
                     error_type="dangerous_function",
+                )
+
+            if (isinstance(func, exp.RegexpLike) and func.args.get("full_match") is not None) or (
+                isinstance(func, exp.CurrentTimestamp) and func.args.get("sysdate") is not None
+            ):
+                raise SQLValidationError(
+                    f"Function '{func_name}' has unsupported extra arguments.",
+                    sql=sql,
+                    error_type="function_not_allowed",
                 )
 
             if isinstance(func, exp.MatchAgainst) and not isinstance(

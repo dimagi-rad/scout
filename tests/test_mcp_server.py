@@ -161,6 +161,51 @@ class TestExecuteQuery:
         assert "supported PostgreSQL" in result["error"]["message"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error_type",
+        [
+            psycopg.errors.SyntaxError,
+            psycopg.errors.UndefinedFunction,
+            psycopg.errors.UndefinedColumn,
+            psycopg.errors.UndefinedTable,
+            psycopg.errors.UndefinedObject,
+            psycopg.errors.DatatypeMismatch,
+        ],
+    )
+    @patch(POOLED_EXEC)
+    async def test_sqlstate_query_error_is_actionable(self, mock_exec, project_context, error_type):
+        mock_exec.side_effect = error_type("invalid query detail")
+        result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "invalid query detail" in result["error"]["message"]
+        assert "Reformulate" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_unexpected_validation_failure_returns_envelope(self, project_context):
+        with patch(
+            "mcp_server.services.query.SQLValidator.validate", side_effect=TypeError("bad AST")
+        ):
+            result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            psycopg.errors.InsufficientPrivilege("denied"),
+            psycopg.errors.InvalidPassword("password authentication failed"),
+            psycopg.OperationalError("does not exist is not a SQLSTATE"),
+        ],
+    )
+    @patch(POOLED_EXEC)
+    async def test_infrastructure_errors_stay_connection_errors(
+        self, mock_exec, project_context, error
+    ):
+        mock_exec.side_effect = error
+        result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == CONNECTION_ERROR
+
+    @pytest.mark.asyncio
     @patch(POOLED_EXEC)
     async def test_successful_query(self, mock_exec, project_context):
         mock_exec.return_value = {
