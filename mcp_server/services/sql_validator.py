@@ -101,6 +101,18 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
 # adding one here requires reviewing its behavior, not just its return type.
 ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
     {
+        "array_contains_all",
+        "array_contained_by",
+        "jsonb_extract",
+        "jsonb_extract_scalar",
+        "j_s_o_n_b_contains_top_key",
+        "j_s_o_n_b_contains_any_top_keys",
+        "j_s_o_n_b_contains_all_top_keys",
+        "j_s_o_n_b_path_exists",
+        "match_against",
+        "array_overlaps",
+        "j_s_o_n_b_delete_at_path",
+        "localtime",
         "regexp_i_like",
         "logical_and",
         "logical_or",
@@ -246,6 +258,18 @@ ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
 # Parser-only names are not PostgreSQL function names and must not authorize a UDF.
 PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
     {
+        "array_contains_all",
+        "array_contained_by",
+        "jsonb_extract",
+        "jsonb_extract_scalar",
+        "j_s_o_n_b_contains_top_key",
+        "j_s_o_n_b_contains_any_top_keys",
+        "j_s_o_n_b_contains_all_top_keys",
+        "j_s_o_n_b_path_exists",
+        "match_against",
+        "array_overlaps",
+        "j_s_o_n_b_delete_at_path",
+        "localtime",
         "regexp_i_like",
         "logical_and",
         "logical_or",
@@ -281,6 +305,18 @@ PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
 # PostgreSQL parses these as syntax/operators, not search_path function calls.
 SQL_SPECIAL_FORMS: frozenset[str] = frozenset(
     {
+        "array_contains_all",
+        "array_contained_by",
+        "jsonb_extract",
+        "jsonb_extract_scalar",
+        "j_s_o_n_b_contains_top_key",
+        "j_s_o_n_b_contains_any_top_keys",
+        "j_s_o_n_b_contains_all_top_keys",
+        "j_s_o_n_b_path_exists",
+        "match_against",
+        "array_overlaps",
+        "j_s_o_n_b_delete_at_path",
+        "localtime",
         "regexp_i_like",
         "regexp_like",
         "and",
@@ -571,10 +607,11 @@ class SQLValidator:
             )
 
     def _validate_cast_types(self, statement: exp.Expression, sql: str) -> None:
-        for target in statement.find_all(exp.DataType, exp.ObjectIdentifier):
-            if not isinstance(target, exp.DataType) or target.this not in ALLOWED_CAST_TYPES:
+        for target in statement.find_all(exp.DataType):
+            if isinstance(target, exp.ObjectIdentifier) or target.this not in ALLOWED_CAST_TYPES:
                 raise SQLValidationError(
-                    "Cast type is not supported. Use core PostgreSQL text, numeric, boolean, "
+                    f"Type '{target.sql(dialect='postgres')}' is not supported. "
+                    "Use core PostgreSQL text, numeric, boolean, "
                     "date/time, JSON, UUID, binary or array types; custom and OID-alias types "
                     "are not permitted.",
                     sql=sql,
@@ -634,6 +671,13 @@ class SQLValidator:
         tables_accessed = self._extract_tables(statement)
 
         for table_info in tables_accessed:
+            if catalog := table_info.get("catalog"):
+                raise SQLValidationError(
+                    f"Database qualifier '{catalog}' is not supported. "
+                    "Use a table name qualified only by the workspace schema or public.",
+                    sql=sql,
+                    error_type="catalog_not_allowed",
+                )
             table_schema = table_info.get("schema")
 
             # Validate schema if specified in the query

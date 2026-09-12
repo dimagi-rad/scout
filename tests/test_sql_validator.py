@@ -935,3 +935,68 @@ class TestReviewRegressions:
         validator = SQLValidator(schema="ws_test")
         statement = validator.validate("SELECT * FROM public.users JOIN ws_test.users USING (id)")
         assert validator.get_tables_accessed(statement) == ["public.users", "ws_test.users"]
+
+
+class TestOperatorReviewRegressions:
+    @pytest.mark.parametrize(
+        "expression",
+        [
+            "'{\"a\":1}'::jsonb @> '{\"a\":1}'::jsonb",
+            "'{\"a\":1}'::jsonb <@ '{\"a\":1}'::jsonb",
+            "'{\"a\":1}'::jsonb #> '{a}'",
+            "'{\"a\":1}'::jsonb #>> '{a}'",
+            "'{\"a\":1}'::jsonb ? 'a'",
+            "'{\"a\":1}'::jsonb ?| ARRAY['a']",
+            "'{\"a\":1}'::jsonb ?& ARRAY['a']",
+            "'{\"a\":1}'::jsonb @? '$.a'",
+            "'{\"a\":1}'::jsonb @@ '$.a == 1'",
+            "ARRAY[1, 2] && ARRAY[2]",
+            "'{\"a\":1}'::jsonb #- '{a}'",
+            "localtime",
+        ],
+    )
+    def test_core_operator_roundtrip(self, expression):
+        original = sqlglot.parse_one(f"SELECT {expression}", dialect="postgres")
+        rewritten = SQLValidator().validate(f"SELECT {expression}")
+        assert rewritten.sql(dialect="postgres") == original.sql(dialect="postgres")
+
+    @pytest.mark.parametrize("catalog", ["otherdb", "scout"])
+    def test_catalog_table_rejected(self, catalog):
+        with pytest.raises(SQLValidationError, match=catalog) as error:
+            SQLValidator().validate(f"SELECT * FROM {catalog}.public.users")
+        assert error.value.error_type == "catalog_not_allowed"
+
+    def test_object_identifier_rejected_even_with_allowed_enum(self):
+        statement = exp.select(
+            exp.Cast(this=exp.Null(), to=exp.ObjectIdentifier(this=exp.DType.TEXT))
+        )
+        with pytest.raises(SQLValidationError) as error:
+            SQLValidator()._validate_cast_types(statement, "SELECT NULL::regclass")
+        assert error.value.error_type == "cast_type_not_allowed"
+
+    def test_type_error_names_column_definition_type(self):
+        with pytest.raises(SQLValidationError, match="(?i)type 'oid'"):
+            SQLValidator().validate("SELECT * FROM unnest(ARRAY[1]) AS s(a oid)")
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "array_contains_all",
+            "array_contained_by",
+            "jsonb_extract",
+            "jsonb_extract_scalar",
+            "j_s_o_n_b_contains_top_key",
+            "j_s_o_n_b_contains_any_top_keys",
+            "j_s_o_n_b_contains_all_top_keys",
+            "j_s_o_n_b_path_exists",
+            "match_against",
+            "array_overlaps",
+            "j_s_o_n_b_delete_at_path",
+            "localtime",
+        ],
+    )
+    def test_operator_internal_name_never_authorizes_anonymous_function(self, name):
+        statement = exp.select(exp.Anonymous(this=name, expressions=[exp.Literal.number(1)]))
+        with pytest.raises(SQLValidationError) as error:
+            SQLValidator()._validate_no_dangerous_functions(statement, f"SELECT {name}(1)")
+        assert error.value.error_type == "function_not_allowed"
