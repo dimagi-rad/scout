@@ -844,19 +844,9 @@ class SQLValidator:
         """
         tables: list[dict[str, str]] = []
 
-        cte_aliases: set[str] = set()
-        for cte in statement.find_all(exp.CTE):
-            if cte.alias:
-                cte_aliases.add(cte.alias.lower())
-
         for table in statement.find_all(exp.Table):
             table_name = table.name
-            # A CTE name can never be schema-qualified, so only a bare reference can
-            # be one. Skipping qualified references too let a CTE shadow a real table
-            # out of the list `_validate_table_access` checks, so
-            # `WITH schemata AS (...) SELECT * FROM information_schema.schemata`
-            # slipped past the schema allowlist (and out of the audit trail).
-            if not table.db and not table.catalog and table_name.lower() in cte_aliases:
+            if self._is_cte_reference(table):
                 continue
             table_info: dict[str, str] = {"table": table_name}
             if table.db:
@@ -866,6 +856,33 @@ class SQLValidator:
             tables.append(table_info)
 
         return tables
+
+    @staticmethod
+    def _is_cte_reference(table: exp.Table) -> bool:
+        # Qualified relations always name physical schemas, never a CTE.
+        if table.db or table.catalog or not isinstance(table.this, exp.Identifier):
+            return False
+        table_name = table.name if table.this.quoted else table.name.lower()
+        enclosing_cte = None
+        ancestor = table.parent
+        while ancestor is not None:
+            if isinstance(ancestor, exp.CTE):
+                enclosing_cte = ancestor
+            with_clause = ancestor.args.get("with_")
+            if isinstance(with_clause, exp.With):
+                for cte in with_clause.expressions:
+                    # Nonrecursive definitions see preceding siblings and outer
+                    # scopes; recursive WITH makes all sibling names visible.
+                    if cte is enclosing_cte and not with_clause.recursive:
+                        break
+                    alias = cte.args.get("alias")
+                    identifier = alias.this if isinstance(alias, exp.TableAlias) else None
+                    if isinstance(identifier, exp.Identifier):
+                        name = identifier.name if identifier.quoted else identifier.name.lower()
+                        if name == table_name:
+                            return True
+            ancestor = ancestor.parent
+        return False
 
     def inject_limit(self, statement: exp.Expression) -> exp.Expression:
         """

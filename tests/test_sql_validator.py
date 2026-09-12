@@ -1189,3 +1189,46 @@ def test_datetime_function_units_remain_expressions(function, unit):
 def test_non_postgres_datetime_spellings_rejected(query):
     with pytest.raises(SQLValidationError):
         SQLValidator().validate(query)
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        (
+            "SELECT * FROM orders WHERE EXISTS (WITH orders AS (SELECT 1 AS n) SELECT n FROM orders)",
+            ["orders"],
+        ),
+        (
+            "WITH c AS (SELECT * FROM orders) SELECT * FROM c WHERE EXISTS (SELECT 1 FROM c)",
+            ["orders"],
+        ),
+        ("WITH orders AS (SELECT * FROM orders) SELECT * FROM orders", ["orders"]),
+        (
+            "WITH orders AS (SELECT * FROM source) SELECT * FROM orders WHERE EXISTS (WITH orders AS (SELECT * FROM other) SELECT * FROM orders)",
+            ["source", "other"],
+        ),
+        (
+            "WITH RECURSIVE r(n) AS (SELECT id FROM seeds UNION ALL SELECT n+1 FROM r WHERE n<3) SELECT * FROM r",
+            ["seeds"],
+        ),
+        (
+            "WITH RECURSIVE a AS (SELECT * FROM b), b AS (SELECT * FROM source) SELECT * FROM a",
+            ["source"],
+        ),
+        (
+            "WITH a AS (SELECT * FROM b), b AS (SELECT * FROM source) SELECT * FROM a",
+            ["b", "source"],
+        ),
+        ('WITH "Orders" AS (SELECT 1) SELECT * FROM orders', ["orders"]),
+        ("WITH Orders AS (SELECT 1) SELECT * FROM orders", []),
+        ('WITH "Orders" AS (SELECT 1) SELECT * FROM "Orders"', []),
+        (
+            "WITH orders AS (SELECT 1) SELECT * FROM public.orders JOIN ws_demo.orders USING (id)",
+            ["public.orders", "ws_demo.orders"],
+        ),
+    ],
+)
+def test_cte_table_provenance_obeys_lexical_scope(sql, expected):
+    validator = SQLValidator(schema="ws_demo")
+    statement = validator.validate(sql)
+    assert sorted(validator.get_tables_accessed(statement)) == sorted(expected)
