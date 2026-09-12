@@ -523,6 +523,15 @@ class SQLValidator:
         # function resolution. Special forms use PostgreSQL's dedicated syntax.
         for func in reversed(list(statement.find_all(exp.Func))):
             func_name = (func.name if isinstance(func, exp.Anonymous) else func.sql_name()).lower()
+            if isinstance(func, exp.CurrentTime) and func.this is None:
+                func.replace(exp.Var(this="CURRENT_TIME"))
+                continue
+            # SQLGlot's timestamp emitter drops the optional precision.
+            if isinstance(func, exp.CurrentTimestamp) and func.this is not None:
+                func.replace(
+                    exp.Anonymous(this="CURRENT_TIMESTAMP", expressions=[func.this.copy()])
+                )
+                continue
             # SQLGlot's regex operator emitter drops regexp_like's third argument.
             if isinstance(func, exp.RegexpLike) and func.args.get("flag") is not None:
                 call = exp.Anonymous(
@@ -556,6 +565,10 @@ class SQLValidator:
         Both pass a naive top-level ``isinstance`` check, so we scan the AST.
         """
         for node_type, message in (
+            (
+                exp.Parameter,
+                "SQL parameters and unary @ are not supported. Use abs() for absolute values.",
+            ),
             (exp.Fetch, "FETCH syntax is not supported. Use LIMIT to bound query results."),
             (exp.Lock, "Row locking is not permitted in read-only queries."),
             (exp.Operator, "Explicit OPERATOR syntax is not supported. Use built-in operators."),
@@ -648,6 +661,15 @@ class SQLValidator:
                     f"Function '{func_name}' is not allowed for security reasons.",
                     sql=sql,
                     error_type="dangerous_function",
+                )
+
+            if isinstance(func, exp.MatchAgainst) and not isinstance(
+                func.args.get("expressions"), list
+            ):
+                raise SQLValidationError(
+                    "match_against() call syntax is not supported. Use the @@ operator for JSONPath matching.",
+                    sql=sql,
+                    error_type="function_not_allowed",
                 )
 
             parent = func.parent

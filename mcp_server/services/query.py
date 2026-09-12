@@ -103,7 +103,15 @@ async def execute_query(ctx: QueryContext, sql: str) -> dict[str, Any]:
     tables_accessed = validator.get_tables_accessed(statement)
 
     requested_limit = validator.limit_value(statement)
-    sql_executed = validator.inject_limit(statement).sql(dialect=validator.dialect)
+    try:
+        sql_executed = validator.inject_limit(statement).sql(dialect=validator.dialect)
+    except Exception:
+        # SQLGlot can parse syntax that its PostgreSQL generator cannot render.
+        logger.warning("SQL generation failed for tenant %s", ctx.tenant_id, exc_info=True)
+        return error_response(
+            VALIDATION_ERROR,
+            "Could not generate supported PostgreSQL syntax. Simplify the query and retry.",
+        )
 
     truncated = requested_limit is not None and requested_limit > validator.max_limit
 

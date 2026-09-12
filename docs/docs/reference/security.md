@@ -31,7 +31,8 @@ are rejected.
 
 Raw SQL requires PostgreSQL 16 or later and supports an explicit allowlist of core PostgreSQL analytics functions:
 aggregates, windows, dates, text, numeric operations, JSON, and arrays. Unknown,
-custom, and extension functions are rejected. Ordinary allowed calls are bound
+custom, and extension function calls are rejected by name. This function-call
+allowlist does not inspect the implementations of PostgreSQL operator overloads. Ordinary allowed calls are bound
 to `pg_catalog` so tenant function overloads cannot change their resolution;
 PostgreSQL special forms such as CASE, CAST, and COALESCE retain their syntax.
 Functions that execute SQL passed as text are not supported. Casts are limited
@@ -39,7 +40,8 @@ to core PostgreSQL data types and arrays of those types; custom types and
 OID-alias types such as `regclass` or `regnamespace` are rejected because their
 input/output functions can resolve catalog objects. Expanding either allowlist
 requires reviewing the function or type's behavior. Core JSONB/array operators
-retain their PostgreSQL syntax. Full-text search types/functions and unlisted
+retain their PostgreSQL syntax, including `@@` for JSONB/JSONPath matching.
+Full-text search types/functions and unlisted
 members of otherwise supported function families are outside this allowlist;
 use `ILIKE` or regular expressions for text search.
 

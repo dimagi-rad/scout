@@ -146,6 +146,21 @@ class TestExecuteQuery:
         assert "parse error" in result["error"]["message"].lower()
 
     @pytest.mark.asyncio
+    async def test_malformed_match_call_returns_envelope(self, project_context):
+        result = await execute_query(project_context, "SELECT match_against(a, b) FROM t")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exception", [TypeError("bad AST"), ValueError("bad generation")])
+    async def test_generation_failure_returns_envelope(self, project_context, exception):
+        with patch("mcp_server.services.query.SQLValidator.inject_limit", side_effect=exception):
+            result = await execute_query(project_context, "SELECT 1")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "supported PostgreSQL" in result["error"]["message"]
+
+    @pytest.mark.asyncio
     @patch(POOLED_EXEC)
     async def test_successful_query(self, mock_exec, project_context):
         mock_exec.return_value = {

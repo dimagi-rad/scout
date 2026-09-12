@@ -16,7 +16,11 @@ import sqlglot
 from sqlglot import exp
 
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
-from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
+from mcp_server.services.sql_validator import (
+    ALLOWED_ANALYTICS_FUNCTIONS,
+    SQLValidationError,
+    SQLValidator,
+)
 
 
 class TestSQLInjectionPrevention:
@@ -1000,3 +1004,32 @@ class TestOperatorReviewRegressions:
         with pytest.raises(SQLValidationError) as error:
             SQLValidator()._validate_no_dangerous_functions(statement, f"SELECT {name}(1)")
         assert error.value.error_type == "function_not_allowed"
+
+
+class TestGenerationReviewRegressions:
+    @pytest.mark.parametrize(
+        "expression", ["current_time", "current_time(3)", "current_timestamp(3)"]
+    )
+    def test_current_time_preserves_postgres_syntax(self, expression):
+        rendered = SQLValidator().validate(f"SELECT {expression}").sql(dialect="postgres")
+        assert rendered == f"SELECT {expression.upper()}"
+
+    def test_reject_malformed_match_call(self):
+        with pytest.raises(SQLValidationError, match="@@"):
+            SQLValidator().validate("SELECT match_against(a, b) FROM t")
+
+    def test_reject_unary_at_with_supported_alternative(self):
+        with pytest.raises(SQLValidationError, match="abs"):
+            SQLValidator().validate("SELECT @ x")
+
+    @pytest.mark.parametrize("name", sorted(ALLOWED_ANALYTICS_FUNCTIONS))
+    @pytest.mark.parametrize("arity", range(5))
+    def test_real_parser_alias_calls_generate_or_reject(self, name, arity):
+        arguments = ", ".join("a" for _ in range(arity))
+        validator = SQLValidator()
+        try:
+            statement = validator.validate(f"SELECT {name}({arguments}) FROM t")
+        except SQLValidationError:
+            return
+        rendered = validator.inject_limit(statement).sql(dialect="postgres")
+        assert rendered
