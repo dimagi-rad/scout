@@ -86,6 +86,11 @@ logger = logging.getLogger(__name__)
 # it applies to. A 401 and a 403 in one run need *opposite* advice, so an
 # unattributed pair reads as a flat contradiction (#372).
 _CREDENTIAL_GUIDANCE: dict[str, str] = {
+    ErrorCode.PIPELINE_UNRESOLVED: (
+        "ask an administrator to configure or repair the materialization pipeline "
+        "for this provider before retrying. Re-running cannot resolve this pipeline "
+        "configuration problem until that configuration changes."
+    ),
     ErrorCode.AUTH_TOKEN_EXPIRED: (
         "expired or revoked sign-in — reconnect the affected account "
         "(Settings → Connections) and re-run materialization."
@@ -135,6 +140,15 @@ def _credential_guidance(failures: Iterable[_SourceFailure]) -> list[str]:
     ]
 
 
+def _set_tenant_display_names(summaries: list[dict]) -> None:
+    providers_by_name: dict[str, set[str]] = {}
+    for entry in summaries:
+        providers_by_name.setdefault(entry["tenant"], set()).add(entry.get("provider", ""))
+    for entry in summaries:
+        if len(providers_by_name[entry["tenant"]]) > 1 and entry.get("provider"):
+            entry["display_name"] = f"{entry['tenant']} ({entry['provider']})"
+
+
 def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
     """Every coded failure in a per-tenant summary, at both levels.
 
@@ -151,7 +165,7 @@ def _summary_failures(tenant_summaries: Iterable[dict]) -> list[_SourceFailure]:
         if tenant.get("error_code"):
             failures.append(
                 _SourceFailure(
-                    name=str(tenant.get("tenant") or "unknown"),
+                    name=str(tenant.get("display_name") or tenant.get("tenant") or "unknown"),
                     error=str(tenant.get("error") or ""),
                     code=str(tenant["error_code"]),
                 )
@@ -423,6 +437,7 @@ async def materialize_workspace_core(
         for tenant_id, tenant in workspace_tenants.items()
         if tenant_id not in reachable
     ]
+    _set_tenant_display_names(unreachable_results)
     for entry in unreachable_results:
         logger.warning(
             "materialize_workspace: workspace %s includes tenant %s, which the "
@@ -480,9 +495,23 @@ async def materialize_workspace_core(
                 pipeline_config,
                 job_id,
             )
-            tenant_results.append({"tenant": tenant_id, "success": True, "result": result})
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "provider": tm.tenant.provider,
+                    "success": True,
+                    "result": result,
+                }
+            )
         except MaterializationCancelled:
-            tenant_results.append({"tenant": tenant_id, "success": False, "cancelled": True})
+            tenant_results.append(
+                {
+                    "tenant": tenant_id,
+                    "provider": tm.tenant.provider,
+                    "success": False,
+                    "cancelled": True,
+                }
+            )
             break
         except ConnectExportError as e:
             # Capture the sentry-trace header so support can correlate with
@@ -500,12 +529,24 @@ async def materialize_workspace_core(
             sentry_sdk.set_tag("connect.upstream_sentry_trace", e.sentry_trace or "")
             sentry_sdk.set_tag("connect.pipeline", pipeline_name or "")
             tenant_results.append(
-                {"tenant": tenant_id, "success": False, "error": str(e), "error_code": code_of(e)}
+                {
+                    "tenant": tenant_id,
+                    "provider": tm.tenant.provider,
+                    "success": False,
+                    "error": str(e),
+                    "error_code": code_of(e),
+                }
             )
         except Exception as e:
             logger.exception("Materialization failed for tenant %s", tenant_id)
             tenant_results.append(
-                {"tenant": tenant_id, "success": False, "error": str(e), "error_code": code_of(e)}
+                {
+                    "tenant": tenant_id,
+                    "provider": tm.tenant.provider,
+                    "success": False,
+                    "error": str(e),
+                    "error_code": code_of(e),
+                }
             )
 
     # Two questions, so two flags. `attempted_succeeded` asks whether the data we
@@ -571,6 +612,7 @@ async def materialize_workspace_core(
     )
 
     all_results = tenant_results + unreachable_results
+    _set_tenant_display_names(all_results)
     return {
         "tenants": all_results,
         "all_succeeded": all_succeeded,
@@ -1726,6 +1768,7 @@ async def _aggregate_materialization_state(
         preflight_failures,
     )
     if not runs:
+        _set_tenant_display_names(uncovered)
         return "no_runs", uncovered
     summary: list[dict] = []
     any_cancelled = False
@@ -1778,6 +1821,7 @@ async def _aggregate_materialization_state(
                     transform_error = transforms["error"]
         tenant_summary = {
             "tenant": tenant_id,
+            "provider": r.tenant_schema.tenant.provider,
             "state": r.state,
             "materialized_row_counts": materialized_row_counts,
             "sources": sources_detail,
@@ -1800,6 +1844,7 @@ async def _aggregate_materialization_state(
         elif r.state != MaterializationRun.RunState.COMPLETED:
             all_completed = False
     summary.extend(uncovered)
+    _set_tenant_display_names(summary)
     if any_cancelled:
         status = "cancelled"
     elif any_failed:
@@ -1896,7 +1941,9 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 if not error.endswith((".", "!", "?")):
                     error += "."
                 recorded_details.append(f"{entry['tenant']} ({entry['provider']}): {error}")
-    uncovered_tenants = [t["tenant"] for t in summary if t.get("state") == TENANT_NOT_RUN]
+    uncovered_tenants = [
+        t.get("display_name", t["tenant"]) for t in summary if t.get("state") == TENANT_NOT_RUN
+    ]
     # Named per source *and* per tenant, because a run can carry a dead token on
     # one and revoked access on another — opposite advice, and the agent has to
     # tell them apart to relay either honestly.

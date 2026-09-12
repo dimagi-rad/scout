@@ -1461,6 +1461,9 @@ async def test_headless_preflight_failure_preserves_real_core_reason(
     assert result["status"] == "failed"
     if missing == "pipeline":
         assert "pipeline" in result["message"].lower()
+        assert "administrator" in result["message"]
+        assert "configure" in result["message"]
+        assert ".." not in result["message"]
         assert summaries[0]["tenants"][0]["error_code"] == ErrorCode.PIPELINE_UNRESOLVED
     else:
         assert "No usable credential could be resolved" in result["message"]
@@ -1556,5 +1559,12 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     assert "preflight_recorded" not in body
     assert "run recorded nothing" not in body
     assert "  " not in tj.error_summary
+    if reason == "pipeline":
+        assert "administrator" in tj.error_summary
+        assert "configure" in tj.error_summary
+        assert "before retrying" in tj.error_summary
+    assert f"{tenant.external_id} (ocs)" in body.split("IMPORTANT:")[-1]
     if reason == "expired":
         assert "Settings → Connections" in tj.error_summary
+        if not all_missing:
+            assert f"{tenant.external_id} (ocs): expired" in tj.error_summary

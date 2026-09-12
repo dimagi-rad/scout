@@ -64,7 +64,9 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         view_schema = summary.get("view_schema")
         view_ok = view_schema is None or view_schema.get("ok")
 
-        not_loaded = [t.get("tenant") for t in tenants if not t.get("success")]
+        not_loaded = [
+            t.get("display_name") or t.get("tenant") for t in tenants if not t.get("success")
+        ]
         # Only name sources we actually have names for — the branches below are
         # reachable with nothing to name, and a dangling "others did not: ."
         # invites the agent to invent one.
@@ -112,12 +114,15 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             message = f"Materialization failed; no data was loaded{named}."
 
         failure_details = [
-            f"{tenant.get('tenant') or 'unknown'}: {tenant['error']}"
+            f"{tenant.get('display_name') or tenant.get('tenant') or 'unknown'}: {tenant['error'].strip()}"
             for tenant in tenants
             if not tenant.get("success") and tenant.get("error")
         ]
         if failure_details:
-            message += " Failure details: " + "; ".join(failure_details) + "."
+            details = "; ".join(failure_details)
+            message += " Failure details: " + details
+            if not details.endswith((".", "!", "?")):
+                message += "."
 
         # Advice comes from the run, keyed by error code — this tool must not
         # write its own (apps/common/errors.py: raise sites describe, one owner
