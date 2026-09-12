@@ -121,6 +121,14 @@ class TestCommCareConnectProvider:
 class TestTokenRefresh:
     """Test the OAuth token refresh service."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_connection_health_storage(self, mocker):
+        connections = mocker.patch(
+            "apps.users.services.token_refresh._token_connections"
+        ).return_value
+        connections.aupdate = AsyncMock()
+        connections.filter.return_value.aupdate = AsyncMock()
+
     @pytest.mark.asyncio
     async def test_refresh_updates_token(self, httpx_mock):
         from apps.users.services.token_refresh import refresh_oauth_token
@@ -136,7 +144,7 @@ class TestTokenRefresh:
             },
         )
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token = "old_access_token"
         social_token.token_secret = "old_refresh_token"
         social_token.app.client_id = "client_123"
@@ -160,7 +168,7 @@ class TestTokenRefresh:
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(url=token_url, method="POST", status_code=400)
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old_refresh_token"
         social_token.app.client_id = "client_123"
         social_token.app.secret = "secret_456"
@@ -179,7 +187,7 @@ class TestTokenRefresh:
             json={"error": "invalid_grant"},
         )
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "dead_refresh_token"
         social_token.app.client_id = "client_123"
         social_token.app.secret = "secret_456"
@@ -201,7 +209,7 @@ class TestTokenRefresh:
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_response(url=token_url, method="POST", status_code=503)
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old_refresh_token"
         social_token.app.client_id = "client_123"
         social_token.app.secret = "secret_456"
@@ -220,7 +228,7 @@ class TestTokenRefresh:
         token_url = "https://example.com/oauth/token/"
         httpx_mock.add_exception(httpx.ConnectError("connection refused"), url=token_url)
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old_refresh_token"
         social_token.app.client_id = "client_123"
         social_token.app.secret = "secret_456"

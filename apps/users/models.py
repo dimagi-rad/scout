@@ -95,6 +95,11 @@ PROVIDER_CHOICES = [
     ("ocs", "Open Chat Studio"),
 ]
 
+# Providers whose OAuth token authorises one *scope* (an OCS team) rather than the
+# whole account, so a user may legitimately hold several connections for it. The
+# UI reads this to offer "connect another" instead of only connect/disconnect.
+SCOPED_OAUTH_PROVIDERS = frozenset({"ocs"})
+
 # Per-provider templates applied to a workspace's stored name to produce a display name.
 # Fields available: {name} (workspace name), plus any field on the source Tenant
 # (e.g. {canonical_name}, {external_id}, {provider}).
@@ -148,9 +153,22 @@ class Tenant(models.Model):
 class TenantConnection(models.Model):
     """A single credential a user added: one OAuth login or one API key.
 
-    A connection is a credential only. The team a chatbot belongs to is recorded
-    on TenantMembership (provider_metadata): in v1 a user has at most one OAuth
-    connection per provider, and its team can change when they re-authorize.
+    A connection is a credential plus the *scope* that credential authorises.
+    ``scope_key`` is the provider-native scope identifier — the OCS team slug —
+    and is ``""`` for providers whose tokens are account-wide (CommCare HQ,
+    CommCare Connect). It exists because an OCS token can only ever read one
+    team, so covering N teams needs N credentials, and the row has to say which
+    one it speaks for (#156). It also replaces the old
+    ``unique(user, provider)`` OAuth guarantee with the narrower
+    ``unique(user, provider, scope_key)``: re-authorising a team you already
+    hold updates that team's connection instead of creating a second one.
+
+    ``social_account`` pins an OAuth connection to the allauth identity holding
+    its token, so credential resolution reads *this* connection's token rather
+    than picking one of the user's tokens for the provider by queryset order.
+
+    The team a *chatbot* belongs to stays on TenantMembership
+    (``provider_metadata``); ``scope_key`` is about the credential, not the data.
     """
 
     OAUTH = "oauth"
@@ -173,6 +191,39 @@ class TenantConnection(models.Model):
         blank=True,
         help_text="Fernet-encrypted opaque string. Empty for OAuth (token lives in allauth).",
     )
+    scope_key = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        db_default="",
+        help_text=(
+            "Provider-native scope this credential authorises (OCS team slug). "
+            'Empty for providers whose tokens are account-wide. Never NULL — "" is '
+            "a real value the uniqueness constraint must collapse on."
+        ),
+    )
+    scope_label = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        db_default="",
+        help_text="Human-readable name for scope_key (e.g. the OCS team name).",
+    )
+    social_account = models.ForeignKey(
+        "socialaccount.SocialAccount",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tenant_connections",
+        help_text="The allauth identity holding this OAuth connection's token. Null for API keys.",
+    )
+    oauth_refresh_failure_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_default="",
+        help_text="Internal fingerprint of the OAuth credential whose last refresh failed.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -180,9 +231,9 @@ class TenantConnection(models.Model):
         ordering = ["-created_at"]
         constraints = [
             models.UniqueConstraint(
-                fields=["user", "provider"],
+                fields=["user", "provider", "scope_key"],
                 condition=models.Q(credential_type="oauth"),
-                name="unique_oauth_connection_per_user_provider",
+                name="unique_oauth_connection_per_user_provider_scope",
             ),
         ]
 

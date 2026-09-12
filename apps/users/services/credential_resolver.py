@@ -9,11 +9,14 @@ from allauth.socialaccount.models import SocialToken
 
 from apps.users.adapters import decrypt_credential
 from apps.users.models import TenantConnection
+from apps.users.services.oauth_scope import is_active_identity, provider_accounts
 from apps.users.services.token_refresh import (
     TokenRefreshError,
+    credential_fingerprint,
     get_token_url,
     refresh_oauth_token,
     refresh_oauth_token_sync,
+    token_health,
     token_needs_refresh,
 )
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
@@ -56,69 +59,94 @@ class CredentialResolutionError(Exception):
 
 
 def _social_token_qs(user, provider: str):
-    """Return a SocialToken queryset filtered by provider-prefix rules.
+    """Use the shared provider mapping, ordered newest identity first."""
+    qs = SocialToken.objects.filter(
+        account__in=provider_accounts(getattr(user, "pk", user), provider)
+    )
+    return qs.order_by("-account__date_joined", "-account__id")
 
-    - ``"commcare_connect"`` matches tokens whose provider starts with
-      ``"commcare_connect"``.
-    - ``"ocs"`` matches tokens whose provider equals ``"ocs"``.
-    - Any other provider matches tokens starting with ``"commcare"`` but
-      excludes ``"commcare_connect"``.
+
+async def aiter_social_tokens(user, provider: str) -> list[SocialToken]:
+    """Active SocialTokens for *user* and *provider*, newest identity first.
+
+    Existing scope bindings exclude superseded or unvalidated identities.
+    Callers that resolve or refresh
+    upstream access must iterate all of them: picking one would silently ignore
+    the teams the user is not "currently" signed in to, which is exactly the
+    lockout #156 exists to remove.
     """
-    if provider == "commcare_connect":
-        return SocialToken.objects.filter(
-            account__user=user,
-            account__provider__startswith="commcare_connect",
+    bindings = {
+        (conn.provider, conn.scope_key): conn.social_account_id
+        async for conn in TenantConnection.objects.filter(
+            user=user, provider=provider, credential_type=TenantConnection.OAUTH
         )
-    if provider == "ocs":
-        return SocialToken.objects.filter(
-            account__user=user,
-            account__provider="ocs",
-        )
-
-    return SocialToken.objects.filter(
-        account__user=user,
-        account__provider__startswith="commcare",
-    ).exclude(account__provider__startswith="commcare_connect")
+    }
+    return [
+        token
+        async for token in _social_token_qs(user, provider).select_related("account", "app")
+        if is_active_identity(token.account, bindings, provider=provider)
+    ]
 
 
-async def aget_social_token(user, provider: str) -> SocialToken | None:
-    """Return the SocialToken for *user* and *provider*, or None."""
-    return await _social_token_qs(user, provider).afirst()
+async def aget_connection_token(conn) -> SocialToken | None:
+    """The SocialToken belonging to *conn*'s own allauth identity.
 
-
-async def aget_fresh_access_token(user, provider: str) -> str | None:
-    """Return a usable OAuth access token for *user*/*provider*, refreshing it if
-    near expiry, or None if the user has no usable token.
-
-    Unlike a raw token read, this refreshes an expired token — important for
-    server-side refresh on behalf of a user who hasn't logged in recently (their
-    access token is likely stale). Returns the same token value the materializer
-    would use for this user+provider.
+    Resolving through ``conn.social_account`` is what makes N tokens per provider
+    safe: the connection names the identity whose token it is, so no ordering
+    heuristic decides which team Scout authenticates as. Connections written
+    before the scope backfill have no linked account and fall back to the
+    provider-wide (now ordered) read.
     """
-    token_obj = await _social_token_qs(user, provider).select_related("account", "app").afirst()
-    if token_obj is None:
-        return None
-    try:
-        cred = await _aresolve_oauth_credential(token_obj, provider)
-    except CredentialResolutionError:
-        # A refresh failure means no usable token. Callers of this helper only
-        # want a live token (e.g. share-time tenant-access refresh) and treat
-        # None as "skip"; surface None rather than raising into them.
-        return None
-    return cred["value"]
+    if conn.social_account_id:
+        return (
+            await SocialToken.objects.filter(account_id=conn.social_account_id)
+            .select_related("account", "app")
+            .afirst()
+        )
+    # user_id, not user: callers select_related("connection") but not its user, so
+    # touching conn.user here would be a sync FK fetch inside an async view.
+    return (
+        await _social_token_qs(conn.user_id, conn.provider)
+        .select_related("account", "app")
+        .afirst()
+    )
 
 
-def _oauth_team_mismatch(membership, token_obj) -> bool:
-    """True when the chatbot's team is known and the live OAuth token is scoped elsewhere.
+async def aiter_fresh_access_tokens(user, provider: str) -> list[tuple]:
+    """Every usable ``(identity, access token)`` pair for *user*/*provider*.
 
-    The chatbot's team lives on the membership (``team_slug``); the team the
-    current OAuth token is scoped to is the OIDC ``team`` claim stored in the
-    SocialAccount's ``extra_data``. When they differ we must not use this token
-    (it has moved to another OCS team) — fail closed.
+    For callers checking upstream access, one representative token answers only
+    about its team and silently ignores the rest.
+    Identities whose token cannot be renewed are dropped rather than raised on —
+    a dead credential for one team must not abort the others.
+    """
+    pairs = []
+    for token_obj in await aiter_social_tokens(user, provider):
+        try:
+            cred = await _aresolve_oauth_credential(token_obj, provider)
+        except CredentialResolutionError:
+            continue
+        pairs.append((token_obj.account, cred["value"]))
+    return pairs
+
+
+def _oauth_team_mismatch(membership, conn, token_obj) -> bool:
+    """True when the chatbot's team is known and this connection is scoped elsewhere.
+
+    The chatbot's team lives on the membership (``team_slug``). The team the
+    connection speaks for is ``conn.scope_key``, recorded when the credential was
+    authorised; the OIDC ``team`` claim on the token's own account is the fallback
+    for connections predating that field. When they differ we must not use this
+    token — fail closed.
+
+    Still needed after multi-token OAuth: memberships that a single shared
+    connection accumulated across two teams keep pointing at it until the user
+    re-authorises the second team, and serving them team A's token would be the
+    cross-team read this check was written to stop.
     """
     if not membership.team_slug:
         return False
-    current = (getattr(token_obj.account, "extra_data", None) or {}).get("team")
+    current = conn.scope_key or (getattr(token_obj.account, "extra_data", None) or {}).get("team")
     return bool(current) and current != membership.team_slug
 
 
@@ -143,26 +171,39 @@ async def aresolve_credential(membership) -> dict | None:
             logger.exception("Failed to decrypt API key for membership %s", membership.id)
             return None
 
-    token_obj = (
-        await _social_token_qs(membership.user, conn.provider)
-        .select_related("account", "app")
-        .afirst()
-    )
+    token_obj = await aget_connection_token(conn)
     if not token_obj:
         return None
-    if _oauth_team_mismatch(membership, token_obj):
-        # The user is signed in to a different team than this chatbot. Fail
-        # closed (never serve another team's token), but surface a distinct,
-        # actionable error so the user is told to re-connect — not the generic
-        # "No credential configured" (arch #245 finding 07#3).
+    if _oauth_team_mismatch(membership, conn, token_obj):
+        # This connection's credential belongs to a different team than this
+        # chatbot. Fail closed (never serve another team's token), but surface a
+        # distinct, actionable error so the user is told to connect that team —
+        # not the generic "No credential configured" (arch #245 finding 07#3).
         raise CredentialResolutionError(
             AUTH_TOKEN_EXPIRED,
             "Your sign-in is scoped to a different team than this chatbot's "
-            f"team ({membership.team_slug}). Please re-connect to team "
+            f"team ({membership.team_slug}). Please connect team "
             f"'{membership.team_slug}' to materialize it.",
         )
 
     return await _aresolve_oauth_credential(token_obj, conn.provider)
+
+
+async def aconnection_status(conn) -> str:
+    """Read connection health without rotating credentials or doing network I/O.
+
+    Renewable credentials need no user action unless their last renewal failed.
+    Failure fingerprints prevent an old credential's error poisoning a reconnect.
+    """
+    if conn.credential_type != TenantConnection.OAUTH:
+        return "unknown"
+    token_obj = await aget_connection_token(conn)
+    if token_obj is None:
+        return "expired"
+    failed = await TenantConnection.objects.filter(
+        pk=conn.pk, oauth_refresh_failure_fingerprint=credential_fingerprint(token_obj)
+    ).aexists()
+    return token_health(token_obj, conn.provider, refresh_failed=failed)
 
 
 def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
