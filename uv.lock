@@ -2881,7 +2881,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.6" },
     { name = "sentry-sdk", extras = ["django"], specifier = ">=2.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
-    { name = "sqlglot", specifier = ">=25.0" },
+    { name = "sqlglot", specifier = "==30.18.0" },
     { name = "taskbadger", specifier = ">=2.1.0a2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "whitenoise", specifier = ">=6.12.0" },

@@ -238,7 +238,6 @@ ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
         "substring",
         "sum",
         "time_to_str",
-        "timestamp_trunc",
         "to_char",
         "to_date",
         "to_json",
@@ -300,7 +299,6 @@ PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
         "json_extract_scalar",
         "or",
         "time_to_str",
-        "timestamp_trunc",
     }
 )
 
@@ -425,7 +423,21 @@ def _argument_count(expression: exp.Expression) -> int:
 class _PreservingPostgres(Postgres):
     """Retain call arity before SQLGlot normalizes away unsupported arguments."""
 
+    # This private parser hook is pinned to SQLGlot 30.18.0; the preservation
+    # sweeps must pass before a dependency upgrade changes its contract.
     class Parser(Postgres.Parser):
+        # PostgreSQL units are text expressions, not SQLGlot date-part keywords.
+        FUNCTIONS = {
+            **Postgres.Parser.FUNCTIONS,
+            "DATE_TRUNC": lambda args: exp.Anonymous(this="date_trunc", expressions=args),
+            "DATE_PART": lambda args: exp.Anonymous(this="date_part", expressions=args),
+        }
+        FUNCTION_PARSERS = {
+            name: parser
+            for name, parser in Postgres.Parser.FUNCTION_PARSERS.items()
+            if name != "DATE_PART"
+        }
+
         def _parse_function_call(self, *args, **kwargs):
             source_arity = None
             source_name = self._curr.text if self._curr else ""
@@ -450,6 +462,19 @@ class _PreservingPostgres(Postgres):
                             source_arity += 1
                         elif source_arity == 0:
                             source_arity = 1
+            name = source_name.lower()
+            if source_arity is not None:
+                if name == "extract" and source_arity > 1:
+                    raise SQLValidationError(
+                        "Use EXTRACT(field FROM timestamp) or date_part(unit, timestamp).",
+                        error_type="function_not_allowed",
+                    )
+                max_arity = {"date_trunc": 3, "date_part": 2}.get(name)
+                if max_arity is not None and source_arity > max_arity:
+                    raise SQLValidationError(
+                        f"Function '{source_name}' has unsupported extra arguments.",
+                        error_type="function_not_allowed",
+                    )
             result = super()._parse_function_call(*args, **kwargs)
             function = result
             while isinstance(function, exp.Window | exp.Filter | exp.WithinGroup):

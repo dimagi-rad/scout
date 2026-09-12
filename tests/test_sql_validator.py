@@ -1151,3 +1151,41 @@ def test_variadic_json_path_arguments_preserved(function):
         .sql(dialect="postgres")
     )
     assert "'a', 'b'" in rendered
+
+
+@pytest.mark.parametrize("function", ["date_trunc", "date_part"])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "unit",
+        "day",
+        "t.unit",
+        "t.year",
+        "unit::text",
+        "coalesce(unit, 'day')",
+        "(SELECT 'year')",
+        "'day'",
+    ],
+)
+def test_datetime_function_units_remain_expressions(function, unit):
+    rendered = (
+        SQLValidator().validate(f"SELECT {function}({unit}, ts) FROM t").sql(dialect="postgres")
+    )
+    parsed = sqlglot.parse_one(f"SELECT {unit}", dialect="postgres").expressions[0]
+    expected_unit = parsed.sql(dialect="postgres")
+    if unit.startswith("coalesce"):
+        expected_unit = "COALESCE(unit, 'day')"
+    assert f"pg_catalog.{function}({expected_unit}, ts)" in rendered
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT timestamp_trunc(ts, day) FROM t",
+        "SELECT timestamp_trunc('day', ts) FROM t",
+        "SELECT extract(unit, ts) FROM t",
+    ],
+)
+def test_non_postgres_datetime_spellings_rejected(query):
+    with pytest.raises(SQLValidationError):
+        SQLValidator().validate(query)
