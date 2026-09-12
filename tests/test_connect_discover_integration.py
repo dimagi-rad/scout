@@ -23,6 +23,6 @@ def test_discover_persists_form_definitions(connect_tenant_membership):
         result = materializer._run_discover_phase(
             connect_tenant_membership, {"type": "api_key", "value": "t"}, pipeline
         )
-    tm = TenantMetadata.objects.get(tenant_membership=connect_tenant_membership)
+    tm = TenantMetadata.objects.get(tenant=connect_tenant_membership.tenant)
     assert "muac_visit" in tm.metadata["form_definitions"]
     assert result["form_definitions"]["muac_visit"] == {"questions": []}

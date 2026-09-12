@@ -230,8 +230,11 @@ def _system_prompt_cache_key(
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
-    Includes user.id because _fetch_schema_context scopes TenantMetadata
-    lookup to the specific user. Includes workspace.system_prompt hash
+    Includes user.id conservatively: the reason given for it — that
+    _fetch_schema_context scoped TenantMetadata per user — no longer holds
+    (TenantMetadata is per tenant, #305, and that function does not read it at
+    all), but sharing one prompt across a workspace's users needs its own audit.
+    Includes workspace.system_prompt hash
     so edits invalidate immediately. Includes ``interactive`` because the
     materialization guidance differs between interactive (fire-and-resume) and
     headless (blocking) runs. Includes ``canvas_write`` because write-capable

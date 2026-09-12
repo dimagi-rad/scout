@@ -89,7 +89,7 @@ class TestKnowledgeModels:
 
 @pytest.mark.django_db
 class TestTenantMetadata:
-    def test_create_and_retrieve_metadata(self, tenant_membership):
+    def test_create_and_retrieve_metadata(self, tenant):
         from django.utils import timezone
 
         from apps.workspaces.models import TenantMetadata
@@ -99,7 +99,7 @@ class TestTenantMetadata:
             "app_definitions": [{"id": "abc", "name": "CHW App"}],
         }
         meta = TenantMetadata.objects.create(
-            tenant_membership=tenant_membership,
+            tenant=tenant,
             metadata=payload,
             discovered_at=timezone.now(),
         )
@@ -107,15 +107,16 @@ class TestTenantMetadata:
         assert retrieved.metadata["case_types"] == ["patient", "household"]
         assert retrieved.metadata["app_definitions"][0]["id"] == "abc"
 
-    def test_one_to_one_with_tenant_membership(self, tenant_membership):
+    def test_one_to_one_with_tenant(self, tenant):
+        """The unique constraint is what stops the per-member duplicates of #305."""
         from apps.workspaces.models import TenantMetadata
 
-        TenantMetadata.objects.create(tenant_membership=tenant_membership)
+        TenantMetadata.objects.create(tenant=tenant)
         with pytest.raises(Exception, match="unique constraint"):
-            TenantMetadata.objects.create(tenant_membership=tenant_membership)
+            TenantMetadata.objects.create(tenant=tenant)
 
-    def test_metadata_defaults_to_empty_dict(self, tenant_membership):
+    def test_metadata_defaults_to_empty_dict(self, tenant):
         from apps.workspaces.models import TenantMetadata
 
-        meta = TenantMetadata.objects.create(tenant_membership=tenant_membership)
+        meta = TenantMetadata.objects.create(tenant=tenant)
         assert meta.metadata == {}
