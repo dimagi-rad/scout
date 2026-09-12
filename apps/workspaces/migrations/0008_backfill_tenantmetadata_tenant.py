@@ -43,8 +43,10 @@ def backfill_tenant(apps, schema_editor):
     )
     logger.info("TenantMetadata: set tenant_id on %d row(s)", backfilled)
 
+    # Pre-0007 memberships were required; never dedupe unexpected NULLs as one tenant.
     duplicate_tenant_ids = list(
-        TenantMetadata.objects.values("tenant_id")
+        TenantMetadata.objects.filter(tenant_id__isnull=False)
+        .values("tenant_id")
         .annotate(row_count=Count("id"))
         .filter(row_count__gt=1)
         .values_list("tenant_id", flat=True)

@@ -231,6 +231,11 @@ def run_pipeline(
                         asset_result["created"],
                         asset_result["updated"],
                     )
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
+                    )
             except Exception:
                 logger.exception(
                     "Failed to generate system assets for %s; continuing pipeline",
@@ -252,6 +257,11 @@ def run_pipeline(
                     form_defs = (tenant_meta.metadata or {}).get("form_definitions", {})
                     for ws in tenant_membership.tenant.workspaces.all():
                         async_to_sync(sync_column_notes)(ws, "stg_visits", form_defs)
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
+                    )
             except Exception:
                 logger.exception(
                     "Failed to generate Connect assets for %s; continuing pipeline",

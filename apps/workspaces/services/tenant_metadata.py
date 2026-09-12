@@ -13,9 +13,12 @@ from apps.workspaces.models import TenantMetadata
 
 
 def _visible_metadata(tenant_id):
+    # Keep #415's visibility rule explicit even if the default manager changes.
     return TenantMetadata.objects.filter(
         tenant_id=tenant_id,
-        tenant_id__in=TenantMembership.objects.filter(tenant_id=tenant_id).values("tenant_id"),
+        tenant_id__in=TenantMembership.objects.filter(
+            tenant_id=tenant_id, archived_at__isnull=True
+        ).values("tenant_id"),
     )
 
 

@@ -1,7 +1,6 @@
 """Tenant-owned storage survives revocation; reads require a live tenant membership."""
 
 from unittest.mock import MagicMock, patch
-from uuid import UUID
 
 import pytest
 from asgiref.sync import async_to_sync
@@ -103,7 +102,7 @@ def test_deleting_last_membership_retains_hidden_storage(md_tenant):
 @pytest.mark.django_db
 def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(user, workspace):
     revoked = Tenant.objects.create(
-        id=UUID(int=1), provider="commcare", external_id="revoked-first", canonical_name="Revoked"
+        provider="commcare", external_id="revoked-first", canonical_name="Revoked"
     )
     member = _member(revoked, "former", archived=True)
     WorkspaceTenant.objects.create(workspace=workspace, tenant=revoked)

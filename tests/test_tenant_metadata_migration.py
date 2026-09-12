@@ -144,3 +144,14 @@ def test_reverse_repoints_survivors_at_the_newest_live_membership(production_sha
     assert restored.tenant_membership_id == seed["fresh_live"].id
     # A dedupe cannot resurrect the rows it deleted.
     assert Metadata.objects.count() == 3
+
+
+def test_dedupe_does_not_combine_rows_without_tenants(production_shaped_metadata):
+    Metadata = production_shaped_metadata["model"]
+    orphan_ids = [Metadata.objects.create().pk for _ in range(2)]
+    try:
+        _migrate(AFTER)
+        Metadata = _historical_metadata_model(AFTER)
+        assert Metadata.objects.filter(pk__in=orphan_ids).count() == 2
+    finally:
+        Metadata.objects.filter(pk__in=orphan_ids).delete()

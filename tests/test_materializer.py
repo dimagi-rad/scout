@@ -423,6 +423,33 @@ class TestRunPipeline:
         mock_meta_loader.assert_not_called()
         mock_meta_model.objects.update_or_create.assert_not_called()
 
+    @pytest.mark.parametrize("provider", ["commcare", "commcare_connect"])
+    def test_missing_visible_metadata_warns_when_skipping_assets(self, provider, caplog):
+        from mcp_server.pipeline_registry import PipelineConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="bare_sync", description="", version="1.0", provider=provider, sources=[]
+        )
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer.get_tenant_metadata", return_value=None),
+            patch("mcp_server.services.materializer.get_managed_db_connection"),
+            patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
+            patch("mcp_server.services.materializer.upsert_system_assets") as commcare_assets,
+            patch("mcp_server.services.materializer.upsert_connect_assets") as connect_assets,
+        ):
+            mock_mgr.return_value.provision.return_value = self._make_schema()
+            self._setup_run_mock(mock_run_cls)
+            mock_asset_cls.objects.filter.return_value.exists.return_value = False
+            result = run_pipeline(self._make_tm(tenant_id="123"), {}, pipeline)
+
+        assert result["status"] == "completed"
+        commcare_assets.assert_not_called()
+        connect_assets.assert_not_called()
+        assert "Skipping asset generation for 123: tenant metadata is unavailable" in caplog.text
+
     def test_transform_failure_does_not_mark_run_failed(self):
         """A DBT transform failure should NOT change state to FAILED."""
         from mcp_server.pipeline_registry import PipelineConfig
