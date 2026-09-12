@@ -1,7 +1,7 @@
 """``workspaces.0008`` must keep the row the read path already serves (#305).
 
-The dedupe deletes rows, so its winner rule has to be the *same* rule as the read
-path's (``winner_first``, PR #415) — otherwise the deploy silently swaps which
+The dedupe deletes rows, so its frozen winner rule has to match the former read
+path (PR #415) — otherwise the deploy silently swaps which
 metadata a tenant sees and the evidence is gone. These tests run the real
 migration against production-shaped data: a tenant with three memberships whose
 metadata disagrees, one of them archived and holding the freshest row.

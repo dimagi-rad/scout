@@ -1,20 +1,17 @@
-"""``TenantMetadata`` must read the same for every user and every surface (arch 09#7).
+"""Tenant-owned storage survives revocation; reads require a live tenant membership."""
 
-The rows used to be per-membership, one per live member, so a tenant had N rows
-that could disagree and an unordered read picked between them — including rows
-hanging off *archived* (upstream-revoked) memberships. #305 made the grain the
-tenant, so these tests pin what the grain change is worth: every surface reads the
-one row, and no membership event can hide or destroy it.
-"""
+from unittest.mock import MagicMock, patch
+from uuid import UUID
 
 import pytest
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from apps.semantic.services.catalog import _tenant_metadata_for_schema
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces.models import SchemaState, TenantMetadata, TenantSchema
+from apps.workspaces.models import SchemaState, TenantMetadata, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
 
 SCHEMA_NAME = "t_md_domain"
@@ -79,19 +76,67 @@ def test_metadata_outlives_the_member_who_discovered_it(md_tenant):
 
 
 @pytest.mark.django_db
-def test_revoking_a_membership_does_not_hide_the_tenants_metadata(md_tenant):
-    """Deliberate change of behaviour at tenant grain: the archived-membership
-    predicate the per-member read needed has no meaning now, and callers gate on
-    their own live access, so a revoked member cannot blank the tenant's schema
-    description for everyone else.
-    """
+def test_revoking_last_membership_hides_but_retains_metadata(md_tenant):
     member = _member(md_tenant, "revoked")
     TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
 
     member.archived_at = timezone.now()
     member.save(update_fields=["archived_at"])
 
+    assert _every_surface(md_tenant) == [None] * 3
+    assert TenantMetadata.objects.get(tenant=md_tenant).metadata == {"owner": "tenant"}
+
+    member.archived_at = None
+    member.save(update_fields=["archived_at"])
     assert _every_surface(md_tenant) == ["tenant"] * 3
+
+
+@pytest.mark.django_db
+def test_deleting_last_membership_retains_hidden_storage(md_tenant):
+    member = _member(md_tenant, "last")
+    TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
+    member.delete()
+    assert _every_surface(md_tenant) == [None] * 3
+    assert TenantMetadata.objects.filter(tenant=md_tenant).exists()
+
+
+@pytest.mark.django_db
+def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(user, workspace):
+    revoked = Tenant.objects.create(
+        id=UUID(int=1), provider="commcare", external_id="revoked-first", canonical_name="Revoked"
+    )
+    member = _member(revoked, "former", archived=True)
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=revoked)
+    assert workspace.tenant == revoked
+    schema = TenantSchema.objects.create(
+        tenant=revoked, schema_name="commcare_revoked_r1a2b3c4", state=SchemaState.ACTIVE
+    )
+    TenantMetadata.objects.create(
+        tenant=revoked, metadata={"case_types": [{"name": "private-case-type"}]}
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    with (
+        patch("apps.workspaces.api.views.get_managed_db_connection", return_value=MagicMock()),
+        patch("apps.workspaces.api.views._live_tables_from_conn", return_value={"cases"}),
+        patch("apps.workspaces.api.views._columns_from_conn", return_value={}),
+        patch(
+            "apps.workspaces.api.views._sync_pipeline_list_tables", return_value=[{"name": "cases"}]
+        ),
+    ):
+        response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+        assert response.status_code == 200
+        assert "source_metadata" not in response.json()["tables"][f"{schema.schema_name}.cases"]
+        assert TenantMetadata.objects.filter(tenant=revoked).exists()
+        member.archived_at = None
+        member.save(update_fields=["archived_at"])
+        response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+        assert (
+            response.json()["tables"][f"{schema.schema_name}.cases"]["source_metadata"]["items"][0][
+                "name"
+            ]
+            == "private-case-type"
+        )
 
 
 @pytest.mark.django_db

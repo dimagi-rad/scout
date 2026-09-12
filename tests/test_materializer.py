@@ -70,6 +70,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -124,6 +125,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -185,6 +187,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -247,6 +250,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
         ):
@@ -294,6 +298,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
         ):
@@ -351,6 +356,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -399,6 +405,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata") as mock_meta_model,
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta_loader,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
             patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
@@ -433,6 +440,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
             patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
@@ -478,6 +486,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
             patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
@@ -536,6 +545,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -582,6 +592,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
             patch("mcp_server.services.materializer.ConnectVisitLoader") as mock_visits,
@@ -649,7 +660,8 @@ class TestRunPipeline:
         with (
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
-            patch("mcp_server.services.materializer.TenantMetadata") as mock_tenant_meta_cls,
+            patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata") as mock_get_tenant_meta,
             patch("mcp_server.services.materializer.TransformationAsset") as mock_asset_cls,
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
@@ -666,11 +678,9 @@ class TestRunPipeline:
             mock_meta.return_value.load.return_value = {}
             mock_users.return_value.load_pages.return_value = iter([])
 
-            # Wire TenantMetadata.objects.filter(...).first() to return a
-            # non-None sentinel so the if-tenant_meta branch is entered.
             fake_tenant_meta = MagicMock()
             fake_tenant_meta.metadata = {"form_definitions": {"visit_form": {}}}
-            mock_tenant_meta_cls.objects.filter.return_value.first.return_value = fake_tenant_meta
+            mock_get_tenant_meta.return_value = fake_tenant_meta
 
             mock_asset_cls.objects.filter.return_value.exists.return_value = False
             mock_upsert.return_value = {"created": 1, "updated": 0, "deleted": 0, "total": 1}
@@ -684,6 +694,7 @@ class TestRunPipeline:
         assert result["status"] == "completed"
 
         # Branch guard: upsert_connect_assets called exactly once with the tenant.
+        mock_get_tenant_meta.assert_called_once_with(tm.tenant_id)
         mock_upsert.assert_called_once_with(tm.tenant, fake_tenant_meta)
 
         # Per-workspace loop: sync_column_notes called once for the one workspace.
@@ -715,6 +726,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.ConnectUserLoader") as mock_users,
             patch("mcp_server.services.materializer.ConnectVisitLoader") as mock_visits,
@@ -755,6 +767,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -801,6 +814,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -851,6 +865,7 @@ class TestRunPipeline:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.CommCareMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.CommCareCaseLoader") as mock_cases,
             patch("mcp_server.services.materializer.get_managed_db_connection") as mock_conn,
@@ -937,6 +952,7 @@ class TestResumableMaterialization:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch(
                 "mcp_server.services.materializer.ConnectVisitLoader",
@@ -1180,6 +1196,7 @@ class TestResumableMaterialization:
             patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
             patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
             patch("mcp_server.services.materializer.TenantMetadata"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
             patch("mcp_server.services.materializer.ConnectMetadataLoader") as mock_meta,
             patch("mcp_server.services.materializer.ConnectCompletedWorkLoader") as mock_cw,
             patch(

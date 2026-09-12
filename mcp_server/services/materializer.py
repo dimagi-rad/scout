@@ -58,6 +58,7 @@ from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -221,7 +222,7 @@ def run_pipeline(
         # Asset generation failures are isolated — load can proceed without assets.
         if pipeline.provider == "commcare":
             try:
-                tenant_meta = TenantMetadata.objects.filter(tenant=tenant_membership.tenant).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -239,7 +240,7 @@ def run_pipeline(
         # Asset generation failures are isolated — the pipeline continues regardless.
         if pipeline.provider == "commcare_connect":
             try:
-                tenant_meta = TenantMetadata.objects.filter(tenant=tenant_membership.tenant).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_connect_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(

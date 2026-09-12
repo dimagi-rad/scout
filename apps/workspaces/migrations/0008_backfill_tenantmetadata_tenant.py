@@ -5,14 +5,11 @@ tenant with N members accumulates up to N metadata rows that can genuinely
 disagree. This sets ``tenant_id`` from the membership, then collapses each
 tenant's rows to one.
 
-**Which row survives** is decided by ``winner_first`` in
-``apps/workspaces/services/tenant_metadata.py`` — the ordering the read path
-already uses (PR #415) — applied to the tenant's *live*-membership rows first, so
-the row kept here is the row the app is serving today. A tenant whose only rows
-hang off archived (upstream-revoked) memberships keeps its newest such row rather
-than losing its metadata: at tenant grain membership liveness is no longer
-expressible, the tenant is unreachable while nobody holds live access, and #305's
-whole point is that a member leaving must not wipe the tenant's metadata.
+The winner ordering freezes PR #415's newest-discovery-first rule, preferring
+live memberships so the retained row matches the metadata served before this
+migration. Archived-only tenants retain their newest row in storage; the read
+service hides it until the tenant has a live membership again. Membership removal
+must not delete durable tenant metadata (#305).
 
 Reverse repoints each surviving row at the tenant's newest live membership
 (falling back to its newest archived one). Rows deleted forward are **not**
@@ -23,11 +20,14 @@ cannot be represented at membership grain and is dropped on the way back.
 import logging
 
 from django.db import migrations
-from django.db.models import Count, OuterRef, Subquery
-
-from apps.workspaces.services.tenant_metadata import winner_first
+from django.db.models import Count, F, OuterRef, Subquery
 
 logger = logging.getLogger(__name__)
+
+
+def winner_first(queryset):
+    # Freeze #415's service ordering: future application edits must not change dedupe.
+    return queryset.order_by(F("discovered_at").desc(nulls_last=True), "-pk")
 
 
 def backfill_tenant(apps, schema_editor):
