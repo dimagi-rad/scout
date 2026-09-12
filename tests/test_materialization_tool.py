@@ -88,6 +88,8 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
     assert result["tenants_not_loaded"] == ["not-mine"]
     assert "not-mine" in result["message"]
     assert "connect that account" in result["message"]
+    assert "older data may still be included" in result["message"]
+    assert "NOT in the results" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -195,4 +197,7 @@ async def test_headless_tool_partial_load_with_failed_view_stays_partial(
     assert "Do NOT retry" not in result["message"]
     assert "Run a data refresh" not in result["message"]
     assert "combined query layer" in result["message"]
+    assert "Do not query" in result["message"]
+    assert "Proceed with the available" not in result["message"]
+    assert "query only the sources" not in result["message"]
     assert "t2" in result["message"]

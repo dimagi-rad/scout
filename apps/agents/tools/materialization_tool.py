@@ -92,8 +92,10 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         elif loaded:
             status = "partial"
             message = (
-                f"Some tenants loaded; others did not{named}. Proceed with the available "
-                "data and tell the user which data sources are NOT in the results."
+                f"Some tenants refreshed; others did not{named}. If the query layer is available, "
+                "older data may still be included for tenants that did not refresh. Verify "
+                "the sources and last successful refresh times used by any answer, disclose "
+                "stale or unknown freshness, and do not infer exclusion from refresh failure."
             )
             if not view_ok:
                 # Not relaying view_schema["error"]: build_view_schema says "run a
@@ -101,9 +103,9 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 # missing sources is fixed (#412). The run's own guidance, appended
                 # below, is the advice that actually applies.
                 message += (
-                    " The workspace's combined query layer could not be rebuilt while "
-                    "sources are missing, so query only the sources that loaded and do "
-                    "not present results as spanning the whole workspace."
+                    " The workspace's combined query layer is unavailable. Do not query this "
+                    "workspace until it is rebuilt. Investigate the tenant refresh failures "
+                    "and address any reported account/access problems before retrying."
                 )
         else:
             status = "failed"

@@ -1400,8 +1400,8 @@ async def _make_partly_covered_job(
 
     The user always holds a live membership on the covered tenant. Whether they
     hold one on the *uncovered* tenant is the switch that decides the reported
-    reason: no membership is the supported ANY-of case, a membership means Scout
-    dropped a tenant the user can reach.
+    reason: no membership establishes lack of access; membership alone does not
+    explain why the tenant was not refreshed.
     """
     user = await User.objects.acreate_user(email=email, password="x")
     ws = await Workspace.objects.acreate(name=ws_name, created_by=user)
@@ -1471,8 +1471,7 @@ async def test_aggregate_does_not_report_completed_when_a_tenant_has_no_run_row(
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advising():
-    """The user CAN reach it and Scout still recorded nothing — a defect, not the
-    supported subset case, so it gets no remediation advice: none would be true."""
+    """Membership alone cannot distinguish missing credentials from other causes."""
     user, ws, uncovered, _tj = await _make_partly_covered_job(
         email="agg-dropped@b.c",
         ws_name="W-agg-drop",
@@ -1491,12 +1490,19 @@ async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advi
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.FAILED])
-async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state):
+@pytest.mark.parametrize("reachable", [False, True])
+async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, reachable):
     """The chat resume prompt — the path this issue was found on."""
     _user, _ws, uncovered, tj = await _make_partly_covered_job(
-        email="resume-uncovered@b.c", ws_name="W-res-unc", pj_id=90003
+        email="resume-uncovered@b.c",
+        ws_name="W-res-unc",
+        pj_id=90003,
+        uncovered_reachable=reachable,
     )
 
+    await TenantSchema.objects.acreate(
+        tenant=uncovered, schema_name="retained_uncovered", state=SchemaState.ACTIVE
+    )
     await WorkspaceViewSchema.objects.filter(workspace=_ws).aupdate(state=view_state)
     mock_agent = MagicMock()
     mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
@@ -1509,16 +1515,21 @@ async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state):
     body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
     assert "Materialization just completed" not in body
     assert uncovered.external_id in body
-    assert "did NOT load at all" in body
+    assert "did not refresh" in body
+    assert "older data may still be included" in body
+    assert "nothing you query covers" not in body
+    assert "say the numbers exclude them" not in body
     # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
     # tenant with no run row could not reach any guidance path before (#364).
-    assert "not connected to your account" in body
+    assert ("not connected to your account" in body) is not reachable
     assert "Per-tenant data loaded successfully" not in body
     assert "a system-side fix is required" not in body
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert uncovered.external_id in tj.error_summary
-    assert "did not load" in tj.error_summary
+    assert "did not refresh" in tj.error_summary
+    assert "older data may still be included" in tj.error_summary
+    assert "re-running materialization will not help" not in tj.error_summary
 
 
 @pytest.mark.asyncio
@@ -1544,3 +1555,30 @@ async def test_resume_no_runs_prompt_names_the_tenants_and_carries_guidance():
     assert result["terminal_state"] == ThreadJob.State.FAILED
     await tj.arefresh_from_db()
     assert uncovered.external_id in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_refresh():
+    _user, _ws, uncovered, tj = await _make_partly_covered_job(
+        email="semantic-uncovered@b.c",
+        ws_name="W-sem-unc",
+        pj_id=90005,
+        uncovered_reachable=True,
+    )
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with (
+        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+        patch(
+            "apps.workspaces.tasks._semantic_layer_state",
+            AsyncMock(return_value=("unavailable", "bad model")),
+        ),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "the data is already loaded" not in body
+    assert "incomplete refresh coverage" in body
+    assert uncovered.external_id in body
+    await tj.arefresh_from_db()
+    assert not tj.error_summary.startswith("Data loaded,")
+    assert "did not refresh" in tj.error_summary

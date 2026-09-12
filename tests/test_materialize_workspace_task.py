@@ -1320,27 +1320,62 @@ async def test_no_memberships_at_all_names_the_tenants_it_could_not_load(workspa
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_unreachable_tenant_does_not_skip_the_cube_build(
-    workspace, tenant, tenant_membership_obj, user
+@pytest.mark.parametrize("retained_schema", [False, True])
+async def test_unreachable_tenant_cube_build_requires_full_workspace_view(
+    workspace, tenant, tenant_membership_obj, user, retained_schema
 ):
-    """The regression that closed PR #397.
-
-    ``all_succeeded`` also gates ``build_and_promote_cube_schema`` (#404), and
-    ``_semantic_layer_state`` reads ``SemanticModel.metadata["last_build"]``,
-    written only from *inside* that build. Skipping the build for a
-    partly-reachable workspace inherits the previous run's ``{"ok": True}`` and
-    reports the semantic layer "ready" while stale — trading one false success
-    for another. So the gate reads "every tenant we attempted succeeded",
-    separately from the honesty flag, and the build still runs over the tenants
-    that did load.
-    """
-    await _add_second_tenant(workspace, external_id="unreachable-for-cube")
-
-    result, mock_cube = await _materialize_as(user, workspace)
-
+    """Use real view validation: missing schemas fail; retained ones remain included."""
+    other = await _add_second_tenant(workspace, external_id="unreachable-for-cube")
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="refreshed_tenant", state=SchemaState.ACTIVE
+    )
+    if retained_schema:
+        await TenantSchema.objects.acreate(
+            tenant=other, schema_name="retained_tenant", state=SchemaState.ACTIVE
+        )
+    conn = MagicMock()
+    conn.cursor.return_value.fetchall.return_value = [("cases",)]
+    with (
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            AsyncMock(return_value={"type": "api_key", "value": "k"}),
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection", return_value=conn
+        ) as connect,
+        patch("apps.workspaces.services.schema_manager.SchemaManager._create_readonly_role"),
+        patch(
+            "apps.workspaces.services.schema_manager.SchemaManager._revoke_stale_view_role_grants"
+        ),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
     assert result["all_succeeded"] is False
-    mock_cube.assert_called_once()
-    assert result["cube_schema"] is not None, "the build ran, so last_build was rewritten"
+    vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
+    if retained_schema:
+        assert vs.state == SchemaState.ACTIVE
+        assert result["view_schema"]["ok"] is True
+        cube.assert_called_once()
+        statements = [call.args[0] for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(
+            hasattr(statement, "as_string")
+            and 'AS SELECT * FROM "retained_tenant"."cases"' in statement.as_string()
+            for statement in statements
+        )
+    else:
+        assert vs.state == SchemaState.FAILED
+        assert other.external_id in vs.last_error
+        assert "no active schema" in vs.last_error
+        assert result["view_schema"]["ok"] is False
+        assert result["cube_schema"] is None
+        connect.assert_not_called()
+        cube.assert_not_called()
 
 
 @pytest.mark.asyncio
