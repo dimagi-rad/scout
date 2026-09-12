@@ -1970,8 +1970,8 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                     "the workspace query layer (view schema) is missing or was never built"
                 )
 
-    # The agent is semantic-only (no raw SQL), so a data load whose Cube schema
-    # build failed leaves the workspace unqueryable even though every run
+    # The agent answers through the semantic model, so a data load whose Cube
+    # schema build failed leaves it with nothing to query even though every run
     # completed — the previous silent path here made the agent claim success
     # and then hit "No active semantic model" with no explanation.
     semantic_state, semantic_error = "ready", ""

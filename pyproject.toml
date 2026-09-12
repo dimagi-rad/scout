@@ -24,6 +24,7 @@ dependencies = [
     "langchain-core>=0.3",
     "langgraph-checkpoint-postgres>=2.0",
     # SQL validation
+    "sqlglot==30.18.0",
     # Data
     "pandas>=2.0",
     "sqlalchemy>=2.0",

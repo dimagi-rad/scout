@@ -394,12 +394,13 @@ class TestAgentGraphAssembly:
         assert "semantic_query" not in tool_names
         assert "list_tables" not in tool_names
 
-    def test_raw_table_tools_filtered(self, user, workspace):
-        """Raw table-inspection tools are not exposed to the agent."""
+    def test_raw_sql_and_table_tools_exposed(self, user, workspace):
+        """Raw SQL and table inspection are the agent's fallback for questions the
+        semantic model cannot express (issue #406), so they must reach the LLM."""
         from apps.agents.graph.base import _build_tools
 
         mcp_tools = []
-        for name in ["semantic_query", "list_tables", "describe_table", "get_metadata"]:
+        for name in ["semantic_query", "query", "list_tables", "describe_table", "get_metadata"]:
             t = MagicMock()
             t.name = name
             mcp_tools.append(t)
@@ -407,9 +408,8 @@ class TestAgentGraphAssembly:
         tools = _build_tools(workspace, user, mcp_tools)
         tool_names = [t.name for t in tools]
 
-        assert "semantic_query" in tool_names
-        for name in ["list_tables", "describe_table", "get_metadata"]:
-            assert name not in tool_names
+        for name in ["semantic_query", "query", "list_tables", "describe_table", "get_metadata"]:
+            assert name in tool_names
 
 
 # ---------------------------------------------------------------------------

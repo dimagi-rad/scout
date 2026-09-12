@@ -7,15 +7,43 @@ Database access is mocked at the Django ORM / psycopg boundary.
 
 from unittest.mock import patch
 
+import psycopg
+import psycopg.errors
 import pytest
 
+from mcp_server.context import QueryContext
 from mcp_server.envelope import (
+    CONNECTION_ERROR,
+    INTERNAL_ERROR,
     NOT_FOUND,
+    QUERY_TIMEOUT,
     VALIDATION_ERROR,
     Timer,
     error_response,
     success_response,
 )
+from mcp_server.services.query import execute_query
+
+# --- Fixtures ---
+
+
+@pytest.fixture
+def project_context():
+    """A QueryContext that doesn't require DB access."""
+    return QueryContext(
+        tenant_id="test-tenant",
+        schema_name="public",
+        max_rows_per_query=500,
+        max_query_timeout_seconds=30,
+        connection_params={
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "testdb",
+            "user": "testuser",
+            "password": "testpass",
+        },
+    )
+
 
 # --- Envelope tests ---
 
@@ -72,6 +100,211 @@ class TestEnvelopeFormat:
     def test_timer_returns_positive_ms(self):
         timer = Timer()
         assert timer.elapsed_ms >= 0
+
+
+# --- Query service tests ---
+
+POOLED_EXEC = "mcp_server.services.query._execute_async_parameterized"
+
+
+class TestExecuteQuery:
+    """Test the query service with mocked DB execution."""
+
+    @pytest.mark.asyncio
+    async def test_validation_error_returns_envelope(self, project_context):
+        result = await execute_query(project_context, "DROP TABLE users")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    async def test_multiple_statements_rejected(self, project_context):
+        result = await execute_query(project_context, "SELECT 1; SELECT 2")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "multiple" in result["error"]["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_dangerous_function_rejected(self, project_context):
+        result = await execute_query(project_context, "SELECT pg_read_file('/etc/passwd')")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "not allowed" in result["error"]["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_system_catalog_rejected(self, project_context):
+        result = await execute_query(project_context, "SELECT nspname FROM pg_namespace")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    async def test_unterminated_quote_returns_envelope(self, project_context):
+        """A tokenizer error must come back as an envelope the agent can read and
+        correct, not as an unhandled exception out of the tool."""
+        result = await execute_query(project_context, "SELECT * FROM notes WHERE a = 'O'Brien'")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "parse error" in result["error"]["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_malformed_match_call_returns_envelope(self, project_context):
+        result = await execute_query(project_context, "SELECT match_against(a, b) FROM t")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exception", [TypeError("bad AST"), ValueError("bad generation")])
+    async def test_generation_failure_returns_envelope(self, project_context, exception):
+        with patch("mcp_server.services.query.SQLValidator.inject_limit", side_effect=exception):
+            result = await execute_query(project_context, "SELECT 1")
+        assert result["success"] is False
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "supported PostgreSQL" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error_type",
+        [
+            psycopg.errors.GroupingError,
+            psycopg.errors.AmbiguousColumn,
+            psycopg.errors.WrongObjectType,
+            psycopg.errors.InvalidColumnReference,
+            psycopg.errors.CannotCoerce,
+            psycopg.errors.DuplicateAlias,
+            psycopg.errors.AmbiguousFunction,
+            psycopg.errors.InvalidTextRepresentation,
+            psycopg.errors.DivisionByZero,
+            psycopg.errors.CardinalityViolation,
+            psycopg.errors.FeatureNotSupported,
+            psycopg.errors.SyntaxError,
+            psycopg.errors.UndefinedFunction,
+            psycopg.errors.UndefinedColumn,
+            psycopg.errors.UndefinedTable,
+            psycopg.errors.UndefinedObject,
+            psycopg.errors.DatatypeMismatch,
+        ],
+    )
+    @patch(POOLED_EXEC)
+    async def test_sqlstate_query_error_is_actionable(self, mock_exec, project_context, error_type):
+        mock_exec.side_effect = error_type("invalid query detail")
+        result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == VALIDATION_ERROR
+        assert "invalid query detail" in result["error"]["message"]
+        assert "Reformulate" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_unexpected_validation_failure_returns_envelope(self, project_context):
+        with patch(
+            "mcp_server.services.query.SQLValidator.validate", side_effect=TypeError("bad AST")
+        ):
+            result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == VALIDATION_ERROR
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            psycopg.errors.ConnectionFailure("connection lost"),
+            psycopg.errors.InsufficientPrivilege("denied"),
+            psycopg.errors.InvalidPassword("password authentication failed"),
+            psycopg.OperationalError("does not exist is not a SQLSTATE"),
+        ],
+    )
+    @patch(POOLED_EXEC)
+    async def test_infrastructure_errors_stay_connection_errors(
+        self, mock_exec, project_context, error
+    ):
+        mock_exec.side_effect = error
+        result = await execute_query(project_context, "SELECT 1")
+        assert result["error"]["code"] == CONNECTION_ERROR
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_successful_query(self, mock_exec, project_context):
+        mock_exec.return_value = {
+            "columns": ["id", "name"],
+            "rows": [[1, "Alice"], [2, "Bob"]],
+            "row_count": 2,
+        }
+        result = await execute_query(project_context, "SELECT id, name FROM users")
+
+        assert "columns" in result
+        assert result["columns"] == ["id", "name"]
+        assert result["row_count"] == 2
+        assert result["truncated"] is False
+        assert "sql_executed" in result
+        assert "tables_accessed" in result
+        assert "users" in result["tables_accessed"]
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_runs_through_the_shared_pooled_executor(self, mock_exec, project_context):
+        """Agent SQL must share the pooled, role-resetting executor (arch #253, 10#1)
+        rather than opening its own connection."""
+        mock_exec.return_value = {"columns": ["id"], "rows": [], "row_count": 0}
+        await execute_query(project_context, "SELECT id FROM users")
+
+        ctx, sql, params, timeout = mock_exec.call_args.args
+        assert ctx is project_context
+        assert "LIMIT" in sql.upper()
+        assert params == ()
+        assert timeout == project_context.max_query_timeout_seconds
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_truncation_detected(self, mock_exec, project_context):
+        """When row_count equals max_limit, truncated should be True."""
+        mock_exec.return_value = {
+            "columns": ["id"],
+            "rows": [[i] for i in range(500)],
+            "row_count": 500,
+        }
+        result = await execute_query(project_context, "SELECT id FROM users")
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_limit_above_cap_is_lowered_and_reported_truncated(
+        self, mock_exec, project_context
+    ):
+        mock_exec.return_value = {"columns": ["id"], "rows": [], "row_count": 0}
+        result = await execute_query(project_context, "SELECT id FROM users LIMIT 5000")
+        assert "LIMIT 500" in result["sql_executed"].upper()
+        assert result["truncated"] is True
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_limit_injected(self, mock_exec, project_context):
+        mock_exec.return_value = {
+            "columns": ["id"],
+            "rows": [],
+            "row_count": 0,
+        }
+        result = await execute_query(project_context, "SELECT id FROM users")
+        assert "LIMIT" in result["sql_executed"].upper()
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_timeout_error(self, mock_exec, project_context):
+        mock_exec.side_effect = psycopg.errors.QueryCanceled()
+        result = await execute_query(project_context, "SELECT * FROM users")
+        assert result["success"] is False
+        assert result["error"]["code"] == QUERY_TIMEOUT
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_connection_error(self, mock_exec, project_context):
+        mock_exec.side_effect = psycopg.OperationalError("could not connect to server")
+        result = await execute_query(project_context, "SELECT * FROM users")
+        assert result["success"] is False
+        assert result["error"]["code"] == CONNECTION_ERROR
+
+    @pytest.mark.asyncio
+    @patch(POOLED_EXEC)
+    async def test_unexpected_error(self, mock_exec, project_context):
+        mock_exec.side_effect = RuntimeError("boom")
+        result = await execute_query(project_context, "SELECT * FROM users")
+        assert result["success"] is False
+        assert result["error"]["code"] == INTERNAL_ERROR
 
 
 # --- Server tool handler tests ---
