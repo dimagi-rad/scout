@@ -64,26 +64,87 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         view_schema = summary.get("view_schema")
         view_ok = view_schema is None or view_schema.get("ok")
 
-        if summary.get("all_succeeded") and view_ok:
+        not_loaded = [
+            t.get("display_name") or t.get("tenant") for t in tenants if not t.get("success")
+        ]
+        # Only name sources we actually have names for — the branches below are
+        # reachable with nothing to name, and a dangling "others did not: ."
+        # invites the agent to invent one.
+        named = f": {', '.join(str(t) for t in not_loaded)}" if not_loaded else ""
+        all_loaded = bool(summary.get("all_succeeded"))
+
+        if all_loaded and view_ok:
             status = "completed"
             message = "Data loaded successfully. Continue with the analysis."
+        elif all_loaded:
+            # Nothing left to load and still no queryable surface, so the view
+            # build itself is broken (its exception is swallowed into
+            # view_schema["ok"] and the Cube build is skipped behind it).
+            #
+            # Gated on all_loaded, NOT on `not view_ok` alone: when a tenant did
+            # not load, build_view_schema fails *because* that tenant has no
+            # ACTIVE schema, so the fix is the tenant, not the build.
+            status = "failed"
+            message = (
+                "Every tenant loaded, but the workspace query layer (view schema) "
+                "failed to build, so nothing is queryable: "
+                f"{(view_schema or {}).get('error') or 'unknown error'}. Do NOT retry — "
+                "tell the user a system-side fix is required."
+            )
         elif loaded:
             status = "partial"
             message = (
-                "Some tenants loaded; others failed. Proceed with the available data "
-                "and note the gap to the user."
+                f"Some tenants refreshed; others did not{named}. If the query layer is available, "
+                "older data may still be included for tenants that did not refresh. Verify "
+                "the sources and last successful refresh times used by any answer, disclose "
+                "stale or unknown freshness, and do not infer exclusion from refresh failure."
             )
+            if not view_ok:
+                # Not relaying view_schema["error"]: build_view_schema says "run a
+                # data refresh", which cannot succeed until whatever stopped the
+                # missing sources is fixed (#412). The run's own guidance, appended
+                # below, is the advice that actually applies.
+                message += (
+                    " The workspace's combined query layer is unavailable. Do not query this "
+                    "workspace until it is rebuilt. Investigate the tenant refresh failures "
+                    "and address any reported account/access problems before retrying."
+                )
         else:
             status = "failed"
-            message = "Materialization failed; no data was loaded."
+            message = f"Materialization failed; no data was loaded{named}."
+
+        failure_details = [
+            f"{tenant.get('display_name') or tenant.get('tenant') or 'unknown'}: {tenant['error'].strip()}"
+            for tenant in tenants
+            if not tenant.get("success") and tenant.get("error")
+        ]
+        if failure_details:
+            details = "; ".join(failure_details)
+            message += " Failure details: " + details
+            if not details.endswith((".", "!", "?")):
+                message += "."
+
+        # Advice comes from the run, keyed by error code — this tool must not
+        # write its own (apps/common/errors.py: raise sites describe, one owner
+        # advises).
+        guidance = summary.get("guidance") or []
+        if guidance:
+            message += " " + " ".join(guidance)
 
         logger.info(
-            "Headless materialization for workspace %s: status=%s, tenants_loaded=%d",
+            "Headless materialization for workspace %s: status=%s, tenants_loaded=%d, "
+            "tenants_not_loaded=%d",
             workspace_id,
             status,
             loaded,
+            len(not_loaded),
         )
-        return {"status": status, "tenants_loaded": loaded, "message": message}
+        return {
+            "status": status,
+            "tenants_loaded": loaded,
+            "tenants_not_loaded": not_loaded,
+            "message": message,
+        }
 
     run_materialization.name = "run_materialization"
     return run_materialization

@@ -178,7 +178,7 @@ async def aresolve_credential(membership) -> dict | None:
         # This connection's credential belongs to a different team than this
         # chatbot. Fail closed (never serve another team's token), but surface a
         # distinct, actionable error so the user is told to connect that team —
-        # not the generic "No credential configured" (arch #245 finding 07#3).
+        # not the generic "No usable credential could be resolved" (arch #245 finding 07#3).
         raise CredentialResolutionError(
             AUTH_TOKEN_EXPIRED,
             "Your sign-in is scoped to a different team than this chatbot's "

@@ -47,6 +47,12 @@ class ErrorCode(StrEnum):
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
 
+    # No live membership for this tenant, so this user's refresh never attempted
+    # it. Current access checks permit this transitional state; the ALL-of policy
+    # in #380 is a separate authorization change. No upstream auth was attempted,
+    # and another user's credential must not be substituted.
+    WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
+
 
 def code_of(exc: BaseException) -> str:
     """Return the ``ErrorCode`` an exception declares, defaulting to INTERNAL_ERROR.

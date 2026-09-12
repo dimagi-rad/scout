@@ -9,8 +9,9 @@ from django.test import override_settings
 from langchain_core.messages import AIMessage
 
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.semantic.models import CubeSchema, SemanticModel
-from apps.users.models import Tenant
+from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
@@ -22,7 +23,10 @@ from apps.workspaces.models import (
 from apps.workspaces.tasks import (
     RESUME_EXCEPTION_MESSAGE,
     RESUME_TIMEOUT_MESSAGE,
+    TENANT_NOT_RUN,
     _aggregate_materialization_state,
+    _credential_guidance,
+    _summary_failures,
     resume_thread_after_materialization,
 )
 
@@ -674,11 +678,15 @@ async def test_aggregate_surfaces_failed_transform_phase():
     in the per-tenant summary so the agent discloses that staging/derived tables
     are stale (issue #241, 04#4: result["transforms"] was previously never read
     by the aggregator)."""
+    user = await User.objects.acreate_user(email="xform-fail@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-xform-fail", created_by=user)
     tenant = await Tenant.objects.acreate(
         external_id="t-xform-fail",
         provider="commcare",
         canonical_name="Xform Tenant",
     )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_xform_fail")
     await MaterializationRun.objects.acreate(
         tenant_schema=schema,
@@ -697,7 +705,7 @@ async def test_aggregate_surfaces_failed_transform_phase():
         },
     )
 
-    status, summary = await _aggregate_materialization_state(778899)
+    status, summary = await _aggregate_materialization_state(778899, ws, str(user.id))
 
     # Raw sources loaded → run-level status stays completed (transforms isolated).
     assert status == "completed"
@@ -710,11 +718,15 @@ async def test_aggregate_surfaces_failed_transform_phase():
 @pytest.mark.django_db(transaction=True)
 async def test_aggregate_no_transform_error_when_transforms_succeed():
     """A successful transform phase adds no ``transform_error`` noise."""
+    user = await User.objects.acreate_user(email="xform-ok@b.c", password="x")
+    ws = await Workspace.objects.acreate(name="W-xform-ok", created_by=user)
     tenant = await Tenant.objects.acreate(
         external_id="t-xform-ok",
         provider="commcare",
         canonical_name="Xform OK Tenant",
     )
+    await WorkspaceTenant.objects.acreate(workspace=ws, tenant=tenant)
+    await TenantMembership.objects.acreate(user=user, tenant=tenant)
     schema = await TenantSchema.objects.acreate(tenant=tenant, schema_name="s_xform_ok")
     await MaterializationRun.objects.acreate(
         tenant_schema=schema,
@@ -728,7 +740,7 @@ async def test_aggregate_no_transform_error_when_transforms_succeed():
         },
     )
 
-    _, summary = await _aggregate_materialization_state(778900)
+    _, summary = await _aggregate_materialization_state(778900, ws, str(user.id))
     assert "transform_error" not in summary[0]
 
 
@@ -765,7 +777,10 @@ async def test_aggregate_surfaces_dbt_test_failures_separately():
         },
     )
 
-    status, summary = await _aggregate_materialization_state(778901)
+    user = await User.objects.acreate_user(email="xform-tests@example.com", password="x")
+    workspace = await Workspace.objects.acreate(name="Xform tests", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    status, summary = await _aggregate_materialization_state(778901, workspace, str(user.id))
 
     assert status == "completed"
     assert "transform_error" not in summary[0]
@@ -1368,3 +1383,286 @@ async def test_resume_plain_completed_for_multi_tenant_active_view_schema():
     assert result["terminal_state"] == ThreadJob.State.COMPLETED
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# #364 surface 2: the interactive chat resume. _aggregate_materialization_state
+# derives everything from MaterializationRun rows, and rows are only created
+# from inside run_pipeline — so a tenant the run never got to is invisible and
+# chat reported "completed" for a workspace it had only partly loaded.
+# ---------------------------------------------------------------------------
+
+
+async def _make_partly_covered_job(
+    *, email, ws_name, pj_id, covered_run=True, uncovered_reachable=False
+):
+    """A 2-tenant workspace where only the first tenant has a run row.
+
+    The user always holds a live membership on the covered tenant. Whether they
+    hold one on the *uncovered* tenant is the switch that decides the reported
+    reason: no membership establishes lack of access; membership alone does not
+    explain why the tenant was not refreshed.
+    """
+    user = await User.objects.acreate_user(email=email, password="x")
+    ws = await Workspace.objects.acreate(name=ws_name, created_by=user)
+    covered = await Tenant.objects.acreate(
+        external_id=f"{ws_name}-covered", provider="commcare", canonical_name="Covered"
+    )
+    uncovered = await Tenant.objects.acreate(
+        external_id=f"{ws_name}-uncovered", provider="commcare", canonical_name="Uncovered"
+    )
+    for t in (covered, uncovered):
+        await WorkspaceTenant.objects.acreate(workspace=ws, tenant=t)
+    await TenantMembership.objects.acreate(user=user, tenant=covered)
+    if uncovered_reachable:
+        await TenantMembership.objects.acreate(user=user, tenant=uncovered)
+    if covered_run:
+        schema = await TenantSchema.objects.acreate(
+            tenant=covered, schema_name=f"{ws_name}_covered".replace("-", "_")
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.COMPLETED,
+            procrastinate_job_id=pj_id,
+            result={"sources": {"cases": {"state": "completed", "rows": 10}}},
+        )
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=ws,
+        schema_name=f"ws_{ws_name}".replace("-", "_")[:22],
+        state=SchemaState.ACTIVE,
+    )
+    thread = await Thread.objects.acreate(workspace=ws, user=user)
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=pj_id,
+        tool_call_id=f"tc-{ws_name}",
+        state=ThreadJob.State.PENDING,
+    )
+    return user, ws, uncovered, tj
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_aggregate_does_not_report_completed_when_a_tenant_has_no_run_row():
+    """Every run row COMPLETED, yet the workspace was only partly loaded.
+
+    Before this, the status came from the rows alone: one COMPLETED row and no
+    row at all for the second tenant read as `completed`, which is what chat
+    told the user (#364).
+    """
+    user, ws, uncovered, _tj = await _make_partly_covered_job(
+        email="agg-uncovered@b.c", ws_name="W-agg-unc", pj_id=90001
+    )
+
+    status, summary = await _aggregate_materialization_state(90001, ws, str(user.id))
+
+    assert status == "partial"
+    # Non-vacuous: the uncovered tenant is IN the summary, so it is what held
+    # the status down rather than an empty check passing by default.
+    assert len(summary) == 2
+    entry = next(t for t in summary if t["tenant"] == uncovered.external_id)
+    assert entry["state"] == TENANT_NOT_RUN
+    assert entry["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert entry["materialized_row_counts"] == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_aggregate_reports_a_reachable_tenant_with_no_run_row_without_advising():
+    """Membership alone cannot distinguish missing credentials from other causes."""
+    user, ws, uncovered, _tj = await _make_partly_covered_job(
+        email="agg-dropped@b.c",
+        ws_name="W-agg-drop",
+        pj_id=90002,
+        uncovered_reachable=True,
+    )
+
+    assert _tj.materialization_preflight_failures == []
+    status, summary = await _aggregate_materialization_state(90002, ws, str(user.id))
+
+    assert status == "partial"
+    entry = next(t for t in summary if t["tenant"] == uncovered.external_id)
+    assert entry["error_code"] == ErrorCode.INTERNAL_ERROR
+    assert _credential_guidance(_summary_failures(summary)) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.FAILED])
+@pytest.mark.parametrize("reachable", [False, True])
+async def test_resume_prompt_names_a_tenant_the_run_did_not_load(view_state, reachable):
+    """The chat resume prompt — the path this issue was found on."""
+    _user, _ws, uncovered, tj = await _make_partly_covered_job(
+        email="resume-uncovered@b.c",
+        ws_name="W-res-unc",
+        pj_id=90003,
+        uncovered_reachable=reachable,
+    )
+
+    await TenantSchema.objects.acreate(
+        tenant=uncovered, schema_name="retained_uncovered", state=SchemaState.ACTIVE
+    )
+    await WorkspaceViewSchema.objects.filter(workspace=_ws).aupdate(state=view_state)
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=mock_agent),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "Materialization just completed" not in body
+    assert uncovered.external_id in body
+    assert "did not refresh" in body
+    assert "older data may still be included" in body
+    assert "none of its data is in these results" not in body
+    assert "<ErrorCode." not in body
+    assert "nothing you query covers" not in body
+    assert "say the numbers exclude them" not in body
+    # The advice comes from _CREDENTIAL_GUIDANCE, attributed to the tenant — a
+    # tenant with no run row could not reach any guidance path before (#364).
+    assert ("not connected to your account" in body) is not reachable
+    assert "Per-tenant data loaded successfully" not in body
+    assert "a system-side fix is required" not in body
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert uncovered.external_id in tj.error_summary
+    assert "did not refresh" in tj.error_summary
+    assert "Any of their data in results may be older" in tj.error_summary
+    assert "Verify the sources" not in tj.error_summary
+    assert "do not claim" not in tj.error_summary
+    assert "none of its data is in these results" not in tj.error_summary
+    assert ("Settings → Connections" in tj.error_summary) is not reachable
+    if view_state == SchemaState.ACTIVE:
+        assert tj.error_summary.startswith("Materialization did not refresh all data.")
+    assert "re-running materialization will not help" not in tj.error_summary
+    assert "  " not in tj.error_summary
+    assert tj.error_summary == tj.error_summary.strip()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_resume_no_runs_prompt_names_the_tenants_and_carries_guidance():
+    """With no run rows at all the prompt had no per-tenant detail and no
+    guidance, so the user was told to "check the connection" with nothing named."""
+    _user, _ws, uncovered, tj = await _make_partly_covered_job(
+        email="resume-noruns@b.c", ws_name="W-res-nor", pj_id=90004, covered_run=False
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.ainvoke = AsyncMock(return_value={"messages": []})
+    with patch(
+        "apps.workspaces.tasks._build_agent_for_resume",
+        AsyncMock(return_value=mock_agent),
+    ):
+        result = await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+
+    body = mock_agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert uncovered.external_id in body
+    assert "not connected to your account" in body
+    assert result["terminal_state"] == ThreadJob.State.FAILED
+    await tj.arefresh_from_db()
+    assert uncovered.external_id in tj.error_summary
+    assert " Not refreshed:" not in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_uncovered_tenant_with_failed_semantic_build_does_not_claim_full_refresh():
+    _user, _ws, uncovered, tj = await _make_partly_covered_job(
+        email="semantic-uncovered@b.c",
+        ws_name="W-sem-unc",
+        pj_id=90005,
+        uncovered_reachable=True,
+    )
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with (
+        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+        patch(
+            "apps.workspaces.tasks._semantic_layer_state",
+            AsyncMock(return_value=("unavailable", "bad model")),
+        ),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "the data is already loaded" not in body
+    assert "incomplete refresh coverage" in body
+    assert uncovered.external_id in body
+    await tj.arefresh_from_db()
+    assert not tj.error_summary.startswith("Data loaded,")
+    assert "did not refresh" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recorded_preflight_reasons_match_uuid_and_provider():
+    user, ws, uncovered, _tj = await _make_partly_covered_job(
+        email="provider-match@b.c", ws_name="W-provider-match", pj_id=90006, covered_run=False
+    )
+    covered = await ws.tenants.exclude(id=uncovered.id).aget()
+    covered.provider = "ocs"
+    covered.external_id = uncovered.external_id
+    await covered.asave(update_fields=["provider", "external_id"])
+    failures = [
+        {
+            "tenant_id": str(covered.id),
+            "provider": "ocs",
+            "error": "OCS credential missing",
+            "error_code": "",
+        },
+        {
+            "tenant_id": str(uncovered.id),
+            "provider": "commcare",
+            "error": "CommCare pipeline missing",
+            "error_code": "PIPELINE_UNRESOLVED",
+        },
+        {
+            "tenant_id": str(covered.id),
+            "provider": "commcare",
+            "error": "wrong provider",
+            "error_code": "",
+        },
+    ]
+    status, summary = await _aggregate_materialization_state(90006, ws, str(user.id), failures)
+    assert status == "no_runs"
+    assert (
+        next(entry for entry in summary if entry["provider"] == "ocs")["error_code"]
+        == ErrorCode.INTERNAL_ERROR
+    )
+    assert {entry["provider"]: entry["error"] for entry in summary} == {
+        "ocs": "OCS credential missing",
+        "commcare": "CommCare pipeline missing",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("change", ["removed", "provider_changed"])
+async def test_no_runs_banner_does_not_advertise_unmatched_recorded_details(change):
+    _user, ws, uncovered, tj = await _make_partly_covered_job(
+        email="unmatched@b.c", ws_name="W-unmatched", pj_id=90007, covered_run=False
+    )
+    tj.materialization_preflight_failures = [
+        {
+            "tenant_id": str(uncovered.id),
+            "provider": uncovered.provider,
+            "error": "Old provider credential failed",
+            "error_code": "AUTH_TOKEN_EXPIRED",
+        }
+    ]
+    await tj.asave(update_fields=["materialization_preflight_failures"])
+    if change == "removed":
+        await WorkspaceTenant.objects.filter(workspace=ws, tenant=uncovered).adelete()
+    else:
+        uncovered.provider = "ocs"
+        await uncovered.asave(update_fields=["provider"])
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        await resume_thread_after_materialization(None, str(tj.id))
+    await tj.arefresh_from_db()
+    assert "failure details below" not in tj.error_summary
+    assert "Old provider credential failed" not in tj.error_summary
+    assert "credentials configured" in tj.error_summary
