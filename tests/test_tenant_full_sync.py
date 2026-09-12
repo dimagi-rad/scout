@@ -23,9 +23,18 @@ from apps.users.services.tenant_resolution import (
 CONNECT_URL = "https://connect.dimagi.com/export/opp_org_program_list/"
 
 
-async def _oauth_conn(user, provider):
+async def _oauth_conn(user, provider, scope_key=""):
+    """An OAuth connection as it exists after migration 0011.
+
+    ``scope_key`` is the team an OCS token is scoped to (``""`` for the
+    account-wide providers), so resolution finds this row instead of adding a
+    second one for the same team.
+    """
     return await TenantConnection.objects.acreate(
-        user=user, provider=provider, credential_type=TenantConnection.OAUTH
+        user=user,
+        provider=provider,
+        credential_type=TenantConnection.OAUTH,
+        scope_key=scope_key,
     )
 
 
@@ -107,7 +116,7 @@ async def test_ocs_archival_is_scoped_to_token_team(user):
     await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
     )
-    conn = await _oauth_conn(user, "ocs")
+    conn = await _oauth_conn(user, "ocs", scope_key="team-a")
     t_a_stale = await Tenant.objects.acreate(provider="ocs", external_id="A1", canonical_name="A1")
     t_b = await Tenant.objects.acreate(provider="ocs", external_id="B1", canonical_name="B1")
     # a stale team-a chatbot (should be revoked) and a team-b chatbot (must be left alone)

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from allauth.account.models import EmailAddress
-from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.db import transaction
 
 from apps.users.models import TenantConnection, TenantMembership
@@ -222,14 +222,16 @@ def _merge_tenant_memberships(canonical: User, duplicate: User) -> tuple[int, in
 def _merge_tenant_connections(canonical: User, duplicate: User) -> tuple[int, int]:
     """Returns (repointed_count, conflict_merged_count).
 
-    Repoint the duplicate's connections to canonical. The model allows only one
-    OAuth connection per (user, provider), so when canonical already owns the
-    OAuth connection for a provider, the duplicate's OAuth connection for that
-    provider is merged: its memberships are repointed to canonical's connection
-    and the duplicate row is deleted. API-key connections are always repointed.
+    Repoint the duplicate's connections to canonical. Uniqueness is
+    ``(user, provider, scope_key)`` for OAuth, so a conflict is only a collision
+    on the same *scope*: that connection's memberships are repointed to
+    canonical's equivalent and the duplicate row is deleted. Keying on provider
+    alone would fold a second OCS team's connection into the first team's, giving
+    those chatbots a credential for the wrong team (#156). API-key connections
+    have no uniqueness and are always repointed.
     """
     canonical_oauth = {
-        c.provider: c
+        (c.provider, c.scope_key): c
         for c in TenantConnection.objects.filter(
             user=canonical, credential_type=TenantConnection.OAUTH
         )
@@ -237,11 +239,13 @@ def _merge_tenant_connections(canonical: User, duplicate: User) -> tuple[int, in
     repointed = 0
     conflict_merged = 0
     for conn in TenantConnection.objects.filter(user=duplicate):
-        existing = canonical_oauth.get(conn.provider)
+        existing = canonical_oauth.get((conn.provider, conn.scope_key))
         if conn.credential_type == TenantConnection.OAUTH and existing is not None:
             # all_objects: repoint tombstones too, or they'd dangle on the deleted
             # connection (conn.memberships is live-only after the manager change).
             TenantMembership.all_objects.filter(connection=conn).update(connection=existing)
+            if conn.social_account_id != existing.social_account_id:
+                SocialToken.objects.filter(account_id=conn.social_account_id).delete()
             conn.delete()
             conflict_merged += 1
         else:
@@ -374,15 +378,20 @@ def merge_users(
         report.tenant_membership_repointed = dup_tms.exclude(
             tenant_id__in=canonical_tenant_ids,
         ).count()
-        canonical_oauth_providers = set(
+        # Mirrors the real merge: a conflict needs the same provider AND scope.
+        canonical_oauth_scopes = set(
             TenantConnection.objects.filter(
                 user=canonical, credential_type=TenantConnection.OAUTH
-            ).values_list("provider", flat=True)
+            ).values_list("provider", "scope_key")
         )
         dup_conns = TenantConnection.objects.filter(user=duplicate)
-        report.tenant_connection_conflict_merged = dup_conns.filter(
-            credential_type=TenantConnection.OAUTH, provider__in=canonical_oauth_providers
-        ).count()
+        report.tenant_connection_conflict_merged = sum(
+            1
+            for row in dup_conns.filter(credential_type=TenantConnection.OAUTH).values_list(
+                "provider", "scope_key"
+            )
+            if row in canonical_oauth_scopes
+        )
         report.tenant_connection_repointed = (
             dup_conns.count() - report.tenant_connection_conflict_merged
         )

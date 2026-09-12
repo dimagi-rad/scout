@@ -57,13 +57,32 @@ def test_connection_is_credential_only_and_links_memberships(user):
 
 
 @pytest.mark.django_db
-def test_one_oauth_connection_per_user_provider(user):
+def test_one_oauth_connection_per_user_provider_scope(user):
+    """Multi-token OAuth (#156) narrowed uniqueness to the scope, not the provider.
+
+    Two teams of one provider are legal; the same team twice is still not.
+    """
     TenantConnection.objects.create(
-        user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="acme"
+    )
+    TenantConnection.objects.create(
+        user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="globex"
     )
     with pytest.raises(IntegrityError):
         TenantConnection.objects.create(
-            user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+            user=user, provider="ocs", credential_type=TenantConnection.OAUTH, scope_key="acme"
+        )
+
+
+@pytest.mark.django_db
+def test_account_wide_providers_still_get_one_oauth_connection(user):
+    """``scope_key=""`` is a real value, so the constraint still collapses on it."""
+    TenantConnection.objects.create(
+        user=user, provider="commcare", credential_type=TenantConnection.OAUTH
+    )
+    with pytest.raises(IntegrityError):
+        TenantConnection.objects.create(
+            user=user, provider="commcare", credential_type=TenantConnection.OAUTH
         )
 
 
@@ -378,59 +397,73 @@ async def test_remove_connection_archives_memberships(user):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_reported_bug_oauth_team_switch_fails_closed(user, mocker):
-    """OAuth team A imports chatbots → add API key for team B → re-login OAuth as
-    team B. The team-A chatbot must fail closed (NOT serve the team-B token),
-    while the team-B chatbot resolves via its API key. This is the regression
-    that motivated the feature. Fail-closed now surfaces a distinct, actionable
-    re-authorize error rather than a silent None (arch #245 finding 07#3)."""
+async def test_connecting_a_second_team_no_longer_evicts_the_first(user, mocker):
+    """The reported bug's successor: authorising team B must not disown team A.
 
-    acct = await SocialAccount.objects.acreate(
-        user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
-    )
+    Originally this asserted that after re-authorising as team B, team A's
+    chatbot failed closed rather than being served the team-B token — correct,
+    but the underlying cause was that Scout could only hold one OCS token, so
+    switching teams meant losing the first. That is what #156 removed: each team
+    now has its own identity, connection and token, and all three credentials
+    resolve to their own team. The fail-closed guarantee it protected is pinned
+    separately by ``test_a_chatbot_of_another_team_still_fails_closed``.
+    """
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
 
-    # 1. Import team A chatbots via OAuth.
-    async def get_team_a(url, headers=None, params=None):
-        if "sessions" in url:
-            return _sessions_response([{"team": {"slug": "team-a", "name": "Team A"}}])
-        return _sessions_response([{"id": "exp-a", "name": "A bot"}])
+    async def _authorize(team, token_value, chatbot_id):
+        """One OAuth round-trip for *team*, as allauth would leave the DB."""
+        account = await SocialAccount.objects.acreate(
+            user=user, provider="ocs", uid=f"42#{team}", extra_data={"sub": "42", "team": team}
+        )
+        await SocialToken.objects.acreate(
+            account=account,
+            app=app,
+            token=token_value,
+            expires_at=timezone.now() + timedelta(hours=5),
+        )
 
-    _mock_async_client(mocker, get_team_a)
-    await resolve_ocs_chatbots(user, "tok-a")
-    tm_a = await TenantMembership.objects.select_related("connection").aget(
-        user=user, tenant__external_id="exp-a"
-    )
-    assert tm_a.team_slug == "team-a"
-    assert tm_a.connection.credential_type == "oauth"
+        async def fake_get(url, headers=None, params=None):
+            if "sessions" in url:
+                return _sessions_response([{"team": {"slug": team, "name": team.title()}}])
+            return _sessions_response([{"id": chatbot_id, "name": chatbot_id}])
 
-    # 2. Add an API key for team B (chatbot exp-b).
-    conn_b = await TenantConnection.objects.acreate(
+        _mock_async_client(mocker, fake_get)
+        await resolve_ocs_chatbots(user, token_value, social_account=account)
+
+    await _authorize("team-a", "tok-a", "exp-a")
+    await _authorize("team-b", "tok-b", "exp-b")
+
+    # Two independent connections, one per team — not one row overwritten twice.
+    conns = {
+        c.scope_key: c
+        async for c in TenantConnection.objects.filter(
+            user=user, provider="ocs", credential_type=TenantConnection.OAUTH
+        )
+    }
+    assert set(conns) == {"team-a", "team-b"}
+
+    async def _cred(external_id):
+        tm = await TenantMembership.objects.select_related("connection", "user").aget(
+            user=user, tenant__external_id=external_id
+        )
+        return await aresolve_credential(tm)
+
+    # Team A survived team B's arrival, and each team gets its OWN token.
+    assert await _cred("exp-a") == {"type": "oauth", "value": "tok-a"}
+    assert await _cred("exp-b") == {"type": "oauth", "value": "tok-b"}
+
+    # A third team via API key is still isolated from both.
+    conn_c = await TenantConnection.objects.acreate(
         user=user,
         provider="ocs",
         credential_type=TenantConnection.API_KEY,
-        encrypted_credential=encrypt_credential("kb"),
+        encrypted_credential=encrypt_credential("kc"),
     )
-    tenant_b = await Tenant.objects.acreate(provider="ocs", external_id="exp-b", canonical_name="B")
-    tm_b = await TenantMembership.objects.acreate(
-        user=user, tenant=tenant_b, connection=conn_b, team_slug="team-b", team_name="Team B"
+    tenant_c = await Tenant.objects.acreate(provider="ocs", external_id="exp-c", canonical_name="C")
+    await TenantMembership.objects.acreate(
+        user=user, tenant=tenant_c, connection=conn_c, team_slug="team-c", team_name="Team C"
     )
-
-    # 3. User re-authorizes OAuth as team B: the single OCS token now scopes to team-b.
-    acct.extra_data = {"team": "team-b"}
-    await acct.asave(update_fields=["extra_data"])
-    _mock_token_qs(mocker, team="team-b", token="tok-b")
-
-    # team-A chatbot fails closed (must NOT fetch with the team-b token → no 404 bug).
-    # Mirror the production call sites, which select_related("connection", "user").
-    tm_a = await TenantMembership.objects.select_related("connection", "user").aget(id=tm_a.id)
-    with pytest.raises(CredentialResolutionError) as exc_info:
-        await aresolve_credential(tm_a)
-    # Fail closed: the team-b token is never returned; the error is actionable.
-    assert exc_info.value.code == AUTH_TOKEN_EXPIRED
-    assert "team-a" in str(exc_info.value)
-    # team-B chatbot still resolves via its own API key
-    tm_b = await TenantMembership.objects.select_related("connection", "user").aget(id=tm_b.id)
-    assert await aresolve_credential(tm_b) == {"type": "api_key", "value": "kb"}
+    assert await _cred("exp-c") == {"type": "api_key", "value": "kc"}
 
 
 # --- archive / restore / multi-key ------------------------------------------

@@ -24,6 +24,11 @@ export interface ApiKeyConnection {
   connection_id: string
   provider: string
   credential_type: string
+  /** The scope this credential authorises (an OCS team slug); "" when account-wide. */
+  scope_key: string
+  scope_label: string
+  /** Per-connection token health. null for API keys, which have no expiry. */
+  status: "connected" | "expired" | null
   chatbots: ConnectionChatbot[]
 }
 
