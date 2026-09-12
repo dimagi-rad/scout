@@ -1,50 +1,32 @@
-"""The one deterministic, live-only read scope for ``TenantMetadata`` (arch 09#7).
+"""Read tenant-owned metadata only while the tenant has a live membership.
 
-``TenantMetadata`` hangs off ``TenantMembership`` (OneToOne) but the data it holds
-— app definitions, case types, form structure discovered during DISCOVER — is a
-property of the *tenant*, not of the member who happened to trigger discovery.
-``materialize_workspace`` fans out over every live membership of a tenant, so a
-tenant with N members accumulates N rows, each written from that member's own
-credential at its own time. Reading one of those with an unordered ``.first()``
-answered "what is in this tenant's schema?" differently per request.
-
-The rule: **the most-recently-discovered LIVE membership's metadata.**
-
-- Live-only is a correctness fix, not a tidy-up: a related-field join does NOT
-  apply ``TenantMembership``'s live-only default manager, so an *archived*
-  membership — a tombstone for access the provider revoked (#249) — kept feeding
-  its metadata into agent prompts, MCP ``describe_table``/``get_metadata``, the
-  semantic catalog and the data dictionary. The ``archived_at IS NULL`` predicate
-  is spelled out here because the join can't inherit it.
-- ``discovered_at`` descending, NULLs last, so a row that actually fetched
-  something outranks one that never did. ``pk`` is the tiebreak (a
-  ``BigAutoField``, so it resolves to the last-inserted row), present only so
-  equal ``discovered_at`` still yields one fixed answer across users, surfaces
-  and requests.
-
-The grain itself is still wrong; moving these fields onto ``Tenant`` is #305, and
-this module's ordering is the winner rule that migration's dedupe should reuse.
+Storage survives membership revocation and deletion (#305), but visibility keeps
+#415's any-live-membership gate. Workspace authorization is separate: it can admit
+a caller through another tenant in a multi-tenant workspace. This is not a check
+of the caller's own membership in the tenant whose metadata is being read.
 """
 
 from __future__ import annotations
 
-from django.db.models import F
-
+from apps.users.models import TenantMembership
 from apps.workspaces.models import TenantMetadata
 
 
-def _live_metadata_qs(tenant_id):
+def _visible_metadata(tenant_id):
+    # Keep #415's visibility rule explicit even if the default manager changes.
     return TenantMetadata.objects.filter(
-        tenant_membership__tenant_id=tenant_id,
-        tenant_membership__archived_at__isnull=True,
-    ).order_by(F("discovered_at").desc(nulls_last=True), "-pk")
+        tenant_id=tenant_id,
+        tenant_id__in=TenantMembership.objects.filter(
+            tenant_id=tenant_id, archived_at__isnull=True
+        ).values("tenant_id"),
+    )
 
 
 def get_tenant_metadata(tenant_id) -> TenantMetadata | None:
-    """Most-recently-discovered live ``TenantMetadata`` for a tenant, or ``None``."""
-    return _live_metadata_qs(tenant_id).first()
+    """Return metadata if discovered and at least one tenant membership is live."""
+    return _visible_metadata(tenant_id).first()
 
 
 async def aget_tenant_metadata(tenant_id) -> TenantMetadata | None:
     """Async sibling of :func:`get_tenant_metadata`."""
-    return await _live_metadata_qs(tenant_id).afirst()
+    return await _visible_metadata(tenant_id).afirst()

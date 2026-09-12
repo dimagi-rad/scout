@@ -50,7 +50,7 @@ def materialization_run(tenant_schema):
 @pytest.fixture
 def tenant_metadata(membership):
     return TenantMetadata.objects.create(
-        tenant_membership=membership,
+        tenant=membership.tenant,
         metadata={"cases": 42},
     )
 

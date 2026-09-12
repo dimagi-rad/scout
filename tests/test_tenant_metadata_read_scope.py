@@ -1,22 +1,16 @@
-"""``TenantMetadata`` must read the same for every user and every surface (arch 09#7).
+"""Tenant-owned storage survives revocation; reads require a live tenant membership."""
 
-The rows are per-membership and ``materialize_workspace`` writes one per live
-member, so a tenant with N members has N rows that can genuinely disagree. These
-tests pin the read rule — most-recently-discovered LIVE membership — and, in
-particular, that a join to an archived (upstream-revoked) membership can no
-longer feed the agent prompt, MCP, the semantic catalog or the data dictionary.
-"""
-
-from datetime import timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from asgiref.sync import async_to_sync
 from django.contrib.auth import get_user_model
 from django.utils import timezone
+from rest_framework.test import APIClient
 
 from apps.semantic.services.catalog import _tenant_metadata_for_schema
 from apps.users.models import Tenant, TenantMembership
-from apps.workspaces.models import SchemaState, TenantMetadata, TenantSchema
+from apps.workspaces.models import SchemaState, TenantMetadata, TenantSchema, WorkspaceTenant
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata, get_tenant_metadata
 
 SCHEMA_NAME = "t_md_domain"
@@ -31,18 +25,12 @@ def md_tenant(db):
     return tenant
 
 
-def _metadata(tenant, owner, *, discovered_at=None, archived=False):
-    """Give ``tenant`` one more member whose membership carries its own metadata."""
-    user = get_user_model().objects.create_user(email=f"{owner}@example.com")
-    tm = TenantMembership.all_objects.create(
+def _member(tenant, name, *, archived=False):
+    user = get_user_model().objects.create_user(email=f"{name}@example.com")
+    return TenantMembership.all_objects.create(
         user=user,
         tenant=tenant,
         archived_at=timezone.now() if archived else None,
-    )
-    return TenantMetadata.objects.create(
-        tenant_membership=tm,
-        metadata={"owner": owner},
-        discovered_at=discovered_at,
     )
 
 
@@ -62,50 +50,96 @@ def _every_surface(tenant):
 
 
 @pytest.mark.django_db
-def test_every_surface_agrees_when_memberships_disagree(md_tenant):
-    now = timezone.now()
-    _metadata(md_tenant, "stale", discovered_at=now - timedelta(days=3))
-    _metadata(md_tenant, "fresh", discovered_at=now)
-    _metadata(md_tenant, "never", discovered_at=None)
+def test_every_surface_reads_the_tenants_one_row(md_tenant):
+    _member(md_tenant, "one")
+    _member(md_tenant, "two")
+    TenantMetadata.objects.create(
+        tenant=md_tenant, metadata={"owner": "tenant"}, discovered_at=timezone.now()
+    )
 
-    assert _every_surface(md_tenant) == ["fresh"] * 3
+    assert _every_surface(md_tenant) == ["tenant"] * 3
 
 
 @pytest.mark.django_db
-def test_archived_membership_metadata_is_never_returned(md_tenant):
-    """The archived row is deliberately the *fresher* one, so recency alone can't
-    save this: an ``archived_at`` predicate must be spelled out, because a
-    related-field join does not inherit ``TenantMembership``'s live-only manager.
+def test_metadata_outlives_the_member_who_discovered_it(md_tenant):
+    """#305's wrong ``CASCADE``: one member leaving used to wipe the metadata the
+    rest of the tenant still needed.
     """
-    now = timezone.now()
-    _metadata(md_tenant, "revoked", discovered_at=now, archived=True)
-    _metadata(md_tenant, "live", discovered_at=now - timedelta(days=1))
+    discoverer = _member(md_tenant, "discoverer")
+    _member(md_tenant, "colleague")
+    TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
 
-    assert _every_surface(md_tenant) == ["live"] * 3
+    discoverer.delete()
+
+    assert _every_surface(md_tenant) == ["tenant"] * 3
 
 
 @pytest.mark.django_db
-def test_only_archived_metadata_reads_as_absent(md_tenant):
-    _metadata(md_tenant, "revoked", discovered_at=timezone.now(), archived=True)
+def test_revoking_last_membership_hides_but_retains_metadata(md_tenant):
+    member = _member(md_tenant, "revoked")
+    TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
+
+    member.archived_at = timezone.now()
+    member.save(update_fields=["archived_at"])
 
     assert _every_surface(md_tenant) == [None] * 3
+    assert TenantMetadata.objects.get(tenant=md_tenant).metadata == {"owner": "tenant"}
+
+    member.archived_at = None
+    member.save(update_fields=["archived_at"])
+    assert _every_surface(md_tenant) == ["tenant"] * 3
 
 
 @pytest.mark.django_db
-def test_undiscovered_row_loses_to_a_discovered_one_inserted_after_it(md_tenant):
-    _metadata(md_tenant, "never", discovered_at=None)
-    _metadata(md_tenant, "discovered", discovered_at=timezone.now())
-
-    assert _every_surface(md_tenant) == ["discovered"] * 3
+def test_deleting_last_membership_retains_hidden_storage(md_tenant):
+    member = _member(md_tenant, "last")
+    TenantMetadata.objects.create(tenant=md_tenant, metadata={"owner": "tenant"})
+    member.delete()
+    assert _every_surface(md_tenant) == [None] * 3
+    assert TenantMetadata.objects.filter(tenant=md_tenant).exists()
 
 
 @pytest.mark.django_db
-def test_tied_discovery_times_still_resolve_to_one_stable_answer(md_tenant):
-    """Equal ``discovered_at`` must not leave the winner up to the query planner."""
-    at = timezone.now()
-    for i in range(4):
-        _metadata(md_tenant, f"tie{i}", discovered_at=at)
+def test_workspace_access_via_second_tenant_does_not_expose_revoked_first(user, workspace):
+    revoked = Tenant.objects.create(
+        provider="commcare", external_id="revoked-first", canonical_name="Revoked"
+    )
+    member = _member(revoked, "former", archived=True)
+    WorkspaceTenant.objects.create(workspace=workspace, tenant=revoked)
+    assert workspace.tenant == revoked
+    schema = TenantSchema.objects.create(
+        tenant=revoked, schema_name="commcare_revoked_r1a2b3c4", state=SchemaState.ACTIVE
+    )
+    TenantMetadata.objects.create(
+        tenant=revoked, metadata={"case_types": [{"name": "private-case-type"}]}
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    with (
+        patch("apps.workspaces.api.views.get_managed_db_connection", return_value=MagicMock()),
+        patch("apps.workspaces.api.views._live_tables_from_conn", return_value={"cases"}),
+        patch("apps.workspaces.api.views._columns_from_conn", return_value={}),
+        patch(
+            "apps.workspaces.api.views._sync_pipeline_list_tables", return_value=[{"name": "cases"}]
+        ),
+    ):
+        response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+        assert response.status_code == 200
+        assert "source_metadata" not in response.json()["tables"][f"{schema.schema_name}.cases"]
+        assert TenantMetadata.objects.filter(tenant=revoked).exists()
+        member.archived_at = None
+        member.save(update_fields=["archived_at"])
+        response = client.get(f"/api/workspaces/{workspace.id}/data-dictionary/")
+        assert (
+            response.json()["tables"][f"{schema.schema_name}.cases"]["source_metadata"]["items"][0][
+                "name"
+            ]
+            == "private-case-type"
+        )
 
-    winners = {get_tenant_metadata(md_tenant.id).metadata["owner"] for _ in range(5)}
-    assert len(winners) == 1
-    assert set(_every_surface(md_tenant)) == winners
+
+@pytest.mark.django_db
+def test_undiscovered_tenant_reads_as_absent(md_tenant):
+    _member(md_tenant, "member")
+
+    assert _every_surface(md_tenant) == [None] * 3

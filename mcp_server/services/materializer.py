@@ -58,6 +58,7 @@ from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -221,9 +222,7 @@ def run_pipeline(
         # Asset generation failures are isolated — load can proceed without assets.
         if pipeline.provider == "commcare":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -231,6 +230,11 @@ def run_pipeline(
                         tenant_membership.tenant.external_id,
                         asset_result["created"],
                         asset_result["updated"],
+                    )
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
                     )
             except Exception:
                 logger.exception(
@@ -241,9 +245,7 @@ def run_pipeline(
         # Asset generation failures are isolated — the pipeline continues regardless.
         if pipeline.provider == "commcare_connect":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_connect_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -255,6 +257,11 @@ def run_pipeline(
                     form_defs = (tenant_meta.metadata or {}).get("form_definitions", {})
                     for ws in tenant_membership.tenant.workspaces.all():
                         async_to_sync(sync_column_notes)(ws, "stg_visits", form_defs)
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
+                    )
             except Exception:
                 logger.exception(
                     "Failed to generate Connect assets for %s; continuing pipeline",
@@ -562,7 +569,7 @@ def _run_discover_phase(
     metadata = loader.load()
 
     TenantMetadata.objects.update_or_create(
-        tenant_membership=tenant_membership,
+        tenant=tenant_membership.tenant,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
