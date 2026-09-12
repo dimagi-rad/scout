@@ -195,13 +195,13 @@ class TestExecuteAsyncParameterized:
 
         # SET ROLE, search_path, timeout, actual query, then reset role/session.
         execute_calls = mock_cursor.execute.call_args_list
-        assert len(execute_calls) == 6
+        assert len(execute_calls) == 7
         assert "SET ROLE" in str(execute_calls[0][0][0])
         assert "RESET ROLE" in str(execute_calls[-2])
         assert "RESET ALL" in str(execute_calls[-1])
 
         # Verify the actual query was called with params
-        final_call = execute_calls[3]
+        final_call = execute_calls[4]
         assert "information_schema.tables" in final_call[0][0]
         assert final_call[0][1] == ("test_domain",)
 

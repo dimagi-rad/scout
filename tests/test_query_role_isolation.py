@@ -81,6 +81,13 @@ class TestSetRoleIsolation:
         call_strs = [str(c) for c in execute_calls]
         assert any("RESET ROLE" in c for c in call_strs)
         assert "RESET ALL" in call_strs[-1]
+        assert any("default_transaction_read_only" in call for call in call_strs)
+        readonly_index = next(
+            i for i, call in enumerate(call_strs) if "default_transaction_read_only" in call
+        )
+        query_index = next(i for i, call in enumerate(call_strs) if "SELECT 1" in call)
+        assert readonly_index < query_index
+        assert "on" in call_strs[readonly_index]
 
     @pytest.mark.asyncio
     async def test_agent_sql_runs_pooled_under_the_readonly_role(self):
@@ -112,6 +119,7 @@ class TestSetRoleIsolation:
         mock_cursor.execute.side_effect = [
             None,  # SET ROLE succeeds
             None,  # SET search_path succeeds
+            None,  # SET default_transaction_read_only succeeds
             None,  # SET statement_timeout succeeds
             Exception("query failed"),  # actual query fails
             None,  # RESET ROLE succeeds

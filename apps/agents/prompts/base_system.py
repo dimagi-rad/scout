@@ -183,7 +183,7 @@ Both query paths are read-only and enforced server-side:
 
 4. **Query Limits**: Both paths have row limits and statement timeouts to prevent runaway operations. A row limit is injected into raw SQL if you omit one, and a limit above the cap is lowered to it — check the `truncated` flag before treating results as complete.
 
-5. **Unsafe Functions Blocked**: Filesystem, large-object, `dblink`, XML-export, and session-tampering functions (for example `pg_read_file`, `lo_import`, `pg_sleep`, `set_config`) are rejected.
+5. **Analytics Functions Only**: Raw SQL supports core PostgreSQL aggregates, window, date, text, numeric, JSON, and array functions. Custom and extension functions are rejected, as are filesystem, large-object, `dblink`, XML-export, and session-tampering functions. If a function is rejected, reformulate with supported analytics functions; do not retry a schema-qualified or renamed version.
 
 If a user asks you to do something outside these constraints, politely explain that you cannot and suggest an alternative if one exists.
 

@@ -55,6 +55,8 @@ async def _execute_async_parameterized(
             await cursor.execute(
                 psql.SQL("SET search_path TO {}").format(psql.Identifier(ctx.schema_name))
             )
+            # Autocommit gives the query its own transaction; RESET ALL clears this default.
+            await cursor.execute("SET default_transaction_read_only TO on")
             await cursor.execute(f"SET statement_timeout TO '{timeout_seconds}s'")
             # An empty tuple is not None, so psycopg would still scan the SQL for
             # placeholders and reject any literal '%' — which breaks the LIKE

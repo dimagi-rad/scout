@@ -7,7 +7,7 @@ executed through the MCP server are safe and comply with project rules.
 Security features:
 - Only SELECT statements allowed (including UNION/INTERSECT/EXCEPT)
 - Single statement enforcement
-- Dangerous function blocking (40+ PostgreSQL functions)
+- Explicit analytics function allowlist (no custom or extension functions)
 - Schema/table allowlist enforcement
 - Automatic LIMIT injection and capping
 """
@@ -80,6 +80,7 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "set_config",
         # Command execution
         "query_to_xml",
+        "query_to_xmlschema",
         "query_to_xml_and_xmlschema",
         "cursor_to_xml",
         "cursor_to_xmlschema",
@@ -92,6 +93,196 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
         "database_to_xml",
         "database_to_xmlschema",
         "database_to_xml_and_xmlschema",
+    }
+)
+
+# Names are SQLGlot's normalized names for built-ins, or PostgreSQL names for
+# Anonymous nodes. Unknown/extension functions may execute SQL hidden in strings;
+# adding one here requires reviewing its behavior, not just its return type.
+ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "abs",
+        "age",
+        "and",
+        "or",
+        "explode",
+        "array",
+        "array_agg",
+        "array_length",
+        "array_size",
+        "array_to_string",
+        "avg",
+        "bool_and",
+        "bool_or",
+        "btrim",
+        "cardinality",
+        "case",
+        "cast",
+        "ceil",
+        "ceiling",
+        "char_length",
+        "character_length",
+        "coalesce",
+        "concat",
+        "concat_ws",
+        "corr",
+        "count",
+        "covar_pop",
+        "covar_samp",
+        "cume_dist",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "date_part",
+        "date_trunc",
+        "dense_rank",
+        "exists",
+        "exp",
+        "exploding_generate_series",
+        "extract",
+        "first_value",
+        "floor",
+        "generate_series",
+        "greatest",
+        "group_concat",
+        "if",
+        "json_agg",
+        "json_array_elements",
+        "json_array_elements_text",
+        "json_array_length",
+        "json_build_array",
+        "json_build_object",
+        "json_extract",
+        "json_extract_scalar",
+        "json_object_agg",
+        "jsonb_agg",
+        "jsonb_array_elements",
+        "jsonb_array_elements_text",
+        "jsonb_array_length",
+        "jsonb_build_array",
+        "jsonb_build_object",
+        "jsonb_extract_path",
+        "jsonb_extract_path_text",
+        "jsonb_object_agg",
+        "jsonb_typeof",
+        "lag",
+        "last_value",
+        "lead",
+        "least",
+        "left",
+        "length",
+        "ln",
+        "log",
+        "lower",
+        "lpad",
+        "ltrim",
+        "max",
+        "md5",
+        "min",
+        "mod",
+        "now",
+        "nth_value",
+        "ntile",
+        "nullif",
+        "percent_rank",
+        "percentile_cont",
+        "percentile_disc",
+        "position",
+        "pow",
+        "power",
+        "rank",
+        "regexp_extract",
+        "regexp_like",
+        "regexp_replace",
+        "regexp_split_to_array",
+        "regexp_split_to_table",
+        "replace",
+        "right",
+        "round",
+        "row_number",
+        "rpad",
+        "rtrim",
+        "sign",
+        "split_part",
+        "sqrt",
+        "str_position",
+        "str_to_date",
+        "str_to_time",
+        "stddev",
+        "stddev_pop",
+        "stddev_samp",
+        "string_agg",
+        "substring",
+        "sum",
+        "time_to_str",
+        "timestamp_trunc",
+        "to_char",
+        "to_date",
+        "to_json",
+        "to_jsonb",
+        "to_number",
+        "to_timestamp",
+        "translate",
+        "trim",
+        "trunc",
+        "unnest",
+        "upper",
+        "var_pop",
+        "var_samp",
+        "variance",
+        "width_bucket",
+    }
+)
+
+# Parser-only names are not PostgreSQL function names and must not authorize a UDF.
+PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
+    {
+        "and",
+        "array",
+        "case",
+        "cast",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "explode",
+        "exploding_generate_series",
+        "exists",
+        "extract",
+        "str_to_date",
+        "str_to_time",
+        "group_concat",
+        "if",
+        "json_extract",
+        "json_extract_scalar",
+        "or",
+        "time_to_str",
+        "timestamp_trunc",
+    }
+)
+
+# PostgreSQL parses these as syntax/operators, not search_path function calls.
+SQL_SPECIAL_FORMS: frozenset[str] = frozenset(
+    {
+        "and",
+        "array",
+        "case",
+        "cast",
+        "coalesce",
+        "current_date",
+        "current_time",
+        "current_timestamp",
+        "exists",
+        "extract",
+        "greatest",
+        "if",
+        "json_extract",
+        "json_extract_scalar",
+        "least",
+        "nullif",
+        "or",
+        "str_position",
+        "substring",
+        "trim",
     }
 )
 
@@ -241,6 +432,16 @@ class SQLValidator:
         self._validate_no_system_catalogs(statement, sql)
         self._validate_table_access(statement, sql)
 
+        # Pin ordinary built-ins to pg_catalog so tenant overloads cannot affect
+        # function resolution. Special forms use PostgreSQL's dedicated syntax.
+        for func in reversed(list(statement.find_all(exp.Func))):
+            func_name = (func.name if isinstance(func, exp.Anonymous) else func.sql_name()).lower()
+            if not isinstance(func, exp.Anonymous) and func_name in SQL_SPECIAL_FORMS:
+                continue
+            if isinstance(func.parent, exp.Dot) and func.parent.expression is func:
+                continue
+            func.replace(exp.Dot(this=exp.to_identifier("pg_catalog"), expression=func.copy()))
+
         return statement
 
     def _validate_statement_type(self, statement: exp.Expression, sql: str) -> None:
@@ -311,7 +512,7 @@ class SQLValidator:
     def _validate_no_dangerous_functions(self, statement: exp.Expression, sql: str) -> None:
         """Check for dangerous function calls in the query."""
         for func in statement.find_all(exp.Func):
-            func_name = func.name.lower() if func.name else ""
+            func_name = (func.name if isinstance(func, exp.Anonymous) else func.sql_name()).lower()
             if func_name in DANGEROUS_FUNCTIONS:
                 raise SQLValidationError(
                     f"Function '{func_name}' is not allowed for security reasons.",
@@ -319,14 +520,20 @@ class SQLValidator:
                     error_type="dangerous_function",
                 )
 
-        # Also check for Anonymous functions (raw function calls)
-        for anon in statement.find_all(exp.Anonymous):
-            func_name = anon.name.lower() if anon.name else ""
-            if func_name in DANGEROUS_FUNCTIONS:
+            parent = func.parent
+            qualified = isinstance(parent, exp.Dot) and parent.expression is func
+            builtin_schema = not qualified or (
+                isinstance(parent.this, exp.Identifier) and parent.this.name == "pg_catalog"
+            )
+            allowed_name = func_name in ALLOWED_ANALYTICS_FUNCTIONS and not (
+                isinstance(func, exp.Anonymous) and func_name in PARSER_ONLY_FUNCTIONS
+            )
+            if not allowed_name or not builtin_schema:
                 raise SQLValidationError(
-                    f"Function '{func_name}' is not allowed for security reasons.",
+                    f"Function '{func_name}' is not allowed. Use supported PostgreSQL "
+                    "analytics functions; custom and extension functions are not supported.",
                     sql=sql,
-                    error_type="dangerous_function",
+                    error_type="function_not_allowed",
                 )
 
     def _validate_table_access(self, statement: exp.Expression, sql: str) -> None:

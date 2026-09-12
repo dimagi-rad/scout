@@ -271,6 +271,19 @@ class TestMultiStatementRejection:
 class TestDangerousFunctions:
     """Test rejection of dangerous PostgreSQL functions."""
 
+    @pytest.mark.parametrize(
+        "function_name",
+        ["query_to_xmlschema", "pg_catalog.query_to_xmlschema", '"query_to_xmlschema"'],
+    )
+    def test_reject_query_schema_conversion(self, function_name):
+        """SQL-bearing XML conversion must be rejected before database execution."""
+        validator = SQLValidator(schema="public")
+
+        with pytest.raises(SQLValidationError) as exc_info:
+            validator.validate(f"SELECT {function_name}('SELECT 1', false, false, '')")
+
+        assert exc_info.value.error_type == "dangerous_function"
+
     def test_reject_pg_read_file(self):
         """Test rejection of pg_read_file function."""
         validator = SQLValidator(schema="public")
@@ -320,6 +333,63 @@ class TestDangerousFunctions:
         # COPY is a different statement type, should be rejected
         with pytest.raises(SQLValidationError):
             validator.validate("COPY users FROM '/tmp/data.csv'")
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT custom_report(1)",
+            "SELECT * FROM custom_rows(1)",
+            "SELECT public.round(1.2)",
+            "SELECT other_schema.count(1)",
+            "SELECT COALESCE(custom_report(1), 0)",
+            "SELECT pg_catalog.timestamp_trunc(1)",
+        ],
+    )
+    def test_reject_functions_outside_analytics_allowlist(self, sql):
+        with pytest.raises(SQLValidationError) as exc_info:
+            SQLValidator().validate(sql)
+
+        assert exc_info.value.error_type == "function_not_allowed"
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "SELECT AVG(amount), SUM(amount), COUNT(DISTINCT id) FROM orders",
+            "SELECT CASE WHEN amount > 0 THEN COALESCE(amount, 0) ELSE NULL END FROM orders",
+            "SELECT ROUND(AVG(amount)::numeric, 2), MIN(amount), MAX(amount) FROM orders",
+            "SELECT ROW_NUMBER() OVER (ORDER BY amount), LAG(amount) OVER () FROM orders",
+            "SELECT DENSE_RANK() OVER (), FIRST_VALUE(amount) OVER () FROM orders",
+            "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount) FROM orders",
+            "SELECT DATE_TRUNC('month', created_at), EXTRACT(year FROM created_at) FROM orders",
+            "SELECT NOW(), CURRENT_DATE, AGE(created_at), TO_CHAR(created_at, 'YYYY') FROM orders",
+            "SELECT LOWER(name), LENGTH(name), SPLIT_PART(name, ' ', 1), TRIM(name) FROM users",
+            "SELECT REGEXP_REPLACE(name, 'a', 'b', 'g'), REPLACE(name, 'a', 'b') FROM users",
+            "SELECT STRING_AGG(name, ','), ARRAY_AGG(name) FROM users",
+            "SELECT JSONB_AGG(data), JSONB_BUILD_OBJECT('count', COUNT(*)) FROM events",
+            "SELECT JSONB_ARRAY_ELEMENTS(data), JSONB_EXTRACT_PATH_TEXT(data, 'name') FROM events",
+            "SELECT data->>'name', data->'details' FROM events",
+            "SELECT UNNEST(ARRAY[1, 2]), GENERATE_SERIES(1, 3)",
+            "SELECT pg_catalog.round(1.2), ABS(-1), GREATEST(1, 2), LEAST(1, 2)",
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE amount > 0)",
+            "SELECT TO_DATE('2026-01-01', 'YYYY-MM-DD'), TO_TIMESTAMP('2026', 'YYYY')",
+            "SELECT ARRAY_LENGTH(ARRAY[1, 2], 1), CHAR_LENGTH('abc')",
+        ],
+    )
+    def test_allow_core_analytics(self, sql):
+        assert SQLValidator().validate(sql) is not None
+
+    def test_builtin_calls_are_bound_to_pg_catalog(self):
+        statement = SQLValidator().validate(
+            "SELECT ROUND(AVG(amount), 2), pg_catalog.abs(-1) FROM orders"
+        )
+        rendered = statement.sql(dialect="postgres")
+        assert "pg_catalog.ROUND(" in rendered
+        assert "pg_catalog.AVG(amount)" in rendered
+        assert "pg_catalog.abs(-1)" in rendered
+
+    def test_quoted_function_names_are_bound_to_pg_catalog(self):
+        statement = SQLValidator().validate('SELECT "jsonb_build_array"(1)')
+        assert 'pg_catalog."jsonb_build_array"' in statement.sql(dialect="postgres")
 
     def test_allow_safe_functions(self):
         """Test that safe functions are allowed."""
