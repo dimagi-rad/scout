@@ -217,6 +217,13 @@ class TenantConnection(models.Model):
         related_name="tenant_connections",
         help_text="The allauth identity holding this OAuth connection's token. Null for API keys.",
     )
+    oauth_refresh_failure_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_default="",
+        help_text="Internal fingerprint of the OAuth credential whose last refresh failed.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

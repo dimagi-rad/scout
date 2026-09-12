@@ -46,7 +46,7 @@ async def _anewest_account(user, provider: str):
     resolving. Ordered, because a user can hold one identity per team and an
     unordered read would attribute a fetch to an arbitrary one of them.
     """
-    return await provider_accounts(user, provider).order_by("-date_joined", "-id").afirst()
+    return await provider_accounts(user.pk, provider).order_by("-date_joined", "-id").afirst()
 
 
 @sync_to_async

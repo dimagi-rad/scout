@@ -14,14 +14,18 @@ Two entry points:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import timedelta
 
 import httpx
 import requests
+from allauth.socialaccount.models import SocialToken
 from django.conf import settings
 from django.utils import timezone
 
+from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import canonical_provider
 
 logger = logging.getLogger(__name__)
@@ -80,6 +84,33 @@ def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bo
     return timezone.now() + REFRESH_BUFFER >= expires_at
 
 
+def credential_fingerprint(token) -> str:
+    value = json.dumps([token.token, token.token_secret, token.app_id])
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def token_health(token, provider, *, refresh_failed=False) -> str:
+    """User-action status, independent of the proactive refresh buffer."""
+    if refresh_failed:
+        return "expired"
+    token_url = get_token_url(provider)
+    if token_url and token.token_secret and token.app:
+        return "connected"
+    if token.expires_at is not None:
+        return "connected" if token.expires_at > timezone.now() else "expired"
+    return "expired" if token_url else "connected"
+
+
+def _token_connections(token):
+    # A late failure from a replaced token must not erase the replacement's outcome.
+    current = SocialToken.objects.filter(
+        pk=token.pk, token=token.token, token_secret=token.token_secret, app_id=token.app_id
+    ).values("account_id")
+    return TenantConnection.objects.filter(
+        social_account_id__in=current, credential_type=TenantConnection.OAUTH
+    )
+
+
 async def refresh_oauth_token(social_token, token_url: str) -> str:
     """Refresh an OAuth token using the refresh token grant.
 
@@ -94,6 +125,7 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
     Raises:
         TokenRefreshError: If the refresh request fails.
     """
+    fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
         raise TokenRefreshError("OAuth application is missing; reconnect this account.")
     try:
@@ -121,9 +153,15 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
             )
         else:
             logger.exception("Token refresh failed for app %s", social_token.app.client_id)
+        await _token_connections(social_token).aupdate(
+            oauth_refresh_failure_fingerprint=fingerprint
+        )
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
+        await _token_connections(social_token).aupdate(
+            oauth_refresh_failure_fingerprint=fingerprint
+        )
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
     data = response.json()
@@ -133,6 +171,11 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
     if data.get("expires_in"):
         social_token.expires_at = timezone.now() + timedelta(seconds=data["expires_in"])
     await social_token.asave()
+    await (
+        _token_connections(social_token)
+        .filter(oauth_refresh_failure_fingerprint=fingerprint)
+        .aupdate(oauth_refresh_failure_fingerprint="")
+    )
 
     logger.info("Successfully refreshed OAuth token for app %s", social_token.app.client_id)
     return social_token.token
@@ -147,6 +190,7 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
     refresh sees it; a persistence failure is non-fatal — the in-memory token is
     still usable for the remainder of this run.
     """
+    fingerprint = credential_fingerprint(social_token)
     if social_token.app is None:
         raise TokenRefreshError("OAuth application is missing; reconnect this account.")
     try:
@@ -177,9 +221,11 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
             )
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
+        _token_connections(social_token).update(oauth_refresh_failure_fingerprint=fingerprint)
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
+        _token_connections(social_token).update(oauth_refresh_failure_fingerprint=fingerprint)
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
     data = response.json()
@@ -190,6 +236,9 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
         social_token.expires_at = timezone.now() + timedelta(seconds=data["expires_in"])
     try:
         social_token.save(update_fields=["token", "token_secret", "expires_at"])
+        _token_connections(social_token).filter(
+            oauth_refresh_failure_fingerprint=fingerprint
+        ).update(oauth_refresh_failure_fingerprint="")
     except Exception:
         logger.warning(
             "Failed to persist mid-run refreshed token for app %s",

@@ -35,7 +35,7 @@ from apps.users.services.tenant_resolution import (
     resolve_connect_opportunities,
     resolve_ocs_chatbots,
 )
-from apps.users.services.token_refresh import get_token_url
+from apps.users.services.token_refresh import credential_fingerprint, get_token_url, token_health
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +243,9 @@ def disconnect_provider_view(request, provider_id):
     # Data providers may use configured allauth IDs such as commcare_prod.
     provider = canonical_provider(provider_id)
     if provider in ("commcare", "commcare_connect", "ocs"):
-        tokens = SocialToken.objects.filter(account__in=provider_accounts(request.user, provider))
+        tokens = SocialToken.objects.filter(
+            account__in=provider_accounts(request.user.pk, provider)
+        )
     else:
         tokens = SocialToken.objects.filter(
             account__user=request.user, account__provider=provider_id
@@ -255,6 +257,14 @@ def disconnect_provider_view(request, provider_id):
             tokens = SocialToken.objects.filter(
                 account__user=request.user, account__provider__in=app_provider_ids
             )
+    configured_ids = (
+        SocialApp.objects.filter(provider=provider)
+        .exclude(provider_id="")
+        .values_list("provider_id", flat=True)
+    )
+    tokens = tokens | SocialToken.objects.filter(
+        account__user=request.user, account__provider__in=configured_ids
+    )
     if not tokens.exists():
         return JsonResponse({"error": "No active connection to disconnect"}, status=404)
 
@@ -322,33 +332,24 @@ def providers_view(request):
             provider = social_token.account.provider
             token_url = get_token_url(provider)
             can_refresh = bool(token_url and social_token.token_secret and social_token.app)
-            if token_needs_refresh(social_token.expires_at, can_refresh=can_refresh):
-                if can_refresh:
-                    try:
-                        async_to_sync(refresh_oauth_token)(social_token, token_url)
-                        _record_status(seen_statuses, provider, "connected")
-                    except TokenRefreshError:
-                        _record_status(seen_statuses, provider, "expired")
-                else:
-                    _record_status(seen_statuses, provider, "expired")
-            elif social_token.expires_at is None and token_url is not None:
-                # Unknown expiry and no refresh token to test it with, so we
-                # cannot vouch for this credential. Reporting "connected" on the
-                # strength of no evidence is exactly how a revoked token showed
-                # as healthy right up until it 401'd (#373). "expired" already
-                # renders as an actionable Reconnect prompt.
-                #
-                # Gated on token_url because #373 is about credentials Scout
-                # hands to a data loader. A provider with no token endpoint
-                # (GitHub, Google) is a login-only identity provider whose token
-                # is never used that way — and its OAuth apps return neither
-                # expires_in nor a refresh token, so this branch would pin it at
-                # "expired" forever, with a Reconnect that cannot clear it and a
-                # Disconnect button hidden (ConnectionsPage only renders it for
-                # "connected").
-                _record_status(seen_statuses, provider, "expired")
-            else:
-                _record_status(seen_statuses, provider, "connected")
+            refresh_failed = False
+            if can_refresh and token_needs_refresh(social_token.expires_at):
+                try:
+                    async_to_sync(refresh_oauth_token)(social_token, token_url)
+                except TokenRefreshError:
+                    refresh_failed = True
+            refresh_failed = (
+                refresh_failed
+                or TenantConnection.objects.filter(
+                    social_account_id=social_token.account_id,
+                    oauth_refresh_failure_fingerprint=credential_fingerprint(social_token),
+                ).exists()
+            )
+            _record_status(
+                seen_statuses,
+                provider,
+                token_health(social_token, provider, refresh_failed=refresh_failed),
+            )
         token_status = {
             provider: ("connected" if "connected" in statuses else "expired")
             for provider, statuses in seen_statuses.items()

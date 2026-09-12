@@ -303,7 +303,7 @@ async def test_a_chatbot_of_another_team_still_fails_closed(user):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 async def test_health_is_per_connection_without_refresh(user, mocker):
-    """An expired team is reported independently, without refreshing either token."""
+    """Renewable credentials are healthy without a proactive refresh in this read."""
     app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="cid", secret="sec")
     _, conn_a = await _aocs_identity(
         user, team="acme", token="stale-a", secret="refresh-a", expires_in_hours=-1, app=app
@@ -316,7 +316,7 @@ async def test_health_is_per_connection_without_refresh(user, mocker):
         new=AsyncMock(return_value="new-a"),
     )
 
-    assert await aconnection_status(conn_a) == "expired"
+    assert await aconnection_status(conn_a) == "connected"
     assert await aconnection_status(conn_b) == "connected"
 
     refresh.assert_not_awaited()
@@ -740,7 +740,7 @@ async def test_connections_health_does_not_rotate_tokens(user, mocker):
     response = await client.get("/api/auth/connections/")
     assert response.status_code == 200
     refresh.assert_not_awaited()
-    assert response.json()[0]["status"] == "expired"
+    assert response.json()[0]["status"] == "connected"
 
 
 @pytest.mark.parametrize("provider", ["commcare_prod", "commcare_connect_staging", "ocs_staging"])
@@ -854,3 +854,161 @@ def test_provider_disconnect_includes_prefixed_accounts_but_excludes_connect(use
     assert list(SocialToken.objects.filter(account__user=user).values_list("token", flat=True)) == [
         "connect"
     ]
+
+
+@pytest.mark.django_db
+def test_disconnect_unions_configured_provider_id_with_prefixed_tokens(user, client):
+    SocialApp.objects.create(provider="commcare", provider_id="hq_production", name="HQ")
+    SocialApp.objects.create(
+        provider="commcare_connect", provider_id="connect_production", name="Connect"
+    )
+    for provider in ["commcare", "commcare_staging", "hq_production", "connect_production"]:
+        account = SocialAccount.objects.create(user=user, provider=provider, uid=provider)
+        SocialToken.objects.create(account=account, token=provider)
+    client.force_login(user)
+    assert client.post("/api/auth/providers/commcare/disconnect/").status_code == 200
+    assert list(SocialToken.objects.filter(account__user=user).values_list("token", flat=True)) == [
+        "connect_production"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("expires_in", [None, 60])
+async def test_successful_refresh_health_does_not_require_expiry_buffer(
+    user, httpx_mock, expires_in
+):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    await SocialToken.objects.filter(account=account).aupdate(expires_at=None)
+    payload = {"access_token": "fresh", "refresh_token": "new-refresh"}
+    if expires_in is not None:
+        payload["expires_in"] = expires_in
+    httpx_mock.add_response(method="POST", json=payload)
+    token = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    await refresh_oauth_token(token, "https://example.com/token")
+    await token.arefresh_from_db()
+    if expires_in is None:
+        assert token.expires_at is None
+    assert await aconnection_status(conn) == "connected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_valid_short_lived_token_needs_no_user_action(user):
+    account, conn = await _aocs_identity(user, team="acme", token="short-lived")
+    await SocialToken.objects.filter(account=account).aupdate(
+        expires_at=timezone.now() + timedelta(seconds=60)
+    )
+    assert await aconnection_status(conn) == "connected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_recorded_refresh_failure_clears_on_success(user, httpx_mock):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    token = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
+    with pytest.raises(TokenRefreshError):
+        await refresh_oauth_token(token, "https://example.com/token")
+    assert await aconnection_status(conn) == "expired"
+    httpx_mock.add_response(
+        method="POST", json={"access_token": "new", "refresh_token": "new-secret"}
+    )
+    await refresh_oauth_token(token, "https://example.com/token")
+    assert await aconnection_status(conn) == "connected"
+    await conn.arefresh_from_db()
+    assert conn.oauth_refresh_failure_fingerprint == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_stale_refresh_failure_does_not_poison_reconnected_credentials(user, httpx_mock):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    stale = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    await SocialToken.objects.filter(account=account).aupdate(
+        token="reconnected", token_secret="new-secret"
+    )
+    httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
+    with pytest.raises(TokenRefreshError):
+        await refresh_oauth_token(stale, "https://example.com/token")
+    assert await aconnection_status(conn) == "connected"
+
+
+@pytest.mark.parametrize("expires_in", [None, 60])
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_provider_and_connection_health_agree_after_refresh(user, httpx_mock, expires_in):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    site, _ = await Site.objects.aget_or_create(
+        id=1, defaults={"domain": "testserver", "name": "test"}
+    )
+    await app.sites.aadd(site)
+    account, _ = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    await SocialToken.objects.filter(account=account).aupdate(expires_at=None)
+    payload = {"access_token": "fresh", "refresh_token": "new"}
+    if expires_in is not None:
+        payload["expires_in"] = expires_in
+    httpx_mock.add_response(method="POST", json=payload)
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert providers[0]["status"] == "connected"
+    assert (await client.get("/api/auth/connections/")).json()[0]["status"] == "connected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_failed_refresh_is_expired_on_both_health_surfaces(user, httpx_mock):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    site, _ = await Site.objects.aget_or_create(
+        id=1, defaults={"domain": "testserver", "name": "test"}
+    )
+    await app.sites.aadd(site)
+    account, _ = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    await SocialToken.objects.filter(account=account).aupdate(
+        expires_at=timezone.now() + timedelta(seconds=60)
+    )
+    httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
+    client = await _login(user)
+    providers = (await client.get("/api/auth/providers/")).json()["providers"]
+    assert providers[0]["status"] == "expired"
+    connections = (await client.get("/api/auth/connections/")).json()
+    assert connections[0]["status"] == "expired"
+    assert "oauth_refresh_failure_fingerprint" not in connections[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_sync_refresh_records_failure_and_clears_after_success(user, requests_mock):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    token = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    url = "https://example.com/token"
+    requests_mock.post(url, status_code=400, json={"error": "invalid_grant"})
+    with pytest.raises(TokenRefreshError):
+        await sync_to_async(refresh_oauth_token_sync)(token, url)
+    assert await aconnection_status(conn) == "expired"
+    requests_mock.post(url, json={"access_token": "new", "refresh_token": "new-secret"})
+    await sync_to_async(refresh_oauth_token_sync)(token, url)
+    assert await aconnection_status(conn) == "connected"
+    await conn.arefresh_from_db()
+    assert conn.oauth_refresh_failure_fingerprint == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_stale_failure_cannot_erase_current_credential_failure(user, httpx_mock):
+    app = await SocialApp.objects.acreate(provider="ocs", name="OCS", client_id="c", secret="s")
+    account, conn = await _aocs_identity(user, team="acme", token="old", secret="refresh", app=app)
+    stale = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    await SocialToken.objects.filter(account=account).aupdate(
+        token="replacement", token_secret="new-secret"
+    )
+    current = await SocialToken.objects.select_related("account", "app").aget(account=account)
+    for token in [current, stale]:
+        httpx_mock.add_response(method="POST", status_code=400, json={"error": "invalid_grant"})
+        with pytest.raises(TokenRefreshError):
+            await refresh_oauth_token(token, "https://example.com/token")
+    assert await aconnection_status(conn) == "expired"

@@ -12,9 +12,11 @@ from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import is_active_identity, provider_accounts
 from apps.users.services.token_refresh import (
     TokenRefreshError,
+    credential_fingerprint,
     get_token_url,
     refresh_oauth_token,
     refresh_oauth_token_sync,
+    token_health,
     token_needs_refresh,
 )
 from mcp_server.envelope import AUTH_TOKEN_EXPIRED
@@ -58,7 +60,9 @@ class CredentialResolutionError(Exception):
 
 def _social_token_qs(user, provider: str):
     """Use the shared provider mapping, ordered newest identity first."""
-    qs = SocialToken.objects.filter(account__in=provider_accounts(user, provider))
+    qs = SocialToken.objects.filter(
+        account__in=provider_accounts(getattr(user, "pk", user), provider)
+    )
     return qs.order_by("-account__date_joined", "-account__id")
 
 
@@ -188,21 +192,18 @@ async def aresolve_credential(membership) -> dict | None:
 async def aconnection_status(conn) -> str:
     """Read connection health without rotating credentials or doing network I/O.
 
-    providers_view owns the settings page's proactive refresh. The client reads
-    this status after that request completes so it sees the updated expiry.
+    Renewable credentials need no user action unless their last renewal failed.
+    Failure fingerprints prevent an old credential's error poisoning a reconnect.
     """
     if conn.credential_type != TenantConnection.OAUTH:
         return "unknown"
     token_obj = await aget_connection_token(conn)
     if token_obj is None:
         return "expired"
-    token_url = get_token_url(conn.provider)
-    can_refresh = bool(token_url and token_obj.token_secret and token_obj.app)
-    if not token_needs_refresh(token_obj.expires_at, can_refresh=can_refresh):
-        if token_obj.expires_at is None and token_url is not None:
-            return "expired"
-        return "connected"
-    return "expired"
+    failed = await TenantConnection.objects.filter(
+        pk=conn.pk, oauth_refresh_failure_fingerprint=credential_fingerprint(token_obj)
+    ).aexists()
+    return token_health(token_obj, conn.provider, refresh_failed=failed)
 
 
 def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
