@@ -442,6 +442,97 @@ historical streams are preserved with their 30-day retention — no data is lost
 
 ## Infrastructure Changes
 
+> ### ⚠️ `update-stack` can replace the EC2 instance, and it does not need your permission
+>
+> `EC2Instance.ImageId` **used to be**
+> `{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}`
+> — resolving to whatever Canonical published **most recently**, at every stack operation. When a new
+> 24.04 image appeared since the last one (roughly monthly), the resolved AMI ID differed,
+> CloudFormation saw `ImageId` change, and **replaced the instance — whatever else you changed.**
+> It is now the explicit `EC2AmiId` parameter, so routine updates no longer replace the instance;
+> pass `ParameterKey=EC2AmiId,UsePreviousValue=true`. Taking a newer image is now a deliberate act
+> (and still replaces the instance).
+>
+> **A restart is also an outage.** On this EBS-backed instance, changing `UserData`
+> [restarts the instance](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-ec2-instance.html#cfn-ec2-instance-userdata)
+> while retaining its root volume; it does not replace the instance. `Replacement: False`
+> in a change set therefore does **not** mean zero downtime. Updated user data
+> [does not run on restart by default](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html),
+> so these bootstrap additions provision future new instances; updating the stack alone
+> does not apply them to the existing machine.
+>
+> This is what happened on **2026-07-06**: an `update-stack` applying long-unapplied changes
+> replaced the instance and took the site down. Full detail is in the 2026-07-06 SES/invites
+> incident handover, which is kept **outside this repo** — it carries the account ID, the Elastic
+> IP and the instance ID, and this repository is public. Ask in `#scout` for it. Everything an
+> operator needs in the moment is in this block.
+>
+> **What a replacement costs.** A new instance boots from the template with a fresh EBS root
+> volume. The Elastic IP re-associates, but everything on disk is gone.
+> `UserData` reinstalls `scout`'s `authorized_keys` and recreates the `scout_shared` /
+> `scout_staging_shared` networks, so CI can reconnect and `kamal deploy` restores the containers
+> — **that is the whole reason those lines exist; do not remove them.** Before they were added,
+> recovery required a human with the EC2 keypair to copy the key across by hand.
+>
+> **Do not run this command unless:**
+> 1. you know the current instance may be replaced or restarted and that is acceptable right now;
+> 2. the co-located staging stack going down with it is acceptable;
+> 3. you have the EC2 keypair to hand, in case `UserData` fails part-way; and
+> 4. you are prepared to re-run `kamal deploy` for every destination afterwards.
+>
+> To find out **before** you commit, create a change set instead of updating directly and inspect
+> the `Replacement` column for `EC2Instance`. `Conditional` needs further inspection;
+> neither it nor `False` rules out the restart outage described above.
+>
+> **Three traps in doing this by hand.** The first two produce *empty output that reads as
+> &ldquo;no replacement&rdquo;*: `EC2AmiId` has no default, so it must be satisfied on every
+> update-type change set or the call is rejected outright; and `create-change-set` returns as soon
+> as the set is `CREATE_PENDING`, so describing it immediately shows an empty `Changes` list. The
+> `wait` is what makes the answer trustworthy — a genuine no-replacement result prints rows with
+> `Replace: False`, never nothing.
+>
+> The third is worse, because its output *looks* trustworthy. `ChangeSetName` must be unique per
+> stack, and this procedure never executes the set — a direct `update-stack` only marks a pending
+> set `OBSOLETE`, it does not delete it. With a fixed name, the second preflight fails to create,
+> then describes **the previous run's set**: a confident `Replace:` table computed from the old
+> template. Hence the timestamped name below; reuse `$CS` in all three calls, and never hard-code
+> `preflight`.
+>
+> ```bash
+> CS=preflight-$(date +%s)
+>
+> aws cloudformation create-change-set \
+>   --stack-name scout-production --change-set-name "$CS" \
+>   --template-body file://infra/scout-stack.yml \
+>   --capabilities CAPABILITY_NAMED_IAM \
+>   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
+>                ParameterKey=EC2AmiId,UsePreviousValue=true \
+>   --profile scout --region us-east-1 &&
+> aws cloudformation wait change-set-create-complete \
+>   --stack-name scout-production --change-set-name "$CS" \
+>   --profile scout --region us-east-1
+>
+> aws cloudformation describe-change-set \
+>   --stack-name scout-production --change-set-name "$CS" \
+>   --query '{Status:Status,Exec:ExecutionStatus,Why:StatusReason,Changes:Changes[].ResourceChange.{Res:LogicalResourceId,Action:Action,Replace:Replacement}}' \
+>   --profile scout --region us-east-1
+>
+> aws cloudformation delete-change-set \
+>   --stack-name scout-production --change-set-name "$CS" \
+>   --profile scout --region us-east-1
+> ```
+>
+> `create` and `wait` are `&&`-chained so a rejected create cannot fall through to a misleading
+> describe. `describe` runs unchained on purpose: when the waiter fails because the template
+> produces *no* changes, `Status`/`Why` are what tell you that, and with a unique name a failed
+> create makes `describe` error loudly rather than answer from stale state. Deleting the set at the
+> end is hygiene, not correctness — the unique name already makes an abandoned run harmless.
+>
+> On the **first** preflight against a stack that predates `EC2AmiId`, `UsePreviousValue=true`
+> cannot work — there is no previous value. Pass the running instance's AMI explicitly, using the
+> `describe-instances` lookup below.
+>
+
 The CloudFormation stack is at `infra/scout-stack.yml`. To update:
 
 ```bash
@@ -450,8 +541,20 @@ aws cloudformation update-stack \
   --template-body file://infra/scout-stack.yml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters ParameterKey=EC2KeyPairName,UsePreviousValue=true \
+               ParameterKey=EC2AmiId,UsePreviousValue=true \
   --profile scout \
   --region us-east-1
+```
+
+`EC2AmiId` has no default, by design — see the parameter's own description in
+`infra/scout-stack.yml`. **On the first update after this change, pass the AMI the running
+instance is already on**, not the latest Ubuntu image, or you trigger the replacement the pin
+exists to prevent:
+
+```bash
+aws ec2 describe-instances --profile scout --region us-east-1 \
+  --filters Name=tag:Name,Values=scout-web Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].ImageId' --output text
 ```
 
 After infra changes, re-run `./scripts/fetch-deploy-env.sh` and update GitHub secrets

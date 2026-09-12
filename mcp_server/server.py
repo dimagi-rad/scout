@@ -903,25 +903,116 @@ async def list_pipelines() -> dict:
 
 
 @mcp.tool()
-async def get_materialization_status(run_id: str, workspace_id: str = "") -> dict:
-    """Retrieve the status of a materialization run by ID.
+async def get_materialization_status(
+    run_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+    thread_id: str = "",
+) -> dict:
+    """Retrieve materialization status by run ID or background-job ID.
 
-    Primarily a fallback for reconnection scenarios — live progress is delivered
-    via MCP progress notifications during an active run_materialization call.
+    Use each run's state and progress to describe data loading. For ThreadJob
+    responses, the top-level state tracks conversation continuation: pending
+    includes active materialization, and running means the resume agent is
+    executing after loading. Top-level started_at is the resume claim time,
+    not the start of data loading. An empty runs list does not prove that the
+    data load has started.
 
     Args:
-        run_id: UUID of the MaterializationRun to look up.
+        run_id: UUID of either a MaterializationRun or the ThreadJob returned by
+            run_materialization. A ThreadJob lookup returns the job state and
+            every associated per-tenant run.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
             The run is scoped to this workspace (arch #253, 01#6) so a run in
             another workspace cannot be inspected from here.
+        user_id: User UUID (injected server-side by the agent graph). Required
+            for ThreadJob lookups so one user cannot inspect another user's job.
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("get_materialization_status", run_id, workspace_id=workspace_id) as tc:
+    async with tool_context(
+        "get_materialization_status",
+        run_id,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+    ) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
-            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            run = None
+
+        if run is None:
+            # run_materialization acknowledges with a ThreadJob UUID before any
+            # per-tenant MaterializationRun rows necessarily exist. Scope the
+            # fallback query in the database so unauthorized callers learn
+            # nothing about whether the job exists.
+            if not workspace_id or not user_id:
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+
+            try:
+                job = await ThreadJob.objects.filter(
+                    id=run_id,
+                    job_type=ThreadJob.JobType.MATERIALIZATION,
+                    thread__workspace_id=workspace_id,
+                    thread__user_id=user_id,
+                ).afirst()
+            except (ValueError, _ValidationError):
+                job = None
+
+            if job is None:
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+
+            runs = [
+                tenant_run
+                async for tenant_run in MaterializationRun.objects.select_related(
+                    "tenant_schema__tenant"
+                )
+                .filter(
+                    procrastinate_job_id=job.procrastinate_job_id,
+                    tenant_schema__tenant__workspace_tenants__workspace_id=workspace_id,
+                )
+                .order_by("started_at", "id")
+            ]
+            tc["result"] = success_response(
+                {
+                    "thread_job_id": str(job.id),
+                    "job_type": job.job_type,
+                    "state": job.state,
+                    "tool_call_id": job.tool_call_id,
+                    "created_at": job.created_at.isoformat(),
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                    "error_summary": job.error_summary,
+                    "runs": [
+                        {
+                            "run_id": str(tenant_run.id),
+                            "pipeline": tenant_run.pipeline,
+                            "state": tenant_run.state,
+                            "result": tenant_run.result,
+                            "progress": tenant_run.progress,
+                            "started_at": tenant_run.started_at.isoformat(),
+                            "completed_at": (
+                                tenant_run.completed_at.isoformat()
+                                if tenant_run.completed_at
+                                else None
+                            ),
+                            "tenant_id": tenant_run.tenant_schema.tenant.external_id,
+                            "schema_name": tenant_run.tenant_schema.schema_name,
+                        }
+                        for tenant_run in runs
+                    ],
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
             return tc["result"]
 
         if not await _run_belongs_to_workspace(run, workspace_id):
@@ -939,6 +1030,7 @@ async def get_materialization_status(run_id: str, workspace_id: str = "") -> dic
                 "pipeline": run.pipeline,
                 "state": run.state,
                 "result": run.result,
+                "progress": run.progress,
                 "started_at": run.started_at.isoformat() if run.started_at else None,
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "tenant_id": tenant_id,

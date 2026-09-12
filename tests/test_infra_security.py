@@ -203,3 +203,15 @@ def test_every_error_metric_has_an_alarm():
     }
     orphans = sorted(error_metrics - alarmed)
     assert not orphans, f"error metric(s) with no alarm consuming them (arch #257): {orphans}"
+
+
+def test_web_instance_ami_is_explicitly_pinned():
+    stack = _load_stack()
+    assert stack["Resources"]["EC2Instance"]["Properties"]["ImageId"] == "EC2AmiId"
+    assert "Default" not in stack["Parameters"]["EC2AmiId"]
+
+
+def test_replacement_instance_bootstraps_deploy_access_and_networks():
+    bootstrap = _resources()["EC2Instance"]["Properties"]["UserData"]["Fn::Base64"]
+    assert "/home/scout/.ssh/authorized_keys" in bootstrap
+    assert "scout_shared scout_staging_shared" in bootstrap
