@@ -12,6 +12,8 @@ Tests cover security-critical functionality:
 """
 
 import pytest
+import sqlglot
+from sqlglot import exp
 
 from apps.agents.prompts.base_system import BASE_SYSTEM_PROMPT
 from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
@@ -668,7 +670,7 @@ class TestCteAliasCannotShadowQualifiedTable:
     def test_qualified_table_shadowed_by_cte_still_reported(self):
         validator = SQLValidator(schema="ws_demo")
         statement = validator.validate("WITH visits AS (SELECT 1) SELECT * FROM ws_demo.visits")
-        assert validator.get_tables_accessed(statement) == ["visits"]
+        assert validator.get_tables_accessed(statement) == ["ws_demo.visits"]
 
     def test_bare_cte_reference_is_still_not_a_table(self):
         validator = SQLValidator(schema="ws_demo")
@@ -716,7 +718,7 @@ class TestWholePgNamespaceIsRejected:
         the allowlist, not the prefix rule, decides."""
         validator = SQLValidator(schema="ws_demo")
         statement = validator.validate("SELECT * FROM ws_demo.pg_notes")
-        assert validator.get_tables_accessed(statement) == ["pg_notes"]
+        assert validator.get_tables_accessed(statement) == ["ws_demo.pg_notes"]
 
     def test_unqualified_pg_name_is_still_rejected_even_if_a_tenant_owns_one(self):
         """Unqualified, `pg_notes` resolves through the implicit pg_catalog first,
@@ -805,3 +807,131 @@ class TestPromptValidatorAlignment:
                 f"Prompt still advertises pg_catalog reachability ({phrase!r}), but the "
                 "validator now rejects unqualified pg_* views (issue #244)."
             )
+
+
+class TestReviewRegressions:
+    @pytest.mark.parametrize("expression", ["name ~ 'abc'", "regexp_like(name, 'abc')"])
+    def test_regex_preserves_column_reference(self, expression):
+        sql = SQLValidator().validate(f"SELECT {expression} FROM users").sql(dialect="postgres")
+        assert "pg_catalog.name" not in sql
+        assert "name ~ 'abc'" in sql
+
+    @pytest.mark.parametrize("operator", ["~", "~*", "!~", "!~*"])
+    def test_regex_operators_preserve_syntax(self, operator):
+        sql = (
+            SQLValidator()
+            .validate(f"SELECT name {operator} 'abc' FROM users")
+            .sql(dialect="postgres")
+        )
+        assert "pg_catalog.name" not in sql
+        assert "~" in sql
+        assert ("~*" in sql) == ("*" in operator)
+        assert ("NOT" in sql) == operator.startswith("!")
+
+    def test_regex_function_preserves_flags(self):
+        sql = (
+            SQLValidator().validate("SELECT regexp_like('ABC', 'abc', 'i')").sql(dialect="postgres")
+        )
+        assert "pg_catalog.regexp_like('abc', 'abc', 'i')" in sql.lower()
+
+    @pytest.mark.parametrize(
+        ("expression", "normalized"),
+        [
+            ("bool_and(true)", "logical_and"),
+            ("bool_or(false)", "logical_or"),
+            ("json_agg(1)", "j_s_o_n_array_agg"),
+            ("json_object_agg('key', 1)", "j_s_o_n_object_agg"),
+            ("jsonb_object_agg('key', 1)", "j_s_o_n_b_object_agg"),
+            ("to_timestamp(0)", "unix_to_time"),
+            ("var_pop(1)", "variance_pop"),
+            ("lpad('x', 3, '0')", "pad"),
+            ("rpad('x', 3, '0')", "pad"),
+        ],
+    )
+    def test_normalized_analytics_functions(self, expression, normalized):
+        parsed = sqlglot.parse_one(f"SELECT {expression}", dialect="postgres")
+        assert next(parsed.find_all(exp.Func)).sql_name().lower() == normalized
+        rendered = SQLValidator().validate(f"SELECT {expression}").sql(dialect="postgres")
+        assert "pg_catalog." in rendered
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "regclass",
+            "regproc",
+            "regprocedure",
+            "regoper",
+            "regoperator",
+            "regtype",
+            "regrole",
+            "regnamespace",
+            "regcollation",
+            "regconfig",
+            "regdictionary",
+            "custom_type[]",
+            "custom_type",
+            "public.custom_type",
+        ],
+    )
+    @pytest.mark.parametrize("template", ["SELECT NULL::{target}", "SELECT CAST(NULL AS {target})"])
+    def test_reject_non_core_cast_targets(self, target, template):
+        with pytest.raises(SQLValidationError) as error:
+            SQLValidator().validate(template.format(target=target))
+        assert error.value.error_type == "cast_type_not_allowed"
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "text",
+            "varchar(20)",
+            "numeric(12,2)",
+            "integer",
+            "bigint",
+            "double precision",
+            "boolean",
+            "date",
+            "timestamp",
+            "timestamptz",
+            "interval",
+            "json",
+            "jsonb",
+            "uuid",
+            "bytea",
+            "text[]",
+            "integer[][]",
+        ],
+    )
+    def test_allow_core_cast_targets(self, target):
+        assert SQLValidator().validate(f"SELECT CAST(NULL AS {target})") is not None
+
+    @pytest.mark.parametrize(
+        ("sql", "message"),
+        [
+            ("SELECT 1 FETCH FIRST 10 ROWS ONLY", "Use LIMIT"),
+            ("SELECT * FROM users FOR UPDATE", "Row locking"),
+            ("SELECT * FROM users FOR SHARE", "Row locking"),
+            ("SELECT * FROM users FOR NO KEY UPDATE", "Row locking"),
+            ("SELECT 1 OPERATOR(pg_catalog.+) 2", "Explicit OPERATOR"),
+            ("TABLE users", "TABLE syntax"),
+        ],
+    )
+    def test_reject_unsupported_syntax_clearly(self, sql, message):
+        with pytest.raises(SQLValidationError, match=message):
+            SQLValidator().validate(sql)
+
+    @pytest.mark.parametrize("sql", ["(SELECT 1)", "((SELECT 1))", "(SELECT 1 UNION SELECT 2)"])
+    def test_parenthesized_select_gets_limit(self, sql):
+        validator = SQLValidator(max_limit=10)
+        statement = validator.validate(sql)
+        assert validator.inject_limit(statement).sql(dialect="postgres").endswith("LIMIT 10")
+
+    def test_parenthesized_select_preserves_outer_limit(self):
+        validator = SQLValidator(max_limit=10)
+        statement = validator.validate("(SELECT 1) LIMIT 2")
+        assert validator.limit_value(statement) == 2
+        assert validator.inject_limit(statement).sql(dialect="postgres").endswith("LIMIT 2")
+
+    def test_table_provenance_preserves_schema(self):
+        validator = SQLValidator(schema="ws_test")
+        statement = validator.validate("SELECT * FROM public.users JOIN ws_test.users USING (id)")
+        assert validator.get_tables_accessed(statement) == ["public.users", "ws_test.users"]

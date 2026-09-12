@@ -101,6 +101,15 @@ DANGEROUS_FUNCTIONS: frozenset[str] = frozenset(
 # adding one here requires reviewing its behavior, not just its return type.
 ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
     {
+        "regexp_i_like",
+        "logical_and",
+        "logical_or",
+        "j_s_o_n_array_agg",
+        "j_s_o_n_object_agg",
+        "j_s_o_n_b_object_agg",
+        "unix_to_time",
+        "variance_pop",
+        "pad",
         "abs",
         "age",
         "and",
@@ -237,6 +246,15 @@ ALLOWED_ANALYTICS_FUNCTIONS: frozenset[str] = frozenset(
 # Parser-only names are not PostgreSQL function names and must not authorize a UDF.
 PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
     {
+        "regexp_i_like",
+        "logical_and",
+        "logical_or",
+        "j_s_o_n_array_agg",
+        "j_s_o_n_object_agg",
+        "j_s_o_n_b_object_agg",
+        "unix_to_time",
+        "variance_pop",
+        "pad",
         "and",
         "array",
         "case",
@@ -263,6 +281,8 @@ PARSER_ONLY_FUNCTIONS: frozenset[str] = frozenset(
 # PostgreSQL parses these as syntax/operators, not search_path function calls.
 SQL_SPECIAL_FORMS: frozenset[str] = frozenset(
     {
+        "regexp_i_like",
+        "regexp_like",
         "and",
         "array",
         "case",
@@ -283,6 +303,36 @@ SQL_SPECIAL_FORMS: frozenset[str] = frozenset(
         "str_position",
         "substring",
         "trim",
+    }
+)
+
+# Casts invoke type I/O functions, so unknown and OID-alias types are not a
+# safe substitute for the function allowlist. Arrays must have safe element types.
+ALLOWED_CAST_TYPES = frozenset(
+    {
+        exp.DType.ARRAY,
+        exp.DType.BIGINT,
+        exp.DType.BIT,
+        exp.DType.BOOLEAN,
+        exp.DType.CHAR,
+        exp.DType.DATE,
+        exp.DType.DECIMAL,
+        exp.DType.DOUBLE,
+        exp.DType.FLOAT,
+        exp.DType.INET,
+        exp.DType.INT,
+        exp.DType.INTERVAL,
+        exp.DType.JSON,
+        exp.DType.JSONB,
+        exp.DType.SMALLINT,
+        exp.DType.TEXT,
+        exp.DType.TIME,
+        exp.DType.TIMETZ,
+        exp.DType.TIMESTAMP,
+        exp.DType.TIMESTAMPTZ,
+        exp.DType.UUID,
+        exp.DType.VARBINARY,
+        exp.DType.VARCHAR,
     }
 )
 
@@ -427,6 +477,7 @@ class SQLValidator:
 
         self._validate_statement_type(statement, sql)
         self._validate_no_dangerous_functions(statement, sql)
+        self._validate_cast_types(statement, sql)
         # Rejects unqualified system-catalog reads (cross-tenant disclosure) that
         # the schema allowlist below cannot see.
         self._validate_no_system_catalogs(statement, sql)
@@ -436,6 +487,18 @@ class SQLValidator:
         # function resolution. Special forms use PostgreSQL's dedicated syntax.
         for func in reversed(list(statement.find_all(exp.Func))):
             func_name = (func.name if isinstance(func, exp.Anonymous) else func.sql_name()).lower()
+            # SQLGlot's regex operator emitter drops regexp_like's third argument.
+            if isinstance(func, exp.RegexpLike) and func.args.get("flag") is not None:
+                call = exp.Anonymous(
+                    this="regexp_like",
+                    expressions=[
+                        func.this.copy(),
+                        func.expression.copy(),
+                        func.args["flag"].copy(),
+                    ],
+                )
+                func.replace(exp.Dot(this=exp.to_identifier("pg_catalog"), expression=call))
+                continue
             if not isinstance(func, exp.Anonymous) and func_name in SQL_SPECIAL_FORMS:
                 continue
             if isinstance(func.parent, exp.Dot) and func.parent.expression is func:
@@ -456,6 +519,25 @@ class SQLValidator:
 
         Both pass a naive top-level ``isinstance`` check, so we scan the AST.
         """
+        for node_type, message in (
+            (exp.Fetch, "FETCH syntax is not supported. Use LIMIT to bound query results."),
+            (exp.Lock, "Row locking is not permitted in read-only queries."),
+            (exp.Operator, "Explicit OPERATOR syntax is not supported. Use built-in operators."),
+        ):
+            if statement.find(node_type) is not None:
+                raise SQLValidationError(message, sql=sql, error_type="forbidden_statement")
+
+        if (
+            isinstance(statement, exp.Alias)
+            and isinstance(statement.this, exp.Column)
+            and statement.this.name.upper() == "TABLE"
+        ):
+            raise SQLValidationError(
+                "TABLE syntax is not supported. Use SELECT * FROM the table instead.",
+                sql=sql,
+                error_type="forbidden_statement",
+            )
+
         # SELECT ... INTO creates a new relation; reject regardless of nesting.
         if statement.args.get("into") is not None or statement.find(exp.Into) is not None:
             raise SQLValidationError(
@@ -475,9 +557,9 @@ class SQLValidator:
                 error_type="forbidden_statement",
             )
 
-        if not isinstance(statement, exp.Select):
+        if not isinstance(statement.unnest(), exp.Select):
             # Also allow UNION, INTERSECT, EXCEPT which wrap SELECT statements
-            if isinstance(statement, exp.Union | exp.Intersect | exp.Except):
+            if isinstance(statement.unnest(), exp.Union | exp.Intersect | exp.Except):
                 return
 
             # If not a SELECT and not explicitly forbidden, still reject
@@ -487,6 +569,17 @@ class SQLValidator:
                 sql=sql,
                 error_type="forbidden_statement",
             )
+
+    def _validate_cast_types(self, statement: exp.Expression, sql: str) -> None:
+        for target in statement.find_all(exp.DataType, exp.ObjectIdentifier):
+            if not isinstance(target, exp.DataType) or target.this not in ALLOWED_CAST_TYPES:
+                raise SQLValidationError(
+                    "Cast type is not supported. Use core PostgreSQL text, numeric, boolean, "
+                    "date/time, JSON, UUID, binary or array types; custom and OID-alias types "
+                    "are not permitted.",
+                    sql=sql,
+                    error_type="cast_type_not_allowed",
+                )
 
     def _validate_no_system_catalogs(self, statement: exp.Expression, sql: str) -> None:
         """Reject references to PostgreSQL system catalogs.
@@ -586,6 +679,8 @@ class SQLValidator:
             table_info: dict[str, str] = {"table": table_name}
             if table.db:
                 table_info["schema"] = table.db
+            if table.catalog:
+                table_info["catalog"] = table.catalog
             tables.append(table_info)
 
         return tables
@@ -622,7 +717,7 @@ class SQLValidator:
                 statement.set("limit", exp.Limit(expression=exp.Literal.number(self.max_limit)))
             return statement
 
-        if isinstance(statement, exp.Select):
+        if isinstance(statement, exp.Select | exp.Subquery):
             existing_limit = statement.args.get("limit")
             if existing_limit:
                 limit_value = self._get_limit_value(existing_limit)
@@ -667,9 +762,13 @@ class SQLValidator:
             statement: The parsed SQL expression
 
         Returns:
-            List of table names (without schema prefix)
+            List of table names, preserving explicit schema/catalog qualifiers
         """
-        return [t["table"] for t in self._extract_tables(statement)]
+        return [
+            ".".join(t[key] for key in ("catalog", "schema", "table") if t.get(key))
+            for t in self._extract_tables(statement)
+            if t["table"]
+        ]
 
 
 __all__ = [

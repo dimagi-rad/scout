@@ -20,7 +20,10 @@ canonical metrics. `teardown_schema` is not exposed to the agent.
 
 Before execution, the server parses SQL and requires a single SELECT, including
 read-only CTEs, joins, and set operations. It rejects DML, DDL, `SELECT INTO`,
-data-modifying CTEs, and multiple statements. Qualified table references must
+data-modifying CTEs, row-locking clauses, explicit `OPERATOR(...)` calls, and
+multiple statements. Use `LIMIT` rather than `FETCH FIRST`; unsupported fetch
+syntax is rejected instead of silently changing the requested row count.
+Qualified table references must
 use the workspace schema or `public`; database role grants remain the access
 boundary. System catalog references, including unqualified `pg_*` relations,
 are rejected.
@@ -30,12 +33,15 @@ aggregates, windows, dates, text, numeric operations, JSON, and arrays. Unknown,
 custom, and extension functions are rejected. Ordinary allowed calls are bound
 to `pg_catalog` so tenant function overloads cannot change their resolution;
 PostgreSQL special forms such as CASE, CAST, and COALESCE retain their syntax.
-Functions that execute SQL passed as text are not supported. Expanding the
-allowlist requires reviewing the function's behavior.
+Functions that execute SQL passed as text are not supported. Casts are limited
+to core PostgreSQL data types and arrays of those types; custom types and
+OID-alias types such as `regclass` or `regnamespace` are rejected because their
+input/output functions can resolve catalog objects. Expanding either allowlist
+requires reviewing the function or type's behavior.
 
 The server injects or caps the result limit and returns a `truncated` indicator.
-The executed SQL and referenced tables are included with the result for
-provenance.
+The executed SQL and referenced tables, preserving explicit schema qualifiers,
+are included with the result for provenance.
 
 ## Database isolation
 

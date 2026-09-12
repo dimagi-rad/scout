@@ -112,7 +112,9 @@ user, and thread identifiers are injected server-side.
 
 The server accepts read-only CTEs, joins, set operations, and an explicit
 allowlist of core PostgreSQL analytics functions. Custom and extension
-functions are not supported. Ordinary allowed functions resolve through
+functions and casts to custom or OID-alias types are not supported. Use `LIMIT`
+for row counts; `FETCH FIRST`, row locks, and explicit `OPERATOR(...)` calls are
+rejected. Ordinary allowed functions resolve through
 `pg_catalog`; the database query runs under the workspace's read-only role in
 a read-only transaction. Unsupported statements/functions and system catalog
 reads are rejected before execution. Row limits and timeouts still apply.
