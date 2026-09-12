@@ -12,6 +12,7 @@ import logging
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from django.conf import settings
 
@@ -37,6 +38,59 @@ class TransformStageError(RuntimeError):
     silently COMPLETED — the dbt connection-level / compilation failures that
     issue #241 (04#4) showed were being swallowed.
     """
+
+
+class TestFailure(NamedTuple):
+    """A dbt test that did not pass.
+
+    ``model`` is empty when ``dbt test`` itself errored before producing
+    per-test rows — the assertions were never evaluated, which is a failure to
+    verify rather than a failed assertion, but is equally not a success.
+    """
+
+    model: str
+    test: str
+    status: str
+
+
+def _collect_test_failures(test_results: dict, assets) -> list[TestFailure]:
+    """Extract the non-passing tests from a ``run_dbt_test`` payload.
+
+    ``warn`` is excluded: a warn-severity test does not fail ``dbt test``, so
+    reporting it as a failure would make the agent distrust data dbt itself
+    considers acceptable.
+    """
+    failures = [
+        TestFailure(model=model, test=entry.get("test", "?"), status=str(entry.get("status", "")))
+        for model, entries in (test_results.get("tests") or {}).items()
+        for entry in entries
+        if str(entry.get("status", "")).lower() in ("fail", "error")
+    ]
+    if failures or test_results.get("success", True):
+        return failures
+    # dbt test failed without attributing anything to a model (compilation or
+    # connection error, so res.result was empty). Recording nothing here would
+    # be indistinguishable from "every test passed" (#391).
+    tested = ", ".join(a.name for a in assets if a.test_yaml)
+    return [
+        TestFailure(
+            model="",
+            test=f"dbt test could not be evaluated for {tested}: "
+            f"{test_results.get('error') or 'dbt test failed'}",
+            status="error",
+        )
+    ]
+
+
+def _summarize_test_failures(failures: list[TestFailure]) -> str:
+    """Render test failures as the sentence the agent relays to the user."""
+    models = sorted({f.model for f in failures if f.model})
+    scope = ""
+    if models:
+        noun = "model" if len(models) == 1 else "models"
+        scope = f" on {noun} {', '.join(models)}"
+    details = ", ".join(f"{f.test} ({f.status})" for f in failures)
+    return f"{len(failures)} data-quality test(s) failed{scope}: {details}"
 
 
 def run_transformation_pipeline(
@@ -73,6 +127,7 @@ def run_transformation_pipeline(
             )
         )
 
+    test_failures: list[TestFailure] = []
     try:
         for stage_name, _scope, filters in stages:
             assets = list(TransformationAsset.objects.filter(**filters))
@@ -81,11 +136,18 @@ def run_transformation_pipeline(
                 continue
             if progress_callback:
                 progress_callback(f"Running {stage_name} transforms ({len(assets)} models)...")
-            _run_stage(run, assets, schema_name, stage_name)
+            test_failures.extend(_run_stage(run, assets, schema_name, stage_name))
 
-        run.status = TransformationRunStatus.COMPLETED
+        if test_failures:
+            # The models built, so this is not FAILED — but it is not a clean
+            # COMPLETED either, and before #391 it was reported as one.
+            run.status = TransformationRunStatus.TESTS_FAILED
+            run.error_message = _summarize_test_failures(test_failures)
+            logger.warning("Transformation run %s: %s", run.id, run.error_message)
+        else:
+            run.status = TransformationRunStatus.COMPLETED
         run.completed_at = datetime.now(UTC)
-        run.save(update_fields=["status", "completed_at"])
+        run.save(update_fields=["status", "completed_at", "error_message"])
 
     except Exception as e:
         logger.exception("Transformation pipeline failed")
@@ -98,7 +160,7 @@ def run_transformation_pipeline(
     return run
 
 
-def _run_stage(run, assets, schema_name, stage_name):
+def _run_stage(run, assets, schema_name, stage_name) -> list[TestFailure]:
     asset_runs = {}
     for asset in assets:
         ar = TransformationAssetRun.objects.create(
@@ -109,7 +171,7 @@ def _run_stage(run, assets, schema_name, stage_name):
         asset_runs[asset.name] = ar
 
     try:
-        _execute_stage(asset_runs, assets, schema_name, stage_name)
+        return _execute_stage(asset_runs, assets, schema_name, stage_name)
     except Exception:
         # Mark any asset runs still in RUNNING as FAILED so they don't stay orphaned.
         now = datetime.now(UTC)
@@ -122,7 +184,7 @@ def _run_stage(run, assets, schema_name, stage_name):
         raise
 
 
-def _execute_stage(asset_runs, assets, schema_name, stage_name):
+def _execute_stage(asset_runs, assets, schema_name, stage_name) -> list[TestFailure]:
     with tempfile.TemporaryDirectory() as tmpdir:
         project_dir = Path(tmpdir) / "project"
         profiles_dir = Path(tmpdir) / "profiles"
@@ -193,3 +255,5 @@ def _execute_stage(asset_runs, assets, schema_name, stage_name):
             error = result.get("error") or "dbt run failed"
             logger.warning("Stage '%s' failed: %s", stage_name, error)
             raise TransformStageError(f"Stage '{stage_name}' failed: {error}")
+
+        return _collect_test_failures(test_results, assets)

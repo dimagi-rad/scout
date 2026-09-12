@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { useAppStore } from "@/store/store"
 import { api } from "@/api/client"
+import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 
 describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => {
   beforeEach(() => {
+    localStorage.clear()
     useAppStore.setState({ activeDomainId: "ws-a", threadId: "thread-a" })
   })
 
@@ -21,6 +23,14 @@ describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => 
     useAppStore.getState().domainActions.setActiveDomain("ws-a")
     expect(useAppStore.getState().activeDomainId).toBe("ws-a")
     expect(useAppStore.getState().threadId).toBe("thread-a")
+  })
+
+  it("records an activated workspace as the most recent", () => {
+    useAppStore.getState().domainActions.setActiveDomain("ws-a")
+    useAppStore.getState().domainActions.setActiveDomain("ws-b")
+    useAppStore.getState().domainActions.setActiveDomain("ws-a")
+
+    expect(getRecentWorkspaceIds()).toEqual(["ws-a", "ws-b"])
   })
 })
 
