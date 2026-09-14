@@ -10,11 +10,13 @@ import contextlib
 import hashlib
 import logging
 import re
+import threading
 import uuid
 
 import psycopg
 import psycopg.sql
 from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 
 from apps.common.identifiers import (
@@ -34,6 +36,43 @@ logger = logging.getLogger(__name__)
 # budget for the ``__{table}`` suffix (the full name is hard-failed if it still
 # exceeds the limit). Identifier minting lives in apps.common.identifiers (arch #235).
 _MAX_VIEW_PREFIX_LEN = 32
+
+
+_VIEW_BUILD_LOCK_NAMESPACE = 0x53435642
+_view_build_context = threading.local()
+
+
+@contextlib.contextmanager
+def _serialize_view_build(workspace_id):
+    workspace_key = str(workspace_id)
+    active_builds = getattr(_view_build_context, "workspaces", None)
+    if active_builds is None:
+        active_builds = _view_build_context.workspaces = set()
+    if workspace_key in active_builds:
+        raise RuntimeError(f"Recursive view build for workspace {workspace_key}")
+    lock_key = int.from_bytes(hashlib.sha256(workspace_key.encode()).digest()[:4], signed=True)
+    active_builds.add(workspace_key)
+    try:
+        # A session lock serializes plan capture, DDL, and publication while
+        # autocommit keeps PROVISIONING visible to readers in other processes.
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_lock(%s, %s)", [_VIEW_BUILD_LOCK_NAMESPACE, lock_key]
+            )
+            try:
+                yield
+            finally:
+                try:
+                    cursor.execute(
+                        "SELECT pg_advisory_unlock(%s, %s)", [_VIEW_BUILD_LOCK_NAMESPACE, lock_key]
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to release workspace view-build lock for %s", workspace_key
+                    )
+                    connection.close()
+    finally:
+        active_builds.remove(workspace_key)
 
 
 def get_managed_db_connection():
@@ -269,6 +308,11 @@ class SchemaManager:
         return f"{sanitized[:23]}_{digest}"
 
     def build_view_schema(self, workspace) -> WorkspaceViewSchema:
+        """Publish one coherent physical view schema and its coverage per workspace."""
+        with _serialize_view_build(workspace.id):
+            return self._build_view_schema(workspace)
+
+    def _build_view_schema(self, workspace) -> WorkspaceViewSchema:
         """(Re)build the PostgreSQL view schema for a multi-tenant workspace.
 
         Fetches all active TenantSchema objects for the workspace's tenants and
