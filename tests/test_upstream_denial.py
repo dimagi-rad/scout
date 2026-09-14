@@ -264,3 +264,70 @@ async def test_denial_preserves_another_users_membership_on_same_tenant(user):
     await arecord_upstream_denial(conn, credential=token.token, code=ErrorCode.AUTH_TOKEN_EXPIRED)
     assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
     assert await TenantMembership.objects.filter(pk=other.pk).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_discovery_started_without_connection_cannot_restore_later_denial(user, httpx_mock):
+    account = await SocialAccount.objects.acreate(
+        user=user, provider="commcare_connect", uid="first"
+    )
+    token = await SocialToken.objects.acreate(account=account, token="first-token")
+
+    async def old_response(request):
+        memberships = await resolve_connect_opportunities(user, token.token, social_account=account)
+        connection = await TenantConnection.objects.aget(pk=memberships[0].connection_id)
+        await arecord_upstream_denial(
+            connection, credential=token.token, code=ErrorCode.AUTH_TOKEN_EXPIRED
+        )
+        return httpx.Response(200, json={"opportunities": [{"id": 1, "name": "A"}]})
+
+    httpx_mock.add_callback(old_response)
+    httpx_mock.add_response(json={"opportunities": [{"id": 1, "name": "A"}]})
+    await resolve_connect_opportunities(user, token.token, social_account=account)
+    assert not await TenantMembership.objects.filter(user=user).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("replacement", ["rotated", "removed"])
+async def test_stale_replacement_discovery_preserves_original_identity(
+    user, httpx_mock, replacement
+):
+    account, token, connection, membership = await identity(user)
+    incoming = await SocialAccount.objects.acreate(
+        user=user, provider="commcare_connect", uid="replacement"
+    )
+    incoming_token = await SocialToken.objects.acreate(account=incoming, token="incoming")
+
+    async def stale_response(request):
+        if replacement == "rotated":
+            await SocialToken.objects.filter(pk=incoming_token.pk).aupdate(token="newer")
+        else:
+            await SocialToken.objects.filter(pk=incoming_token.pk).adelete()
+        return httpx.Response(200, json={"opportunities": [{"id": 1, "name": "A"}]})
+
+    httpx_mock.add_callback(stale_response)
+    await resolve_connect_opportunities(user, "incoming", social_account=incoming)
+    await connection.arefresh_from_db()
+    assert connection.social_account_id == account.pk
+    assert await SocialToken.objects.filter(pk=token.pk).aexists()
+    assert await TenantMembership.objects.filter(pk=membership.pk).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_rejected_replacement_with_same_token_cannot_revoke_current_identity(
+    user, httpx_mock
+):
+    _account, token, connection, membership = await identity(user)
+    incoming = await SocialAccount.objects.acreate(
+        user=user, provider="commcare_connect", uid="replacement"
+    )
+    await SocialToken.objects.acreate(account=incoming, token=token.token)
+    httpx_mock.add_response(status_code=401)
+    with pytest.raises(ConnectAuthError):
+        await resolve_connect_opportunities(user, token.token, social_account=incoming)
+    assert await TenantMembership.objects.filter(pk=membership.pk).aexists()
+    await connection.arefresh_from_db()
+    assert connection.upstream_denial_code == ""

@@ -103,6 +103,12 @@ class UpstreamTokenExpired(ExpectedUpstreamError):
     code = ErrorCode.AUTH_TOKEN_EXPIRED
 
 
+class UpstreamRefreshFailed(ExpectedUpstreamError):
+    """Refresh could not complete; retry or reconnect without revoking memberships."""
+
+    code = ErrorCode.AUTH_REFRESH_FAILED
+
+
 class UpstreamAccessDenied(ExpectedUpstreamError):
     """HTTP 403 — the credential is valid but has no access to this resource.
 
@@ -136,6 +142,10 @@ class CommCareAuthError(Exception):
     """Raised when CommCare HQ refuses our credential."""
 
     provider = "commcare"
+
+    def __init__(self, message, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class CommCareTokenExpiredError(CommCareAuthError, UpstreamTokenExpired):

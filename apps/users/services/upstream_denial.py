@@ -80,7 +80,7 @@ arecord_upstream_denial = sync_to_async(record_upstream_denial)
 
 
 async def adiscovery_connection(user, provider, access_token, account=None):
-    """Snapshot an existing connection without binding an unverified OAuth identity."""
+    """Snapshot the scope before discovery, including a binding it may replace."""
     if account is None:
         token = (
             await SocialToken.objects.filter(
@@ -89,15 +89,11 @@ async def adiscovery_connection(user, provider, access_token, account=None):
             .select_related("account")
             .afirst()
         )
-        if token is None:
-            return None
-        account = token.account
+        account = token.account if token is not None else None
     connection = await TenantConnection.objects.filter(
         user=user,
         provider=provider,
         credential_type=TenantConnection.OAUTH,
         scope_key=account_scope(account),
     ).afirst()
-    if connection and connection.social_account_id not in (None, account.pk):
-        return None
     return connection

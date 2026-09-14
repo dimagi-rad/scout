@@ -18,7 +18,7 @@
 - [x] Add durable denial code/time fields to TenantConnection and migration.
 - [x] Add `apps/users/services/upstream_denial.py`: sync atomic recorder plus async wrapper; serialize with existing user lock and verify exact connection/credential observation before writing. Only allow authoritative auth codes. Tenant 403 must not mark the whole credential dead.
 - [x] In `tenant_resolution.py`, record discovery 401/403 before raising existing non-expected provider exceptions. Discovery 403 is scoped to the enumerated identity/connection, not an arbitrary tenant. Preserve identity binding and successful restoration behavior.
-- [x] In `token_refresh.py`, only invalid_grant is an authoritative credential revocation; invalid_client, timeouts, 429 and 5xx remain non-revoking failures. Preserve typed distinction in sync and async paths.
+- [x] In `token_refresh.py`, refresh rejection records a reconnect fingerprint without archiving memberships: invalid_grant can mean a rotated/stale refresh secret. Preserve the typed reconnect distinction; resource/discovery 401/403 own archival.
 
 ## Chunk 3: Loader integration
 
@@ -37,7 +37,7 @@
 
 ## Review refinements
 
-All denial observations advance the connection timestamp, including tenant-only403, so earlier discovery cannot restore access. Explicitly different legacy OCS OAuth teams are preserved; API-key401 remains credential-wide. Refresh rejection also verifies the refresh secret/app snapshot, and materialization does not re-record an already handled rejection using weaker evidence. Existing-account discovery runs on allauth pre_social_login after token storage (and user reconciliation), while new connects retain social_account_added. The actual callback order has a regression test.
+All denial observations advance the connection timestamp, including tenant-only403, so earlier discovery cannot restore access. Explicitly different legacy OCS OAuth teams are preserved; API-key401 remains credential-wide. Refresh rejection retains the credential fingerprint and never archives access; materialization does not reinterpret it as a resource denial. Existing-account discovery runs on allauth pre_social_login after token storage (and user reconciliation), while new connects retain social_account_added. The actual callback order has a regression test.
 
 This PR leaves the current any-of read gate intact: mixed-coverage workspace enforcement is #380, and ambiguous legacy-team cleanup is #379. Global Connect metadata list403 is not treated as an opportunity-specific denial. A successful complete discovery restores confirmed memberships; a successful token refresh alone does not.
 
@@ -46,3 +46,15 @@ Final verification: 285 related tests passed; Ruff lint/format, migration consis
 Review PR: https://github.com/dimagi-rad/scout/pull/441 (open; not merged or deployed).
 
 Further critical review reproduced a denial/discovery race: clearing the timestamp allowed an old response to restore access after a newer discovery. Retain the last-denial timestamp permanently as the observation fence, while clearing the active code on successful discovery. Regression failed before the fix; 285 related tests pass afterward. Independent re-review found no remaining introduced actionable issues. Claude auto-review must produce a usable result before requesting snopoke.
+
+## Takeover review iteration — 14 September
+
+Claude’s refresh-grant finding was confirmed with six failing sync/async regression cases. Refresh rejection now preserves memberships and the reconnect signal. Expected HTTP/transport refresh failures carry AUTH_REFRESH_FAILED and retry guidance at the loader boundary; unexpected defects remain ordinary errors. Existing token-endpoint error logging for outages is retained, as required by the existing lifecycle tests; expected loader errors do not add a second Sentry failure.
+
+The allauth regression now drives complete_social_login through real login and existing-account connect flows, checking the stored token, outgoing bearer header, authenticated session and restored membership. Discovery guard skips are logged, CommCare auth status is explicit, and empty denial-code writes are skipped.
+
+Internal review reproduced an additional race: discovery begun without a connection could restore access after newer discovery and denial. Discovery now preserves whether the connection existed at request start and verifies the incoming credential before replacing an identity. Regression coverage includes removed/rotated replacement tokens.
+
+The durable code records unresolved connection-wide denial for later coverage UI; tenant-scoped denials remain represented by archived memberships. The timestamp is a permanent ordering fence, not a current-denial boolean. UI consumption, periodic reconciliation, usable-credential coverage and all-of enforcement remain subsequent section-02 work.
+
+Takeover validation: 336 related PostgreSQL tests passed; 56 affected tests passed after final refresh-classification refinement. Ruff lint/format, migration consistency, Django system checks and diff checks passed. Updated Claude review remains the final automated review gate.

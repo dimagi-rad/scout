@@ -1,4 +1,4 @@
-"""Only authoritative OAuth refresh rejection revokes connection memberships."""
+"""Refresh grant failures require reconnect without claiming resource access was revoked."""
 
 import httpx
 import pytest
@@ -8,7 +8,7 @@ from asgiref.sync import sync_to_async
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.common.errors import UpstreamTokenExpired
+from apps.common.errors import ExpectedStateError, UpstreamRefreshFailed, UpstreamTokenExpired
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.token_refresh import (
     TokenRefreshError,
@@ -67,7 +67,7 @@ async def invoke(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("status", [400, 401, 403])
-async def test_invalid_grant_revokes_only_current_connection(
+async def test_invalid_grant_preserves_memberships_and_marks_reconnect(
     identities, mode, status, httpx_mock, requests_mock
 ):
     token, connection, member = identities[0]
@@ -81,10 +81,13 @@ async def test_invalid_grant_revokes_only_current_connection(
             payload={"error": "invalid_grant"},
         )
     assert isinstance(caught.value, UpstreamTokenExpired)
-    assert not await TenantMembership.objects.filter(pk=member.pk).aexists()
+    assert caught.value.code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert await TenantMembership.objects.filter(pk=member.pk).aexists()
     assert await TenantMembership.objects.filter(pk=identities[1][2].pk).aexists()
     await connection.arefresh_from_db()
-    assert connection.upstream_denial_code == ErrorCode.AUTH_TOKEN_EXPIRED
+    assert connection.upstream_denial_code == ""
+    assert connection.upstream_denied_at is None
+    assert connection.oauth_refresh_failure_fingerprint
 
 
 @pytest.mark.django_db(transaction=True)
@@ -115,6 +118,11 @@ async def test_inconclusive_refresh_preserves_access(
             simulate_timeout=simulate_timeout,
         )
     assert not isinstance(caught.value, UpstreamTokenExpired)
+    if simulate_timeout or status in (429, 503):
+        assert isinstance(caught.value, UpstreamRefreshFailed)
+    else:
+        assert not isinstance(caught.value, ExpectedStateError)
+    assert caught.value.code == ErrorCode.AUTH_REFRESH_FAILED
     assert await TenantMembership.objects.filter(pk=member.pk).aexists()
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""

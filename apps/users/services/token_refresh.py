@@ -26,10 +26,9 @@ from django.conf import settings
 from django.utils import timezone
 
 from apps.common.error_codes import ErrorCode
-from apps.common.errors import UpstreamTokenExpired
+from apps.common.errors import UpstreamRefreshFailed, UpstreamTokenExpired
 from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import canonical_provider
-from apps.users.services.upstream_denial import arecord_upstream_denial, record_upstream_denial
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +62,18 @@ def get_token_url(provider: str) -> str | None:
 class TokenRefreshError(Exception):
     """Raised when token refresh fails."""
 
+    code = ErrorCode.AUTH_REFRESH_FAILED
+
+
+class TokenRefreshUnavailable(TokenRefreshError, UpstreamRefreshFailed):
+    """An HTTP or transport failure prevented credential refresh."""
+
 
 class TokenRefreshRejected(TokenRefreshError, UpstreamTokenExpired):
     """The provider explicitly rejected the refresh grant as invalid."""
 
+    code = ErrorCode.AUTH_TOKEN_EXPIRED
+    # A dead refresh grant requires reconnect, but does not prove resource access loss.
     denial_handled = True
 
 
@@ -176,24 +183,17 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
             oauth_refresh_failure_fingerprint=fingerprint
         )
         if _is_invalid_grant(e.response):
-            async for connection in _token_connections(social_token):
-                await arecord_upstream_denial(
-                    connection,
-                    credential=social_token.token,
-                    code=ErrorCode.AUTH_TOKEN_EXPIRED,
-                    token_snapshot=(
-                        social_token.pk,
-                        social_token.token_secret,
-                        social_token.app_id,
-                    ),
-                )
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
+        if e.response.status_code in (408, 429) or e.response.status_code >= 500:
+            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
         await _token_connections(social_token).aupdate(
             oauth_refresh_failure_fingerprint=fingerprint
         )
+        if isinstance(e, (httpx.RequestError, requests.RequestException)):
+            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
     data = response.json()
@@ -255,22 +255,15 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         _token_connections(social_token).update(oauth_refresh_failure_fingerprint=fingerprint)
         if _is_invalid_grant(e.response):
-            for connection in _token_connections(social_token):
-                record_upstream_denial(
-                    connection,
-                    credential=social_token.token,
-                    code=ErrorCode.AUTH_TOKEN_EXPIRED,
-                    token_snapshot=(
-                        social_token.pk,
-                        social_token.token_secret,
-                        social_token.app_id,
-                    ),
-                )
             raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
+        if status is not None and (status in (408, 429) or status >= 500):
+            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         _token_connections(social_token).update(oauth_refresh_failure_fingerprint=fingerprint)
+        if isinstance(e, (httpx.RequestError, requests.RequestException)):
+            raise TokenRefreshUnavailable(f"Failed to refresh OAuth token: {e}") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
 
     data = response.json()

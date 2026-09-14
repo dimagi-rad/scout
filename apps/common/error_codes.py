@@ -46,6 +46,7 @@ class ErrorCode(StrEnum):
     # Reconnecting mints an identically-scoped credential that fails the same
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
+    AUTH_REFRESH_FAILED = "AUTH_REFRESH_FAILED"
 
     # No live membership for this tenant, so this user's refresh never attempted
     # it. Current access checks permit this transitional state; the ALL-of policy

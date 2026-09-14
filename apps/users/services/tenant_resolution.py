@@ -68,6 +68,7 @@ def _aoauth_connection(
     allow_replace=True,
     observed_connection=None,
     access_token=None,
+    observation_taken=False,
 ):
     """Bind a validated identity and retire superseded credentials for this scope.
 
@@ -84,14 +85,44 @@ def _aoauth_connection(
             credential_type=TenantConnection.OAUTH,
             scope_key=scope_key,
         ).first()
-        if observed_connection is not None and (
-            conn is None
-            or conn.pk != observed_connection.pk
-            or conn.social_account_id != observed_connection.social_account_id
-            or conn.upstream_denied_at != observed_connection.upstream_denied_at
-            or not credential_is_current(conn, access_token)
-        ):
+        if observation_taken and observed_connection is None and conn is not None:
+            logger.info(
+                "Skipping discovery: connection appeared for user=%s provider=%s", user.pk, provider
+            )
             return None
+        if observed_connection is not None:
+            if (
+                conn is None
+                or conn.pk != observed_connection.pk
+                or conn.social_account_id != observed_connection.social_account_id
+            ):
+                logger.info(
+                    "Skipping discovery: connection changed for user=%s provider=%s",
+                    user.pk,
+                    provider,
+                )
+                return None
+            if conn.upstream_denied_at != observed_connection.upstream_denied_at:
+                logger.info("Skipping discovery: newer denial for connection=%s", conn.pk)
+                return None
+        if access_token is not None:
+            if account is not None:
+                current_token = (
+                    SocialToken.objects.select_for_update()
+                    .filter(account=account, token=access_token)
+                    .exists()
+                )
+            else:
+                current_token = not (conn and conn.social_account_id) or credential_is_current(
+                    conn, access_token
+                )
+            if not current_token:
+                logger.info(
+                    "Skipping discovery: credential changed for user=%s provider=%s",
+                    user.pk,
+                    provider,
+                )
+                return None
         if not allow_replace and account is not None:
             if not SocialToken.objects.filter(account=account).exists():
                 return None
@@ -152,19 +183,25 @@ def _sync_memberships(
         if not TenantConnection.objects.filter(
             pk=connection.pk, user=user, social_account_id=connection.social_account_id
         ).exists():
+            logger.info("Skipping membership sync: connection changed id=%s", connection.pk)
             return []
         current = TenantConnection.objects.get(pk=connection.pk)
         observation = observed_connection or connection
         if current.upstream_denied_at != observation.upstream_denied_at:
+            logger.info("Skipping membership sync: newer denial for connection=%s", connection.pk)
             return []
         if (
             access_token is not None
             and current.social_account_id
             and not credential_is_current(current, access_token)
         ):
+            logger.info(
+                "Skipping membership sync: credential changed for connection=%s", connection.pk
+            )
             return []
         # Keep the last denial as a fence against discoveries started before it.
-        TenantConnection.objects.filter(pk=connection.pk).update(upstream_denial_code="")
+        if current.upstream_denial_code:
+            TenantConnection.objects.filter(pk=connection.pk).update(upstream_denial_code="")
         fresh_ids: set = set()
         memberships: list[TenantMembership] = []
         for tenant in fresh_tenants:
@@ -203,7 +240,7 @@ async def resolve_commcare_domains(
     try:
         domains = await _fetch_all_domains(access_token)
     except CommCareAuthError as error:
-        await _record_discovery_denial(observed, access_token, getattr(error, "status_code", None))
+        await _record_discovery_denial(observed, access_token, error.status_code, social_account)
         raise
     conn = await _aoauth_connection(
         user,
@@ -214,6 +251,7 @@ async def resolve_commcare_domains(
         allow_replace=allow_replace,
         observed_connection=observed,
         access_token=access_token,
+        observation_taken=True,
     )
     if conn is None:
         return []
@@ -247,7 +285,7 @@ async def resolve_connect_opportunities(
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
-        await _record_discovery_denial(observed, access_token, resp.status_code)
+        await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
         raise ConnectAuthError(
             f"Connect returned {resp.status_code} while listing opportunities — the "
             f"access token is expired, revoked, or not authorized for this API"
@@ -268,6 +306,7 @@ async def resolve_connect_opportunities(
         allow_replace=allow_replace,
         observed_connection=observed,
         access_token=access_token,
+        observation_taken=True,
     )
     if conn is None:
         return []
@@ -310,7 +349,7 @@ async def resolve_ocs_chatbots(
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
-                await _record_discovery_denial(observed, access_token, resp.status_code)
+                await _record_discovery_denial(observed, access_token, resp.status_code, account)
                 raise OCSAuthError(
                     f"OCS returned {resp.status_code} while listing experiments — the "
                     f"access token is expired, revoked, or not authorized for this team"
@@ -331,6 +370,7 @@ async def resolve_ocs_chatbots(
         allow_replace=allow_replace,
         observed_connection=observed,
         access_token=access_token,
+        observation_taken=True,
     )
 
     if conn is None:
@@ -360,7 +400,13 @@ async def resolve_ocs_chatbots(
     return memberships
 
 
-async def _record_discovery_denial(connection, access_token, status):
+async def _record_discovery_denial(connection, access_token, status, account=None):
+    if (
+        account is not None
+        and connection is not None
+        and connection.social_account_id not in (None, account.pk)
+    ):
+        return
     if status not in (401, 403):
         return
     await arecord_upstream_denial(
@@ -385,12 +431,11 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
-                error = CommCareAuthError(
+                raise CommCareAuthError(
                     f"CommCare returned {resp.status_code} while listing domains — the "
-                    f"access token is expired, revoked, or not authorized for this API"
+                    f"access token is expired, revoked, or not authorized for this API",
+                    status_code=resp.status_code,
                 )
-                error.status_code = resp.status_code
-                raise error
             resp.raise_for_status()
             data = resp.json()
             if "objects" not in data:  # shape-drift guard

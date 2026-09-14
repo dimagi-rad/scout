@@ -12,6 +12,8 @@ from collections.abc import Callable
 import requests
 from urllib3.util.retry import Retry
 
+from apps.common.errors import UpstreamRefreshFailed
+
 # urllib3 honours a server ``Retry-After`` header verbatim when
 # ``respect_retry_after_header=True`` — with NO upper bound (``backoff_max``
 # caps only the exponential path). Loaders run on the single materialization
@@ -78,13 +80,13 @@ def get_with_auth_refresh(
     signal); a 403 is a permission error left to the caller. On refresh
     failure the refresh exception propagates: a transient refresh outage is
     not evidence that the credential was revoked. A refresher that returns
-    no token raises an ordinary error for the same reason.
+    no token raises an expected refresh failure for the same reason.
     """
     resp = session.get(url, **kwargs)
     if resp.status_code != 401 or refresh is None:
         return resp
     new_token = refresh()
     if not new_token:
-        raise RuntimeError("Mid-run token refresh returned no access token")
+        raise UpstreamRefreshFailed("Mid-run token refresh returned no access token")
     session.headers["Authorization"] = f"Bearer {new_token}"
     return session.get(url, **kwargs)

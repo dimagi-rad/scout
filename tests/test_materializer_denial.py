@@ -9,6 +9,7 @@ from allauth.socialaccount.models import SocialAccount, SocialToken
 from apps.common.errors import OCSAccessDeniedError, OCSTokenExpiredError
 from apps.users.models import Tenant, TenantConnection, TenantMembership
 from apps.users.services.credential_resolver import _make_token_refresher
+from apps.users.services.token_refresh import TokenRefreshRejected, TokenRefreshUnavailable
 from apps.workspaces.access import resolve_workspace_access_ex
 from apps.workspaces.models import MaterializationRun, TenantSchema, Workspace
 from mcp_server.loaders.ocs_base import OCSBaseLoader
@@ -195,3 +196,26 @@ def test_ocs_api_key_401_revokes_memberships_with_team_metadata(denial_context):
                 memberships[0], {"type": "api_key", "value": "key"}, pipeline, target_schema=schema
             )
     assert not TenantMembership.objects.filter(connection=conn).exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("error_type", [TokenRefreshRejected, TokenRefreshUnavailable])
+def test_refresh_failure_records_actionable_code_without_archival(denial_context, error_type):
+    conn, token, memberships, schema, pipeline = denial_context
+    with patch(
+        "mcp_server.services.materializer._run_discover_phase",
+        side_effect=error_type("refresh failed"),
+    ):
+        with pytest.raises(error_type):
+            run_pipeline(
+                memberships[0],
+                {"type": "oauth", "value": token.token},
+                pipeline,
+                target_schema=schema,
+            )
+    assert TenantMembership.objects.filter(pk__in=[m.pk for m in memberships]).count() == 2
+    conn.refresh_from_db()
+    assert conn.upstream_denied_at is None
+    run = MaterializationRun.objects.get(tenant_schema=schema)
+    assert run.state == MaterializationRun.RunState.FAILED
+    assert run.result["error_code"] == error_type.code
