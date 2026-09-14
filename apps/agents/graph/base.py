@@ -1030,7 +1030,7 @@ async def _build_system_prompt(
     if has_tenants:
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
-        if tenant_count > 1:
+        if await workspace.tenants.acount() > 1:
             coverage = (
                 await WorkspaceViewSchema.objects.filter(
                     workspace_id=workspace.id, state=SchemaState.ACTIVE
