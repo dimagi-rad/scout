@@ -403,18 +403,27 @@ def ensure_semantic_model(workspace) -> SemanticModel:
         return model
 
 
-def get_active_semantic_model(workspace) -> SemanticModel:
-    """Return the current queryable semantic model without refreshing it."""
-    model = SemanticModel.objects.filter(
-        workspace=workspace,
-        status=SemanticModel.Status.ACTIVE,
-    ).first()
+def _active_semantic_models(workspace):
+    return SemanticModel.objects.filter(workspace=workspace, status=SemanticModel.Status.ACTIVE)
+
+
+def _require_active_semantic_model(model) -> SemanticModel:
     if model is None:
         raise SemanticCatalogUnavailable(
             "No active semantic model is available. Refresh workspace data.",
             schema_status="unavailable",
         )
     return model
+
+
+def get_active_semantic_model(workspace) -> SemanticModel:
+    """Return the current queryable semantic model without refreshing it."""
+    return _require_active_semantic_model(_active_semantic_models(workspace).first())
+
+
+async def aget_active_semantic_model(workspace) -> SemanticModel:
+    """Async counterpart using the same queryability predicate."""
+    return _require_active_semantic_model(await _active_semantic_models(workspace).afirst())
 
 
 def _sync_custom_datasets(

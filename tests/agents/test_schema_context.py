@@ -13,7 +13,14 @@ from apps.agents.graph.base import (
     _fetch_semantic_model_context,
 )
 from apps.semantic.models import SemanticModel
-from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 
 
 @pytest.fixture
@@ -65,6 +72,89 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
     else:
         assert "waits" in result.lower()
     assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("has_serving_schema", [True, False])
+@pytest.mark.parametrize("has_catalog", [True, False])
+async def test_refresh_keeps_previous_data_queryable_only_when_ready(
+    workspace, tenant, interactive, has_serving_schema, has_catalog
+):
+    if has_serving_schema:
+        await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="previous_data", state=SchemaState.ACTIVE
+        )
+    if has_catalog:
+        await SemanticModel.objects.acreate(
+            workspace=workspace, name="Previous model", status=SemanticModel.Status.ACTIVE
+        )
+    refresh_schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="refresh_target", state=SchemaState.PROVISIONING
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=refresh_schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.LOADING,
+    )
+
+    result = await _fetch_semantic_model_context(workspace, interactive=interactive)
+
+    assert "in progress" in result.lower()
+    if has_serving_schema and has_catalog:
+        assert "previously loaded data" in result.lower()
+        assert "do not trigger another" in result.lower()
+        assert "do not call other data tools" not in result.lower()
+        assert "semantic_query" in result
+        assert "do not promise an automatic follow-up" in result.lower()
+    else:
+        assert "previously loaded data" not in result.lower()
+        assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("has_view", [True, False])
+@pytest.mark.parametrize("in_place_run", [True, False])
+async def test_multi_source_refresh_requires_serving_view_and_no_in_place_writer(
+    workspace, tenant, has_view, in_place_run
+):
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="refresh_previous", state=SchemaState.ACTIVE
+    )
+    refresh = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="refresh_new", state=SchemaState.PROVISIONING
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=refresh, pipeline="commcare_sync", state=MaterializationRun.RunState.LOADING
+    )
+    other_tenant = await Tenant.objects.acreate(provider="commcare", external_id="other-refresh")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other_tenant)
+    other_schema = await TenantSchema.objects.acreate(
+        tenant=other_tenant, schema_name="other_serving", state=SchemaState.ACTIVE
+    )
+    if in_place_run:
+        await MaterializationRun.objects.acreate(
+            tenant_schema=other_schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+        )
+    await SemanticModel.objects.acreate(
+        workspace=workspace, name="Previous model", status=SemanticModel.Status.ACTIVE
+    )
+    if has_view:
+        await WorkspaceViewSchema.objects.acreate(
+            workspace=workspace, schema_name="serving_view", state=SchemaState.ACTIVE
+        )
+
+    result = await _fetch_semantic_model_context(workspace)
+
+    assert "in progress" in result.lower()
+    if has_view and not in_place_run:
+        assert "previously loaded data" in result.lower()
+    else:
+        assert "do not call other data tools" in result.lower()
 
 
 @pytest.mark.asyncio
