@@ -116,6 +116,65 @@ def test_artifact_manager_summary_is_compact():
     }
 
 
+def test_artifact_manager_returns_missing_topic_model_to_parent_without_artifact():
+    response = {
+        "status": "needs_data_model",
+        "message": "Topic labels must be saved before this chart can query them.",
+        "data_requirements": [
+            "Derive topic from raw_messages.content using user-approved classification rules.",
+            "Keep message_id as the row key and created_at for date filters.",
+        ],
+    }
+    message = AIMessage(content=json.dumps(response))
+
+    summary = _summarize_result([message], message.content)
+
+    assert summary["status"] == "needs_data_model"
+    assert summary["data_requirements"] == response["data_requirements"]
+    assert summary["artifact_id"] is None
+    assert summary["artifact_version"] is None
+    assert summary["runtime_summary"] == ""
+
+
+def test_artifact_manager_bounds_data_model_handoff():
+    response = {
+        "status": "needs_data_model",
+        "data_requirements": [None, {}, "  ", *["x" * 1000] * 12],
+    }
+
+    summary = _summarize_result([], json.dumps(response))
+
+    assert summary["data_requirements"] == ["x" * 500] * 8
+
+
+@pytest.mark.asyncio
+async def test_artifact_manager_tool_preserves_data_preparation_handoff(monkeypatch):
+    final = {
+        "status": "needs_data_model",
+        "message": "A reviewed topic field is needed.",
+        "data_requirements": ["Create message_topics at message grain after user approval."],
+    }
+
+    class FakeGraph:
+        async def astream_events(self, input_state, config, version):
+            yield {
+                "event": "on_chain_end",
+                "data": {"output": {"messages": [AIMessage(content=json.dumps(final))]}},
+            }
+
+    monkeypatch.setattr(
+        "apps.agents.tools.artifact_manager_agent._build_artifact_manager_graph",
+        lambda *args: FakeGraph(),
+    )
+    manager = create_artifact_manager_tool(SimpleNamespace(id="workspace"), None, [])
+
+    result = await manager.ainvoke({"task": "Build an OCS topic dashboard."})
+
+    assert result["status"] == "needs_data_model"
+    assert result["data_requirements"] == final["data_requirements"]
+    assert result["artifact_id"] is None
+
+
 @pytest.mark.asyncio
 async def test_nested_tool_output_is_truncated_with_marker():
     import asyncio

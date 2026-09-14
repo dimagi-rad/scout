@@ -1,7 +1,11 @@
 """Prompt contract checks for semantic graph artifact creation."""
 
 from apps.agents.prompts.artifact_prompt import ARTIFACT_PROMPT_ADDITION
-from apps.agents.tools.artifact_manager_agent import ARTIFACT_MANAGER_SYSTEM_PROMPT
+from apps.agents.tools.artifact_manager_agent import (
+    ARTIFACT_MANAGER_SYSTEM_PROMPT,
+    NESTED_MCP_TOOL_NAMES,
+)
+from apps.agents.tools.canvas_manager_agent import CANVAS_MANAGER_SYSTEM_PROMPT
 
 
 def test_artifact_prompt_lists_narrative_block_config_keys():
@@ -47,3 +51,17 @@ def test_artifact_manager_prompt_documents_atomic_apply_ops():
 def test_artifact_manager_prompt_requires_reading_the_full_doc_before_complex_edits():
     assert "full current `story_doc`" in ARTIFACT_MANAGER_SYSTEM_PROMPT
     assert "preserve existing config exactly" in ARTIFACT_MANAGER_SYSTEM_PROMPT
+
+
+def test_topic_dashboards_have_an_explicit_data_model_handoff():
+    for prompt in (ARTIFACT_PROMPT_ADDITION, ARTIFACT_MANAGER_SYSTEM_PROMPT):
+        assert 'status: "needs_data_model"' in prompt
+        assert "data_requirements" in prompt
+        assert "`canvas_manager`" in prompt
+    assert "prepare the data model first" in ARTIFACT_PROMPT_ADDITION
+    assert "Only after the user requests or approves creating/saving" in ARTIFACT_PROMPT_ADDITION
+    assert "Do not infer permission to change the model from a chart" in ARTIFACT_PROMPT_ADDITION
+    assert "examined versus eligible rows" in ARTIFACT_PROMPT_ADDITION
+    assert "Keyword rules are\nnot NLP clustering" in ARTIFACT_PROMPT_ADDITION
+    assert "Do not invent a\n  taxonomy from column names" in CANVAS_MANAGER_SYSTEM_PROMPT
+    assert {"list_datasets", "describe_dataset", "semantic_query"} == NESTED_MCP_TOOL_NAMES

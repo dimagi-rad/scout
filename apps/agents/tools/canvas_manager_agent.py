@@ -119,6 +119,12 @@ shared with the user in a side panel. Your tools:
   inferred immediately — fix reported problems before committing. On committed
   CTE datasets, primary_key stays editable via
   {"op": "set", "target": "dataset/<name>/primary_key", "value": "..."}.
+- For transcript-derived topic datasets, use only the classification rules or
+  reviewed labels provided/approved by the parent and user. Do not invent a
+  taxonomy from column names. Preserve the source message ID as the primary
+  key for message-grain results and retain its time column for dashboard
+  filters. Document keyword rules versus reviewed snapshot labels and their
+  coverage; new messages do not automatically receive snapshot labels.
 
 ## canvas_apply op reference
 - {"op": "add_existing", "object_type": "dataset", "ref": "raw_visits"}
