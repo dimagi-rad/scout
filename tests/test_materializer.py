@@ -1803,7 +1803,7 @@ class TestSummarizeError:
             ),
             (
                 CommCareBaseLoader("a-long-lived-project-space-name", _CREDENTIAL),
-                "https://hq.test/a/x/api/case/v2/",
+                "https://www.commcarehq.org/a/x/api/case/v2/",
             ),
             (
                 ConnectBaseLoader(999999999, _CREDENTIAL, base_url="https://connect.test"),
