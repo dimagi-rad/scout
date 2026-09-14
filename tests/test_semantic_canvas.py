@@ -580,7 +580,7 @@ def test_custom_dataset_draft_and_commit(canvas, semantic_model, workspace, monk
     assert result["diagnostics"] == []
     draft = canvas.changes.get()
     assert draft.fields["_validation"]["columns"][0]["name"] == "username"
-    assert 'from "raw_visits"' in draft.fields["_validation"]["compiled_sql"]
+    assert 'FROM "raw_visits"' in draft.fields["_validation"]["compiled_sql"]
 
     report = commit_canvas(canvas, user)
     assert report["blocked"] is False

@@ -2,41 +2,22 @@
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from typing import Any
 
 import psycopg
 from asgiref.sync import async_to_sync
 from psycopg import sql as psql
+from sqlglot import exp
+from sqlglot.errors import OptimizeError
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.scope import traverse_scope
 
 from mcp_server.context import load_workspace_context
+from mcp_server.services.sql_validator import SQLValidationError, SQLValidator
 
 
 class CustomDatasetError(ValueError):
     """Raised when a custom dataset cannot be compiled safely."""
-
-
-@dataclass(frozen=True)
-class InferredColumn:
-    name: str
-    data_type: str
-
-
-_IDENT = r'(?:"[^"]+"|[a-zA-Z_][a-zA-Z0-9_]*)'
-_TABLE_REF_RE = re.compile(rf"\b(from|join)\s+({_IDENT}(?:\s*\.\s*{_IDENT})?)", re.IGNORECASE)
-_CTE_RE = re.compile(rf"(?:\bwith|,)\s+({_IDENT})\s+as\s*\(", re.IGNORECASE)
-_DENIED_SQL_RE = re.compile(
-    r"\b("
-    r"alter|analyze|call|copy|create|delete|do|drop|execute|grant|insert|merge|"
-    r"refresh|reindex|revoke|truncate|update|vacuum"
-    r")\b",
-    re.IGNORECASE,
-)
-_SYSTEM_CATALOG_RE = re.compile(
-    r"\b(information_schema|pg_catalog|pg_class|pg_namespace|pg_tables|pg_views)\b",
-    re.IGNORECASE,
-)
 
 
 def compile_custom_dataset_sql(
@@ -52,33 +33,42 @@ def compile_custom_dataset_sql(
     (Cube's driver and infer_custom_dataset_columns) set search_path to the
     workspace's current schema, so a tenant-schema swap never stales this SQL.
     """
-    sql = _normalize_single_statement(definition_sql)
-    lowered = sql.lstrip().lower()
-    if not (lowered.startswith("select ") or lowered.startswith("with ")):
-        raise CustomDatasetError("Custom datasets must be defined by a SELECT or WITH query.")
-    if _DENIED_SQL_RE.search(sql):
-        raise CustomDatasetError("Custom dataset SQL must be read-only.")
-    if _SYSTEM_CATALOG_RE.search(sql):
-        raise CustomDatasetError("Custom dataset SQL cannot reference system catalogs.")
+    if not (definition_sql or "").strip():
+        raise CustomDatasetError("Custom dataset SQL is required.")
+    try:
+        # Share the read-only/function safety boundary with raw queries, but do
+        # not inject their display row limit into a reusable dataset (#406).
+        statement = SQLValidator().validate(definition_sql)
+    except SQLValidationError as exc:
+        raise CustomDatasetError(f"Custom dataset SQL is invalid: {exc}") from exc
 
-    cte_names = {_normalize_identifier(match.group(1)) for match in _CTE_RE.finditer(sql)}
-
-    def replace_table(match: re.Match[str]) -> str:
-        keyword = match.group(1)
-        table_ref = match.group(2)
-        if "." in table_ref:
+    normalize_identifiers(statement, dialect="postgres")
+    for table in statement.find_all(exp.Table):
+        if table.db or table.catalog:
             raise CustomDatasetError("Custom dataset SQL cannot use explicit schema references.")
-        table_key = _normalize_identifier(table_ref)
-        if table_key in cte_names:
-            return match.group(0)
+
+    try:
+        tables = [
+            source
+            for scope in traverse_scope(statement)
+            for _node, source in scope.selected_sources.values()
+            if isinstance(source, exp.Table) and isinstance(source.this, exp.Identifier)
+        ]
+    except OptimizeError as exc:
+        raise CustomDatasetError(f"Custom dataset SQL is invalid: {exc}") from exc
+
+    for table in tables:
+        table_key = table.name.lower()
         table_name = allowed_tables.get(table_key)
         if not table_name:
             raise CustomDatasetError(
                 f"Custom dataset SQL references unknown workspace table '{table_key}'."
             )
-        return f"{keyword} {_quote_identifier(table_name)}"
+        if table.name != table_name and not table.alias:
+            table.set("alias", exp.TableAlias(this=table.this.copy()))
+        table.set("this", exp.to_identifier(table_name, quoted=True))
 
-    return _TABLE_REF_RE.sub(replace_table, sql)
+    return statement.sql(dialect="postgres")
 
 
 def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str, Any]]:
@@ -127,25 +117,3 @@ def infer_custom_dataset_columns(workspace, compiled_sql: str) -> list[dict[str,
         raise
     except Exception as exc:
         raise CustomDatasetError(f"Custom dataset SQL failed validation: {exc}") from exc
-
-
-def _normalize_single_statement(sql: str) -> str:
-    value = (sql or "").strip()
-    if not value:
-        raise CustomDatasetError("Custom dataset SQL is required.")
-    if value.endswith(";"):
-        value = value[:-1].strip()
-    if ";" in value:
-        raise CustomDatasetError("Custom dataset SQL must contain exactly one statement.")
-    return value
-
-
-def _normalize_identifier(value: str) -> str:
-    value = value.strip()
-    if value.startswith('"') and value.endswith('"'):
-        value = value[1:-1].replace('""', '"')
-    return value.lower()
-
-
-def _quote_identifier(value: str) -> str:
-    return '"' + value.replace('"', '""') + '"'
