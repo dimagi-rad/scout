@@ -16,6 +16,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from django.conf import settings
+from django.db.models import Exists, OuterRef
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -35,8 +36,7 @@ from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.semantic.models import SemanticModel
-from apps.semantic.services.catalog import SemanticCatalogUnavailable
+from apps.semantic.services.catalog import SemanticCatalogUnavailable, aget_active_semantic_model
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
@@ -248,13 +248,7 @@ def _system_prompt_cache_key(
 
 
 async def _semantic_catalog_context(workspace) -> str:
-    if not await SemanticModel.objects.filter(
-        workspace=workspace, status=SemanticModel.Status.ACTIVE
-    ).aexists():
-        raise SemanticCatalogUnavailable(
-            "No active semantic model is available. Refresh workspace data.",
-            schema_status="unavailable",
-        )
+    await aget_active_semantic_model(workspace)
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
@@ -268,11 +262,41 @@ async def _semantic_catalog_context(workspace) -> str:
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
     # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
-    materialization_in_progress = await MaterializationRun.objects.filter(
+    active_runs = MaterializationRun.objects.filter(
         tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
         state__in=list(MaterializationRun.ACTIVE_STATES),
-    ).aexists()
-    if materialization_in_progress:
+    )
+    if await active_runs.aexists():
+        runs_with_serving_schema = active_runs.annotate(
+            has_serving_schema=Exists(
+                TenantSchema.objects.filter(
+                    tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
+                )
+            )
+        )
+        unsafe_run = await runs_with_serving_schema.exclude(
+            tenant_schema__state=SchemaState.PROVISIONING, has_serving_schema=True
+        ).aexists()
+        if not unsafe_run:
+            try:
+                ready_context = await _semantic_catalog_context(workspace)
+            except SemanticCatalogUnavailable:
+                pass
+            else:
+                tenant_count = await workspace.tenants.acount()
+                if (
+                    tenant_count == 1
+                    or await WorkspaceViewSchema.objects.filter(
+                        workspace=workspace, state=SchemaState.ACTIVE
+                    ).aexists()
+                ):
+                    return (
+                        "A refresh is in progress in a separate schema. You may query the "
+                        "previously loaded data while it finishes; tell the user results do "
+                        "not include this refresh yet. Do NOT trigger another materialization. "
+                        "Do not promise an automatic follow-up based on this status.\n\n"
+                        f"{ready_context}"
+                    )
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
         return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE

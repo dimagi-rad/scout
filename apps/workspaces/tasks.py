@@ -276,8 +276,8 @@ def _compose_failure_summary(runs: list[MaterializationRun]) -> str:
     return summary
 
 
-@task
-async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
+@task(pass_context=True)
+async def refresh_tenant_schema(context, schema_id: str, membership_id: str) -> dict:
     """Provision a new schema and run the materialization pipeline.
 
     On success: marks state=ACTIVE, schedules teardown of old active schemas.
@@ -333,7 +333,12 @@ async def refresh_tenant_schema(schema_id: str, membership_id: str) -> dict:
         # target_schema forces the load into the new "_r" schema; without it
         # run_pipeline re-resolves the old active base schema and data lands there.
         await _to_thread_fresh_db(
-            run_pipeline, membership, credential, pipeline_config, target_schema=new_schema
+            run_pipeline,
+            membership,
+            credential,
+            pipeline_config,
+            target_schema=new_schema,
+            procrastinate_job_id=context.job.id,
         )
     except Exception:
         logger.exception("Materialization failed for schema '%s'", new_schema.schema_name)
