@@ -186,7 +186,7 @@ async def test_rebuild_defers_inflight_promotion_without_model_error(workspace, 
     assert model.metadata["last_build"]["status"] == "deferred"
     assert model.metadata["last_build"]["ok"] is False
     assert result["cube_schema"]["status"] == "deferred"
-    assert (await _semantic_layer_state(workspace))[0] == "deferred"
+    assert (await _semantic_layer_state(workspace))[0] == "unavailable"
     cube.assert_not_called()
 
 

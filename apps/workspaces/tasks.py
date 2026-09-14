@@ -2038,17 +2038,25 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
         return "unknown", ""
     last_build = (model.metadata or {}).get("last_build") or {}
     error = str(last_build.get("error") or "")
-    if last_build.get("status") == "deferred":
-        return "deferred", str(
-            last_build.get("reason") or "An included source is still refreshing."
-        )
     has_active = await CubeSchema.objects.filter(
         workspace=workspace,
         semantic_model=model,
         status=CubeSchema.Status.ACTIVE,
     ).aexists()
-    if not has_active:
-        return "unavailable", error or "no active Cube schema was built"
+    if not has_active or model.status != SemanticModel.Status.ACTIVE:
+        return "unavailable", error or "no active semantic model and Cube schema are available"
+    if last_build.get("status") == "deferred":
+        coverage = (
+            await WorkspaceViewSchema.objects.filter(workspace=workspace, state=SchemaState.ACTIVE)
+            .values_list("tenant_coverage", flat=True)
+            .afirst()
+        )
+        snapshot_state = await _included_tenant_snapshot_state(workspace, coverage)
+        if snapshot_state == "in_progress":
+            return "deferred", "An included source is still refreshing."
+        if snapshot_state == "unsafe":
+            return "stale", "An included source's refresh did not complete successfully."
+        return "stale", "Source refreshes finished, but semantic promotion has not completed."
     if last_build and not last_build.get("ok", True):
         return "stale", error
     return "ready", ""
@@ -2181,11 +2189,17 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 f"above. Per-tenant: {summary}"
             )
     elif semantic_state == "deferred":
+        refresh_summary = (
+            "This materialization job finished."
+            if status == "completed"
+            else "Materialization left incomplete refresh coverage; some sources did not refresh."
+        )
         body = (
-            f"{SYSTEM_RESUME_MARKER} This materialization job finished, but another included "
-            f"source is still refreshing. Semantic promotion is deferred: {semantic_error}. "
+            f"{SYSTEM_RESUME_MARKER} {refresh_summary} Another included source is still "
+            f"refreshing. Semantic promotion is deferred: {semantic_error}. "
             "Do not claim a fresh complete semantic snapshot or a build failure. "
-            f"Check current data availability before answering. Per-tenant: {summary}"
+            f"Check current data availability before answering.{credential_guidance} "
+            f"Per-tenant: {summary}"
         )
     elif semantic_unavailable and status != "completed":
         body = (
@@ -2296,7 +2310,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     if semantic_state == "stale":
         body += (
-            f" Note: the semantic model refresh FAILED after this load "
+            f" Note: the semantic model is not up to date after this load "
             f"({semantic_error or 'unknown error'}), so queries run against the "
             f"PREVIOUS semantic model — tables or fields added by this load may "
             f"be missing from list_datasets/semantic_query until a rebuild "

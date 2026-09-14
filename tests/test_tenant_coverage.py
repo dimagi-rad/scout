@@ -10,8 +10,6 @@ from apps.workspaces.services.tenant_coverage import (
 @pytest.mark.parametrize(
     "value",
     [
-        None,
-        {},
         [],
         "bad",
         {"included_tenants": [], "excluded_tenants": [None]},
@@ -36,3 +34,9 @@ def test_valid_coverage_reports_missing_source_without_external_name():
         coverage_warning({"included_tenants": [{"tenant_id": "ready"}], "excluded_tenants": []})
         == ""
     )
+
+
+@pytest.mark.parametrize("value", [None, {}])
+def test_absent_legacy_coverage_is_silent(value):
+    assert coverage_warning(value) == ""
+    assert coverage_complete(value) is None

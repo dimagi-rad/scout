@@ -1348,7 +1348,9 @@ async def test_schema_status_discloses_missing_sources(user, view_state, malform
     ):
         result = await get_schema_status(workspace_id=str(workspace.id))
     assert result["success"] is True
-    assert result["data"]["tenant_coverage"] == coverage
+    assert result["data"]["tenant_coverage"] == (
+        coverage if view_state == SchemaState.ACTIVE else None
+    )
     assert result["data"]["data_complete"] is (
         False if view_state == SchemaState.ACTIVE and not malformed else None
     )

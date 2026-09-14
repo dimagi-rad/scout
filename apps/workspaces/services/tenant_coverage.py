@@ -22,6 +22,9 @@ def coverage_complete(value) -> bool | None:
 
 
 def coverage_warning(value) -> str:
+    # Empty coverage is the legacy migration default, not a partial-build claim.
+    if value is None or value == {}:
+        return ""
     coverage = parse_coverage(value)
     if coverage is None:
         return "Source coverage is unknown. When answering, verify which sources the data covers."

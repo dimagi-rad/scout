@@ -1511,7 +1511,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         tables = await workspace_list_tables(ctx)
 
         # Source coverage of the ACTIVE view, not refresh completion or data freshness.
-        coverage = vs.tenant_coverage or {}
+        coverage = (vs.tenant_coverage or {}) if vs.state == SchemaState.ACTIVE else None
         tc["result"] = success_response(
             {
                 "exists": True,
