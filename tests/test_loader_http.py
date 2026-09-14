@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from unittest.mock import MagicMock
 
+import pytest
 from urllib3.response import HTTPResponse
 
 from mcp_server.loaders._http import (
@@ -92,19 +93,18 @@ class TestGetWithAuthRefresh:
         refresh.assert_not_called()
         assert session.get.call_count == 1
 
-    def test_refresh_failure_returns_original_401(self):
+    def test_refresh_failure_propagates_without_claiming_authoritative_denial(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(side_effect=RuntimeError("boom"))
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
-        # Original 401 returned so the caller raises its provider AuthError.
-        assert result is resp401
+        with pytest.raises(RuntimeError, match="boom"):
+            get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
         assert session.get.call_count == 1
 
     def test_empty_new_token_does_not_retry(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(return_value=None)
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
-        assert result is resp401
+        with pytest.raises(RuntimeError, match="no access token"):
+            get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
         assert session.get.call_count == 1

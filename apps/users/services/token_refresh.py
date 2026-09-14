@@ -25,8 +25,11 @@ from allauth.socialaccount.models import SocialToken
 from django.conf import settings
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
+from apps.common.errors import UpstreamTokenExpired
 from apps.users.models import TenantConnection
 from apps.users.services.oauth_scope import canonical_provider
+from apps.users.services.upstream_denial import arecord_upstream_denial, record_upstream_denial
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,22 @@ def get_token_url(provider: str) -> str | None:
 
 class TokenRefreshError(Exception):
     """Raised when token refresh fails."""
+
+
+class TokenRefreshRejected(TokenRefreshError, UpstreamTokenExpired):
+    """The provider explicitly rejected the refresh grant as invalid."""
+
+    denial_handled = True
+
+
+def _is_invalid_grant(response) -> bool:
+    if response is None or response.status_code not in (400, 401, 403):
+        return False
+    try:
+        data = response.json()
+    except ValueError:
+        return False
+    return isinstance(data, dict) and data.get("error") == "invalid_grant"
 
 
 def token_needs_refresh(expires_at: timezone.datetime | None, *, can_refresh: bool = True) -> bool:
@@ -156,6 +175,19 @@ async def refresh_oauth_token(social_token, token_url: str) -> str:
         await _token_connections(social_token).aupdate(
             oauth_refresh_failure_fingerprint=fingerprint
         )
+        if _is_invalid_grant(e.response):
+            async for connection in _token_connections(social_token):
+                await arecord_upstream_denial(
+                    connection,
+                    credential=social_token.token,
+                    code=ErrorCode.AUTH_TOKEN_EXPIRED,
+                    token_snapshot=(
+                        social_token.pk,
+                        social_token.token_secret,
+                        social_token.app_id,
+                    ),
+                )
+            raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Token refresh failed for app %s", social_token.app.client_id)
@@ -222,6 +254,19 @@ def refresh_oauth_token_sync(social_token, token_url: str) -> str:
         else:
             logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)
         _token_connections(social_token).update(oauth_refresh_failure_fingerprint=fingerprint)
+        if _is_invalid_grant(e.response):
+            for connection in _token_connections(social_token):
+                record_upstream_denial(
+                    connection,
+                    credential=social_token.token,
+                    code=ErrorCode.AUTH_TOKEN_EXPIRED,
+                    token_snapshot=(
+                        social_token.pk,
+                        social_token.token_secret,
+                        social_token.app_id,
+                    ),
+                )
+            raise TokenRefreshRejected("OAuth refresh grant was rejected as invalid.") from e
         raise TokenRefreshError(f"Failed to refresh OAuth token: {e}") from e
     except Exception as e:
         logger.exception("Sync token refresh failed for app %s", social_token.app.client_id)

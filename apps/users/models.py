@@ -217,6 +217,8 @@ class TenantConnection(models.Model):
         related_name="tenant_connections",
         help_text="The allauth identity holding this OAuth connection's token. Null for API keys.",
     )
+    upstream_denial_code = models.CharField(max_length=40, blank=True, default="", db_default="")
+    upstream_denied_at = models.DateTimeField(null=True, blank=True)
     oauth_refresh_failure_fingerprint = models.CharField(
         max_length=64,
         blank=True,

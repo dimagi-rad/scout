@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from allauth.socialaccount.models import SocialAccount, SocialApp, SocialLogin, SocialToken
+from allauth.socialaccount.signals import pre_social_login
 from asgiref.sync import sync_to_async
 from django.apps import apps as global_apps
 from django.contrib.sites.models import Site
@@ -614,7 +615,7 @@ async def test_retired_identity_can_reconnect_via_allauth(user, mocker):
     await resolve_ocs_chatbots(user, "replacement", social_account=replacement)
     assert not await SocialToken.objects.filter(account=original).aexists()
 
-    # Existing-account lookup emits the resolution signal before storing its new token.
+    # Resolve at the callback's pre-login signal, after lookup stores the new token.
     login = SocialLogin(
         user=type(user)(),
         account=SocialAccount(provider="ocs", uid=original.uid, extra_data={"team": "acme"}),
@@ -623,6 +624,7 @@ async def test_retired_identity_can_reconnect_via_allauth(user, mocker):
         app=app, token="reconnected", expires_at=timezone.now() + timedelta(hours=5)
     )
     await sync_to_async(login.lookup)()
+    await sync_to_async(pre_social_login.send)(sender=SocialLogin, request=None, sociallogin=login)
     await conn.arefresh_from_db()
     assert conn.social_account_id == original.id
     assert (await SocialToken.objects.aget(account=original)).token == "reconnected"

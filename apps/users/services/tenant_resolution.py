@@ -9,8 +9,10 @@ no longer returns is archived (revoked).
 
 Revocation safety — a fetch that silently returned a *partial* or *shape-drifted*
 result would wrongly archive access the user still has, so every fetch either
-returns a provably complete set or raises **before** any archival:
-  * HTTP 401/403/non-2xx → raise (token expired / wrong scope).
+returns a provably complete set or raises. Only authoritative denial triggers
+archival on an unsuccessful fetch:
+  * HTTP 401/403 → record denial for the observed connection, then raise.
+  * Other non-2xx → raise without revoking access.
   * missing expected key in a 2xx body → raise (never treat drift as "zero tenants").
   * CommCare pagination that can't be followed → raise (no silent truncation).
 Callers (the login signal and ``tenant_list_view``) treat any raise as "skip
@@ -29,10 +31,16 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
 from apps.common.errors import CommCareAuthError, ConnectAuthError, OCSAuthError
 from apps.users.models import Tenant, TenantConnection, TenantMembership, User
 from apps.users.services.oauth_scope import account_scope, provider_accounts, scope_account_ids
 from apps.users.services.ocs_team import adetect_team_name_from_oauth
+from apps.users.services.upstream_denial import (
+    adiscovery_connection,
+    arecord_upstream_denial,
+    credential_is_current,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +59,15 @@ async def _anewest_account(user, provider: str):
 
 @sync_to_async
 def _aoauth_connection(
-    user, provider: str, *, scope_key: str, scope_label: str, account, allow_replace=True
+    user,
+    provider: str,
+    *,
+    scope_key: str,
+    scope_label: str,
+    account,
+    allow_replace=True,
+    observed_connection=None,
+    access_token=None,
 ):
     """Bind a validated identity and retire superseded credentials for this scope.
 
@@ -68,6 +84,14 @@ def _aoauth_connection(
             credential_type=TenantConnection.OAUTH,
             scope_key=scope_key,
         ).first()
+        if observed_connection is not None and (
+            conn is None
+            or conn.pk != observed_connection.pk
+            or conn.social_account_id != observed_connection.social_account_id
+            or conn.upstream_denied_at != observed_connection.upstream_denied_at
+            or not credential_is_current(conn, access_token)
+        ):
+            return None
         if not allow_replace and account is not None:
             if not SocialToken.objects.filter(account=account).exists():
                 return None
@@ -108,6 +132,8 @@ def _sync_memberships(
     *,
     membership_extra: dict | None = None,
     archive_team_slug: str | None = None,
+    observed_connection=None,
+    access_token=None,
 ) -> list[TenantMembership]:
     """Upsert memberships for ``fresh_tenants`` and archive this connection's stale ones.
 
@@ -127,6 +153,19 @@ def _sync_memberships(
             pk=connection.pk, user=user, social_account_id=connection.social_account_id
         ).exists():
             return []
+        current = TenantConnection.objects.get(pk=connection.pk)
+        observation = observed_connection or connection
+        if current.upstream_denied_at != observation.upstream_denied_at:
+            return []
+        if (
+            access_token is not None
+            and current.social_account_id
+            and not credential_is_current(current, access_token)
+        ):
+            return []
+        TenantConnection.objects.filter(pk=connection.pk).update(
+            upstream_denial_code="", upstream_denied_at=None
+        )
         fresh_ids: set = set()
         memberships: list[TenantMembership] = []
         for tenant in fresh_tenants:
@@ -161,7 +200,12 @@ async def resolve_commcare_domains(
     A CommCare HQ token is account-wide, so this stays one connection per user
     (``scope_key=""``); ``social_account`` only pins which identity holds it.
     """
-    domains = await _fetch_all_domains(access_token)  # complete or raises
+    observed = await adiscovery_connection(user, "commcare", access_token, social_account)
+    try:
+        domains = await _fetch_all_domains(access_token)
+    except CommCareAuthError as error:
+        await _record_discovery_denial(observed, access_token, getattr(error, "status_code", None))
+        raise
     conn = await _aoauth_connection(
         user,
         "commcare",
@@ -169,6 +213,8 @@ async def resolve_commcare_domains(
         scope_label="",
         account=social_account,
         allow_replace=allow_replace,
+        observed_connection=observed,
+        access_token=access_token,
     )
     if conn is None:
         return []
@@ -181,7 +227,9 @@ async def resolve_commcare_domains(
         )
         fresh.append(tenant)
 
-    memberships = await _sync_memberships(user, conn, fresh)
+    memberships = await _sync_memberships(
+        user, conn, fresh, observed_connection=observed, access_token=access_token
+    )
     logger.info("Resolved %d CommCare domains for user %s", len(memberships), user.email)
     return memberships
 
@@ -194,11 +242,13 @@ async def resolve_connect_opportunities(
     A Connect token is account-wide, so this stays one connection per user
     (``scope_key=""``); ``social_account`` only pins which identity holds it.
     """
+    observed = await adiscovery_connection(user, "commcare_connect", access_token, social_account)
     base_url = getattr(settings, "CONNECT_API_URL", "https://connect.dimagi.com")
     url = f"{base_url.rstrip('/')}/export/opp_org_program_list/"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
+        await _record_discovery_denial(observed, access_token, resp.status_code)
         raise ConnectAuthError(
             f"Connect returned {resp.status_code} while listing opportunities — the "
             f"access token is expired, revoked, or not authorized for this API"
@@ -217,6 +267,8 @@ async def resolve_connect_opportunities(
         scope_label="",
         account=social_account,
         allow_replace=allow_replace,
+        observed_connection=observed,
+        access_token=access_token,
     )
     if conn is None:
         return []
@@ -229,7 +281,9 @@ async def resolve_connect_opportunities(
         )
         fresh.append(tenant)
 
-    memberships = await _sync_memberships(user, conn, fresh)
+    memberships = await _sync_memberships(
+        user, conn, fresh, observed_connection=observed, access_token=access_token
+    )
     logger.info("Resolved %d Connect opportunities for user %s", len(memberships), user.email)
     return memberships
 
@@ -247,6 +301,7 @@ async def resolve_ocs_chatbots(
     base_url = getattr(settings, "OCS_URL", "https://www.openchatstudio.com").rstrip("/")
 
     account = social_account if social_account is not None else await _anewest_account(user, "ocs")
+    observed = await adiscovery_connection(user, "ocs", access_token, account)
     team_slug = account_scope(account)
     team_name = (await adetect_team_name_from_oauth(access_token, base_url)) or team_slug
 
@@ -256,6 +311,7 @@ async def resolve_ocs_chatbots(
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
+                await _record_discovery_denial(observed, access_token, resp.status_code)
                 raise OCSAuthError(
                     f"OCS returned {resp.status_code} while listing experiments — the "
                     f"access token is expired, revoked, or not authorized for this team"
@@ -274,6 +330,8 @@ async def resolve_ocs_chatbots(
         scope_label=team_name,
         account=account,
         allow_replace=allow_replace,
+        observed_connection=observed,
+        access_token=access_token,
     )
 
     if conn is None:
@@ -294,11 +352,23 @@ async def resolve_ocs_chatbots(
         fresh,
         membership_extra={"team_slug": team_slug, "team_name": team_name},
         archive_team_slug=team_slug,
+        observed_connection=observed,
+        access_token=access_token,
     )
     logger.info(
         "Resolved %d OCS chatbots for user %s (team %s)", len(memberships), user.email, team_slug
     )
     return memberships
+
+
+async def _record_discovery_denial(connection, access_token, status):
+    if status not in (401, 403):
+        return
+    await arecord_upstream_denial(
+        connection,
+        credential=access_token,
+        code=ErrorCode.AUTH_TOKEN_EXPIRED if status == 401 else ErrorCode.AUTH_ACCESS_DENIED,
+    )
 
 
 async def _fetch_all_domains(access_token: str) -> list[dict]:
@@ -316,10 +386,12 @@ async def _fetch_all_domains(access_token: str) -> list[dict]:
         while url:
             resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
             if resp.status_code in (401, 403):
-                raise CommCareAuthError(
+                error = CommCareAuthError(
                     f"CommCare returned {resp.status_code} while listing domains — the "
                     f"access token is expired, revoked, or not authorized for this API"
                 )
+                error.status_code = resp.status_code
+                raise error
             resp.raise_for_status()
             data = resp.json()
             if "objects" not in data:  # shape-drift guard

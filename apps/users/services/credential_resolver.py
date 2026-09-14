@@ -206,7 +206,9 @@ async def aconnection_status(conn) -> str:
     return token_health(token_obj, conn.provider, refresh_failed=failed)
 
 
-def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
+def _make_token_refresher(
+    token_obj, token_url: str, credential: dict | None = None
+) -> Callable[[], str]:
     """Return a sync callable a loader invokes on a mid-run 401 to mint a fresh
     access token (arch #252, finding 14#3).
 
@@ -217,7 +219,10 @@ def _make_token_refresher(token_obj, token_url: str) -> Callable[[], str]:
     """
 
     def _refresh() -> str:
-        return refresh_oauth_token_sync(token_obj, token_url)
+        value = refresh_oauth_token_sync(token_obj, token_url)
+        if credential is not None:
+            credential["value"] = value
+        return value
 
     return _refresh
 
@@ -256,5 +261,5 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
 
     cred: dict = {"type": "oauth", "value": token_value}
     if can_refresh:
-        cred["refresh"] = _make_token_refresher(token_obj, token_url)
+        cred["refresh"] = _make_token_refresher(token_obj, token_url, cred)
     return cred

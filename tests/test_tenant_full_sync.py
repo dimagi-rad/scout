@@ -8,7 +8,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.models import SocialAccount, SocialToken
 from django.utils import timezone
 
 from apps.users.models import Tenant, TenantConnection, TenantMembership
@@ -113,9 +113,10 @@ async def test_commcare_pagination_follows_relative_next(user, httpx_mock):
 @pytest.mark.django_db(transaction=True)
 async def test_ocs_archival_is_scoped_to_token_team(user):
     # user's token is scoped to team-a
-    await SocialAccount.objects.acreate(
+    account = await SocialAccount.objects.acreate(
         user=user, provider="ocs", uid="u1", extra_data={"team": "team-a"}
     )
+    await SocialToken.objects.acreate(account=account, token="tok")
     conn = await _oauth_conn(user, "ocs", scope_key="team-a")
     t_a_stale = await Tenant.objects.acreate(provider="ocs", external_id="A1", canonical_name="A1")
     t_b = await Tenant.objects.acreate(provider="ocs", external_id="B1", canonical_name="B1")
