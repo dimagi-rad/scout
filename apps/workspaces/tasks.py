@@ -42,9 +42,11 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceDataRecovery,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.data_recovery import workspace_query_surface
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import parse_coverage
@@ -1171,9 +1173,8 @@ async def _rebuild_single_tenant_semantic_models(tenant_ids) -> None:
             logger.exception("Failed to defer semantic model rebuild for workspace %s", ws_id)
 
 
-@task
-async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
-    """Rebuild the semantic model + Cube schema after workspace data changed shape."""
+async def rebuild_workspace_semantic_model_core(workspace_id: str) -> dict:
+    """Rebuild the semantic model + Cube schema without dispatching another job."""
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)
     except Workspace.DoesNotExist:
@@ -1194,6 +1195,109 @@ async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
             "content_hash": cube_schema.content_hash,
         }
     }
+
+
+@task
+async def rebuild_workspace_semantic_model(workspace_id: str) -> dict:
+    """Rebuild the semantic model + Cube schema after workspace data changed shape."""
+    return await rebuild_workspace_semantic_model_core(workspace_id)
+
+
+@task(pass_context=True)
+async def recover_workspace_data(context, recovery_id: str) -> dict:
+    """Repair the least healthy layer of a workspace's artifact query surface.
+
+    The requested recovery type captures why the job was created. The task
+    reassesses after waiting for any in-flight materialization, because another
+    session may have repaired the physical layer while this job was queued. It
+    then runs only the remaining repair and records a durable terminal state.
+    """
+    try:
+        recovery = await WorkspaceDataRecovery.objects.select_related("workspace").aget(
+            id=recovery_id
+        )
+    except WorkspaceDataRecovery.DoesNotExist:
+        logger.warning("recover_workspace_data: recovery %s not found", recovery_id)
+        return {"status": "missing"}
+
+    now = timezone.now()
+    claimed = await WorkspaceDataRecovery.objects.filter(
+        id=recovery.id,
+        state=WorkspaceDataRecovery.State.PENDING,
+    ).aupdate(
+        state=WorkspaceDataRecovery.State.RUNNING,
+        procrastinate_job_id=context.job.id,
+        started_at=now,
+        error="",
+    )
+    if not claimed:
+        return {"status": recovery.state}
+
+    result: dict = {}
+    try:
+        if recovery.recovery_type == WorkspaceDataRecovery.RecoveryType.MATERIALIZATION:
+            await _await_in_progress_materializations(str(recovery.workspace_id))
+
+        surface = await workspace_query_surface(recovery.workspace)
+        if surface["status"] == "needs_materialization":
+            result = await materialize_workspace_core(
+                str(recovery.workspace_id),
+                str(recovery.requested_by_id or ""),
+                context.job.id,
+            )
+        elif surface["status"] == "needs_semantic_rebuild":
+            result = await rebuild_workspace_semantic_model_core(str(recovery.workspace_id))
+        elif surface["status"] == "ready":
+            result = {"status": "already_recovered"}
+        else:
+            result = {"error": surface["message"]}
+
+        final_surface = await workspace_query_surface(recovery.workspace)
+        if final_surface["status"] != "ready":
+            error = _workspace_recovery_error(result, final_surface)
+            await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+                state=WorkspaceDataRecovery.State.FAILED,
+                result=result,
+                error=error,
+                completed_at=timezone.now(),
+            )
+            return {"status": "failed", "error": error, "result": result}
+
+        await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+            state=WorkspaceDataRecovery.State.COMPLETED,
+            result=result,
+            error="",
+            completed_at=timezone.now(),
+        )
+        return {"status": "completed", "result": result}
+    except Exception as exc:
+        logger.exception("Workspace data recovery %s failed", recovery.id)
+        error = str(exc)[:1000] or "Scout could not restore this artifact's data."
+        await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+            state=WorkspaceDataRecovery.State.FAILED,
+            result=result,
+            error=error,
+            completed_at=timezone.now(),
+        )
+        return {"status": "failed", "error": error, "result": result}
+
+
+def _workspace_recovery_error(result: dict, surface: dict) -> str:
+    """Select the most useful persisted error for an artifact recovery card."""
+    if result.get("error"):
+        return str(result["error"])[:1000]
+    cube_error = (result.get("cube_schema") or {}).get("error")
+    if cube_error:
+        return str(cube_error)[:1000]
+    view_error = (result.get("view_schema") or {}).get("error")
+    if view_error:
+        return str(view_error)[:1000]
+    for tenant in result.get("tenants") or []:
+        if tenant.get("error"):
+            return str(tenant["error"])[:1000]
+    if surface.get("detail"):
+        return str(surface["detail"])[:1000]
+    return str(surface.get("message") or "Scout could not restore this artifact's data.")[:1000]
 
 
 @task
@@ -1593,6 +1697,93 @@ async def _stalled_procrastinate_job_ids() -> set[int]:
         )
         return set()
     return {j.id for j in stalled if j.id is not None}
+
+
+async def reconcile_workspace_data_recovery(
+    recovery: WorkspaceDataRecovery,
+    *,
+    check_stalled: bool = False,
+) -> str | None:
+    """Reconcile a recovery row whose worker did not record a terminal state.
+
+    Artifact pages poll from the API process, so this is also a backstop when
+    the worker (including its janitor) is unhealthy. A live queue job is never
+    disturbed unless Procrastinate reports its worker heartbeat as stalled.
+    """
+    if recovery.state not in WorkspaceDataRecovery.ACTIVE_STATES:
+        return None
+    if recovery.procrastinate_job_id is None:
+        if timezone.now() - recovery.created_at < STALE_JOB_THRESHOLD:
+            return None
+        error = "Background recovery was not queued. Please try again."
+        updated = await WorkspaceDataRecovery.objects.filter(
+            id=recovery.id,
+            state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+        ).aupdate(
+            state=WorkspaceDataRecovery.State.FAILED,
+            error=error,
+            completed_at=timezone.now(),
+        )
+        return "failed" if updated else None
+
+    status = await _procrastinate_job_status(recovery.procrastinate_job_id)
+    if status is None:
+        return None
+    if status in _PROCRASTINATE_INFLIGHT_STATUSES:
+        if not check_stalled:
+            return None
+        stalled_ids = await _stalled_procrastinate_job_ids()
+        if recovery.procrastinate_job_id not in stalled_ids:
+            return None
+        error = "The background recovery worker stopped responding. Please try again."
+    elif status == _PROCRASTINATE_SUCCEEDED_STATUS:
+        surface = await workspace_query_surface(recovery.workspace)
+        if surface["status"] == "ready":
+            updated = await WorkspaceDataRecovery.objects.filter(
+                id=recovery.id,
+                state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+            ).aupdate(
+                state=WorkspaceDataRecovery.State.COMPLETED,
+                completed_at=timezone.now(),
+                error="",
+            )
+            return "completed" if updated else None
+        error = _workspace_recovery_error(recovery.result or {}, surface)
+    elif status in _PROCRASTINATE_FAILED_STATUSES:
+        error = recovery.error or f"The background recovery job ended ({status}). Please try again."
+    else:
+        logger.warning(
+            "Recovery reconcile: unrecognized procrastinate status %r for job %s; skipping",
+            status,
+            recovery.procrastinate_job_id,
+        )
+        return None
+
+    updated = await WorkspaceDataRecovery.objects.filter(
+        id=recovery.id,
+        state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+    ).aupdate(
+        state=WorkspaceDataRecovery.State.FAILED,
+        error=error[:1000],
+        completed_at=timezone.now(),
+    )
+    return "failed" if updated else None
+
+
+@app.periodic(cron="*/15 * * * *")
+@task
+async def expire_stale_workspace_data_recoveries(timestamp: int = 0) -> dict:
+    """Release artifact recoveries stranded by a stopped background worker."""
+    cutoff = timezone.now() - STALE_JOB_THRESHOLD
+    reconciled = 0
+    async for recovery in WorkspaceDataRecovery.objects.select_related("workspace").filter(
+        state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+        created_at__lt=cutoff,
+    ):
+        action = await reconcile_workspace_data_recovery(recovery, check_stalled=True)
+        if action is not None:
+            reconciled += 1
+    return {"reconciled": reconciled}
 
 
 async def _fail_thread_jobs_for_dead_materialization(procrastinate_job_id: int) -> None:

@@ -102,6 +102,69 @@ class MaterializationRun(models.Model):
         return f"{self.pipeline} - {self.state}"
 
 
+class WorkspaceDataRecovery(models.Model):
+    """Tracks a user-requested repair of a workspace's query surface.
+
+    Materialization runs are tenant-scoped and chat jobs are thread-scoped. An
+    artifact recovery is neither: it repairs a workspace-level query surface
+    and must remain observable after the requesting page is closed. This row is
+    the durable bridge between that UI state and the background work.
+    """
+
+    class RecoveryType(models.TextChoices):
+        MATERIALIZATION = "materialization", "Materialization"
+        SEMANTIC_REBUILD = "semantic_rebuild", "Semantic rebuild"
+
+    class State(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    ACTIVE_STATES = frozenset({State.PENDING, State.RUNNING})
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        "workspaces.Workspace",
+        on_delete=models.CASCADE,
+        related_name="data_recoveries",
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_workspace_data_recoveries",
+    )
+    recovery_type = models.CharField(max_length=32, choices=RecoveryType.choices)
+    source_type = models.CharField(max_length=32, default="artifact")
+    source_id = models.UUIDField(null=True, blank=True)
+    state = models.CharField(max_length=16, choices=State.choices, default=State.PENDING)
+    procrastinate_job_id = models.BigIntegerField(null=True, blank=True, unique=True)
+    result = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["workspace"],
+                condition=Q(state__in=["pending", "running"]),
+                name="one_active_data_recovery_per_workspace",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["workspace", "state"], name="ws_recovery_ws_state"),
+        ]
+
+    def __str__(self):
+        return f"{self.recovery_type}({self.state}) for {self.workspace_id}"
+
+
 class WorkspaceRole(models.TextChoices):
     READ = "read", "Read"
     READ_WRITE = "read_write", "Read/Write"
