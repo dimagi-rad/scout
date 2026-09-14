@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 
-from apps.common.identifiers import dbt_column_alias, dbt_model_name
+from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,15 @@ def slugify_model_name(name: str) -> str:
     if not slug:
         raise ValueError(f"Cannot generate a valid model name from: {name!r}")
     return slug
+
+
+def _display_name_slug(name: str, *, identity: str) -> str:
+    try:
+        return slugify_model_name(name)
+    except ValueError:
+        # Display labels need not contain ASCII; keep fallback names tied to
+        # source identity rather than a mutable label or enumeration order.
+        return fit_identifier("unnamed", unique_key=identity, always_hash=True)
 
 
 def _sql_escape(value: str) -> str:
@@ -273,13 +282,18 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
         if not isinstance(form_name, str):
             form_name = xmlns
         app_name = form_def.get("app_name", "")
-        base_slug = slugify_model_name(form_name)
+        base_slug = _display_name_slug(form_name, identity=f"form:{xmlns}")
 
         # Disambiguate duplicate form names across apps; always incorporate the
         # counter so 3+ collisions stay unique.
         if base_slug in seen_form_slugs:
             count = seen_form_slugs[base_slug]
-            app_suffix = f"_{slugify_model_name(app_name)}" if app_name else ""
+            app_slug = (
+                _display_name_slug(app_name, identity=f"app:{form_def.get('app_id') or app_name}")
+                if app_name
+                else ""
+            )
+            app_suffix = f"_{app_slug}" if app_slug else ""
             slug = f"{base_slug}{app_suffix}_{count}"
         else:
             slug = base_slug
