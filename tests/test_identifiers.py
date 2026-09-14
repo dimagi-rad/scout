@@ -17,6 +17,7 @@ from apps.common.identifiers import (
     refresh_schema_name,
     sanitize_identifier,
     tenant_schema_name,
+    view_name,
 )
 
 
@@ -183,3 +184,43 @@ class TestDbtNames:
         assert a != b
         assert _nbytes(a) <= PG_MAX_IDENTIFIER_BYTES
         assert _nbytes(b) <= PG_MAX_IDENTIFIER_BYTES
+
+
+class TestViewName:
+    """``{prefix}__{table}`` multi-tenant view names (SCOUT-DJANGO-3C)."""
+
+    def test_short_name_returned_verbatim(self):
+        # Existing prod views must keep their exact names — no migration.
+        assert view_name("domain_a", "raw_visits") == "domain_a__raw_visits"
+
+    def test_name_that_exactly_fits_is_verbatim(self):
+        table = "t" * (PG_MAX_IDENTIFIER_BYTES - len("p__"))
+        assert view_name("p", table) == f"p__{table}"
+
+    def test_oversized_name_is_fitted_and_valid(self):
+        # Exact production shape: a 32-char capped prefix + a 48-char dbt
+        # repeat-group model name, which used to hard-fail the whole build.
+        name = view_name(
+            "kangaroomothercare_pret_388c2eaf",
+            "stg_visits__repeat_join_max_non_selected_numbers",
+        )
+        assert _is_valid_pg_identifier(name)
+        assert name.startswith("kangaroomothercare_pret_388c2eaf__stg_visits__repeat")
+
+    def test_oversized_names_sharing_a_63_byte_head_stay_distinct(self):
+        prefix = "kangaroomothercare_pret_388c2eaf"
+        a = view_name(prefix, "stg_visits__repeat_join_max_non_selected_numbers")
+        b = view_name(prefix, "stg_visits__repeat_join_max_non_selected_numbers_2")
+        assert a != b
+        assert _nbytes(a) <= PG_MAX_IDENTIFIER_BYTES
+        assert _nbytes(b) <= PG_MAX_IDENTIFIER_BYTES
+
+    def test_same_table_under_different_prefixes_stays_distinct(self):
+        table = "stg_visits__repeat_join_max_non_selected_numbers"
+        a = view_name("kmc_ke_kikapu_p1_may26", table)
+        b = view_name("kmc_ng_beri_p1_may26", table)
+        assert a != b
+
+    def test_deterministic_across_rebuilds(self):
+        args = ("kmcpipn_newopportunity", "stg_visits__repeat_pick_first_nth_missing_randoms")
+        assert view_name(*args) == view_name(*args)

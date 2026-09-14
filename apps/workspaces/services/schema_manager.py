@@ -20,12 +20,12 @@ from django.db import connection
 from django.utils import timezone
 
 from apps.common.identifiers import (
-    PG_MAX_IDENTIFIER_BYTES,
     dbt_role_name,
     readonly_role_name,
     refresh_schema_name,
     sanitize_identifier,
     tenant_schema_name,
+    view_name,
 )
 from apps.users.models import Tenant
 from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchema
@@ -33,8 +33,9 @@ from apps.workspaces.models import SchemaState, TenantSchema, WorkspaceViewSchem
 logger = logging.getLogger(__name__)
 
 # Cap the view-name prefix well below Postgres's 63-byte identifier limit, leaving
-# budget for the ``__{table}`` suffix (the full name is hard-failed if it still
-# exceeds the limit). Identifier minting lives in apps.common.identifiers (arch #235).
+# budget for the ``__{table}`` suffix (the full name is digest-fitted by
+# ``view_name`` if it still exceeds the limit). Identifier minting lives in
+# apps.common.identifiers (arch #235).
 _MAX_VIEW_PREFIX_LEN = 32
 
 
@@ -324,8 +325,9 @@ class SchemaManager:
         A workspace with at least one active tenant schema remains queryable: tenants
         without one are recorded in ``tenant_coverage`` and omitted from this build.
         Raises ValueError if no tenant has an active schema, if two included tenants
-        produce the same view prefix or full view name, or if a composed view name
-        would exceed PostgreSQL's 63-byte identifier limit.
+        produce the same view prefix or full view name. A composed view name that
+        would exceed PostgreSQL's 63-byte identifier limit is digest-fitted rather
+        than truncated (SCOUT-DJANGO-3C).
 
         Returns the WorkspaceViewSchema model instance with state=ACTIVE on success.
         """
@@ -405,13 +407,12 @@ class SchemaManager:
                 prefix_to_tenant[prefix] = tenant_external_id
                 tenant_prefixes.append((schema_name, tenant_external_id, prefix))
 
-            # Check length + full-name collisions on FINAL names before any DDL.
+            # Check full-name collisions on FINAL (fitted) names before any DDL.
             # The collision check catches ambiguous __ delimiters ("foo__bar"+"baz"
-            # vs "foo"+"bar__baz"); the length check catches composed names that
-            # would silently truncate past the 63-byte limit and collapse together.
+            # vs "foo"+"bar__baz"); view_name keeps every name within the
+            # 63-byte limit so Postgres never silently truncates two into one.
             planned_views: list[tuple[str, str, str]] = []
-            seen_view_names: dict[str, str] = {}  # view_name → tenant_external_id
-            oversized_views: list[str] = []
+            seen_view_names: dict[str, str] = {}  # fitted view name → tenant_external_id
             for schema_name, tenant_external_id, prefix in tenant_prefixes:
                 cursor.execute(
                     "SELECT table_name FROM information_schema.tables "
@@ -419,23 +420,14 @@ class SchemaManager:
                     (schema_name,),
                 )
                 for (table_name,) in cursor.fetchall():
-                    view_name = f"{prefix}__{table_name}"
-                    if len(view_name.encode("utf-8")) > PG_MAX_IDENTIFIER_BYTES:
-                        oversized_views.append(view_name)
-                        continue
-                    if view_name in seen_view_names:
+                    name = view_name(prefix, table_name)
+                    if name in seen_view_names:
                         raise ValueError(
-                            f"View name collision: '{view_name}' produced by both "
-                            f"tenant '{seen_view_names[view_name]}' and '{tenant_external_id}'"
+                            f"View name collision: '{name}' produced by both "
+                            f"tenant '{seen_view_names[name]}' and '{tenant_external_id}'"
                         )
-                    seen_view_names[view_name] = tenant_external_id
-                    planned_views.append((view_name, schema_name, table_name))
-
-            if oversized_views:
-                raise ValueError(
-                    "View name(s) exceed PostgreSQL's 63-byte identifier limit and "
-                    f"would be truncated: {', '.join(sorted(oversized_views))}"
-                )
+                    seen_view_names[name] = tenant_external_id
+                    planned_views.append((name, schema_name, table_name))
 
             # DROP + recreate (not CREATE OR REPLACE VIEW) so a rebuild after an
             # underlying column change never hits "cannot change name of view
@@ -449,11 +441,11 @@ class SchemaManager:
                 psycopg.sql.SQL("CREATE SCHEMA {}").format(psycopg.sql.Identifier(view_schema_name))
             )
 
-            for view_name, schema_name, table_name in planned_views:
+            for name, schema_name, table_name in planned_views:
                 cursor.execute(
                     psycopg.sql.SQL("CREATE VIEW {}.{} AS SELECT * FROM {}.{}").format(
                         psycopg.sql.Identifier(view_schema_name),
-                        psycopg.sql.Identifier(view_name),
+                        psycopg.sql.Identifier(name),
                         psycopg.sql.Identifier(schema_name),
                         psycopg.sql.Identifier(table_name),
                     )
