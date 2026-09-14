@@ -32,7 +32,7 @@
 
 - [x] Run focused tests, related auth/identity/loader suites, Ruff, migration consistency and relevant architectural fitness checks.
 - [x] Independent review for scope correctness and races; fix findings and rerun affected tests.
-- [ ] Create a small reviewable PR with evidence and explicit rollout boundary; do not merge or deploy automatically.
+- [x] Create a small reviewable PR with evidence and explicit rollout boundary; do not merge or deploy automatically.
 - [x] Correct the local triage completion display separately from the security PR.
 
 ## Review refinements
@@ -42,3 +42,5 @@ All denial observations advance the connection timestamp, including tenant-only4
 This PR leaves the current any-of read gate intact: mixed-coverage workspace enforcement is #380, and ambiguous legacy-team cleanup is #379. Global Connect metadata list403 is not treated as an opportunity-specific denial. A successful complete discovery restores confirmed memberships; a successful token refresh alone does not.
 
 Final verification: 284 related tests passed; Ruff lint/format, migration consistency, Django system checks and diff whitespace checks passed.
+
+Review PR: https://github.com/dimagi-rad/scout/pull/441 (open; not merged or deployed).
