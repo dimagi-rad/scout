@@ -1,6 +1,6 @@
 """Regression for the raw OCS text -> saved topic dataset -> dashboard path (#406)."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from asgiref.sync import async_to_sync
@@ -55,6 +55,13 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
     )
     thread = Thread.objects.create(workspace=workspace, user=user)
     canvas = resolve_thread_canvas(workspace, thread, user)
+    cube_schema = CubeSchema(
+        workspace=workspace,
+        semantic_model=model,
+        filename="ocs_topics.yaml",
+        content_hash="ocs-topics-test",
+    )
+    build_schema = Mock(return_value=cube_schema)
 
     def probe_columns(_workspace, compiled_sql):
         with connection.cursor() as cursor:
@@ -70,7 +77,7 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
             ]
 
     monkeypatch.setattr(canvas_service, "infer_custom_dataset_columns", probe_columns)
-    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", lambda ws, m: None)
+    monkeypatch.setattr(canvas_commit_module, "build_and_promote_cube_schema", build_schema)
 
     with connection.cursor() as cursor:
         cursor.execute(
@@ -108,7 +115,10 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
         )
         assert result["diagnostics"] == []
         assert result["can_commit"] is True
-        assert commit_canvas(canvas, user)["blocked"] is False
+        committed = commit_canvas(canvas, user)
+        assert committed["blocked"] is False
+        assert committed["cube_schema"] == {"ok": True, "content_hash": cube_schema.content_hash}
+        build_schema.assert_called_once_with(workspace, model=model)
 
         dataset = model.datasets.get(name="message_topics")
         assert dataset.primary_key == "message_id"
@@ -130,13 +140,8 @@ def test_ocs_topic_dataset_can_be_committed_and_bound_to_dashboard(workspace, us
         with connection.cursor() as cursor:
             cursor.execute("DROP TABLE IF EXISTS pg_temp.raw_messages")
 
-    CubeSchema.objects.create(
-        workspace=workspace,
-        semantic_model=model,
-        filename="ocs_topics.yaml",
-        content=generate_cube_schema_yaml(model),
-        content_hash="ocs-topics-test",
-    )
+    cube_schema.content = generate_cube_schema_yaml(model)
+    cube_schema.save()
     monkeypatch.setattr(
         query_service,
         "load_workspace_context",
