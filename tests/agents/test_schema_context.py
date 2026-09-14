@@ -521,8 +521,9 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("malformed", [False, True])
 async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
-    workspace, tenant, user, interactive
+    workspace, tenant, user, interactive, malformed
 ):
     graph_base._system_prompt_cache.clear()
     missing = await Tenant.objects.acreate(provider="commcare", external_id="missing-domain")
@@ -542,6 +543,10 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
             ],
         },
     )
+    if malformed:
+        await WorkspaceViewSchema.objects.filter(pk=view.pk).aupdate(
+            tenant_coverage={"excluded_tenants": [None]}
+        )
     with (
         patch("apps.agents.graph.base.time.monotonic", return_value=100),
         patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
@@ -561,9 +566,12 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
         stable_again, recovered = await graph_base._build_system_prompt(
             workspace, user, interactive
         )
-    assert "missing-domain" in degraded
-    assert "excluded" in degraded.lower()
-    assert "disclose" in degraded.lower()
+    if malformed:
+        assert "coverage is unknown" in degraded.lower()
+    else:
+        assert "missing-domain" in degraded
+        assert "excluded" in degraded.lower()
+        assert "disclose" in degraded.lower()
     assert "missing-domain" not in recovered
     assert stable == stable_again
     retriever.return_value.retrieve.assert_awaited_once()

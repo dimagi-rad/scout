@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from apps.users.models import User
     from apps.workspaces.models import Workspace
 
+from apps.workspaces.services.tenant_coverage import coverage_warning
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,15 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         named = f": {', '.join(str(t) for t in not_loaded)}" if not_loaded else ""
         all_loaded = bool(summary.get("all_succeeded"))
 
-        if all_loaded and view_ok:
+        cube_outcome = summary.get("cube_schema") or {}
+        if cube_outcome.get("status") == "deferred":
+            status = "partial"
+            message = (
+                "Semantic promotion is deferred while an included source is still refreshing. "
+                "Check current data availability before analysis; do not claim a fresh complete "
+                "semantic snapshot yet."
+            )
+        elif all_loaded and view_ok:
             status = "completed"
             message = "Data loaded successfully. Continue with the analysis."
         elif all_loaded:
@@ -114,16 +124,10 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
 
-        excluded = coverage.get("excluded_tenants") or []
-        if view_ok and excluded:
-            names = ", ".join(
-                f"{entry.get('provider', 'source')}: {entry.get('external_id') or entry['tenant_id']}"
-                for entry in excluded
-            )
-            message += (
-                f" Sources excluded from the current query layer: {names}. "
-                "Answers cover only included sources; disclose this missing data."
-            )
+        if view_ok and coverage:
+            warning = coverage_warning(coverage)
+            if warning:
+                message += " " + warning
 
         failure_details = [
             f"{tenant.get('display_name') or tenant.get('tenant') or 'unknown'}: {tenant['error'].strip()}"

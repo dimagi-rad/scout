@@ -217,8 +217,9 @@ async def test_headless_tool_partial_load_with_failed_view_stays_partial(
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("malformed", [False, True])
 async def test_headless_materialization_discloses_confirmed_exclusions(
-    workspace, user, monkeypatch
+    workspace, user, monkeypatch, malformed
 ):
     coverage = {
         "included_tenants": [{"tenant_id": "ready", "external_id": "ready"}],
@@ -226,6 +227,9 @@ async def test_headless_materialization_discloses_confirmed_exclusions(
             {"tenant_id": "missing", "provider": "commcare", "external_id": "missing"}
         ],
     }
+
+    if malformed:
+        coverage = {"excluded_tenants": [None]}
 
     async def core(*args):
         return {
@@ -241,5 +245,27 @@ async def test_headless_materialization_discloses_confirmed_exclusions(
     result = await create_materialization_tool(workspace, user).ainvoke({})
     assert result["status"] == "partial"
     assert result["tenant_coverage"] == coverage
-    assert "excluded" in result["message"].lower()
+    assert ("unknown" if malformed else "excluded") in result["message"].lower()
     assert "missing" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_materialization_reports_deferred_promotion(workspace, user, monkeypatch):
+    async def core(*args):
+        return {
+            "all_succeeded": True,
+            "tenants": [{"tenant": "ready", "success": True}],
+            "view_schema": {"ok": True},
+            "cube_schema": {
+                "ok": False,
+                "status": "deferred",
+                "reason": "Another source is still refreshing.",
+            },
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "partial"
+    assert "deferred" in result["message"]
+    assert "failed" not in result["message"].lower()

@@ -26,6 +26,7 @@ from apps.semantic.models import CubeSchema, SemanticModel
 from apps.semantic.services.cube_schema import (
     CubeSchemaBuildError,
     build_and_promote_cube_schema,
+    record_cube_schema_build_deferred,
     record_cube_schema_build_failure,
 )
 from apps.transformations.models import TransformationRunStatus
@@ -46,6 +47,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app, task
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
@@ -610,7 +612,7 @@ async def materialize_workspace_core(
     # it. An included old ACTIVE schema must not conceal a failed refresh.
     cube_input_is_safe = attempted_succeeded
     if view_schema_outcome is not None and view_schema_outcome.get("ok"):
-        tenant_coverage = view_schema_outcome.get("tenant_coverage") or {}
+        tenant_coverage = parse_coverage(view_schema_outcome.get("tenant_coverage")) or {}
         excluded_tenant_ids = {
             str(entry.get("tenant_id"))
             for entry in tenant_coverage.get("excluded_tenants", [])
@@ -625,10 +627,12 @@ async def materialize_workspace_core(
             excluded_tenant_ids
         ) and failed_attempted_tenant_ids.isdisjoint(included_tenant_ids)
 
+    snapshot_state = "safe" if cube_input_is_safe else "unsafe"
     if cube_input_is_safe and view_schema_outcome and view_schema_outcome.get("ok"):
-        cube_input_is_safe = await _included_tenant_snapshot_is_safe(
+        snapshot_state = await _included_tenant_snapshot_state(
             workspace, view_schema_outcome["tenant_coverage"]
         )
+        cube_input_is_safe = snapshot_state == "safe"
 
     cube_schema_outcome: dict | None = None
     cube_build_allowed = cube_input_is_safe and (
@@ -664,12 +668,11 @@ async def materialize_workspace_core(
                 "Semantic Cube schema build skipped because materialization did not produce "
                 "a safe tenant snapshot."
             )
-        await _to_thread_fresh_db(
-            record_cube_schema_build_failure,
-            workspace,
-            skip_reason,
-        )
-        cube_schema_outcome = {"ok": False, "error": skip_reason}
+        if snapshot_state == "in_progress":
+            cube_schema_outcome = await _defer_cube_promotion(workspace)
+        else:
+            await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, skip_reason)
+            cube_schema_outcome = {"ok": False, "error": skip_reason}
 
     # Tenant data schemas (t_<id>) are SHARED. Re-materializing drops & recreates
     # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
@@ -1003,27 +1006,39 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
         await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
 
 
-async def _included_tenant_snapshot_is_safe(workspace, tenant_coverage: dict) -> bool:
-    included_ids = {
-        str(entry["tenant_id"])
-        for entry in tenant_coverage.get("included_tenants", [])
-        if isinstance(entry, dict) and entry.get("tenant_id")
-    }
-    # Sibling rebuilds do not have the initiating job's in-memory results. Read
-    # the latest attempt, not the last successful one, across each tenant's schemas.
-    latest_runs = (
+async def _included_tenant_snapshot_state(workspace, tenant_coverage) -> str:
+    coverage = parse_coverage(tenant_coverage)
+    included_ids = (
+        {entry["tenant_id"] for entry in coverage["included_tenants"]}
+        if coverage is not None
+        else {str(tenant.id) async for tenant in workspace.tenants.all()}
+    )
+    # PARTIAL data may be readable but cannot certify a complete new semantic
+    # snapshot. Legacy ACTIVE schemas without run history remain usable; a known
+    # failed/partial attempt must never inherit that legacy allowance.
+    latest_start = (
         MaterializationRun.objects.filter(
-            tenant_schema__tenant__workspace_tenants__workspace=workspace
+            tenant_schema__tenant_id=OuterRef("tenant_schema__tenant_id")
         )
-        .order_by("tenant_schema__tenant_id", "-started_at", "-id")
-        .distinct("tenant_schema__tenant_id")
-        .values_list("tenant_schema__tenant_id", "state")
+        .order_by("-started_at")
+        .values("started_at")[:1]
     )
-    return all(
-        state == MaterializationRun.RunState.COMPLETED
-        for tenant_id, state in [entry async for entry in latest_runs]
-        if str(tenant_id) in included_ids
-    )
+    # UUIDs cannot order tied timestamps, and an older live writer can still
+    # alter the snapshot after a newer attempt completes.
+    latest_runs = MaterializationRun.objects.filter(
+        Q(started_at=Subquery(latest_start)) | Q(state__in=MaterializationRun.ACTIVE_STATES),
+        tenant_schema__tenant__workspace_tenants__workspace=workspace,
+    ).values_list("tenant_schema__tenant_id", "state")
+    states = {state async for tenant_id, state in latest_runs if str(tenant_id) in included_ids}
+    if states - MaterializationRun.ACTIVE_STATES - {MaterializationRun.RunState.COMPLETED}:
+        return "unsafe"
+    return "in_progress" if states & MaterializationRun.ACTIVE_STATES else "safe"
+
+
+async def _defer_cube_promotion(workspace) -> dict:
+    reason = "Semantic promotion is waiting for an included source's refresh to finish."
+    await _to_thread_fresh_db(record_cube_schema_build_deferred, workspace, reason)
+    return {"ok": False, "status": "deferred", "reason": reason}
 
 
 @task
@@ -1073,7 +1088,15 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         workspace_id,
     )
     tenant_coverage = vs.tenant_coverage if isinstance(vs.tenant_coverage, dict) else {}
-    if not await _included_tenant_snapshot_is_safe(workspace, tenant_coverage):
+    snapshot_state = await _included_tenant_snapshot_state(workspace, tenant_coverage)
+    if snapshot_state == "in_progress":
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
+            "cube_schema": await _defer_cube_promotion(workspace),
+        }
+    if snapshot_state == "unsafe":
         error = "Semantic Cube schema build skipped because an included tenant snapshot is unsafe."
         await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, error)
         return {
@@ -1996,6 +2019,7 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
     Returns ``(state, error)``:
 
     - ``"ready"`` — an active Cube schema exists and the latest build succeeded.
+    - ``"deferred"`` — promotion is waiting for an included source still refreshing.
     - ``"stale"`` — an active schema is still serving, but the latest rebuild
       failed (recorded by ``build_and_promote_cube_schema`` in
       ``SemanticModel.metadata["last_build"]``); new tables/fields from this
@@ -2009,6 +2033,10 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
         return "unknown", ""
     last_build = (model.metadata or {}).get("last_build") or {}
     error = str(last_build.get("error") or "")
+    if last_build.get("status") == "deferred":
+        return "deferred", str(
+            last_build.get("reason") or "An included source is still refreshing."
+        )
     has_active = await CubeSchema.objects.filter(
         workspace=workspace,
         semantic_model=model,
@@ -2147,6 +2175,13 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 f"plainly that a system-side fix is required and quote the error summary "
                 f"above. Per-tenant: {summary}"
             )
+    elif semantic_state == "deferred":
+        body = (
+            f"{SYSTEM_RESUME_MARKER} This materialization job finished, but another included "
+            f"source is still refreshing. Semantic promotion is deferred: {semantic_error}. "
+            "Do not claim a fresh complete semantic snapshot or a build failure. "
+            f"Check current data availability before answering. Per-tenant: {summary}"
+        )
     elif semantic_unavailable and status != "completed":
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "

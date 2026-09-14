@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.contrib.auth import get_user_model
 
+from apps.semantic.models import SemanticModel
 from apps.semantic.services.cube_schema import CubeSchemaBuildError
 from apps.users.models import Tenant
 from apps.workspaces.models import (
@@ -15,7 +16,7 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.tasks import rebuild_workspace_view_schema
+from apps.workspaces.tasks import _semantic_layer_state, rebuild_workspace_view_schema
 
 
 @pytest.fixture
@@ -151,5 +152,107 @@ async def test_rebuild_does_not_promote_failed_included_snapshot(
         cube.assert_called_once()
     else:
         cube.assert_not_called()
-        failure.assert_called_once()
+        if latest_state == "loading":
+            failure.assert_not_called()
+            assert result["cube_schema"]["status"] == "deferred"
+        else:
+            failure.assert_called_once()
         assert result["cube_schema"]["ok"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_rebuild_defers_inflight_promotion_without_model_error(workspace, tenant):
+    schema = await TenantSchema.objects.aget(tenant=tenant)
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="commcare_sync", state="loading"
+    )
+    model = await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Pending",
+        status=SemanticModel.Status.DRAFT,
+        metadata={"last_build": {"ok": True}},
+    )
+    coverage = {"included_tenants": [{"tenant_id": str(tenant.id)}], "excluded_tenants": []}
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as manager,
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        manager.return_value.build_view_schema.return_value.tenant_coverage = coverage
+        result = await rebuild_workspace_view_schema(str(workspace.id))
+    await model.arefresh_from_db()
+    assert model.status == SemanticModel.Status.DRAFT
+    assert not model.diagnostics
+    assert model.metadata["last_build"]["status"] == "deferred"
+    assert model.metadata["last_build"]["ok"] is False
+    assert result["cube_schema"]["status"] == "deferred"
+    assert (await _semantic_layer_state(workspace))[0] == "deferred"
+    cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_tied_latest_attempts_do_not_choose_random_success(workspace, tenant):
+    schema = await TenantSchema.objects.aget(tenant=tenant)
+    completed = await MaterializationRun.objects.acreate(
+        id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+        tenant_schema=schema,
+        pipeline="sync",
+        state="completed",
+    )
+    failed = await MaterializationRun.objects.acreate(
+        id="00000000-0000-0000-0000-000000000001",
+        tenant_schema=schema,
+        pipeline="sync",
+        state="failed",
+    )
+    await MaterializationRun.objects.filter(pk=failed.pk).aupdate(started_at=completed.started_at)
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as manager,
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        manager.return_value.build_view_schema.return_value.tenant_coverage = {
+            "included_tenants": [{"tenant_id": str(tenant.id)}],
+            "excluded_tenants": [],
+        }
+        result = await rebuild_workspace_view_schema(str(workspace.id))
+    cube.assert_not_called()
+    assert result["cube_schema"]["ok"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_legacy_active_schema_without_runs_can_promote(workspace, tenant):
+    assert not await MaterializationRun.objects.filter(tenant_schema__tenant=tenant).aexists()
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as manager,
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        manager.return_value.build_view_schema.return_value.tenant_coverage = {
+            "included_tenants": [{"tenant_id": str(tenant.id)}],
+            "excluded_tenants": [],
+        }
+        result = await rebuild_workspace_view_schema(str(workspace.id))
+    cube.assert_called_once()
+    assert result["cube_schema"]["ok"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_older_live_writer_still_defers_promotion(workspace, tenant):
+    schema = await TenantSchema.objects.aget(tenant=tenant)
+    await MaterializationRun.objects.acreate(tenant_schema=schema, pipeline="sync", state="loading")
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="sync", state="completed"
+    )
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as manager,
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        manager.return_value.build_view_schema.return_value.tenant_coverage = {
+            "included_tenants": [{"tenant_id": str(tenant.id)}],
+            "excluded_tenants": [],
+        }
+        result = await rebuild_workspace_view_schema(str(workspace.id))
+    cube.assert_not_called()
+    assert result["cube_schema"]["status"] == "deferred"

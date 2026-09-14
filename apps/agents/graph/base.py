@@ -49,6 +49,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     select_pipeline_config,
 )
+from apps.workspaces.services.tenant_coverage import coverage_warning
 from mcp_server.services.metadata import (
     pipeline_list_tables,
     transformation_aware_list_tables,
@@ -1038,18 +1039,9 @@ async def _build_system_prompt(
                 .values_list("tenant_coverage", flat=True)
                 .afirst()
             )
-            excluded = (coverage or {}).get("excluded_tenants") or []
-            if excluded:
-                names = ", ".join(
-                    f"{entry.get('provider', 'source')}: "
-                    f"{entry.get('external_id') or entry['tenant_id']}"
-                    for entry in excluded
-                )
-                volatile += (
-                    f"Sources excluded from the current query layer: {names}. "
-                    "Answers cover only included sources. Disclose the missing data; "
-                    "do not present partial results as covering the whole workspace.\n"
-                )
+            warning = coverage_warning(coverage)
+            if warning:
+                volatile += warning + "\n"
     return stable, volatile
 
 
