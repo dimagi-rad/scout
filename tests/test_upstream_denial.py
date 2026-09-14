@@ -89,6 +89,8 @@ async def test_successful_discovery_restores_access_and_clears_denial(user, http
     with pytest.raises(ConnectAuthError):
         await resolve_connect_opportunities(user, token.token, social_account=account)
     assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
+    await conn.arefresh_from_db()
+    denied_at = conn.upstream_denied_at
     token.token = "reconnected"
     await token.asave()
     httpx_mock.add_response(json={"opportunities": [{"id": 1, "name": "A"}]})
@@ -96,7 +98,7 @@ async def test_successful_discovery_restores_access_and_clears_denial(user, http
     assert await TenantMembership.objects.filter(pk=tm.pk).aexists()
     await conn.arefresh_from_db()
     assert conn.upstream_denial_code == ""
-    assert conn.upstream_denied_at is None
+    assert conn.upstream_denied_at == denied_at
 
 
 @pytest.mark.asyncio
@@ -143,6 +145,25 @@ async def test_discovery_started_before_tenant_denial_cannot_restore_it(user, ht
         return httpx.Response(200, json={"opportunities": [{"id": 1, "name": "A"}]})
 
     httpx_mock.add_callback(response)
+    await resolve_connect_opportunities(user, token.token, social_account=account)
+    assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_stale_discovery_cannot_restore_denial_after_newer_discovery(user, httpx_mock):
+    account, token, conn, tm = await identity(user)
+
+    async def stale_response(request):
+        await arecord_upstream_denial(
+            conn, credential=token.token, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tm.tenant_id
+        )
+        await resolve_connect_opportunities(user, token.token, social_account=account)
+        assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
+        return httpx.Response(200, json={"opportunities": [{"id": 1, "name": "A"}]})
+
+    httpx_mock.add_callback(stale_response)
+    httpx_mock.add_response(json={"opportunities": []})
     await resolve_connect_opportunities(user, token.token, social_account=account)
     assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
 

@@ -163,9 +163,8 @@ def _sync_memberships(
             and not credential_is_current(current, access_token)
         ):
             return []
-        TenantConnection.objects.filter(pk=connection.pk).update(
-            upstream_denial_code="", upstream_denied_at=None
-        )
+        # Keep the last denial as a fence against discoveries started before it.
+        TenantConnection.objects.filter(pk=connection.pk).update(upstream_denial_code="")
         fresh_ids: set = set()
         memberships: list[TenantMembership] = []
         for tenant in fresh_tenants:
