@@ -448,7 +448,7 @@ def test_ensure_semantic_model_syncs_valid_custom_dataset(monkeypatch, workspace
     custom_dataset = model.datasets.get(name="visit_users")
 
     assert custom_dataset.source_kind == SemanticDataset.SourceKind.CUSTOM
-    assert custom_dataset.metadata["cube_sql"] == 'select username from "raw_visits"'
+    assert custom_dataset.metadata["cube_sql"] == 'SELECT username FROM "raw_visits"'
     assert custom_dataset.fields.filter(name="username", is_visible=True).exists()
     assert model.datasets.filter(name="raw_visits", is_visible=True).exists()
 
