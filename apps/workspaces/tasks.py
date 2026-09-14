@@ -23,7 +23,12 @@ from apps.chat.constants import SYSTEM_RESUME_MARKER
 from apps.chat.models import Thread, ThreadJob
 from apps.common.error_codes import ErrorCode, code_of
 from apps.semantic.models import CubeSchema, SemanticModel
-from apps.semantic.services.cube_schema import CubeSchemaBuildError, build_and_promote_cube_schema
+from apps.semantic.services.cube_schema import (
+    CubeSchemaBuildError,
+    build_and_promote_cube_schema,
+    record_cube_schema_build_deferred,
+    record_cube_schema_build_failure,
+)
 from apps.transformations.models import TransformationRunStatus
 from apps.users.models import TenantMembership
 from apps.users.services.credential_resolver import (
@@ -42,6 +47,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_coverage import parse_coverage
 from config.procrastinate import app, task
 from mcp_server.loaders.connect_base import ConnectExportError
 from mcp_server.pipeline_registry import get_registry
@@ -406,6 +412,8 @@ async def materialize_workspace_core(
     when the run has been marked CANCELLED, triggering a transaction rollback.
     """
     tenant_results: list[dict] = []
+    attempted_tenant_ids: set[str] = set()
+    successful_attempted_tenant_ids: set[str] = set()
 
     try:
         workspace = await Workspace.objects.aget(id=workspace_id)
@@ -464,6 +472,9 @@ async def materialize_workspace_core(
     provider_pipeline_map = {p.provider: p.name for p in registry.list()}
 
     for tm in memberships:
+        attempted_tenant_ids.add(str(tm.tenant_id))
+        # A later attempt can invalidate the snapshot produced by an earlier success.
+        successful_attempted_tenant_ids.discard(str(tm.tenant_id))
         tenant_id = tm.tenant.external_id
         pipeline_name = provider_pipeline_map.get(tm.tenant.provider)
         if pipeline_name is None:
@@ -500,6 +511,7 @@ async def materialize_workspace_core(
                 pipeline_config,
                 job_id,
             )
+            successful_attempted_tenant_ids.add(str(tm.tenant_id))
             tenant_results.append(
                 {
                     "tenant": tenant_id,
@@ -554,11 +566,12 @@ async def materialize_workspace_core(
                 }
             )
 
-    # Two questions, so two flags. `attempted_succeeded` asks whether the data we
-    # did load is self-consistent, and gates the Cube build below exactly as
-    # `all_succeeded` did before #364. `all_succeeded` is the honesty flag callers
-    # read, and a workspace we could not fully cover is not a success.
+    # Two questions, so two flags. `attempted_succeeded` asks whether every
+    # attempted load succeeded; the coverage-aware Cube gate below can refine it
+    # for a failed tenant omitted from a degraded view. `all_succeeded` is the
+    # honesty flag callers read, and an uncovered workspace is not a success.
     attempted_succeeded = all(r.get("success") for r in tenant_results)
+    failed_attempted_tenant_ids = attempted_tenant_ids - successful_attempted_tenant_ids
     all_succeeded = attempted_succeeded and not unreachable_results
 
     # A partial/cancelled multi-tenant run DROP-CASCADEs some namespaced views,
@@ -568,8 +581,15 @@ async def materialize_workspace_core(
     workspace_tenant_count = await workspace.workspace_tenants.acount()
     if workspace_tenant_count > 1:
         try:
-            await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
-            view_schema_outcome = {"ok": True, "error": None}
+            view_schema = await _to_thread_fresh_db(SchemaManager().build_view_schema, workspace)
+            tenant_coverage = (
+                view_schema.tenant_coverage if isinstance(view_schema.tenant_coverage, dict) else {}
+            )
+            view_schema_outcome = {
+                "ok": True,
+                "error": None,
+                "tenant_coverage": tenant_coverage,
+            }
         except Exception as exc:
             # Don't re-raise — the resume task must still fire. The failure is
             # recorded on the WorkspaceViewSchema row (state=FAILED, last_error),
@@ -578,16 +598,53 @@ async def materialize_workspace_core(
                 "Post-materialization view schema rebuild failed for workspace %s",
                 workspace_id,
             )
-            view_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+            failed_view_schema = await WorkspaceViewSchema.objects.filter(
+                workspace=workspace
+            ).afirst()
+            tenant_coverage = (
+                failed_view_schema.tenant_coverage
+                if failed_view_schema is not None
+                and isinstance(failed_view_schema.tenant_coverage, dict)
+                else {}
+            )
+            view_schema_outcome = {
+                "ok": False,
+                "error": str(exc)[:500],
+                "tenant_coverage": tenant_coverage,
+            }
 
-    # Preserve the build gate for successful attempts, but only after the full
-    # workspace view builds. That view may include older ACTIVE tenant schemas;
-    # this does not implement degraded views or per-caller query filtering.
+    # A failed source can be safe only when the built view explicitly excludes
+    # it. An included old ACTIVE schema must not conceal a failed refresh.
+    cube_input_is_safe = attempted_succeeded
+    if view_schema_outcome is not None and view_schema_outcome.get("ok"):
+        tenant_coverage = parse_coverage(view_schema_outcome.get("tenant_coverage")) or {}
+        excluded_tenant_ids = {
+            str(entry.get("tenant_id"))
+            for entry in tenant_coverage.get("excluded_tenants", [])
+            if isinstance(entry, dict) and entry.get("tenant_id")
+        }
+        included_tenant_ids = {
+            str(entry.get("tenant_id"))
+            for entry in tenant_coverage.get("included_tenants", [])
+            if isinstance(entry, dict) and entry.get("tenant_id")
+        }
+        cube_input_is_safe = failed_attempted_tenant_ids.issubset(
+            excluded_tenant_ids
+        ) and failed_attempted_tenant_ids.isdisjoint(included_tenant_ids)
+
+    snapshot_state = "safe" if cube_input_is_safe else "unsafe"
+    if cube_input_is_safe and view_schema_outcome and view_schema_outcome.get("ok"):
+        snapshot_state = await _included_tenant_snapshot_state(
+            workspace, view_schema_outcome["tenant_coverage"]
+        )
+        cube_input_is_safe = snapshot_state == "safe"
+
     cube_schema_outcome: dict | None = None
-    if attempted_succeeded and (
+    cube_build_allowed = cube_input_is_safe and (
         workspace_tenant_count <= 1
         or (view_schema_outcome is not None and view_schema_outcome.get("ok"))
-    ):
+    )
+    if cube_build_allowed:
         try:
             cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
             cube_schema_outcome = {
@@ -606,6 +663,21 @@ async def materialize_workspace_core(
         except Exception as exc:
             logger.exception("Semantic Cube schema build failed for workspace %s", workspace_id)
             cube_schema_outcome = {"ok": False, "error": str(exc)[:500]}
+    else:
+        if view_schema_outcome is not None and not view_schema_outcome.get("ok"):
+            skip_reason = (
+                "Semantic Cube schema build skipped because the workspace view schema build failed."
+            )
+        else:
+            skip_reason = (
+                "Semantic Cube schema build skipped because materialization did not produce "
+                "a safe tenant snapshot."
+            )
+        if snapshot_state == "in_progress":
+            cube_schema_outcome = await _defer_cube_promotion(workspace)
+        else:
+            await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, skip_reason)
+            cube_schema_outcome = {"ok": False, "error": skip_reason}
 
     # Tenant data schemas (t_<id>) are SHARED. Re-materializing drops & recreates
     # raw_* tables, cascade-dropping the namespaced views in every OTHER workspace's
@@ -939,6 +1011,46 @@ async def expire_inactive_schemas(timestamp: int = 0) -> None:
         await teardown_view_schema_task.defer_async(view_schema_id=str(vs.id))
 
 
+async def _included_tenant_snapshot_state(workspace, tenant_coverage) -> str:
+    coverage = parse_coverage(tenant_coverage)
+    included_ids = (
+        {entry["tenant_id"] for entry in coverage["included_tenants"]}
+        if coverage is not None
+        else {str(tenant.id) async for tenant in workspace.tenants.all()}
+    )
+    # PARTIAL data may be readable but cannot certify a complete new semantic
+    # snapshot. Legacy ACTIVE schemas without run history remain usable; a known
+    # failed/partial attempt must never inherit that legacy allowance.
+    latest_start = (
+        MaterializationRun.objects.filter(
+            tenant_schema__tenant_id=OuterRef("tenant_schema__tenant_id")
+        )
+        .order_by("-started_at")
+        .values("started_at")[:1]
+    )
+    # UUIDs cannot order tied timestamps, and an older live writer can still
+    # alter the snapshot after a newer attempt completes.
+    latest_runs = MaterializationRun.objects.filter(
+        Q(started_at=Subquery(latest_start)) | Q(state__in=MaterializationRun.ACTIVE_STATES),
+        tenant_schema__tenant__workspace_tenants__workspace=workspace,
+    ).values_list("tenant_schema__tenant_id", "state")
+    states = {state async for tenant_id, state in latest_runs if str(tenant_id) in included_ids}
+    if states - MaterializationRun.ACTIVE_STATES - {MaterializationRun.RunState.COMPLETED}:
+        return "unsafe"
+    return "in_progress" if states & MaterializationRun.ACTIVE_STATES else "safe"
+
+
+async def _defer_cube_promotion(workspace) -> dict:
+    """Describe pending build work, even before the first semantic model exists.
+
+    This operation outcome does not assert catalog availability; creating a
+    placeholder model merely to record a deferral would change that contract.
+    """
+    reason = "Semantic promotion is waiting for an included source's refresh to finish."
+    await _to_thread_fresh_db(record_cube_schema_build_deferred, workspace, reason)
+    return {"ok": False, "status": "deferred", "reason": reason}
+
+
 @task
 async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
     """Build (or rebuild) the UNION ALL view schema for a multi-tenant workspace.
@@ -960,13 +1072,49 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         # don't re-write state here and risk clobbering a concurrent transition —
         # e.g. TEARDOWN set by expire_inactive_schemas (arch #255 03#2).
         logger.exception("Failed to build view schema for workspace %s", workspace_id)
-        return {"error": "Failed to build view schema"}
+        skip_reason = (
+            "Semantic Cube schema build skipped because the workspace view schema build failed."
+        )
+        await _to_thread_fresh_db(
+            record_cube_schema_build_failure,
+            workspace,
+            skip_reason,
+        )
+        failed_view_schema = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
+        tenant_coverage = (
+            failed_view_schema.tenant_coverage
+            if failed_view_schema is not None
+            and isinstance(failed_view_schema.tenant_coverage, dict)
+            else {}
+        )
+        return {
+            "error": "Failed to build view schema",
+            "tenant_coverage": tenant_coverage,
+        }
 
     logger.info(
         "View schema '%s' is now active for workspace %s",
         vs.schema_name,
         workspace_id,
     )
+    tenant_coverage = vs.tenant_coverage if isinstance(vs.tenant_coverage, dict) else {}
+    snapshot_state = await _included_tenant_snapshot_state(workspace, tenant_coverage)
+    if snapshot_state == "in_progress":
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
+            "cube_schema": await _defer_cube_promotion(workspace),
+        }
+    if snapshot_state == "unsafe":
+        error = "Semantic Cube schema build skipped because an included tenant snapshot is unsafe."
+        await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, error)
+        return {
+            "status": "active",
+            "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
+            "cube_schema": {"ok": False, "error": error},
+        }
     try:
         cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
     except CubeSchemaBuildError as exc:
@@ -978,6 +1126,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         return {
             "status": "active",
             "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
             "cube_schema": {"ok": False, "error": str(exc)[:500]},
         }
     except Exception as exc:
@@ -988,11 +1137,13 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
         return {
             "status": "active",
             "schema_name": vs.schema_name,
+            "tenant_coverage": tenant_coverage,
             "cube_schema": {"ok": False, "error": str(exc)[:500]},
         }
     return {
         "status": "active",
         "schema_name": vs.schema_name,
+        "tenant_coverage": tenant_coverage,
         "cube_schema": {
             "ok": True,
             "id": str(cube_schema.id),
@@ -1206,12 +1357,20 @@ async def _fail_dependent_view_schemas(tenant_id) -> int:
     # Truthful last_error for the cascade (07#9): the marker lets the resume logic
     # advise a re-run, instead of the generic "system-side fix required" — wrong
     # here, since re-materializing the torn-down tenant IS the fix.
-    return await WorkspaceViewSchema.objects.filter(
-        workspace_id__in=dependent_workspace_ids,
-        state=SchemaState.ACTIVE,
-    ).aupdate(
-        state=SchemaState.FAILED,
-        last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+    # Older builds have no coverage record; conservatively retain their legacy
+    # invalidation. Explicitly excluded sources have no views to cascade-drop.
+    excluded = Q(tenant_coverage__contains={"excluded_tenants": [{"tenant_id": str(tenant_id)}]})
+    included = Q(tenant_coverage__contains={"included_tenants": [{"tenant_id": str(tenant_id)}]})
+    return (
+        await WorkspaceViewSchema.objects.filter(
+            workspace_id__in=dependent_workspace_ids,
+            state=SchemaState.ACTIVE,
+        )
+        .exclude(excluded & ~included)
+        .aupdate(
+            state=SchemaState.FAILED,
+            last_error=VIEW_SCHEMA_CASCADE_TEARDOWN_ERROR,
+        )
     )
 
 
@@ -1870,6 +2029,7 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
     Returns ``(state, error)``:
 
     - ``"ready"`` — an active Cube schema exists and the latest build succeeded.
+    - ``"deferred"`` — promotion is waiting for an included source still refreshing.
     - ``"stale"`` — an active schema is still serving, but the latest rebuild
       failed (recorded by ``build_and_promote_cube_schema`` in
       ``SemanticModel.metadata["last_build"]``); new tables/fields from this
@@ -1888,8 +2048,22 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
         semantic_model=model,
         status=CubeSchema.Status.ACTIVE,
     ).aexists()
-    if not has_active:
-        return "unavailable", error or "no active Cube schema was built"
+    if not has_active or model.status != SemanticModel.Status.ACTIVE:
+        return "unavailable", error or "no active semantic model and Cube schema are available"
+    if last_build.get("status") == "deferred":
+        if error:
+            return "stale", error
+        coverage = (
+            await WorkspaceViewSchema.objects.filter(workspace=workspace, state=SchemaState.ACTIVE)
+            .values_list("tenant_coverage", flat=True)
+            .afirst()
+        )
+        snapshot_state = await _included_tenant_snapshot_state(workspace, coverage)
+        if snapshot_state == "in_progress":
+            return "deferred", "An included source is still refreshing."
+        if snapshot_state == "unsafe":
+            return "stale", "An included source's refresh did not complete successfully."
+        return "stale", "Source refreshes finished, but semantic promotion has not completed."
     if last_build and not last_build.get("ok", True):
         return "stale", error
     return "ready", ""
@@ -2021,6 +2195,19 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
                 f"plainly that a system-side fix is required and quote the error summary "
                 f"above. Per-tenant: {summary}"
             )
+    elif semantic_state == "deferred":
+        refresh_summary = (
+            "This materialization job finished."
+            if status == "completed"
+            else "Materialization left incomplete refresh coverage; some sources did not refresh."
+        )
+        body = (
+            f"{SYSTEM_RESUME_MARKER} {refresh_summary} Another included source is still "
+            f"refreshing. Semantic promotion is deferred: {semantic_error}. "
+            "Do not claim a fresh complete semantic snapshot or a build failure. "
+            f"Check current data availability before answering.{credential_guidance} "
+            f"Per-tenant: {summary}"
+        )
     elif semantic_unavailable and status != "completed":
         body = (
             f"{SYSTEM_RESUME_MARKER} Materialization left incomplete refresh coverage, "
@@ -2130,7 +2317,7 @@ async def resume_thread_after_materialization(context, thread_job_id: str) -> di
 
     if semantic_state == "stale":
         body += (
-            f" Note: the semantic model refresh FAILED after this load "
+            f" Note: the semantic model is not up to date after this load "
             f"({semantic_error or 'unknown error'}), so queries run against the "
             f"PREVIOUS semantic model — tables or fields added by this load may "
             f"be missing from list_datasets/semantic_query until a rebuild "

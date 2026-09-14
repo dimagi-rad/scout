@@ -845,6 +845,28 @@ def test_failed_build_keeps_last_known_good_readable(
     assert CubeSchema.objects.filter(workspace=workspace, status=CubeSchema.Status.ERROR).exists()
 
 
+def test_record_skipped_build_replaces_stale_success_without_disabling_fallback(
+    workspace, semantic_model
+):
+    semantic_model.metadata = {"last_build": {"ok": True, "content_hash": "testhash"}}
+    semantic_model.save(update_fields=["metadata"])
+
+    cube_schema_service.record_cube_schema_build_failure(
+        workspace,
+        "Semantic Cube schema build skipped because the workspace view schema build failed.",
+    )
+
+    semantic_model.refresh_from_db()
+    assert semantic_model.status == SemanticModel.Status.ACTIVE
+    assert semantic_model.metadata["last_build"]["ok"] is False
+    assert "view schema build failed" in semantic_model.metadata["last_build"]["error"]
+    assert CubeSchema.objects.filter(
+        workspace=workspace,
+        semantic_model=semantic_model,
+        status=CubeSchema.Status.ACTIVE,
+    ).exists()
+
+
 def test_failed_refreshed_build_keeps_previous_catalog_readable(
     monkeypatch, workspace, semantic_model, no_close_old_connections
 ):

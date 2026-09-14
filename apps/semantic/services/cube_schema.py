@@ -67,6 +67,47 @@ def build_and_promote_cube_schema(workspace, *, model: SemanticModel | None = No
         close_old_connections()
 
 
+def record_cube_schema_build_failure(workspace, error: str) -> None:
+    """Record a failed or skipped build without creating a semantic model.
+
+    If an ACTIVE Cube schema exists, it remains the readable fallback and the
+    model remains ACTIVE; only ``metadata.last_build`` and diagnostics become
+    failed. Workspaces without an existing model have no stale result to clear.
+    """
+    try:
+        model = SemanticModel.objects.filter(workspace=workspace).first()
+        if model is not None:
+            _record_build_failure(workspace, model, CubeSchemaBuildError(error))
+    except Exception:
+        logger.exception(
+            "Failed to record skipped Cube schema build for workspace %s",
+            workspace.id,
+        )
+
+
+def record_cube_schema_build_deferred(workspace, reason: str) -> None:
+    """Replace stale success metadata without turning active work into an error."""
+    try:
+        model = SemanticModel.objects.filter(workspace=workspace).first()
+        if model is None:
+            return
+        previous_error = ((model.metadata or {}).get("last_build") or {}).get("error")
+        model.metadata = {
+            **(model.metadata or {}),
+            "last_build": {
+                "ok": False,
+                "status": "deferred",
+                "reason": reason,
+                "at": timezone.now().isoformat(),
+            },
+        }
+        if previous_error:
+            model.metadata["last_build"]["error"] = previous_error
+        model.save(update_fields=["metadata", "updated_at"])
+    except Exception:
+        logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
+
+
 def _build_and_promote_refreshed_model(workspace) -> CubeSchema:
     """Refresh physical datasets and promote them atomically when possible.
 

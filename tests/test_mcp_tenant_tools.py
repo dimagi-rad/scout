@@ -1318,3 +1318,39 @@ class TestExecuteAsyncIntegration:
 
         assert result["row_count"] == 1
         assert result["rows"][0][0] == 3
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("view_state", [SchemaState.ACTIVE, SchemaState.MATERIALIZING])
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_schema_status_discloses_missing_sources(user, view_state, malformed):
+    workspace = await Workspace.objects.acreate(name="Degraded workspace", created_by=user)
+    tenants = []
+    for suffix in ("ready", "missing"):
+        tenant = await Tenant.objects.acreate(provider="commcare", external_id=suffix)
+        tenants.append(tenant)
+        await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    coverage = {
+        "included_tenants": [{"tenant_id": str(tenants[0].id), "external_id": "ready"}],
+        "excluded_tenants": [{"tenant_id": str(tenants[1].id), "external_id": "missing"}],
+    }
+    if malformed:
+        coverage = {"excluded_tenants": [None]}
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_degraded_status",
+        state=view_state,
+        tenant_coverage=coverage,
+    )
+    with (
+        patch("mcp_server.server._resolve_mcp_context", AsyncMock()),
+        patch("mcp_server.server.workspace_list_tables", AsyncMock(return_value=[])),
+    ):
+        result = await get_schema_status(workspace_id=str(workspace.id))
+    assert result["success"] is True
+    assert result["data"]["tenant_coverage"] == (
+        coverage if view_state == SchemaState.ACTIVE else None
+    )
+    assert result["data"]["data_complete"] is (
+        False if view_state == SchemaState.ACTIVE and not malformed else None
+    )

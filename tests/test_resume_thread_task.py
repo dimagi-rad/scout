@@ -26,6 +26,8 @@ from apps.workspaces.tasks import (
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
     _credential_guidance,
+    _defer_cube_promotion,
+    _semantic_layer_state,
     _summary_failures,
     resume_thread_after_materialization,
 )
@@ -1666,3 +1668,109 @@ async def test_no_runs_banner_does_not_advertise_unmatched_recorded_details(chan
     assert "failure details below" not in tj.error_summary
     assert "Old provider credential failed" not in tj.error_summary
     assert "credentials configured" in tj.error_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_deferred_resume_preserves_partial_refresh_and_credential_guidance():
+    _user, _ws, uncovered, tj = await _make_partly_covered_job(
+        email="deferred-credential@b.c",
+        ws_name="W-deferred-creds",
+        pj_id=97001,
+        uncovered_reachable=True,
+    )
+    tj.materialization_preflight_failures = [
+        {
+            "tenant_id": str(uncovered.id),
+            "provider": uncovered.provider,
+            "error": "Token expired",
+            "error_code": ErrorCode.AUTH_TOKEN_EXPIRED,
+        }
+    ]
+    await tj.asave(update_fields=["materialization_preflight_failures"])
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with (
+        patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)),
+        patch(
+            "apps.workspaces.tasks._semantic_layer_state",
+            AsyncMock(return_value=("deferred", "Another refresh is running")),
+        ),
+    ):
+        await resume_thread_after_materialization(None, thread_job_id=str(tj.id))
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    assert "incomplete refresh coverage" in body
+    assert "reconnect the affected account" in body
+    assert uncovered.external_id in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("has_cube", [False, True])
+@pytest.mark.parametrize("run_state", [None, "loading", "failed", "completed"])
+async def test_deferred_semantic_state_checks_current_availability_and_writers(
+    workspace, tenant, has_cube, run_state
+):
+    model = await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Deferred",
+        status=SemanticModel.Status.ACTIVE,
+        metadata={
+            "last_build": {
+                "ok": False,
+                "status": "deferred",
+                "reason": "Source is still refreshing",
+            }
+        },
+    )
+    if has_cube:
+        await CubeSchema.objects.acreate(
+            workspace=workspace,
+            semantic_model=model,
+            filename="deferred.yaml",
+            content="cubes: []",
+            content_hash="deferred",
+            status=CubeSchema.Status.ACTIVE,
+        )
+    if run_state:
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="deferred_current", state=SchemaState.ACTIVE
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema, pipeline="sync", state=run_state
+        )
+    state, reason = await _semantic_layer_state(workspace)
+    expected = "unavailable" if not has_cube else "deferred" if run_state == "loading" else "stale"
+    assert state == expected
+    if run_state != "loading":
+        assert "still refreshing" not in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer_active", [False, True])
+async def test_deferral_retains_prior_validation_failure(workspace, tenant, writer_active):
+    model = await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Previous",
+        metadata={"last_build": {"ok": False, "error": "Cube validation failed: bad metric"}},
+    )
+    await CubeSchema.objects.acreate(
+        workspace=workspace,
+        semantic_model=model,
+        filename="previous.yaml",
+        content="cubes: []",
+        content_hash="previous",
+    )
+    if writer_active:
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="prior_error_writer", state=SchemaState.ACTIVE
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema, pipeline="sync", state="loading"
+        )
+    await _defer_cube_promotion(workspace)
+    await model.arefresh_from_db()
+    assert model.metadata["last_build"]["error"] == "Cube validation failed: bad metric"
+    state, reason = await _semantic_layer_state(workspace)
+    assert state == "stale"
+    assert "Cube validation failed: bad metric" in reason

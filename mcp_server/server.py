@@ -61,6 +61,7 @@ from apps.workspaces.services.pipeline_resolver import (
     aresolve_pipeline_config,
 )
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.tasks import materialize_workspace
 from config.procrastinate import app as procrastinate_app
@@ -1509,12 +1510,18 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         ctx = await _resolve_mcp_context(workspace_id)
         tables = await workspace_list_tables(ctx)
 
+        # Source coverage of the ACTIVE view, not refresh completion or data freshness.
+        coverage = (vs.tenant_coverage or {}) if vs.state == SchemaState.ACTIVE else None
         tc["result"] = success_response(
             {
                 "exists": True,
                 "state": vs.state,
                 "last_materialized_at": last_materialized_at,
                 "tables": tables,
+                "tenant_coverage": coverage,
+                "data_complete": coverage_complete(coverage)
+                if vs.state == SchemaState.ACTIVE
+                else None,
             },
             schema=vs.schema_name,
         )

@@ -213,3 +213,82 @@ async def test_headless_tool_partial_load_with_failed_view_stays_partial(
     assert "Proceed with the available" not in result["message"]
     assert "query only the sources" not in result["message"]
     assert "t2" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_headless_materialization_discloses_confirmed_exclusions(
+    workspace, user, monkeypatch, malformed
+):
+    coverage = {
+        "included_tenants": [{"tenant_id": "ready", "external_id": "ready"}],
+        "excluded_tenants": [
+            {"tenant_id": "missing", "provider": "commcare", "external_id": "missing"}
+        ],
+    }
+
+    if malformed:
+        coverage = {"excluded_tenants": [None]}
+
+    async def core(*args):
+        return {
+            "all_succeeded": False,
+            "tenants": [
+                {"tenant": "ready", "success": True},
+                {"tenant": "missing", "success": False},
+            ],
+            "view_schema": {"ok": True, "tenant_coverage": coverage},
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "partial"
+    assert result["tenant_coverage"] == coverage
+    assert ("unknown" if malformed else "excluded") in result["message"].lower()
+    assert "missing" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_materialization_reports_deferred_promotion(workspace, user, monkeypatch):
+    async def core(*args):
+        return {
+            "all_succeeded": True,
+            "tenants": [{"tenant": "ready", "success": True}],
+            "view_schema": {"ok": True},
+            "cube_schema": {
+                "ok": False,
+                "status": "deferred",
+                "reason": "Another source is still refreshing.",
+            },
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "partial"
+    assert "deferred" in result["message"]
+    assert "failed" not in result["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("loaded", [0, 1])
+async def test_deferred_promotion_keeps_actual_load_outcome(workspace, user, monkeypatch, loaded):
+    async def core(*args):
+        return {
+            "all_succeeded": False,
+            "tenants": [{"tenant": f"source-{i}", "success": i < loaded} for i in range(2)],
+            "view_schema": {"ok": True},
+            "cube_schema": {"ok": False, "status": "deferred"},
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == ("partial" if loaded else "failed")
+    assert "source-1" in result["message"]
+    assert "deferred" in result["message"]
+    if loaded:
+        assert "older data may still be included" in result["message"]
+    else:
+        assert "no data was loaded" in result["message"]

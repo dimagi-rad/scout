@@ -558,3 +558,28 @@ async def test_teardown_view_schema_still_drops_when_state_is_teardown(db, user)
     MockManager.return_value.teardown_view_schema.assert_called_once()
     await vs.arefresh_from_db()
     assert vs.state == SchemaState.EXPIRED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_teardown_preserves_view_that_excluded_the_source(active_schema, tenant, user):
+    active_schema.state = SchemaState.TEARDOWN
+    await active_schema.asave(update_fields=["state"])
+    other = await Tenant.objects.acreate(provider="commcare", external_id="remaining-source")
+    workspace = await Workspace.objects.acreate(name="Degraded", created_by=user)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=tenant)
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    view = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_degraded_teardown",
+        state=SchemaState.ACTIVE,
+        tenant_coverage={
+            "included_tenants": [{"tenant_id": str(other.id)}],
+            "excluded_tenants": [{"tenant_id": str(tenant.id)}],
+        },
+    )
+    with patch("apps.workspaces.tasks.SchemaManager"):
+        await teardown_schema(schema_id=str(active_schema.id))
+    await view.arefresh_from_db()
+    assert view.state == SchemaState.ACTIVE
+    assert view.last_error == ""
