@@ -342,8 +342,9 @@ class SchemaManager:
         vs.save(update_fields=["schema_name", "state"])
 
         try:
+            # Callers may have prefetched membership before waiting for the build lock.
             tenants = sorted(
-                workspace.tenants.all(),
+                workspace.tenants.all().iterator(),
                 key=lambda tenant: (tenant.provider, tenant.external_id, str(tenant.id)),
             )
             if not tenants:
