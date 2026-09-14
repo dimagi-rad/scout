@@ -1,8 +1,10 @@
 """Tests for schema context injection into the agent system prompt."""
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from django.utils import timezone
 
 from apps.agents.graph import base as graph_base
 from apps.agents.graph.base import (
@@ -65,9 +67,36 @@ async def test_semantic_context_active_run_takes_precedence_over_active_model(
     if interactive:
         assert "trigger another" in result.lower()
         assert "resume" not in result.lower()
+        assert "if this conversation" not in result.lower()
+        assert "do not promise an automatic follow-up" in result.lower()
     else:
         assert "waits" in result.lower()
     assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_old_untracked_active_run_does_not_claim_data_ready(workspace, tenant):
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="long_running_load", state=SchemaState.ACTIVE
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace, name="Previous model", status=SemanticModel.Status.ACTIVE
+    )
+    run = await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="commcare_sync", state=MaterializationRun.RunState.LOADING
+    )
+    await MaterializationRun.objects.filter(pk=run.pk).aupdate(
+        started_at=timezone.now() - timedelta(hours=2)
+    )
+
+    result = await _fetch_semantic_model_context(workspace)
+
+    assert "do not call other data tools" in result.lower()
+    assert "Data is loaded and ready" not in result
+    await run.arefresh_from_db()
+    assert run.state == MaterializationRun.RunState.LOADING
+    assert run.procrastinate_job_id is None
 
 
 @pytest.mark.asyncio
@@ -108,7 +137,7 @@ async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, u
         workspace=workspace, name="Existing model", status=SemanticModel.Status.ACTIVE
     )
     with (
-        patch("apps.agents.graph.base.time.monotonic", return_value=100),
+        patch.object(graph_base, "time", MagicMock(monotonic=MagicMock(return_value=100))),
         patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
     ):
         retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
@@ -299,6 +328,7 @@ async def test_build_system_prompt_no_schema_status_call():
     mock_workspace = MagicMock()
     mock_workspace.system_prompt = None
     mock_workspace.tenants.acount = AsyncMock(return_value=1)
+    mock_workspace.tenants.aexists = AsyncMock(return_value=True)
 
     with (
         patch("apps.agents.graph.base.KnowledgeRetriever") as MockKR,
@@ -460,6 +490,7 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
     ws.id = "22222222-2222-2222-2222-222222222222"
     ws.system_prompt = None
     ws.tenants.acount = AsyncMock(return_value=2)
+    ws.tenants.aexists = AsyncMock(return_value=True)
     ws.tenants.all.return_value = _AsyncIter([MagicMock(id="aa"), MagicMock(id="bb")])
 
     with (

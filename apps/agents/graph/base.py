@@ -15,7 +15,6 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from asgiref.sync import sync_to_async
 from django.conf import settings
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -36,10 +35,8 @@ from apps.agents.tools.learning_tool import create_save_learning_tool
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.agents.tools.recipe_tool import create_recipe_tool
 from apps.knowledge.services.retriever import KnowledgeRetriever
-from apps.semantic.services.catalog import (
-    SemanticCatalogUnavailable,
-    get_active_semantic_model,
-)
+from apps.semantic.models import SemanticModel
+from apps.semantic.services.catalog import SemanticCatalogUnavailable
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
@@ -249,8 +246,14 @@ def _system_prompt_cache_key(
     return f"{workspace.id}:{user_id}:{prompt_hash}:{mode}:{canvas_mode}"
 
 
-def _semantic_catalog_context_sync(workspace) -> str:
-    get_active_semantic_model(workspace)
+async def _semantic_catalog_context(workspace) -> str:
+    if not await SemanticModel.objects.filter(
+        workspace=workspace, status=SemanticModel.Status.ACTIVE
+    ).aexists():
+        raise SemanticCatalogUnavailable(
+            "No active semantic model is available. Refresh workspace data.",
+            schema_status="unavailable",
+        )
     return (
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
@@ -262,6 +265,7 @@ def _semantic_catalog_context_sync(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
+    # Age alone cannot prove a writer has stopped; the reconciler owns dead-run detection.
     # Runs track live work even while the previous semantic catalog remains active.
     materialization_in_progress = await MaterializationRun.objects.filter(
         tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
@@ -273,7 +277,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
         return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     try:
-        return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
+        return await _semantic_catalog_context(workspace)
     except SemanticCatalogUnavailable:
         tenant_count = await workspace.tenants.acount()
         if tenant_count == 1:
@@ -335,9 +339,8 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
 _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
     "A materialization is already in progress in the background. Do NOT "
     "trigger another one and do NOT call other data tools. Briefly tell "
-    "the user it's still loading and end your turn. If this conversation "
-    "did not start the load, ask the user to check back once loading finishes; "
-    "do not promise an automatic follow-up."
+    "the user it's still loading and ask them to check back once loading finishes. "
+    "End your turn. Do not promise an automatic follow-up based on this status."
 )
 
 
@@ -1019,12 +1022,12 @@ async def _build_system_prompt(
     no longer rewrites cached prefix bytes and defeats every cache hit (arch #254,
     finding 02#3). ``volatile_suffix`` may be "".
     """
-    tenant_count = await workspace.tenants.acount()
+    has_tenants = await workspace.tenants.aexists()
     stable = await _build_stable_system_prompt(
-        workspace, user, tenant_count > 0, interactive, canvas_write
+        workspace, user, has_tenants, interactive, canvas_write
     )
     volatile = ""
-    if tenant_count > 0:
+    if has_tenants:
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
         if tenant_count > 1:

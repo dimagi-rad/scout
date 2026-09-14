@@ -18,6 +18,7 @@ async def test_system_prompt_is_cached_across_calls():
     workspace.system_prompt = "Test instructions"
     workspace.tenants = MagicMock()
     workspace.tenants.acount = AsyncMock(return_value=0)
+    workspace.tenants.aexists = AsyncMock(return_value=False)
 
     user = MagicMock()
     user.id = "test-user-id"
@@ -46,6 +47,7 @@ async def test_system_prompt_cache_invalidates_on_prompt_change():
     workspace.system_prompt = "Instructions v1"
     workspace.tenants = MagicMock()
     workspace.tenants.acount = AsyncMock(return_value=0)
+    workspace.tenants.aexists = AsyncMock(return_value=False)
 
     user = MagicMock()
 
@@ -75,6 +77,7 @@ async def test_system_prompt_cache_separates_canvas_write_mode():
     workspace.system_prompt = ""
     workspace.tenants = MagicMock()
     workspace.tenants.acount = AsyncMock(return_value=0)
+    workspace.tenants.aexists = AsyncMock(return_value=False)
 
     user = MagicMock()
     user.id = "test-user-id"
