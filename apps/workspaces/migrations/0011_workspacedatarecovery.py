@@ -31,6 +31,7 @@ class Migration(migrations.Migration):
                     models.CharField(
                         choices=[
                             ("materialization", "Materialization"),
+                            ("view_rebuild", "Workspace view rebuild"),
                             ("semantic_rebuild", "Semantic rebuild"),
                         ],
                         max_length=32,

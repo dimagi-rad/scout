@@ -11,125 +11,12 @@ from __future__ import annotations
 from typing import Any
 
 from apps.chat.models import ThreadJob
-from apps.semantic.models import CubeSchema, SemanticModel
 from apps.workspaces.models import (
     MaterializationRun,
-    SchemaState,
-    TenantSchema,
     WorkspaceDataRecovery,
     WorkspaceTenant,
-    WorkspaceViewSchema,
 )
-
-
-async def workspace_query_surface(workspace) -> dict[str, Any]:
-    """Describe whether ``workspace`` currently has a queryable data surface.
-
-    ``recovery_action`` intentionally names the least expensive repair. Missing
-    physical data requires materialization (which also rebuilds semantics),
-    while an intact physical schema with no active semantic surface only needs
-    the semantic model/Cube build.
-    """
-    tenant_ids = [
-        tenant_id
-        async for tenant_id in WorkspaceTenant.objects.filter(workspace=workspace).values_list(
-            "tenant_id", flat=True
-        )
-    ]
-    if not tenant_ids:
-        return {
-            "status": "unavailable",
-            "recovery_action": None,
-            "physical_status": "missing",
-            "semantic_status": "unknown",
-            "message": "This workspace has no data sources to restore.",
-        }
-
-    physical_ready = False
-    physical_status = "missing"
-    physical_error = ""
-    if len(tenant_ids) == 1:
-        queryable_schema = await (
-            TenantSchema.objects.filter(
-                tenant_id=tenant_ids[0],
-                state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
-            )
-            .order_by("-created_at")
-            .afirst()
-        )
-        physical_ready = queryable_schema is not None
-        if queryable_schema is not None:
-            physical_status = queryable_schema.state
-        else:
-            latest_schema = await (
-                TenantSchema.objects.filter(tenant_id=tenant_ids[0])
-                .order_by("-created_at")
-                .afirst()
-            )
-            if latest_schema is not None:
-                physical_status = latest_schema.state
-    else:
-        view_schema = await WorkspaceViewSchema.objects.filter(workspace=workspace).afirst()
-        physical_ready = view_schema is not None and view_schema.state == SchemaState.ACTIVE
-        if view_schema is not None:
-            physical_status = view_schema.state
-            physical_error = view_schema.last_error or ""
-
-    if not physical_ready:
-        return {
-            "status": "needs_materialization",
-            "recovery_action": WorkspaceDataRecovery.RecoveryType.MATERIALIZATION,
-            "physical_status": physical_status,
-            "semantic_status": "blocked",
-            "message": (
-                "The data behind this artifact is no longer available. "
-                "Restore the workspace data to use it again."
-            ),
-            **({"detail": physical_error[:500]} if physical_error else {}),
-        }
-
-    model = await SemanticModel.objects.filter(workspace=workspace).afirst()
-    if model is None:
-        return {
-            "status": "needs_semantic_rebuild",
-            "recovery_action": WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
-            "physical_status": physical_status,
-            "semantic_status": "missing",
-            "message": (
-                "The workspace data is available, but its semantic model needs to be rebuilt "
-                "before this artifact can query it."
-            ),
-        }
-
-    has_active_cube = await CubeSchema.objects.filter(
-        workspace=workspace,
-        semantic_model=model,
-        status=CubeSchema.Status.ACTIVE,
-    ).aexists()
-    if model.status != SemanticModel.Status.ACTIVE or not has_active_cube:
-        last_build = (model.metadata or {}).get("last_build") or {}
-        error = str(last_build.get("error") or "")
-        return {
-            "status": "needs_semantic_rebuild",
-            "recovery_action": WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD,
-            "physical_status": physical_status,
-            "semantic_status": "unavailable",
-            "message": (
-                "The workspace data is available, but its semantic model needs to be rebuilt "
-                "before this artifact can query it."
-            ),
-            **({"detail": error[:500]} if error else {}),
-        }
-
-    last_build = (model.metadata or {}).get("last_build") or {}
-    semantic_status = "ready" if not last_build or last_build.get("ok", True) else "stale"
-    return {
-        "status": "ready",
-        "recovery_action": None,
-        "physical_status": physical_status,
-        "semantic_status": semantic_status,
-        "message": "Artifact data is ready.",
-    }
+from apps.workspaces.services.query_state import workspace_query_surface
 
 
 async def artifact_data_state(artifact) -> dict[str, Any]:
@@ -292,6 +179,8 @@ def _serialize_progress(progress: dict | None) -> dict[str, Any] | None:
 
 
 def _recovering_message(recovery_type: str) -> str:
+    if recovery_type == WorkspaceDataRecovery.RecoveryType.VIEW_REBUILD:
+        return "Rebuilding the workspace query layer for this artifact."
     if recovery_type == WorkspaceDataRecovery.RecoveryType.SEMANTIC_REBUILD:
         return "Rebuilding the semantic model for this artifact."
     return "Restoring the workspace data for this artifact."

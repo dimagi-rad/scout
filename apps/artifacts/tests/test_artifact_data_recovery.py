@@ -13,6 +13,7 @@ from apps.chat.models import Thread, ThreadJob
 from apps.semantic.models import CubeSchema, SemanticModel
 from apps.users.models import Tenant, TenantMembership, User
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -20,8 +21,11 @@ from apps.workspaces.models import (
     WorkspaceMembership,
     WorkspaceRole,
     WorkspaceTenant,
+    WorkspaceViewSchema,
 )
-from apps.workspaces.tasks import recover_workspace_data
+from apps.workspaces.services.query_state import workspace_query_surface
+from apps.workspaces.tasks import rebuild_workspace_semantic_model_core, recover_workspace_data
+from mcp_server.server import get_schema_status
 
 
 @pytest.fixture
@@ -76,6 +80,18 @@ async def test_missing_physical_data_requests_materialization(recovery_setup):
     assert body["status"] == "needs_materialization"
     assert body["recovery_action"] == "materialization"
     assert body["can_retry"] is True
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_chat_and_artifacts_report_the_same_query_surface(recovery_setup):
+    artifact_response = await recovery_setup.client.get(recovery_setup.url)
+    chat_response = await get_schema_status(workspace_id=str(recovery_setup.workspace.id))
+    surface = chat_response["data"]["query_surface"]
+    assert surface["status"] == artifact_response.json()["status"]
+    assert surface["recovery_action"] == artifact_response.json()["recovery_action"]
+    assert surface["queryable"] is False
+    assert surface["in_progress"] is False
 
 
 @pytest.mark.django_db(transaction=True)
@@ -267,7 +283,10 @@ async def test_recovery_worker_records_success(recovery_setup):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_recovery_worker_persists_actionable_failure(recovery_setup):
+@pytest.mark.parametrize("old_schema_still_serving", [False, True])
+async def test_recovery_worker_persists_actionable_failure(
+    recovery_setup, old_schema_still_serving
+):
     recovery = await WorkspaceDataRecovery.objects.acreate(
         workspace=recovery_setup.workspace,
         requested_by=recovery_setup.user,
@@ -284,7 +303,14 @@ async def test_recovery_worker_persists_actionable_failure(recovery_setup):
     with (
         patch(
             "apps.workspaces.tasks.workspace_query_surface",
-            new=AsyncMock(side_effect=[needs_semantic, needs_semantic]),
+            new=AsyncMock(
+                side_effect=[
+                    needs_semantic,
+                    {"status": "ready", "recovery_action": None, "message": "Ready."}
+                    if old_schema_still_serving
+                    else needs_semantic,
+                ]
+            ),
         ),
         patch(
             "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
@@ -299,3 +325,102 @@ async def test_recovery_worker_persists_actionable_failure(recovery_setup):
     assert result["status"] == "failed"
     assert recovery.state == WorkspaceDataRecovery.State.FAILED
     assert recovery.error == "Cube rejected schema"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_missing_view_keeps_existing_source_data(recovery_setup):
+    other = await Tenant.objects.acreate(provider="commcare", external_id="other-recovery")
+    await WorkspaceTenant.objects.acreate(workspace=recovery_setup.workspace, tenant=other)
+    await TenantSchema.objects.acreate(
+        tenant=recovery_setup.tenant, schema_name="recovery_present", state=SchemaState.ACTIVE
+    )
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=recovery_setup.workspace, schema_name="ws_recovery", state=SchemaState.EXPIRED
+    )
+    response = await recovery_setup.client.get(recovery_setup.url)
+    assert response.json()["recovery_action"] == "view_rebuild"
+    recovery = await WorkspaceDataRecovery.objects.acreate(
+        workspace=recovery_setup.workspace,
+        requested_by=recovery_setup.user,
+        recovery_type=WorkspaceDataRecovery.RecoveryType.VIEW_REBUILD,
+    )
+    with (
+        patch(
+            "apps.workspaces.tasks.workspace_query_surface",
+            new=AsyncMock(side_effect=[response.json(), {"status": "ready"}]),
+        ),
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_view_schema.func",
+            new=AsyncMock(return_value={"cube_schema": {"ok": True}}),
+        ) as rebuild,
+        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as materialize,
+    ):
+        result = await recover_workspace_data.func(
+            SimpleNamespace(job=SimpleNamespace(id=920)), str(recovery.id)
+        )
+    assert result["status"] == "completed"
+    rebuild.assert_awaited_once_with(str(recovery_setup.workspace.id))
+    materialize.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["failed", "partial", "cancelled"])
+async def test_semantic_rebuild_rejects_unsafe_snapshot(recovery_setup, state):
+    schema = await TenantSchema.objects.acreate(
+        tenant=recovery_setup.tenant, schema_name="recovery_unsafe", state=SchemaState.ACTIVE
+    )
+    await MaterializationRun.objects.acreate(tenant_schema=schema, pipeline="test", state=state)
+    surface = await workspace_query_surface(recovery_setup.workspace)
+    assert surface["recovery_action"] == "materialization"
+    with patch("apps.workspaces.tasks.build_and_promote_cube_schema") as promote:
+        result = await rebuild_workspace_semantic_model_core(str(recovery_setup.workspace.id))
+    assert result["cube_schema"]["ok"] is False
+    assert "unsafe" in result["cube_schema"]["error"]
+    promote.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_semantic_rebuild_defers_for_active_snapshot(recovery_setup):
+    schema = await TenantSchema.objects.acreate(
+        tenant=recovery_setup.tenant, schema_name="recovery_loading", state=SchemaState.ACTIVE
+    )
+    await MaterializationRun.objects.acreate(tenant_schema=schema, pipeline="test", state="loading")
+    surface = await workspace_query_surface(recovery_setup.workspace)
+    assert surface["status"] == "recovering"
+    assert surface["in_progress"] is True
+    assert surface["queryable"] is False
+    with patch("apps.workspaces.tasks.build_and_promote_cube_schema") as promote:
+        result = await rebuild_workspace_semantic_model_core(str(recovery_setup.workspace.id))
+    assert result["cube_schema"]["status"] == "deferred"
+    promote.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_shared_query_state_keeps_stale_build_diagnostics(recovery_setup):
+    await TenantSchema.objects.acreate(
+        tenant=recovery_setup.tenant, schema_name="recovery_stale", state=SchemaState.ACTIVE
+    )
+    model = await SemanticModel.objects.acreate(
+        workspace=recovery_setup.workspace,
+        name="Stale",
+        status=SemanticModel.Status.ACTIVE,
+        metadata={
+            "last_build": {"ok": False, "status": "deferred", "error": "Previous build failed"}
+        },
+    )
+    await CubeSchema.objects.acreate(
+        workspace=recovery_setup.workspace,
+        semantic_model=model,
+        status=CubeSchema.Status.ACTIVE,
+        filename="stale.yaml",
+        content="cubes: []",
+        content_hash="stale",
+    )
+    surface = await workspace_query_surface(recovery_setup.workspace)
+    assert surface["status"] == "ready"
+    assert surface["semantic_status"] == "stale"
+    assert surface["detail"] == "Previous build failed"

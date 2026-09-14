@@ -57,7 +57,7 @@ export function ArtifactDataRecovery({
     return (
       <RecoveryShell
         icon={<Loader2 className="h-5 w-5 animate-spin" />}
-        title={state.recovery?.type === "semantic_rebuild" ? "Rebuilding the data model" : "Restoring artifact data"}
+        title={state.recovery?.type === "view_rebuild" ? "Rebuilding the query layer" : state.recovery?.type === "semantic_rebuild" ? "Rebuilding the data model" : "Restoring artifact data"}
       >
         <p>{state.message}</p>
         <div className="w-full max-w-sm" role="status" aria-live="polite">
@@ -93,11 +93,12 @@ export function ArtifactDataRecovery({
   }
 
   const failed = state.status === "failed"
+  const viewOnly = state.recovery_action === "view_rebuild"
   const semanticOnly = state.recovery_action === "semantic_rebuild"
   return (
     <RecoveryShell
       icon={failed ? <AlertTriangle className="h-5 w-5" /> : <DatabaseBackup className="h-5 w-5" />}
-      title={failed ? "Data recovery failed" : semanticOnly ? "Data model needs rebuilding" : "Artifact data is offline"}
+      title={failed ? "Data recovery failed" : viewOnly ? "Query layer needs rebuilding" : semanticOnly ? "Data model needs rebuilding" : "Artifact data is offline"}
       destructive={failed}
     >
       <p>{state.message}</p>
@@ -109,9 +110,11 @@ export function ArtifactDataRecovery({
             ? "Starting…"
             : failed
               ? "Try recovery again"
-              : semanticOnly
-                ? "Rebuild data model"
-                : "Restore workspace data"}
+              : viewOnly
+                ? "Rebuild query layer"
+                : semanticOnly
+                  ? "Rebuild data model"
+                  : "Restore workspace data"}
         </Button>
       )}
     </RecoveryShell>

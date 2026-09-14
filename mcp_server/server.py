@@ -52,6 +52,7 @@ from apps.workspaces.models import (
     SchemaState,
     TenantSchema,
     Workspace,
+    WorkspaceDataRecovery,
     WorkspaceMembership,
     WorkspaceTenant,
     WorkspaceViewSchema,
@@ -60,6 +61,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     aresolve_pipeline_config,
 )
+from apps.workspaces.services.query_state import workspace_query_surface
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import coverage_complete
 from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
@@ -1289,14 +1291,28 @@ async def run_materialization(
             tc["result"] = error_response(NOT_FOUND, "thread not found in this workspace")
             return tc["result"]
 
-        # Dedupe concurrent dispatch by thread_id (not workspace): the chained
-        # resume task fires once against a single thread_job_id, so a second
-        # caller in another thread would get no follow-up when the worker
-        # finishes. Consequence: two threads in one workspace can run parallel
-        # materializations sharing tenant_schemas — unchanged from the prior
-        # workspace-scoped guard, and the materializer has no per-tenant_schema
-        # lock. Tenant-level dedupe, if ever added, belongs here with a
-        # tenant_id filter.
+        recovery = await WorkspaceDataRecovery.objects.filter(
+            workspace_id=workspace_id,
+            state__in=WorkspaceDataRecovery.ACTIVE_STATES,
+        ).afirst()
+        if recovery is not None:
+            tc["result"] = success_response(
+                {
+                    "status": "already_in_progress",
+                    "workspace_recovery_id": str(recovery.id),
+                    "message": (
+                        "Artifact data recovery is already running for this workspace. "
+                        "Do not start another load. Check get_schema_status for completion; "
+                        "this operation has no automatic chat follow-up."
+                    ),
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
+            return tc["result"]
+
+        # Each chat needs its own ThreadJob for automatic follow-up. The worker
+        # serializes data operations through Cube publication for this workspace.
         existing = await ThreadJob.objects.filter(
             thread_id=thread_id,
             job_type=ThreadJob.JobType.MATERIALIZATION,
@@ -1402,6 +1418,8 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             tc["result"] = error_response(NOT_FOUND, f"Workspace '{workspace_id}' not found")
             return tc["result"]
 
+        query_surface = await workspace_query_surface(workspace)
+        not_provisioned["data"]["query_surface"] = query_surface
         tenant_count = await workspace.tenants.acount()
 
         if tenant_count == 0:
@@ -1452,6 +1470,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
                 {
                     "exists": True,
                     "state": ts.state,
+                    "query_surface": query_surface,
                     "last_materialized_at": last_materialized_at,
                     "tables": tables,
                 },
@@ -1516,6 +1535,7 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             {
                 "exists": True,
                 "state": vs.state,
+                "query_surface": query_surface,
                 "last_materialized_at": last_materialized_at,
                 "tables": tables,
                 "tenant_coverage": coverage,

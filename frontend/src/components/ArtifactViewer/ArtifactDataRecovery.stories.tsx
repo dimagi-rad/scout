@@ -40,6 +40,18 @@ export const DataOffline: Story = {
   args: { state: offline },
 }
 
+export const RebuildingQueryLayer: Story = {
+  args: {
+    state: {
+      ...offline,
+      status: "needs_view_rebuild",
+      recovery_action: "view_rebuild",
+      physical_status: "expired",
+      message: "Source data is available. Rebuild the workspace query layer to use it again.",
+    },
+  },
+}
+
 export const RebuildingSemanticModel: Story = {
   args: {
     state: {

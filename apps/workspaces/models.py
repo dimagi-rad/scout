@@ -113,6 +113,7 @@ class WorkspaceDataRecovery(models.Model):
 
     class RecoveryType(models.TextChoices):
         MATERIALIZATION = "materialization", "Materialization"
+        VIEW_REBUILD = "view_rebuild", "Workspace view rebuild"
         SEMANTIC_REBUILD = "semantic_rebuild", "Semantic rebuild"
 
     class State(models.TextChoices):

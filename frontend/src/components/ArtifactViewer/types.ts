@@ -18,12 +18,13 @@ export type ArtifactDataStatus =
   | "not_required"
   | "ready"
   | "needs_materialization"
+  | "needs_view_rebuild"
   | "needs_semantic_rebuild"
   | "recovering"
   | "failed"
   | "unavailable"
 
-export type ArtifactRecoveryAction = "materialization" | "semantic_rebuild" | null
+export type ArtifactRecoveryAction = "materialization" | "view_rebuild" | "semantic_rebuild" | null
 
 export interface ArtifactRecoveryProgress {
   percent: number | null
