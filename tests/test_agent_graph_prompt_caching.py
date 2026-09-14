@@ -44,6 +44,7 @@ async def test_system_prompt_split_into_stable_and_volatile(monkeypatch):
     workspace.system_prompt = "WS instructions"
     workspace.tenants = MagicMock()
     workspace.tenants.acount = AsyncMock(return_value=0)
+    workspace.tenants.aexists = AsyncMock(return_value=False)
     user = MagicMock()
     user.id = "u1"
 
@@ -74,6 +75,7 @@ async def test_volatile_schema_not_in_stable_prefix(monkeypatch):
     workspace.system_prompt = ""
     workspace.tenants = MagicMock()
     workspace.tenants.acount = AsyncMock(return_value=1)
+    workspace.tenants.aexists = AsyncMock(return_value=True)
     tenant = MagicMock()
     tenant.canonical_name = "Acme"
     tenant.external_id = "acme"

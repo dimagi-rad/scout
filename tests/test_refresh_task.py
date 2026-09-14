@@ -78,11 +78,12 @@ async def test_refresh_task_marks_schema_active_on_success(
             "apps.workspaces.tasks.get_registry",
             return_value=_mock_registry(),
         ),
-        patch("apps.workspaces.tasks.run_pipeline"),
+        patch("apps.workspaces.tasks.run_pipeline") as pipeline,
     ):
         from apps.workspaces.tasks import refresh_tenant_schema
 
         result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -90,6 +91,7 @@ async def test_refresh_task_marks_schema_active_on_success(
     await provisioning_schema.arefresh_from_db()
     assert provisioning_schema.state == SchemaState.ACTIVE
     assert result["status"] == "active"
+    assert pipeline.call_args.kwargs["procrastinate_job_id"] == 438
 
 
 @pytest.mark.asyncio
@@ -123,6 +125,7 @@ async def test_refresh_task_schedules_old_schema_teardown(
         from apps.workspaces.tasks import refresh_tenant_schema
 
         await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -145,6 +148,7 @@ async def test_refresh_task_marks_failed_on_schema_creation_error(
         from apps.workspaces.tasks import refresh_tenant_schema
 
         result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -170,6 +174,7 @@ async def test_refresh_task_marks_failed_on_no_credential(
         from apps.workspaces.tasks import refresh_tenant_schema
 
         result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -206,6 +211,7 @@ async def test_refresh_task_marks_failed_on_materialization_error(
         from apps.workspaces.tasks import refresh_tenant_schema
 
         result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -251,6 +257,7 @@ async def test_refresh_task_resolves_credential_in_async_context(
         from apps.workspaces.tasks import refresh_tenant_schema
 
         result = await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -264,6 +271,7 @@ async def test_refresh_task_resolves_credential_in_async_context(
 @pytest.mark.django_db(transaction=True)
 async def test_refresh_task_returns_error_for_unknown_schema(tenant_membership_obj):
     result = await refresh_tenant_schema(
+        context=MagicMock(job=MagicMock(id=438)),
         schema_id="00000000-0000-0000-0000-000000000000",
         membership_id=str(tenant_membership_obj.id),
     )
@@ -317,6 +325,7 @@ async def test_refresh_loads_into_new_schema_not_old_active(
         patch("apps.workspaces.tasks.teardown_schema.configure", return_value=deferrer),
     ):
         await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
@@ -381,6 +390,7 @@ async def test_refresh_task_rebuilds_dependent_multitenant_view_schemas(
         ) as mock_rebuild,
     ):
         await refresh_tenant_schema(
+            context=MagicMock(job=MagicMock(id=438)),
             schema_id=str(provisioning_schema.id),
             membership_id=str(tenant_membership_obj.id),
         )
