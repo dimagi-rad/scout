@@ -98,6 +98,22 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
     })
   })
 
+  it("preserves a deep-linked thread while changing workspaces", async () => {
+    useAppStore.setState({ activeDomainId: WS_B })
+    render(
+      <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>
+        <Routes>
+          <Route path="/workspaces/:workspaceId/chat/:threadId" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+      expect(useAppStore.getState().threadId).toBe(THREAD_A)
+      expect(screen.getByTestId("path").textContent).toBe(`/workspaces/${WS_A}/chat/${THREAD_A}`)
+    })
+  })
+
   it("records an opened workspace even when it is already active", async () => {
     render(
       <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>

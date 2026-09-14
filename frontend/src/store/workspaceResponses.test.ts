@@ -199,3 +199,26 @@ it("keeps request ownership independent between stores", async () => {
   expect(state().artifacts[0].title).toBe("first")
   expect(other.getState().artifacts[0].title).toBe("other")
 })
+
+it("starts a fresh thread when tenant resolution changes the workspace", async () => {
+  store.setState({ threadId: "a-thread" })
+  vi.spyOn(api, "post").mockResolvedValue({ workspace_id: "b" })
+  vi.spyOn(workspaceApi, "list").mockResolvedValue([])
+  await state().domainActions.ensureTenant("commcare", "b")
+  expect(state().activeDomainId).toBe("b")
+  expect(state().threadId).not.toBe("a-thread")
+})
+
+it("a missing-workspace detail call leaves no orphaned loading state", async () => {
+  const old = deferred()
+  vi.spyOn(api, "get").mockImplementationOnce(() => old.promise as never)
+  const pending = state().datasetActions.fetchDataset("records")
+  expect(state().selectedDatasetStatus).toBe("loading")
+  store.setState({ activeDomainId: null })
+  await expect(state().datasetActions.fetchDataset("records")).rejects.toThrow("No active workspace")
+  await expect(state().dictionaryActions.fetchTable("public", "records")).rejects.toThrow("No active domain")
+  old.resolve({ dataset: { name: "records" } })
+  await pending
+  expect(state().selectedDatasetStatus).toBe("idle")
+  expect(state().selectedDataset).toBeNull()
+})

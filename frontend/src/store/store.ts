@@ -23,9 +23,10 @@ export function createAppStore() {
   }))
   store.subscribe((state, previous) => {
     if (state.activeDomainId === previous.activeDomainId) return
-    // Clear before UI subscribers run; generations also reject A→B→A responses.
+    // Clear before UI subscribers run; seed workspace-owned state after selecting a workspace.
     store.setState({
       workspaceGeneration: state.workspaceGeneration + 1,
+      threadId: crypto.randomUUID(),
       artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
       activeArtifactId: null,
       dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null,
