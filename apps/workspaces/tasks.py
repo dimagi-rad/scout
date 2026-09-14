@@ -45,7 +45,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.services.data_operation import serialized_workspace_data, workspace_data_lock
+from apps.workspaces.services.data_operation import (
+    run_data_thread,
+    serialized_workspace_data,
+    workspace_data_lock,
+)
 from apps.workspaces.services.pipeline_resolver import no_pipeline_message
 from apps.workspaces.services.query_state import (
     included_tenant_snapshot_state as _included_tenant_snapshot_state,
@@ -308,7 +312,7 @@ async def refresh_tenant_schema(context, schema_id: str, membership_id: str) -> 
 
     manager = SchemaManager()
     try:
-        await asyncio.to_thread(manager.create_physical_schema, new_schema)
+        await run_data_thread(manager.create_physical_schema, new_schema)
     except Exception:
         logger.exception("Failed to create schema '%s'", new_schema.schema_name)
         new_schema.state = SchemaState.FAILED
@@ -513,7 +517,7 @@ async def materialize_workspace_core(
 
         pipeline_config = registry.get(pipeline_name)
         try:
-            result = await asyncio.to_thread(
+            result = await run_data_thread(
                 _run_pipeline_with_progress,
                 tm,
                 credential,
@@ -655,7 +659,7 @@ async def materialize_workspace_core(
     )
     if cube_build_allowed:
         try:
-            cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+            cube_schema = await run_data_thread(build_and_promote_cube_schema, workspace)
             cube_schema_outcome = {
                 "ok": True,
                 "id": str(cube_schema.id),
@@ -911,7 +915,7 @@ async def _to_thread_fresh_db(func, /, *args, **kwargs):
         close_old_connections()
         return func(*args, **kwargs)
 
-    return await asyncio.to_thread(_guarded)
+    return await run_data_thread(_guarded)
 
 
 def _run_pipeline_with_progress(
@@ -1097,7 +1101,7 @@ async def rebuild_workspace_view_schema(workspace_id: str) -> dict:
             "cube_schema": {"ok": False, "error": error},
         }
     try:
-        cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+        cube_schema = await run_data_thread(build_and_promote_cube_schema, workspace)
     except CubeSchemaBuildError as exc:
         logger.warning(
             "Semantic Cube schema build failed after view schema rebuild for workspace %s: %s",
@@ -1170,7 +1174,7 @@ async def rebuild_workspace_semantic_model_core(workspace_id: str) -> dict:
         await _to_thread_fresh_db(record_cube_schema_build_failure, workspace, error)
         return {"cube_schema": {"ok": False, "error": error}}
     try:
-        cube_schema = await asyncio.to_thread(build_and_promote_cube_schema, workspace)
+        cube_schema = await run_data_thread(build_and_promote_cube_schema, workspace)
     except CubeSchemaBuildError as exc:
         logger.warning("Semantic model rebuild failed for workspace %s: %s", workspace_id, exc)
         return {"cube_schema": {"ok": False, "error": str(exc)[:500]}}
@@ -1222,6 +1226,15 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
     if not claimed:
         return {"status": recovery.state}
 
+    if recovery.requested_by_id is None:
+        error = "The user who requested recovery no longer exists. Ask a workspace member to retry."
+        await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+            state=WorkspaceDataRecovery.State.FAILED,
+            error=error,
+            completed_at=timezone.now(),
+        )
+        return {"status": "failed", "error": error}
+
     result: dict = {}
     try:
         async with workspace_data_lock(str(recovery.workspace_id)):
@@ -1231,7 +1244,7 @@ async def recover_workspace_data(context, recovery_id: str) -> dict:
             if surface["status"] == "needs_materialization":
                 result = await materialize_workspace_core(
                     str(recovery.workspace_id),
-                    str(recovery.requested_by_id or ""),
+                    str(recovery.requested_by_id),
                     context.job.id,
                 )
             elif surface["status"] == "needs_semantic_rebuild":

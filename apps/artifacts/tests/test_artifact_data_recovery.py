@@ -235,6 +235,27 @@ async def test_query_data_returns_recovery_contract_instead_of_generic_query_err
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_deleted_requester_cannot_borrow_other_users_credentials(recovery_setup):
+    recovery = await WorkspaceDataRecovery.objects.acreate(
+        workspace=recovery_setup.workspace,
+        requested_by=recovery_setup.user,
+        recovery_type=WorkspaceDataRecovery.RecoveryType.MATERIALIZATION,
+    )
+    await recovery_setup.user.adelete()
+    with patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as materialize:
+        result = await recover_workspace_data.func(
+            SimpleNamespace(job=SimpleNamespace(id=921)), str(recovery.id)
+        )
+    await recovery.arefresh_from_db()
+    assert result["status"] == "failed"
+    assert recovery.state == WorkspaceDataRecovery.State.FAILED
+    assert recovery.completed_at is not None
+    assert "no longer exists" in recovery.error
+    materialize.assert_not_awaited()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_recovery_worker_records_success(recovery_setup):
     recovery = await WorkspaceDataRecovery.objects.acreate(
         workspace=recovery_setup.workspace,

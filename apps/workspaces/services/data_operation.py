@@ -13,6 +13,30 @@ _LOCK_NAMESPACE = 0x53434441
 _held_workspaces = ContextVar("scout_data_workspaces", default=(None, frozenset()))
 
 
+async def run_data_thread(function, /, *args, **kwargs):
+    """Keep owning locks until a sync mutation has actually stopped.
+
+    Cancelling ``to_thread`` only cancels its waiter, not the running thread.
+    Drain a shielded thread before propagating cancellation so another repair
+    cannot overlap its still-running load or Cube publication.
+    """
+    work = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        while not work.done():
+            try:
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # Repeated worker-abort requests must not release the lock early.
+                continue
+            except Exception:
+                break
+        if not work.cancelled():
+            work.exception()  # Retrieve any failure while preserving cancellation.
+        raise
+
+
 @asynccontextmanager
 async def workspace_data_lock(workspace_id):
     key = str(workspace_id)
