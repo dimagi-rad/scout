@@ -4,10 +4,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from apps.agents.graph import base as graph_base
 from apps.agents.graph.base import (
     _fetch_multi_tenant_schema_context,
     _fetch_schema_context,
+    _fetch_semantic_model_context,
 )
+from apps.semantic.models import SemanticModel
+from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
 
 
 @pytest.fixture
@@ -22,6 +26,107 @@ def mock_tenant():
 @pytest.fixture
 def mock_user():
     return MagicMock()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("state", sorted(MaterializationRun.ACTIVE_STATES))
+async def test_semantic_context_active_run_takes_precedence_over_active_model(
+    workspace, tenant, interactive, state
+):
+    """A last-known-good model must not hide a materialization in flight."""
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="test_domain_active",
+        state=SchemaState.ACTIVE,
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Existing semantic model",
+        status=SemanticModel.Status.ACTIVE,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=state,
+    )
+
+    result = await _fetch_semantic_model_context(workspace, interactive=interactive)
+
+    assert "in progress" in result.lower()
+    if interactive:
+        assert "trigger another" in result.lower()
+        assert "resume" not in result.lower()
+    else:
+        assert "waits" in result.lower()
+    assert "Data is loaded and ready" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_semantic_context_completed_run_does_not_hide_active_model(workspace, tenant):
+    """A terminal run is historical and must not replace ready-model guidance."""
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant,
+        schema_name="test_domain_completed",
+        state=SchemaState.ACTIVE,
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Existing semantic model",
+        status=SemanticModel.Status.ACTIVE,
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema,
+        pipeline="commcare_sync",
+        state=MaterializationRun.RunState.COMPLETED,
+    )
+
+    result = await _fetch_semantic_model_context(workspace)
+
+    assert "Data is loaded and ready" in result
+    assert "in progress" not in result.lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+async def test_prompt_availability_changes_within_cache_ttl(workspace, tenant, user, interactive):
+    graph_base._system_prompt_cache.clear()
+    schema = await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="prompt_transition", state=SchemaState.ACTIVE
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace, name="Existing model", status=SemanticModel.Status.ACTIVE
+    )
+    with (
+        patch("apps.agents.graph.base.time.monotonic", return_value=100),
+        patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
+    ):
+        retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
+        stable, ready = await graph_base._build_system_prompt(workspace, user, interactive)
+        run = await MaterializationRun.objects.acreate(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.LOADING,
+        )
+        stable_loading, loading = await graph_base._build_system_prompt(
+            workspace, user, interactive
+        )
+        await MaterializationRun.objects.filter(pk=run.pk).aupdate(
+            state=MaterializationRun.RunState.COMPLETED
+        )
+        stable_done, done = await graph_base._build_system_prompt(workspace, user, interactive)
+
+    assert "Data is loaded and ready" in ready
+    assert "in progress" in loading.lower()
+    assert "Data is loaded and ready" not in loading
+    assert "Data is loaded and ready" in done
+    assert "in progress" not in done.lower()
+    assert stable == stable_loading == stable_done
+    retriever.return_value.retrieve.assert_awaited_once()
+    graph_base._system_prompt_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -57,6 +162,7 @@ async def test_fetch_schema_context_materializing(mock_tenant, mock_user):
 
     assert "loading" in result.lower()
     assert "run_materialization" not in result
+    assert "resume" not in result.lower()
 
 
 @pytest.mark.asyncio
@@ -276,6 +382,7 @@ async def test_fetch_multi_tenant_view_schema_materializing(mock_multi_workspace
 
     assert "in progress" in result.lower()
     assert "run_materialization" not in result
+    assert "resume" not in result.lower()
 
 
 @pytest.mark.asyncio
@@ -297,6 +404,7 @@ async def test_fetch_multi_tenant_active_materialization_run(mock_multi_workspac
 
     assert "in progress" in result.lower()
     assert "run_materialization" not in result
+    assert "resume" not in result.lower()
 
 
 @pytest.mark.asyncio
