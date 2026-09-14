@@ -16,6 +16,7 @@ export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 export interface DomainSlice {
   domains: TenantMembership[]
   activeDomainId: string | null
+  workspaceGeneration: number
   domainsStatus: DomainsStatus
   domainsError: string | null
   domainActions: {
@@ -29,6 +30,7 @@ export interface DomainSlice {
 export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> = (set, get) => ({
   domains: [],
   activeDomainId: null,
+  workspaceGeneration: 0,
   domainsStatus: "idle",
   domainsError: null,
   domainActions: {

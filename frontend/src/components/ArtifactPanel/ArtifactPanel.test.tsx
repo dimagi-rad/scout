@@ -11,10 +11,8 @@ const ARTIFACT_ID = "22222222-2222-2222-2222-222222222222"
 
 describe("ArtifactPanel", () => {
   beforeEach(() => {
-    useAppStore.setState({
-      activeDomainId: WORKSPACE_ID,
-      activeArtifactId: ARTIFACT_ID,
-    })
+    useAppStore.getState().domainActions.setActiveDomain(WORKSPACE_ID)
+    useAppStore.getState().uiActions.openArtifact(ARTIFACT_ID)
   })
 
   afterEach(() => {
