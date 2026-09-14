@@ -7,11 +7,31 @@ from apps.chat.models import Thread, ThreadJob
 from apps.users.models import Tenant, TenantMembership
 from apps.workspaces.models import (
     Workspace,
+    WorkspaceDataRecovery,
     WorkspaceTenant,
 )
 from mcp_server.server import run_materialization
 
 User = get_user_model()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_run_materialization_observes_artifact_recovery(workspace, user):
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    recovery = await WorkspaceDataRecovery.objects.acreate(
+        workspace=workspace,
+        requested_by=user,
+        recovery_type="semantic_rebuild",
+    )
+    with patch("mcp_server.server.materialize_workspace.defer_async", new=AsyncMock()) as defer:
+        result = await run_materialization(
+            workspace_id=str(workspace.id), user_id=str(user.id), thread_id=str(thread.id)
+        )
+    assert result["data"]["status"] == "already_in_progress"
+    assert result["data"]["workspace_recovery_id"] == str(recovery.id)
+    assert "no automatic chat follow-up" in result["data"]["message"]
+    defer.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,9 @@ import { Loader2 } from "lucide-react"
 import { ArtifactGraphRenderer, type ArtifactDetail } from "@/components/ArtifactGraph"
 import { withBasePath } from "@/config"
 import { cn } from "@/lib/utils"
+import { ArtifactDataRecovery } from "./ArtifactDataRecovery"
 import type { QueryDataResponse } from "./types"
+import { useArtifactDataRecovery } from "./useArtifactDataRecovery"
 
 export interface ArtifactCanvasHandle {
   exportPdf: () => void
@@ -27,6 +29,12 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
   ) {
     const iframeRef = useRef<HTMLIFrameElement>(null)
     const isGraphArtifact = artifact?.type === "story"
+    const hasLiveQueries = Boolean(artifact?.semantic_queries.length)
+    const recovery = useArtifactDataRecovery(artifactId, workspaceId, hasLiveQueries)
+    const dataIsReady =
+      !hasLiveQueries ||
+      recovery.state?.status === "ready" ||
+      recovery.state?.status === "not_required"
 
     useImperativeHandle(ref, () => ({
       exportPdf: () => {
@@ -66,10 +74,20 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
             {error}
           </div>
         )}
-        {!isLoading && !error && isGraphArtifact && artifact && (
+        {!isLoading && !error && artifact && hasLiveQueries && !dataIsReady && (
+          <ArtifactDataRecovery
+            state={recovery.state}
+            error={recovery.error}
+            isChecking={recovery.isChecking}
+            isStarting={recovery.isStarting}
+            onRecover={() => void recovery.startRecovery()}
+            onRetryCheck={() => void recovery.refetch()}
+          />
+        )}
+        {!isLoading && !error && dataIsReady && isGraphArtifact && artifact && (
           <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} />
         )}
-        {!isLoading && !error && artifact && !isGraphArtifact && (
+        {!isLoading && !error && dataIsReady && artifact && !isGraphArtifact && (
           <iframe
             ref={iframeRef}
             key={artifactId}
