@@ -85,6 +85,7 @@ interface SidebarStoryProps {
 function SeedSidebarStore({ children, threadsStatus = "loaded" }: SidebarStoryProps) {
   useEffect(() => {
     const state = useAppStore.getState()
+    useAppStore.setState({ activeDomainId: "workspace-1" })
     useAppStore.setState({
       user: {
         id: "story-user",
@@ -96,7 +97,6 @@ function SeedSidebarStore({ children, threadsStatus = "loaded" }: SidebarStoryPr
       authStatus: "authenticated",
       authError: null,
       domains: workspaces,
-      activeDomainId: "workspace-1",
       domainsStatus: "loaded",
       domainsError: null,
       threadId: "thread-1",
