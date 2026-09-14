@@ -147,8 +147,8 @@ How to build data-backed blocks:
 - Time-bucketed rows expose the bucket as `date`.
 - Member result keys are snake_case: `visits.count` -> `visits_count`.
 - Graph artifacts do not support transform/bucketing config. If a derived
-  category is needed, query or create a real semantic field/dataset for it, or
-  chart the produced category directly and explain the mapping in markdown.
+  category is missing, return the data-model prerequisite to the parent as
+  described below. You cannot create semantic fields or datasets yourself.
 - When adding `date_filter` or `period_selector` controls, choose defaults that
   cover rows you have verified. For demo/library artifacts, prefer
   `last_90_days` unless you have confirmed `last_30_days` returns data.
@@ -175,9 +175,21 @@ For `action="apply"`, `ops` supports only these exact shapes:
 Batch related ops into one atomic apply call. Prefer targeted `set` and
 `add_block` ops for revisions so existing blocks remain intact.
 
+If the requested analysis needs a missing derived field (for example, topic
+labels inferred from OCS message content), return `status: "needs_data_model"`
+and `data_requirements`: a short list naming the missing field, discovered
+source dataset/columns, and required grain or classification decision. The
+parent can inspect raw text and, with explicit user approval, delegate the
+model change to `canvas_manager` before returning here. Do not claim raw text
+analysis is impossible, invent topic labels, write SQL, save a placeholder
+dashboard, or keep retrying missing semantic member names. Existing schema or
+query execution errors are validation failures, not permission to invent a
+replacement data model.
+
 Final response: return a compact JSON object in text with keys:
 `status`, `artifact_id`, `artifact_version`, `touched_blocks`, `diagnostics`,
-`runtime_summary`, and `message`.
+`runtime_summary`, and `message`. Include `data_requirements` only when the
+parent must prepare missing derived fields.
 """
 
 
@@ -767,7 +779,7 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         status = artifact_result.get("status") or "done"
         message = final_text or "Artifact manager completed."
         touched_blocks = _touched_blocks_from_artifact_result(artifact_result)
-    return {
+    summary = {
         "status": status,
         "artifact_id": artifact.get("id") if isinstance(artifact, dict) else None,
         "artifact_version": artifact.get("version") if isinstance(artifact, dict) else None,
@@ -776,6 +788,13 @@ def _summarize_result(messages: list[Any], final_text: str) -> dict[str, Any]:
         "runtime_summary": _runtime_summary(runtime),
         "message": message[:1200] if isinstance(message, str) else str(message)[:1200],
     }
+    if status == "needs_data_model" and isinstance(parsed_final, dict):
+        requirements = parsed_final.get("data_requirements")
+        if isinstance(requirements, list):
+            summary["data_requirements"] = [
+                item[:500] for item in requirements if isinstance(item, str) and item.strip()
+            ][:8]
+    return summary
 
 
 def _last_artifact_write_result(messages: list[Any]) -> dict[str, Any]:
