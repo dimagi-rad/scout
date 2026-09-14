@@ -262,11 +262,7 @@ def _semantic_catalog_context_sync(workspace) -> str:
 
 
 async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> str:
-    # TenantSchema/WorkspaceViewSchema MATERIALIZING is a dead state: the
-    # materializer records live work on MaterializationRun instead. Check the
-    # run state before accepting an existing semantic model as ready, otherwise
-    # a refresh in flight is hidden behind the last active catalog and the agent
-    # may start a second materialization.
+    # Runs track live work even while the previous semantic catalog remains active.
     materialization_in_progress = await MaterializationRun.objects.filter(
         tenant_schema__tenant__workspace_tenants__workspace_id=workspace.id,
         state__in=list(MaterializationRun.ACTIVE_STATES),
@@ -274,12 +270,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
     if materialization_in_progress:
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools. Briefly tell "
-            "the user it's still loading and end your turn — the system will "
-            "resume the conversation automatically when materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     try:
         return await sync_to_async(_semantic_catalog_context_sync, thread_sensitive=True)(workspace)
@@ -307,12 +298,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
-                    else (
-                        "A materialization is already in progress in the background. Do NOT "
-                        "trigger another one and do NOT call other data tools. Briefly tell "
-                        "the user it's still loading and end your turn — the system will "
-                        "resume the conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
             return (
                 "Data is loaded, but no semantic datasets are available yet. "
@@ -325,12 +311,7 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 return (
                     _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
                     if not interactive
-                    else (
-                        "A materialization is already in progress in the background. Do NOT "
-                        "trigger another one and do NOT call other data tools. Briefly tell "
-                        "the user it's still loading and end your turn — the system will "
-                        "resume the conversation automatically when materialization completes."
-                    )
+                    else _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
                 )
             return (
                 f"{_MULTI_TENANT_NAMESPACE_HINT}\n\n"
@@ -348,6 +329,16 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
                 "conversation automatically when materialization completes."
             )
         )
+
+
+# Only the thread that dispatched a load has a completion callback.
+_INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
+    "A materialization is already in progress in the background. Do NOT "
+    "trigger another one and do NOT call other data tools. Briefly tell "
+    "the user it's still loading and end your turn. If this conversation "
+    "did not start the load, ask the user to check back once loading finishes; "
+    "do not promise an automatic follow-up."
+)
 
 
 # HEADLESS (non-interactive, e.g. recipe) guidance. No Thread/checkpointer/resume
@@ -415,13 +406,7 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     if ts.state == SchemaState.MATERIALIZING:
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools (the data is "
-            "not yet ready). Briefly tell the user it's still loading and end "
-            "your turn — the system will resume the conversation automatically "
-            "when the current materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     try:
         pipeline_config = select_pipeline_config(provider=tenant.provider)
@@ -498,13 +483,7 @@ async def _fetch_multi_tenant_schema_context(workspace, user, interactive: bool 
     if active_run is not None or (vs is not None and vs.state == SchemaState.MATERIALIZING):
         if not interactive:
             return _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE
-        return (
-            "A materialization is already in progress in the background. Do NOT "
-            "trigger another one and do NOT call other data tools (the data is "
-            "not yet ready). Briefly tell the user it's still loading and end "
-            "your turn — the system will resume the conversation automatically "
-            "when the current materialization completes."
-        )
+        return _INTERACTIVE_MATERIALIZE_IN_PROGRESS_GUIDANCE
 
     if vs is None or vs.state != SchemaState.ACTIVE:
         if not interactive:
@@ -1040,7 +1019,27 @@ async def _build_system_prompt(
     no longer rewrites cached prefix bytes and defeats every cache hit (arch #254,
     finding 02#3). ``volatile_suffix`` may be "".
     """
-    cache_key = _system_prompt_cache_key(workspace, user, interactive, canvas_write)
+    tenant_count = await workspace.tenants.acount()
+    stable = await _build_stable_system_prompt(
+        workspace, user, tenant_count > 0, interactive, canvas_write
+    )
+    volatile = ""
+    if tenant_count > 0:
+        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
+        volatile = f"\n## Data Availability\n\n{semantic_context}\n"
+    return stable, volatile
+
+
+async def _build_stable_system_prompt(
+    workspace: Workspace,
+    user,
+    has_tenants: bool,
+    interactive: bool,
+    canvas_write: bool,
+) -> str:
+    cache_key = (
+        f"{_system_prompt_cache_key(workspace, user, interactive, canvas_write)}:{has_tenants}"
+    )
     cached = _system_prompt_cache.get(cache_key)
     if cached is not None:
         value, timestamp = cached
@@ -1060,12 +1059,7 @@ async def _build_system_prompt(
         # (arch #254, finding 01#4).
         stable_sections.append(f"\n{knowledge_context}\n")
 
-    # Volatile sections (after the cache breakpoint)
-    volatile_sections: list[str] = []
-
-    tenant_count = await workspace.tenants.acount()
-
-    if tenant_count > 0:
+    if has_tenants:
         stable_sections.append("""
 ## Workspace And Dataset Discovery
 
@@ -1105,9 +1099,6 @@ Dataset editing vocabulary:
 When results are truncated, suggest adding filters or using aggregations to reduce the result size.
 """)
 
-        semantic_context = await _fetch_semantic_model_context(workspace, interactive)
-        volatile_sections.append(f"\n## Data Availability\n\n{semantic_context}\n")
-
     if interactive and canvas_write:
         stable_sections.append("""
 ## Semantic Canvas (dataset editing)
@@ -1138,10 +1129,7 @@ currency, explain that a read-write workspace role is required.
 """)
 
     stable = "\n".join(stable_sections)
-    volatile = "\n".join(volatile_sections)
-    result = (stable, volatile)
-
-    _system_prompt_cache[cache_key] = (result, time.monotonic())
+    _system_prompt_cache[cache_key] = (stable, time.monotonic())
 
     if len(_system_prompt_cache) > 256:
         now = time.monotonic()
@@ -1151,7 +1139,7 @@ currency, explain that a read-write workspace role is required.
         for k in expired:
             del _system_prompt_cache[k]
 
-    return result
+    return stable
 
 
 __all__ = [
