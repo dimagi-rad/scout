@@ -12,6 +12,7 @@ result would wrongly archive access the user still has, so every fetch either
 returns a provably complete set or raises. Only authoritative denial triggers
 archival on an unsuccessful fetch:
   * HTTP 401/403 → record denial for the observed connection, then raise.
+    Connect global-list 403 is unknown-scope and raises without archival.
   * Other non-2xx → raise without revoking access.
   * missing expected key in a 2xx body → raise (never treat drift as "zero tenants").
   * CommCare pagination that can't be followed → raise (no silent truncation).
@@ -285,7 +286,9 @@ async def resolve_connect_opportunities(
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
-        await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
+        # This global list's 403 cannot establish which opportunities lost access.
+        if resp.status_code == 401:
+            await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
         raise ConnectAuthError(
             f"Connect returned {resp.status_code} while listing opportunities — the "
             f"access token is expired, revoked, or not authorized for this API"
@@ -406,8 +409,15 @@ async def _record_discovery_denial(connection, access_token, status, account=Non
         and connection is not None
         and connection.social_account_id not in (None, account.pk)
     ):
+        logger.warning(
+            "Skipping discovery denial: identity changed for connection=%s", connection.pk
+        )
         return
     if status not in (401, 403):
+        logger.warning(
+            "Skipping discovery denial: unsupported status for connection=%s",
+            connection.pk if connection else None,
+        )
         return
     await arecord_upstream_denial(
         connection,

@@ -41,20 +41,18 @@ async def identity(user, provider="commcare_connect", scope=""):
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("status", [401, 403])
-async def test_discovery_denial_archives_only_observed_connection(user, httpx_mock, status):
+async def test_connect_discovery_only_401_archives_observed_connection(user, httpx_mock, status):
     account, token, conn, tm = await identity(user)
     _, _, _other, sibling = await identity(user, "ocs", "other-team")
     httpx_mock.add_response(status_code=status)
     with pytest.raises(ConnectAuthError):
         await resolve_connect_opportunities(user, token.token, social_account=account)
     await tm.arefresh_from_db()
-    assert tm.archived_at is not None
+    assert (tm.archived_at is not None) == (status == 401)
     assert await TenantMembership.objects.filter(pk=sibling.pk).aexists()
     await conn.arefresh_from_db()
-    assert conn.upstream_denial_code == (
-        "AUTH_TOKEN_EXPIRED" if status == 401 else "AUTH_ACCESS_DENIED"
-    )
-    assert conn.upstream_denied_at is not None
+    assert conn.upstream_denial_code == ("AUTH_TOKEN_EXPIRED" if status == 401 else "")
+    assert (conn.upstream_denied_at is not None) == (status == 401)
 
 
 @pytest.mark.asyncio

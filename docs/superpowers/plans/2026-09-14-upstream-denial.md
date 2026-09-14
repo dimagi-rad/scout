@@ -58,3 +58,9 @@ Internal review reproduced an additional race: discovery begun without a connect
 The durable code records unresolved connection-wide denial for later coverage UI; tenant-scoped denials remain represented by archived memberships. The timestamp is a permanent ordering fence, not a current-denial boolean. UI consumption, periodic reconciliation, usable-credential coverage and all-of enforcement remain subsequent section-02 work.
 
 Takeover validation: 336 related PostgreSQL tests passed; 56 affected tests passed after final refresh-classification refinement. Ruff lint/format, migration consistency, Django system checks and diff checks passed. Updated Claude review remains the final automated review gate.
+
+## Second Claude pass
+
+Claude confirmed the initial seven findings and discovery races were addressed. Its next pass identified inconsistent treatment of Connect's global org/program-list 403. Discovery now matches the loader: this response has unknown opportunity scope, so it raises without archiving memberships. A 401 remains connection-wide and a per-opportunity 403 remains tenant-specific. The changed regression failed on the previous head.
+
+Denial-recorder declines now log their reason and connection ID; the scope marker is declared with shared enum values. Persistent refresh failure guidance points to administrator configuration checks. API-key recovery currently requires re-entering a validated key; the existing persistence flow restores memberships onto a new connection. Automatic API-key revalidation and retiring superseded denied connections are explicit follow-ups for periodic reconciliation/coverage UI, before that UI consumes denial state.

@@ -63,6 +63,8 @@ categories were recovered by substring-matching prose (#388 review).
 
 from __future__ import annotations
 
+from enum import StrEnum
+
 from apps.common.error_codes import ErrorCode
 
 
@@ -73,6 +75,11 @@ class ExpectedStateError(Exception):
     docstring for the four-part test a subclass must satisfy before it inherits
     from this.
     """
+
+
+class DenialScope(StrEnum):
+    TENANT = "tenant"
+    UNKNOWN = "unknown"
 
 
 class ExpectedUpstreamError(ExpectedStateError):
@@ -86,6 +93,7 @@ class ExpectedUpstreamError(ExpectedStateError):
 
     provider: str | None = None
     code: ErrorCode | None = None
+    denial_scope: DenialScope = DenialScope.TENANT
 
 
 class UpstreamTokenExpired(ExpectedUpstreamError):

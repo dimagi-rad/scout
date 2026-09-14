@@ -166,4 +166,4 @@ def test_opportunity_denial_retains_tenant_scope(loader):
         m.get(f"{BASE}/export/opportunity/814/", status_code=403)
         with pytest.raises(ConnectAccessDeniedError) as caught:
             loader.load()
-    assert getattr(caught.value, "denial_scope", "tenant") == "tenant"
+    assert caught.value.denial_scope == "tenant"

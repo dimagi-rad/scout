@@ -51,7 +51,7 @@ from django.utils import timezone
 from psycopg import sql as psql
 
 from apps.common.error_codes import code_of
-from apps.common.errors import UpstreamAccessDenied, UpstreamTokenExpired
+from apps.common.errors import DenialScope, UpstreamAccessDenied, UpstreamTokenExpired
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
@@ -459,7 +459,7 @@ def run_pipeline(
             )
         if (
             isinstance(e, (UpstreamTokenExpired, UpstreamAccessDenied))
-            and getattr(e, "denial_scope", None) != "unknown"
+            and e.denial_scope != DenialScope.UNKNOWN
             and not getattr(e, "denial_handled", False)
         ):
             record_upstream_denial(

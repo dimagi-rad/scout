@@ -97,7 +97,7 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
     ),
     ErrorCode.AUTH_REFRESH_FAILED: (
         "sign-in refresh could not complete — retry shortly. If the problem persists, "
-        "reconnect the affected account (Settings → Connections) and re-run materialization."
+        "ask an administrator to check the provider connection settings."
     ),
     ErrorCode.AUTH_ACCESS_DENIED: (
         "access was removed upstream, not an expired sign-in — reconnecting will "

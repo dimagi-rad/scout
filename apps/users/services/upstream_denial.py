@@ -1,5 +1,7 @@
 """Persist authoritative denial only while the observed credential still owns access."""
 
+import logging
+
 from allauth.socialaccount.models import SocialToken
 from asgiref.sync import sync_to_async
 from django.db import transaction
@@ -9,6 +11,8 @@ from django.utils import timezone
 from apps.common.error_codes import ErrorCode
 from apps.users.models import TenantConnection, TenantMembership, User
 from apps.users.services.oauth_scope import account_scope, provider_accounts
+
+logger = logging.getLogger(__name__)
 
 
 def credential_is_current(connection, credential, token_snapshot=None):
@@ -35,13 +39,18 @@ def record_upstream_denial(connection, *, credential, code, tenant_id=None, toke
     An unbound/new identity cannot revoke the connection it failed to replace.
     The user lock matches discovery/reconnect/disconnect's serialization boundary.
     """
-    if connection is None or code not in (
+    if connection is None:
+        logger.info("Skipping upstream denial: missing connection id=None")
+        return 0
+    if code not in (
         ErrorCode.AUTH_TOKEN_EXPIRED,
         ErrorCode.AUTH_ACCESS_DENIED,
     ):
+        logger.info("Skipping upstream denial: unsupported code for connection=%s", connection.pk)
         return 0
     with transaction.atomic():
         if not User.objects.select_for_update().filter(pk=connection.user_id).exists():
+            logger.info("Skipping upstream denial: missing user for connection=%s", connection.pk)
             return 0
         current = TenantConnection.objects.filter(
             pk=connection.pk,
@@ -50,7 +59,13 @@ def record_upstream_denial(connection, *, credential, code, tenant_id=None, toke
             social_account_id=connection.social_account_id,
             encrypted_credential=connection.encrypted_credential,
         ).first()
-        if current is None or not credential_is_current(current, credential, token_snapshot):
+        if current is None:
+            logger.info("Skipping upstream denial: connection changed id=%s", connection.pk)
+            return 0
+        if not credential_is_current(current, credential, token_snapshot):
+            logger.info(
+                "Skipping upstream denial: stale credential for connection=%s", connection.pk
+            )
             return 0
         now = timezone.now()
         memberships = TenantMembership.all_objects.filter(
