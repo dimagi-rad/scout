@@ -1027,6 +1027,26 @@ async def _build_system_prompt(
     if tenant_count > 0:
         semantic_context = await _fetch_semantic_model_context(workspace, interactive)
         volatile = f"\n## Data Availability\n\n{semantic_context}\n"
+        if tenant_count > 1:
+            coverage = (
+                await WorkspaceViewSchema.objects.filter(
+                    workspace_id=workspace.id, state=SchemaState.ACTIVE
+                )
+                .values_list("tenant_coverage", flat=True)
+                .afirst()
+            )
+            excluded = (coverage or {}).get("excluded_tenants") or []
+            if excluded:
+                names = ", ".join(
+                    f"{entry.get('provider', 'source')}: "
+                    f"{entry.get('external_id') or entry['tenant_id']}"
+                    for entry in excluded
+                )
+                volatile += (
+                    f"Sources excluded from the current query layer: {names}. "
+                    "Answers cover only included sources. Disclose the missing data; "
+                    "do not present partial results as covering the whole workspace.\n"
+                )
     return stable, volatile
 
 

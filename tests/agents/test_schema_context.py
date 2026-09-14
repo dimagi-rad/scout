@@ -11,7 +11,14 @@ from apps.agents.graph.base import (
     _fetch_semantic_model_context,
 )
 from apps.semantic.models import SemanticModel
-from apps.workspaces.models import MaterializationRun, SchemaState, TenantSchema
+from apps.users.models import Tenant
+from apps.workspaces.models import (
+    MaterializationRun,
+    SchemaState,
+    TenantSchema,
+    WorkspaceTenant,
+    WorkspaceViewSchema,
+)
 
 
 @pytest.fixture
@@ -478,3 +485,55 @@ async def test_build_system_prompt_multi_tenant_no_data_pre_fetched():
     # — that was the bug. The agent should know up front there is no data.
     assert "Call `list_tables` to see all available tables." not in prompt
     assert "list_datasets" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("interactive", [True, False])
+async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
+    workspace, tenant, user, interactive
+):
+    graph_base._system_prompt_cache.clear()
+    missing = await Tenant.objects.acreate(provider="commcare", external_id="missing-domain")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=missing)
+    view = await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_prompt_coverage",
+        state=SchemaState.ACTIVE,
+        tenant_coverage={
+            "included_tenants": [{"tenant_id": str(tenant.id), "external_id": tenant.external_id}],
+            "excluded_tenants": [
+                {
+                    "tenant_id": str(missing.id),
+                    "provider": "commcare",
+                    "external_id": missing.external_id,
+                }
+            ],
+        },
+    )
+    with (
+        patch("apps.agents.graph.base.time.monotonic", return_value=100),
+        patch("apps.agents.graph.base.KnowledgeRetriever") as retriever,
+        patch(
+            "apps.agents.graph.base._fetch_semantic_model_context",
+            AsyncMock(return_value="Data is loaded and ready."),
+        ),
+    ):
+        retriever.return_value.retrieve = AsyncMock(return_value="Knowledge")
+        stable, degraded = await graph_base._build_system_prompt(workspace, user, interactive)
+        await WorkspaceViewSchema.objects.filter(pk=view.pk).aupdate(
+            tenant_coverage={
+                "included_tenants": [{"tenant_id": str(tenant.id)}, {"tenant_id": str(missing.id)}],
+                "excluded_tenants": [],
+            }
+        )
+        stable_again, recovered = await graph_base._build_system_prompt(
+            workspace, user, interactive
+        )
+    assert "missing-domain" in degraded
+    assert "excluded" in degraded.lower()
+    assert "disclose" in degraded.lower()
+    assert "missing-domain" not in recovered
+    assert stable == stable_again
+    retriever.return_value.retrieve.assert_awaited_once()
+    graph_base._system_prompt_cache.clear()
