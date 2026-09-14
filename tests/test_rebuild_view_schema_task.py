@@ -16,7 +16,11 @@ from apps.workspaces.models import (
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
-from apps.workspaces.tasks import _semantic_layer_state, rebuild_workspace_view_schema
+from apps.workspaces.tasks import (
+    _defer_cube_promotion,
+    _semantic_layer_state,
+    rebuild_workspace_view_schema,
+)
 
 
 @pytest.fixture
@@ -256,3 +260,12 @@ async def test_older_live_writer_still_defers_promotion(workspace, tenant):
         result = await rebuild_workspace_view_schema(str(workspace.id))
     cube.assert_not_called()
     assert result["cube_schema"]["status"] == "deferred"
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_first_model_build_can_be_deferred_without_fabricating_catalog(workspace):
+    outcome = await _defer_cube_promotion(workspace)
+    assert outcome["status"] == "deferred"
+    assert not await SemanticModel.objects.filter(workspace=workspace).aexists()
+    assert await _semantic_layer_state(workspace) == ("unknown", "")

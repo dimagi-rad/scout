@@ -26,6 +26,7 @@ from apps.workspaces.tasks import (
     TENANT_NOT_RUN,
     _aggregate_materialization_state,
     _credential_guidance,
+    _defer_cube_promotion,
     _semantic_layer_state,
     _summary_failures,
     resume_thread_after_materialization,
@@ -1742,3 +1743,34 @@ async def test_deferred_semantic_state_checks_current_availability_and_writers(
     assert state == expected
     if run_state != "loading":
         assert "still refreshing" not in reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("writer_active", [False, True])
+async def test_deferral_retains_prior_validation_failure(workspace, tenant, writer_active):
+    model = await SemanticModel.objects.acreate(
+        workspace=workspace,
+        name="Previous",
+        metadata={"last_build": {"ok": False, "error": "Cube validation failed: bad metric"}},
+    )
+    await CubeSchema.objects.acreate(
+        workspace=workspace,
+        semantic_model=model,
+        filename="previous.yaml",
+        content="cubes: []",
+        content_hash="previous",
+    )
+    if writer_active:
+        schema = await TenantSchema.objects.acreate(
+            tenant=tenant, schema_name="prior_error_writer", state=SchemaState.ACTIVE
+        )
+        await MaterializationRun.objects.acreate(
+            tenant_schema=schema, pipeline="sync", state="loading"
+        )
+    await _defer_cube_promotion(workspace)
+    await model.arefresh_from_db()
+    assert model.metadata["last_build"]["error"] == "Cube validation failed: bad metric"
+    state, reason = await _semantic_layer_state(workspace)
+    assert state == "stale"
+    assert "Cube validation failed: bad metric" in reason

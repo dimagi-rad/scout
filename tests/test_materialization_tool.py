@@ -269,3 +269,26 @@ async def test_headless_materialization_reports_deferred_promotion(workspace, us
     assert result["status"] == "partial"
     assert "deferred" in result["message"]
     assert "failed" not in result["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("loaded", [0, 1])
+async def test_deferred_promotion_keeps_actual_load_outcome(workspace, user, monkeypatch, loaded):
+    async def core(*args):
+        return {
+            "all_succeeded": False,
+            "tenants": [{"tenant": f"source-{i}", "success": i < loaded} for i in range(2)],
+            "view_schema": {"ok": True},
+            "cube_schema": {"ok": False, "status": "deferred"},
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == ("partial" if loaded else "failed")
+    assert "source-1" in result["message"]
+    assert "deferred" in result["message"]
+    if loaded:
+        assert "older data may still be included" in result["message"]
+    else:
+        assert "no data was loaded" in result["message"]

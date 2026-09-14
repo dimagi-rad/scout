@@ -1041,6 +1041,11 @@ async def _included_tenant_snapshot_state(workspace, tenant_coverage) -> str:
 
 
 async def _defer_cube_promotion(workspace) -> dict:
+    """Describe pending build work, even before the first semantic model exists.
+
+    This operation outcome does not assert catalog availability; creating a
+    placeholder model merely to record a deferral would change that contract.
+    """
     reason = "Semantic promotion is waiting for an included source's refresh to finish."
     await _to_thread_fresh_db(record_cube_schema_build_deferred, workspace, reason)
     return {"ok": False, "status": "deferred", "reason": reason}
@@ -2046,6 +2051,8 @@ async def _semantic_layer_state(workspace) -> tuple[str, str]:
     if not has_active or model.status != SemanticModel.Status.ACTIVE:
         return "unavailable", error or "no active semantic model and Cube schema are available"
     if last_build.get("status") == "deferred":
+        if error:
+            return "stale", error
         coverage = (
             await WorkspaceViewSchema.objects.filter(workspace=workspace, state=SchemaState.ACTIVE)
             .values_list("tenant_coverage", flat=True)

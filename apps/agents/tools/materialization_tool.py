@@ -77,16 +77,14 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         all_loaded = bool(summary.get("all_succeeded"))
 
         cube_outcome = summary.get("cube_schema") or {}
-        if cube_outcome.get("status") == "deferred":
-            status = "partial"
+        promotion_deferred = cube_outcome.get("status") == "deferred"
+        if all_loaded and view_ok:
+            status = "partial" if promotion_deferred else "completed"
             message = (
-                "Semantic promotion is deferred while an included source is still refreshing. "
-                "Check current data availability before analysis; do not claim a fresh complete "
-                "semantic snapshot yet."
+                "All tenants refreshed."
+                if promotion_deferred
+                else "Data loaded successfully. Continue with the analysis."
             )
-        elif all_loaded and view_ok:
-            status = "completed"
-            message = "Data loaded successfully. Continue with the analysis."
         elif all_loaded:
             # Nothing left to load and still no queryable surface, so the view
             # build itself is broken (its exception is swallowed into
@@ -123,6 +121,13 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         else:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
+
+        if promotion_deferred:
+            message += (
+                " Semantic promotion is deferred while an included source is still refreshing. "
+                "Check current data availability before analysis; do not claim a fresh complete "
+                "semantic snapshot yet."
+            )
 
         if view_ok and coverage:
             warning = coverage_warning(coverage)

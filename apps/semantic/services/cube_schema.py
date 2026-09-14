@@ -91,6 +91,7 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
         model = SemanticModel.objects.filter(workspace=workspace).first()
         if model is None:
             return
+        previous_error = ((model.metadata or {}).get("last_build") or {}).get("error")
         model.metadata = {
             **(model.metadata or {}),
             "last_build": {
@@ -100,6 +101,8 @@ def record_cube_schema_build_deferred(workspace, reason: str) -> None:
                 "at": timezone.now().isoformat(),
             },
         }
+        if previous_error:
+            model.metadata["last_build"]["error"] = previous_error
         model.save(update_fields=["metadata", "updated_at"])
     except Exception:
         logger.exception("Failed to record deferred Cube promotion for workspace %s", workspace.id)
