@@ -60,10 +60,10 @@ def record_upstream_denial(connection, *, credential, code, tenant_id=None, toke
             encrypted_credential=connection.encrypted_credential,
         ).first()
         if current is None:
-            logger.info("Skipping upstream denial: connection changed id=%s", connection.pk)
+            logger.warning("Skipping upstream denial: connection changed id=%s", connection.pk)
             return 0
         if not credential_is_current(current, credential, token_snapshot):
-            logger.info(
+            logger.warning(
                 "Skipping upstream denial: stale credential for connection=%s", connection.pk
             )
             return 0

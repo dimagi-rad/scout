@@ -12,7 +12,9 @@ result would wrongly archive access the user still has, so every fetch either
 returns a provably complete set or raises. Only authoritative denial triggers
 archival on an unsuccessful fetch:
   * HTTP 401/403 → record denial for the observed connection, then raise.
-    Connect global-list 403 is unknown-scope and raises without archival.
+    Connect org/program export-list 403 is an endpoint-specific exception:
+    it can reject export scope without revoking opportunity membership.
+    CommCare user-domain and OCS team-membership lists retain scoped denial semantics.
   * Other non-2xx → raise without revoking access.
   * missing expected key in a 2xx body → raise (never treat drift as "zero tenants").
   * CommCare pagination that can't be followed → raise (no silent truncation).
@@ -170,6 +172,10 @@ def _sync_memberships(
     """Upsert memberships for ``fresh_tenants`` and archive this connection's stale ones.
 
     ``fresh_tenants`` must be the **complete** set the upstream fetch returned.
+    A discovery begun after denial restores listed tenant memberships, including
+    earlier tenant-403 tombstones. This is the membership recovery contract; it
+    does not prove every loader/export endpoint is usable. Persisting endpoint
+    denial through discovery would also need a separate recovery probe/lifecycle.
     Uses ``all_objects`` so a revoked tombstone is reused (un-archived) instead of
     colliding on ``unique(user, tenant)``. Archival is scoped to ``connection`` — so
     an OAuth refresh never touches an API-key connection's memberships or another
@@ -286,7 +292,7 @@ async def resolve_connect_opportunities(
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code in (401, 403):
-        # This global list's 403 cannot establish which opportunities lost access.
+        # Export-list permission can be denied while opportunity membership remains valid.
         if resp.status_code == 401:
             await _record_discovery_denial(observed, access_token, resp.status_code, social_account)
         raise ConnectAuthError(

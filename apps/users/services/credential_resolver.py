@@ -230,12 +230,9 @@ def _make_token_refresher(
 async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
     """Build an OAuth credential dict, refreshing the token if near expiry.
 
-    Fails closed (raises ``CredentialResolutionError`` with ``AUTH_TOKEN_EXPIRED``)
-    when the token is at/near expiry and cannot be renewed. Serving a known-stale
-    token only provisions a schema and burns the discover phase before the first
-    authenticated request 401s, and no 401 downstream maps to actionable
-    re-authentication guidance — so we surface "reconnect your account" up front
-    instead of a doomed run (arch #252, finding 14#4).
+    Fails closed when a near-expiry token cannot be renewed. A rejected grant or
+    unrefreshable token needs reconnect; other refresh failures preserve their
+    distinct code so provider outages do not masquerade as revoked sign-in.
 
     When a refresh is possible the credential carries a ``refresh`` callable so
     loaders can renew the token mid-run and survive a token whose lifetime is
@@ -257,7 +254,12 @@ async def _aresolve_oauth_credential(token_obj, provider: str) -> dict:
             token_value = await refresh_oauth_token(token_obj, token_url)
         except TokenRefreshError as e:
             logger.warning("Token refresh failed for provider %s; failing closed", provider)
-            raise CredentialResolutionError(AUTH_TOKEN_EXPIRED, _reauth_message(provider)) from e
+            message = (
+                _reauth_message(provider)
+                if e.code == AUTH_TOKEN_EXPIRED
+                else f"Sign-in refresh could not complete for {provider}."
+            )
+            raise CredentialResolutionError(e.code, message) from e
 
     cred: dict = {"type": "oauth", "value": token_value}
     if can_refresh:

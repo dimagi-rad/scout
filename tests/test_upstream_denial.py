@@ -329,3 +329,24 @@ async def test_rejected_replacement_with_same_token_cannot_revoke_current_identi
     assert await TenantMembership.objects.filter(pk=membership.pk).aexists()
     await connection.arefresh_from_db()
     assert connection.upstream_denial_code == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_new_complete_discovery_restores_listed_membership_after_tenant_denial(
+    user, httpx_mock
+):
+    account, token, conn, tm = await identity(user)
+    await arecord_upstream_denial(
+        conn, credential=token.token, code=ErrorCode.AUTH_ACCESS_DENIED, tenant_id=tm.tenant_id
+    )
+    assert not await TenantMembership.objects.filter(pk=tm.pk).aexists()
+    await conn.arefresh_from_db()
+    denial_fence = conn.upstream_denied_at
+    httpx_mock.add_response(json={"opportunities": [{"id": 1, "name": "A"}]})
+    restored = await resolve_connect_opportunities(user, token.token, social_account=account)
+    assert [membership.pk for membership in restored] == [tm.pk]
+    assert await TenantMembership.objects.filter(pk=tm.pk).aexists()
+    await conn.arefresh_from_db()
+    assert conn.upstream_denied_at == denial_fence
+    assert httpx_mock.get_request().headers["Authorization"] == f"Bearer {token.token}"

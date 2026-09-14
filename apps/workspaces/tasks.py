@@ -100,8 +100,8 @@ _CREDENTIAL_GUIDANCE: dict[str, str] = {
         "ask an administrator to check the provider connection settings."
     ),
     ErrorCode.AUTH_ACCESS_DENIED: (
-        "access was removed upstream, not an expired sign-in — reconnecting will "
-        "NOT restore it, because it mints a token with exactly the same access. "
+        "access was removed upstream or this resource is restricted — reconnecting "
+        "alone does not change upstream permissions. "
         "Ask an admin on the affected provider to restore access, or remove that "
         "data source from the workspace."
     ),

@@ -6,6 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from django.utils import timezone
 
+from apps.common.error_codes import ErrorCode
+from apps.users.services.token_refresh import (
+    TokenRefreshError,
+    TokenRefreshRejected,
+    TokenRefreshUnavailable,
+)
+
 
 @pytest.mark.django_db
 class TestCredentialResolverTokenRefresh:
@@ -58,15 +65,21 @@ class TestCredentialResolverTokenRefresh:
             assert result["value"] == "still-valid-token"
 
     @pytest.mark.asyncio
-    async def test_refresh_failure_fails_closed(self):
+    @pytest.mark.parametrize(
+        "error_type,code",
+        [
+            (TokenRefreshError, ErrorCode.AUTH_REFRESH_FAILED),
+            (TokenRefreshUnavailable, ErrorCode.AUTH_REFRESH_FAILED),
+            (TokenRefreshRejected, ErrorCode.AUTH_TOKEN_EXPIRED),
+        ],
+    )
+    async def test_refresh_failure_fails_closed(self, error_type, code):
         """arch #252 (14#4): a refresh failure at/near expiry must fail closed
         with actionable reconnect guidance, not fall back to a stale token."""
         from apps.users.services.credential_resolver import (
             CredentialResolutionError,
             _aresolve_oauth_credential,
         )
-        from apps.users.services.token_refresh import TokenRefreshError
-        from mcp_server.envelope import AUTH_TOKEN_EXPIRED
 
         mock_token = MagicMock()
         mock_token.token = "known-stale-token"
@@ -77,13 +90,13 @@ class TestCredentialResolverTokenRefresh:
             patch(
                 "apps.users.services.credential_resolver.refresh_oauth_token",
                 new_callable=AsyncMock,
-                side_effect=TokenRefreshError("fail"),
+                side_effect=error_type("fail"),
             ),
             pytest.raises(CredentialResolutionError) as exc,
         ):
             await _aresolve_oauth_credential(mock_token, "commcare")
-        assert exc.value.code == AUTH_TOKEN_EXPIRED
-        assert "reconnect" in exc.value.message.lower()
+        assert exc.value.code == code
+        assert ("reconnect" in exc.value.message.lower()) == (code == ErrorCode.AUTH_TOKEN_EXPIRED)
 
     @pytest.mark.asyncio
     async def test_near_expiry_with_no_refresh_capability_fails_closed(self):
