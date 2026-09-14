@@ -143,18 +143,31 @@ def dbt_model_name(name: str) -> str:
     return fit_identifier(name, unique_key=name)
 
 
-def dbt_column_alias(base: str, seen: dict[str, int]) -> str:
+def dbt_column_alias(
+    base: str,
+    seen: dict[str, int],
+    *,
+    reserved: set[str] | frozenset[str] = frozenset(),
+) -> str:
     """Return a unique dbt column alias, capped to 63 bytes.
 
     Duplicates are disambiguated (``base``, ``base_2``, ...) and only THEN passed
     through the byte guard — so distinct long property names cannot collapse to
     one physical column the way ``_unique_alias`` (which disambiguated *before*
     truncation) allowed.
+
+    ``reserved`` contains every literal alias in the model. Generated suffixes
+    skip those names, so ``status, status, status_2`` cannot produce two
+    ``status_2`` columns merely because the literal column is encountered last.
     """
-    if base in seen:
-        seen[base] += 1
-        unique = f"{base}_{seen[base]}"
-    else:
+    if base not in seen:
         seen[base] = 1
         unique = base
+    else:
+        occurrence = seen[base] + 1
+        unique = f"{base}_{occurrence}"
+        while unique in reserved:
+            occurrence += 1
+            unique = f"{base}_{occurrence}"
+        seen[base] = occurrence
     return fit_identifier(unique, unique_key=unique)

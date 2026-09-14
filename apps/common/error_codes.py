@@ -32,6 +32,11 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
     SCHEMA_BUILD_FAILED = "SCHEMA_BUILD_FAILED"
 
+    # No materialization pipeline could be resolved for a tenant's provider.
+    # Distinct from SCHEMA_BUILD_FAILED: the schema may be perfectly healthy —
+    # Scout just cannot say which loader wrote it, so it must not guess (#155).
+    PIPELINE_UNRESOLVED = "PIPELINE_UNRESOLVED"
+
     # HTTP 401 upstream: the credential is dead and reconnecting mints a working
     # one. Shared deliberately by the loaders and by credential_resolver's
     # pre-flight check — one condition, one code, however it is detected.
@@ -41,6 +46,12 @@ class ErrorCode(StrEnum):
     # Reconnecting mints an identically-scoped credential that fails the same
     # way, so this must never be collapsed into AUTH_TOKEN_EXPIRED (#372).
     AUTH_ACCESS_DENIED = "AUTH_ACCESS_DENIED"
+
+    # No live membership for this tenant, so this user's refresh never attempted
+    # it. Current access checks permit this transitional state; the ALL-of policy
+    # in #380 is a separate authorization change. No upstream auth was attempted,
+    # and another user's credential must not be substituted.
+    WORKSPACE_TENANT_UNREACHABLE = "WORKSPACE_TENANT_UNREACHABLE"
 
 
 def code_of(exc: BaseException) -> str:

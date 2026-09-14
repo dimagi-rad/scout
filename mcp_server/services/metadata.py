@@ -226,12 +226,16 @@ async def pipeline_describe_table(
     table_name: str,
     ctx: QueryContext,
     tenant_metadata: TenantMetadata | None,
-    pipeline_config: PipelineConfig,
+    pipeline_config: PipelineConfig | None,
 ) -> dict | None:
     """Describe a table using information_schema, enriched with discover-phase annotations.
 
     Returns None if the table does not exist in information_schema.
     JSONB columns (properties, form_data) receive descriptions derived from TenantMetadata.
+
+    ``pipeline_config`` is None for a multi-tenant ``ws_*`` view schema, which has
+    no single tenant and therefore no pipeline to attribute: the table gets no
+    pipeline-derived description rather than borrowing another provider's (#155).
     """
     result = await _execute_async_parameterized(
         ctx,
@@ -246,7 +250,11 @@ async def pipeline_describe_table(
     if not result.get("rows"):
         return None
 
-    source_descriptions = {s.physical_table_name: s.description for s in pipeline_config.sources}
+    source_descriptions = (
+        {s.physical_table_name: s.description for s in pipeline_config.sources}
+        if pipeline_config is not None
+        else {}
+    )
     jsonb_annotations = _build_jsonb_annotations(table_name, tenant_metadata)
 
     columns = []

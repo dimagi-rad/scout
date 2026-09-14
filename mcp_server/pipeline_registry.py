@@ -170,11 +170,18 @@ def _parse_pipeline(data: dict) -> PipelineConfig:
         )
         for r in rel_raw
     ]
+    provider = data.get("provider")
+    if not provider:
+        # Defaulting to commcare made a forgotten `provider:` key register as a
+        # commcare pipeline, so a commcare tenant could resolve to an unrelated
+        # pipeline. Raising instead lets _load_all record the file in
+        # load_errors, which reports as the deploy error it is (#155).
+        raise ValueError(f"Pipeline '{data['pipeline']}' declares no provider")
     return PipelineConfig(
         name=data["pipeline"],
         description=data.get("description", ""),
         version=data.get("version", "1.0"),
-        provider=data.get("provider", "commcare"),
+        provider=provider,
         sources=sources,
         metadata_discovery=metadata_discovery,
         transforms=transforms,

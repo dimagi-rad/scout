@@ -10,6 +10,7 @@ from apps.transformations.services.commcare_staging import (
     slugify_model_name,
     upsert_system_assets,
 )
+from apps.workspaces.models import TenantMetadata
 
 
 @pytest.fixture
@@ -244,6 +245,28 @@ class TestSlugifyModelName:
     def test_unicode_only_raises(self):
         with pytest.raises(ValueError, match="Cannot generate a valid model name"):
             slugify_model_name("日本語")
+
+
+@pytest.mark.django_db
+def test_form_aliases_do_not_collide_with_literal_suffix(tenant):
+    metadata = _make_metadata(
+        form_definitions={
+            "collision-form": {
+                "name": "Collision",
+                "questions": [
+                    {"value": "/data/status"},
+                    {"value": "/other/status"},
+                    {"value": "/data/status_2"},
+                ],
+            }
+        }
+    )
+
+    sql = generate_system_assets(tenant, metadata)[0].sql_content
+
+    assert sql.count(' AS "status"') == 1
+    assert sql.count(' AS "status_2"') == 1
+    assert sql.count(' AS "status_3"') == 1
 
 
 # ── Case type generation ───────────────────────────────────────────────────
@@ -697,15 +720,7 @@ class TestEmptyMetadata:
 
 @pytest.fixture
 def tenant_metadata(tenant):
-    from apps.users.models import TenantMembership, User
-    from apps.workspaces.models import TenantMetadata
-
-    user = User.objects.create_user(email="test@example.com", password="testpass")
-    membership = TenantMembership.objects.create(user=user, tenant=tenant)
-    return TenantMetadata.objects.create(
-        tenant_membership=membership,
-        metadata=_make_full_metadata(),
-    )
+    return TenantMetadata.objects.create(tenant=tenant, metadata=_make_full_metadata())
 
 
 @pytest.mark.django_db
@@ -737,14 +752,7 @@ class TestUpsertSystemAssets:
         assert second["total"] == first["total"] + 1
 
     def test_empty_metadata_returns_zeros(self, tenant):
-        from apps.users.models import TenantMembership, User
-        from apps.workspaces.models import TenantMetadata
-
-        user = User.objects.create_user(email="empty@example.com", password="testpass")
-        membership = TenantMembership.objects.create(user=user, tenant=tenant)
-        empty_meta = TenantMetadata.objects.create(
-            tenant_membership=membership, metadata=_make_metadata()
-        )
+        empty_meta = TenantMetadata.objects.create(tenant=tenant, metadata=_make_metadata())
         result = upsert_system_assets(tenant, empty_meta)
         assert result == {"created": 0, "updated": 0, "total": 0, "deleted": 0}
 

@@ -29,6 +29,7 @@ from mcp_server.context import QueryContext, load_tenant_context
 from mcp_server.envelope import NOT_FOUND, VALIDATION_ERROR
 from mcp_server.server import get_schema_status
 from mcp_server.services.pool import close_all_pools
+from mcp_server.services.query import execute_query
 
 # All async tests in this module use pytest-asyncio
 pytestmark = pytest.mark.asyncio(loop_scope="function")
@@ -37,6 +38,9 @@ pytestmark = pytest.mark.asyncio(loop_scope="function")
 # inside the function body, so we must patch on the source module.
 PATCH_INTERNAL_QUERY = "mcp_server.services.query.execute_internal_query"
 PATCH_WORKSPACE_CONTEXT = "mcp_server.server.load_workspace_context"
+# Pipeline resolution moved into apps.workspaces.services.pipeline_resolver,
+# so the tenant lookup is patched where it is now consumed.
+PATCH_RESOLVER_TENANT = "apps.workspaces.services.pipeline_resolver.Tenant"
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -194,13 +198,13 @@ class TestExecuteAsyncParameterized:
 
         # SET ROLE, search_path, timeout, actual query, then reset role/session.
         execute_calls = mock_cursor.execute.call_args_list
-        assert len(execute_calls) == 6
+        assert len(execute_calls) == 7
         assert "SET ROLE" in str(execute_calls[0][0][0])
         assert "RESET ROLE" in str(execute_calls[-2])
         assert "RESET ALL" in str(execute_calls[-1])
 
         # Verify the actual query was called with params
-        final_call = execute_calls[3]
+        final_call = execute_calls[4]
         assert "information_schema.tables" in final_call[0][0]
         assert final_call[0][1] == ("test_domain",)
 
@@ -307,7 +311,7 @@ class TestListTablesTool:
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.WorkspaceViewSchema") as mock_vs_cls,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
+            patch(PATCH_RESOLVER_TENANT) as mock_tenant_cls,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_LIST_TABLES, return_value=[]),
         ):
@@ -530,13 +534,13 @@ class TestDescribeTableTool:
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch("mcp_server.server.aget_tenant_metadata", new_callable=AsyncMock) as mock_tm,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=mock_table),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
+            mock_tm.return_value = MagicMock()
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -560,15 +564,15 @@ class TestDescribeTableTool:
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.Tenant") as mock_tenant_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch(PATCH_RESOLVER_TENANT) as mock_tenant_cls,
+            patch("mcp_server.server.aget_tenant_metadata", new_callable=AsyncMock) as mock_tm,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_DESCRIBE_TABLE, return_value=None),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
             mock_tenant_cls.objects.aget = AsyncMock(return_value=mock_tenant)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=None)
+            mock_tm.return_value = None
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=None)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -636,13 +640,13 @@ class TestGetMetadataTool:
         with (
             patch(PATCH_WORKSPACE_CONTEXT, new_callable=AsyncMock) as mock_ctx,
             patch("mcp_server.server.TenantSchema") as mock_ts_cls,
-            patch("mcp_server.server.TenantMetadata") as mock_tm_cls,
+            patch("mcp_server.server.aget_tenant_metadata", new_callable=AsyncMock) as mock_tm,
             patch("mcp_server.server.MaterializationRun") as mock_run_cls,
             patch(PATCH_PIPELINE_GET_METADATA, return_value=mock_result),
         ):
             mock_ctx.return_value = tenant_context
             mock_ts_cls.objects.filter.return_value.afirst = AsyncMock(return_value=mock_ts)
-            mock_tm_cls.objects.filter.return_value.afirst = AsyncMock(return_value=MagicMock())
+            mock_tm.return_value = MagicMock()
             mock_run_qs = MagicMock()
             mock_run_qs.order_by.return_value.afirst = AsyncMock(return_value=mock_run)
             mock_run_cls.objects.filter.return_value = mock_run_qs
@@ -1288,6 +1292,19 @@ class TestExecuteAsyncIntegration:
         assert result["columns"] == ["name", "value"]
         assert result["rows"] == [["beta", 2], ["gamma", 3]]
         assert result["row_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_agent_sql_can_use_like_patterns(self):
+        """Free-text search is the whole point of re-enabling raw SQL (issue #406).
+        A literal '%' must survive to the server: psycopg only skips placeholder
+        parsing when params is None, and an empty tuple is not None."""
+        result = await execute_query(
+            self._ctx(), "SELECT name FROM items WHERE name LIKE '%a%' ORDER BY name"
+        )
+
+        assert result["columns"] == ["name"]
+        assert result["rows"] == [["alpha"], ["beta"], ["gamma"]]
+        assert "items" in result["tables_accessed"]
 
     @pytest.mark.asyncio
     async def test_search_path_is_applied(self):

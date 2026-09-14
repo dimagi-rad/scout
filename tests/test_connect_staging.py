@@ -84,3 +84,24 @@ def test_generates_visit_staging_with_typed_columns(connect_tenant):
     assert "child_name" in rsql
     assert "muac" not in rsql
     assert "muac_confirmed" not in rsql
+
+
+@pytest.mark.django_db(transaction=True)
+def test_visit_aliases_do_not_collide_with_literal_suffix(connect_tenant):
+    form_defs = {
+        "collision": {
+            "questions": [
+                {"value": "/data/status", "repeat": False},
+                {"value": "/other/status", "repeat": False},
+                {"value": "/data/status_2", "repeat": False},
+            ]
+        }
+    }
+
+    sql = {a.name: a for a in generate_connect_assets(form_defs, connect_tenant)}[
+        "stg_visits"
+    ].sql_content
+
+    assert sql.count(' AS "status_2"') == 1
+    assert sql.count(' AS "status_3"') == 1
+    assert sql.count(' AS "status_4"') == 1

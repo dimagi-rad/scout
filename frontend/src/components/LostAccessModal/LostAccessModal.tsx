@@ -4,7 +4,6 @@ import { AlertTriangle } from "lucide-react"
 import { useAppStore } from "@/store/store"
 import { workspaceHasAccess } from "@/api/workspaces"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
-import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
 
 /** Distinct provider labels for a workspace, e.g. "CommCare" or "CommCare, Open Chat Studio". */
@@ -38,7 +37,6 @@ export function LostAccessModal() {
   const source = providerLabels(active.tenants ?? [])
 
   function goTo(ws: (typeof domains)[number]) {
-    recordWorkspaceUse(ws.id)
     setActiveDomain(ws.id)
     newThread()
     navigate(`${workspacePath(ws)}/chat`)

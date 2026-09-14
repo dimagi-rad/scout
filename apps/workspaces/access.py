@@ -106,6 +106,46 @@ async def _ashares_live_tenant(user, tenant_ids) -> bool:
     return await TenantMembership.objects.filter(user=user, tenant_id__in=tenant_ids).aexists()
 
 
+def covers_live_tenants(user, tenant_ids) -> bool:
+    """Whether the user has a live ``TenantMembership`` for EVERY id in ``tenant_ids``.
+
+    **Not the gate.** ``_shares_live_tenant`` above is still what decides access,
+    and it is still any-of; flipping it to covering-all is #380 and lands after
+    this. This predicate exists so the covering rule can be evaluated against
+    real membership data now.
+
+    Its purpose is to make the #156 → #380 dependency checkable: covering-all was
+    blocked because a user holding two OCS teams could only ever prove one, so the
+    rule would have denied a workspace spanning both with no way to self-remediate.
+    With multi-token OAuth that user holds a live membership for each tenant, and
+    this returns True — see
+    ``tests/test_ocs_multi_team_oauth.py::test_two_team_user_covers_an_all_of_workspace``.
+    """
+    if not tenant_ids:
+        return True
+    wanted = set(tenant_ids)
+    covered = set(
+        TenantMembership.objects.filter(user=user, tenant_id__in=wanted).values_list(
+            "tenant_id", flat=True
+        )
+    )
+    return wanted <= covered
+
+
+async def acovers_live_tenants(user, tenant_ids) -> bool:
+    """Async twin of ``covers_live_tenants``. Not the gate — see that docstring."""
+    if not tenant_ids:
+        return True
+    wanted = set(tenant_ids)
+    covered = {
+        tid
+        async for tid in TenantMembership.objects.filter(
+            user=user, tenant_id__in=wanted
+        ).values_list("tenant_id", flat=True)
+    }
+    return wanted <= covered
+
+
 def resolve_workspace_access_ex(user, workspace_id) -> WorkspaceAccess:
     """Resolve access, exposing the denial reason (see ``WorkspaceAccess``)."""
     try:

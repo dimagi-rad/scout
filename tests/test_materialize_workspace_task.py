@@ -7,7 +7,9 @@ import pytest
 from django.test import AsyncClient
 from django.utils import timezone
 
+from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.chat.models import Thread, ThreadJob
+from apps.common.error_codes import ErrorCode
 from apps.users.models import Tenant, TenantMembership
 from apps.users.services.credential_resolver import CredentialResolutionError
 from apps.workspaces import tasks as workspaces_tasks
@@ -68,7 +70,7 @@ def test_compose_failure_summary_surfaces_top_level_error(tenant):
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(transaction=True)
-async def test_aggregate_materialization_state_surfaces_top_level_error(tenant):
+async def test_aggregate_materialization_state_surfaces_top_level_error(workspace, tenant, user):
     schema = await TenantSchema.objects.acreate(
         tenant=tenant,
         schema_name="t_failure_aggregate",
@@ -86,7 +88,9 @@ async def test_aggregate_materialization_state_surfaces_top_level_error(tenant):
         },
     )
 
-    status, summary = await workspaces_tasks._aggregate_materialization_state(12345)
+    status, summary = await workspaces_tasks._aggregate_materialization_state(
+        12345, workspace, str(user.id)
+    )
 
     assert status == "failed"
     assert summary[0]["error"] == "ConnectionError: failed to reach host.docker.internal:8001"
@@ -171,7 +175,7 @@ async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
     workspace, tenant_membership_obj, context_with_job_id
 ):
     """A team-mismatch credential failure must surface a distinct, actionable
-    re-authorize message — NOT the generic "No credential configured" — so a
+    re-authorize message — NOT the generic "No usable credential could be resolved" — so a
     user logged into the wrong OCS team is told to re-connect (finding 07#3)."""
     with (
         patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
@@ -191,7 +195,7 @@ async def test_materialize_workspace_surfaces_team_mismatch_distinctly(
     assert result["all_succeeded"] is False
     tenant_result = result["tenants"][0]
     assert tenant_result["success"] is False
-    assert "No credential configured" not in tenant_result["error"]
+    assert "No usable credential could be resolved" not in tenant_result["error"]
     assert "re-connect" in tenant_result["error"]
     assert tenant_result["error_code"] == AUTH_TOKEN_EXPIRED
 
@@ -652,8 +656,15 @@ async def test_materialize_workspace_defers_resume_on_no_memberships_early_retur
             user_id="",
         )
 
-    # Early-return error envelope returned to the worker.
-    assert result == {"error": "No tenant memberships found", "tenants": []}
+    # Early-return error envelope returned to the worker. all_succeeded is now
+    # explicit rather than absent — callers read it, and a run that loaded nothing
+    # is not a success (#364). This workspace has no tenants, so none to name.
+    assert result == {
+        "error": "No tenant memberships found",
+        "tenants": [],
+        "all_succeeded": False,
+        "guidance": [],
+    }
     # But the resume task IS still deferred (in the finally block).
     resume_mock.defer_async.assert_awaited_once_with(thread_job_id=str(tj.id))
 
@@ -725,12 +736,25 @@ async def test_defer_resume_for_job_retries_when_threadjob_not_yet_committed(
         patch("apps.workspaces.tasks.resume_thread_after_materialization") as resume_mock,
     ):
         resume_mock.defer_async = AsyncMock(return_value=MagicMock(id=99))
-        await workspaces_tasks._defer_resume_for_job(job_id)
+        await workspaces_tasks._defer_resume_for_job(
+            job_id,
+            [
+                {
+                    "tenant_id": "recorded-tenant",
+                    "provider": "ocs",
+                    "error": "preflight failed",
+                    "error_code": "",
+                }
+            ],
+        )
 
     assert insert_state["inserted"], "fake_sleep should have inserted the ThreadJob"
     resume_mock.defer_async.assert_awaited_once_with(
         thread_job_id=insert_state["tj_id"],
     )
+
+    persisted_job = await ThreadJob.objects.aget(id=insert_state["tj_id"])
+    assert persisted_job.materialization_preflight_failures[0]["error"] == "preflight failed"
 
 
 @pytest.mark.asyncio
@@ -1168,3 +1192,379 @@ async def test_materialize_workspace_no_sibling_rebuild_when_none_qualify(
         )
 
     mock_rebuild.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #364 surface 1: materialize_workspace_core's return dict. A workspace tenant
+# the acting user cannot reach must be REPORTED, never silently skipped, and
+# never covered by a teammate's credential.
+# ---------------------------------------------------------------------------
+
+
+async def _add_second_tenant(workspace, *, external_id="teammate-domain", provider="commcare"):
+    """Put a second tenant in the workspace that `user` has no membership for."""
+    other = await Tenant.objects.acreate(
+        provider=provider, external_id=external_id, canonical_name=external_id
+    )
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    return other
+
+
+async def _materialize_as(user, workspace, *, pipeline_side_effect=None):
+    """Run the core as `user`, with the pipeline and both schema builds mocked."""
+    with (
+        patch("apps.workspaces.tasks.aresolve_credential", new_callable=AsyncMock) as mock_cred,
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+            side_effect=pipeline_side_effect,
+        ),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as mock_cube,
+    ):
+        mock_cred.return_value = {"type": "api_key", "value": "k"}
+        result = await workspaces_tasks.materialize_workspace_core(
+            str(workspace.id), user_id=str(user.id), job_id=None
+        )
+    return result, mock_cube
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_unreachable_workspace_tenant_is_reported_and_fails_the_run(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """The production path — user_id is always populated — had zero coverage.
+
+    A workspace tenant with no membership for the acting user never entered
+    tenant_results, so `all(...)` over a list it was absent from returned True
+    and the run reported success while loading a subset of the workspace (#364).
+    """
+    other = await _add_second_tenant(workspace)
+
+    result, _ = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False, "a workspace we could not fully load is not a success"
+    # Non-vacuous: both tenants are accounted for, so all() had something to fail on.
+    assert len(result["tenants"]) == 2
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[tenant.external_id]["success"] is True
+    unreachable = by_tenant[other.external_id]
+    assert unreachable["success"] is False
+    assert unreachable["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert other.external_id in unreachable["error"]
+    # Advice reaches the caller from _CREDENTIAL_GUIDANCE, attributed to the tenant.
+    assert result["guidance"] == [
+        f"{other.external_id}: "
+        f"{workspaces_tasks._CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE]}"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_a_teammates_membership_does_not_make_a_tenant_reachable(
+    workspace, tenant, tenant_membership_obj, user, django_user_model
+):
+    """Never resolve a credential from another member to satisfy this user's run.
+
+    The tenant IS reachable *by someone* — a teammate holds a live membership —
+    and that must not count. This user's token pulls this user's data; a
+    teammate's token only ever verifies the teammate's own access. Pins that the
+    `user_id` filter stays, rather than being relaxed to any-member resolution.
+    """
+    mate = await django_user_model.objects.acreate_user(email="mate@example.com", password="pass")
+    other = await _add_second_tenant(workspace, external_id="mates-bot")
+    await TenantMembership.objects.acreate(user=mate, tenant=other)
+
+    result, _ = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    assert len(result["tenants"]) == 2
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_archived_membership_does_not_make_a_tenant_reachable(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """An archived membership is upstream access that was removed — not access."""
+    other = await _add_second_tenant(workspace, external_id="revoked-domain")
+    await TenantMembership.objects.acreate(user=user, tenant=other, archived_at=timezone.now())
+
+    result, _ = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    assert len(result["tenants"]) == 2
+    by_tenant = {r["tenant"]: r for r in result["tenants"]}
+    assert by_tenant[other.external_id]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_fully_reachable_workspace_still_reports_success(
+    workspace, tenant, tenant_membership_obj, user
+):
+    """Regression guard: the coverage check must not fail a healthy workspace."""
+    result, mock_cube = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is True
+    assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
+    assert result["guidance"] == []
+    mock_cube.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_no_memberships_at_all_names_the_tenants_it_could_not_load(workspace, tenant, user):
+    """The early return gave ``"tenants": []``, so the caller could not tell which
+    sources were missing — or that anything was missing at all."""
+    await TenantMembership.objects.filter(user=user, tenant=tenant).adelete()
+
+    result, mock_cube = await _materialize_as(user, workspace)
+
+    assert result["all_succeeded"] is False
+    assert [r["tenant"] for r in result["tenants"]] == [tenant.external_id]
+    assert result["tenants"][0]["error_code"] == ErrorCode.WORKSPACE_TENANT_UNREACHABLE
+    assert result["guidance"]
+    mock_cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("retained_schema", [False, True])
+async def test_unreachable_tenant_cube_build_requires_full_workspace_view(
+    workspace, tenant, tenant_membership_obj, user, retained_schema
+):
+    """Use real view validation: missing schemas fail; retained ones remain included."""
+    other = await _add_second_tenant(workspace, external_id="unreachable-for-cube")
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="refreshed_tenant", state=SchemaState.ACTIVE
+    )
+    if retained_schema:
+        await TenantSchema.objects.acreate(
+            tenant=other, schema_name="retained_tenant", state=SchemaState.ACTIVE
+        )
+    conn = MagicMock()
+    conn.cursor.return_value.fetchall.return_value = [("cases",)]
+    with (
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            AsyncMock(return_value={"type": "api_key", "value": "k"}),
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry("commcare")),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            return_value={"status": "completed"},
+        ),
+        patch(
+            "apps.workspaces.services.schema_manager.get_managed_db_connection", return_value=conn
+        ) as connect,
+        patch("apps.workspaces.services.schema_manager.SchemaManager._create_readonly_role"),
+        patch(
+            "apps.workspaces.services.schema_manager.SchemaManager._revoke_stale_view_role_grants"
+        ),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+    assert result["all_succeeded"] is False
+    vs = await WorkspaceViewSchema.objects.aget(workspace=workspace)
+    if retained_schema:
+        assert vs.state == SchemaState.ACTIVE
+        assert result["view_schema"]["ok"] is True
+        cube.assert_called_once()
+        statements = [call.args[0] for call in conn.cursor.return_value.execute.call_args_list]
+        assert any(
+            hasattr(statement, "as_string")
+            and 'AS SELECT * FROM "retained_tenant"."cases"' in statement.as_string()
+            for statement in statements
+        )
+    else:
+        assert vs.state == SchemaState.FAILED
+        assert other.external_id in vs.last_error
+        assert "no active schema" in vs.last_error
+        assert result["view_schema"]["ok"] is False
+        assert result["cube_schema"] is None
+        connect.assert_not_called()
+        cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_cube_build_is_still_skipped_when_an_attempted_tenant_fails(
+    multi_tenant_workspace, tenant_membership_obj, user
+):
+    """The #404 gate is unchanged for a tenant we actually tried and lost: its
+    data is half-written, so promoting a schema over it is not safe."""
+    result, mock_cube = await _materialize_as(
+        user, multi_tenant_workspace, pipeline_side_effect=RuntimeError("load blew up")
+    )
+
+    assert result["all_succeeded"] is False
+    assert [r["success"] for r in result["tenants"]] == [False, False]
+    mock_cube.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("code", [ErrorCode.AUTH_TOKEN_EXPIRED, ErrorCode.AUTH_ACCESS_DENIED])
+async def test_core_preserves_coded_pipeline_failure_guidance(
+    workspace, tenant_membership_obj, user, code
+):
+    with (
+        patch(
+            "apps.workspaces.tasks.aresolve_credential",
+            AsyncMock(return_value={"type": "api_key", "value": "k"}),
+        ),
+        patch("apps.workspaces.tasks.get_registry", return_value=_mock_registry()),
+        patch(
+            "apps.workspaces.tasks._run_pipeline_with_progress",
+            side_effect=CredentialResolutionError(code, "upstream rejected token"),
+        ),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+    ):
+        result = await workspaces_tasks.materialize_workspace_core(str(workspace.id), str(user.id))
+    assert result["all_succeeded"] is False
+    assert result["tenants"][0]["error_code"] == code
+    assert result["guidance"]
+    expected = (
+        "reconnect the affected account" if code == ErrorCode.AUTH_TOKEN_EXPIRED else "Ask an admin"
+    )
+    assert expected in result["guidance"][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("missing", ["pipeline", "credential"])
+async def test_headless_preflight_failure_preserves_real_core_reason(
+    workspace, tenant_membership_obj, user, missing
+):
+    registry = _mock_registry("commcare")
+    if missing == "pipeline":
+        registry.list.return_value = []
+    summaries = []
+
+    async def run_core(*args):
+        summary = await workspaces_tasks.materialize_workspace_core(*args)
+        summaries.append(summary)
+        return summary
+
+    with (
+        patch("apps.workspaces.tasks.materialize_workspace_blocking", run_core),
+        patch("apps.workspaces.tasks.get_registry", return_value=registry),
+        patch("apps.workspaces.tasks.aresolve_credential", AsyncMock(return_value=None)),
+    ):
+        result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "failed"
+    if missing == "pipeline":
+        assert "pipeline" in result["message"].lower()
+        assert "administrator" in result["message"]
+        assert "configure" in result["message"]
+        assert ".." not in result["message"]
+        assert summaries[0]["tenants"][0]["error_code"] == ErrorCode.PIPELINE_UNRESOLVED
+    else:
+        assert "No usable credential could be resolved" in result["message"]
+        assert "error_code" not in summaries[0]["tenants"][0]
+    assert "expired" not in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("reason", ["pipeline", "credential", "expired"])
+@pytest.mark.parametrize("all_missing", [False, True])
+async def test_preflight_reason_survives_core_wrapper_and_resume(
+    workspace, tenant, tenant_membership_obj, user, context_with_job_id, reason, all_missing
+):
+    other = await _add_second_tenant(workspace, provider="ocs", external_id=tenant.external_id)
+    await TenantMembership.objects.acreate(user=user, tenant=other)
+    thread = await Thread.objects.acreate(workspace=workspace, user=user)
+    job_id = context_with_job_id.job.id
+    tj = await ThreadJob.objects.acreate(
+        thread=thread,
+        job_type="materialization",
+        procrastinate_job_id=job_id,
+        tool_call_id="preflight",
+    )
+    registry = _mock_registry("commcare")
+    registry.list.return_value = [_mock_pipeline("commcare"), _mock_pipeline("ocs")]
+    if reason == "pipeline":
+        registry.list.return_value = [] if all_missing else [_mock_pipeline("commcare")]
+
+    async def credential(membership):
+        if membership.tenant_id == other.id or all_missing:
+            if reason == "expired":
+                raise CredentialResolutionError(
+                    ErrorCode.AUTH_TOKEN_EXPIRED, "Sign-in expired before loading"
+                )
+            return None
+        return {"type": "api_key", "value": "k"}
+
+    def pipeline(membership, *args, **kwargs):
+        schema = TenantSchema.objects.create(
+            tenant=membership.tenant, schema_name="covered_preflight", state=SchemaState.ACTIVE
+        )
+        MaterializationRun.objects.create(
+            tenant_schema=schema,
+            pipeline="commcare_sync",
+            state=MaterializationRun.RunState.COMPLETED,
+            procrastinate_job_id=job_id,
+        )
+        return {"status": "completed"}
+
+    persisted = []
+
+    async def fail_enqueue(**kwargs):
+        await tj.arefresh_from_db()
+        persisted.extend(tj.materialization_preflight_failures)
+        raise RuntimeError("queue unavailable")
+
+    with (
+        patch("apps.workspaces.tasks.get_registry", return_value=registry),
+        patch("apps.workspaces.tasks.aresolve_credential", credential),
+        patch("apps.workspaces.tasks._run_pipeline_with_progress", side_effect=pipeline),
+        patch("apps.workspaces.tasks.SchemaManager", return_value=MagicMock()),
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema"),
+        patch("apps.workspaces.tasks._rebuild_dependent_view_schemas", AsyncMock()),
+        patch(
+            "apps.workspaces.tasks.resume_thread_after_materialization.defer_async",
+            side_effect=fail_enqueue,
+        ),
+    ):
+        await materialize_workspace(context_with_job_id, str(workspace.id), str(user.id))
+    assert persisted
+    failure = next(item for item in persisted if item["tenant_id"] == str(other.id))
+    assert failure["provider"] == "ocs"
+    assert set(failure) == {"tenant_id", "provider", "error", "error_code"}
+    assert not await MaterializationRun.objects.filter(tenant_schema__tenant=other).aexists()
+    assert not await TenantSchema.objects.filter(tenant=other).aexists()
+    expected = {
+        "pipeline": "No pipeline available",
+        "credential": "No usable credential could be resolved",
+        "expired": "Sign-in expired before loading",
+    }[reason]
+    assert expected in failure["error"]
+    agent = MagicMock(ainvoke=AsyncMock(return_value={"messages": []}))
+    with patch("apps.workspaces.tasks._build_agent_for_resume", AsyncMock(return_value=agent)):
+        await workspaces_tasks.resume_thread_after_materialization(None, str(tj.id))
+    body = agent.ainvoke.await_args.args[0]["messages"][0].content
+    await tj.arefresh_from_db()
+    assert expected in body
+    assert expected in tj.error_summary
+    if reason == "credential":
+        assert "resolved." in tj.error_summary
+        assert "resolved This" not in tj.error_summary
+    assert "preflight_recorded" not in body
+    assert "run recorded nothing" not in body
+    assert "  " not in tj.error_summary
+    if reason == "pipeline":
+        assert "administrator" in tj.error_summary
+        assert "configure" in tj.error_summary
+        assert "before retrying" in tj.error_summary
+    assert f"{tenant.external_id} (ocs)" in body.split("IMPORTANT:")[-1]
+    if reason == "expired":
+        assert "Settings → Connections" in tj.error_summary
+        if not all_missing:
+            assert f"{tenant.external_id} (ocs): expired" in tj.error_summary

@@ -32,6 +32,26 @@ Parameters:
     Type: AWS::EC2::KeyPair::KeyName
     Description: SSH key pair for EC2 instance (used by Kamal for deploys)
 
+  EC2AmiId:
+    Type: AWS::EC2::Image::Id
+    Description: >-
+      Ubuntu 24.04 AMI for the web instance. Pinned deliberately and with NO default:
+      this used to be an SSM reference to the latest Ubuntu image, which meant every
+      stack operation after Canonical published a new image saw ImageId change and
+      REPLACED the instance regardless of what was edited (the 2026-07-06 outage).
+      Pass UsePreviousValue=true on routine updates. To find the value the running
+      instance is already on -- pass THAT on the first update, or you will trigger the
+      very replacement this parameter exists to prevent:
+        aws ec2 describe-instances --profile scout --region us-east-1 \
+          --filters Name=tag:Name,Values=scout-web \
+                    Name=instance-state-name,Values=running \
+          --query 'Reservations[].Instances[].ImageId' --output text
+      To take a newer Ubuntu image, look one up and pass it explicitly, accepting that
+      doing so replaces the instance:
+        aws ssm get-parameter --profile scout --region us-east-1 \
+          --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id \
+          --query Parameter.Value --output text
+
   EC2InstanceType:
     Type: String
     Default: t3.medium
@@ -221,9 +241,27 @@ Resources:
                   - !Sub '${McpLogGroup.Arn}:*'
                   - !Sub '${WorkerLogGroup.Arn}:*'
                   - !Sub '${FrontendLogGroup.Arn}:*'
-        # Transactional email (workspace invites) via Amazon SES using the
-        # instance role — no access keys. The API builds the message; the
-        # Procrastinate worker actually sends it. Both run on this instance.
+        # Transactional email (workspace invites) via Amazon SES. The API builds
+        # the message; the Procrastinate worker actually sends it.
+        #
+        # This policy is NOT what sends production email, despite its name. The
+        # worker runs on the scout_shared Docker bridge, and HttpPutResponseHopLimit: 1
+        # below deliberately stops bridge containers reaching IMDS (arch #329), so the
+        # worker cannot assume this role. It authenticates instead with static
+        # send-only keys (IAM user scout-ses-worker) fetched from Secrets Manager at
+        # deploy time -- .kamal/secrets-common, config/deploy-worker.yml, and
+        # config/settings/production.py. That user and its secret are not in this
+        # template.
+        #
+        # DO NOT raise HttpPutResponseHopLimit to 2 to "fix" email. That re-opens the
+        # SSRF-to-IMDS hole arch #329 closed, and email is not broken.
+        #
+        # Nothing currently uses this policy, and it is safe to prune. The API does not
+        # call SES -- invite_notifications.py only does send_email.defer(), and the
+        # send_mail lives in the worker-executed task in apps/users/tasks.py -- it has
+        # no AWS_SES_* credentials (those appear only in config/deploy-worker.yml), and
+        # it runs on scout_shared too (config/deploy.yml), so it could not assume this
+        # role even if it tried.
         - PolicyName: scout-ses-send
           PolicyDocument:
             Version: '2012-10-17'
@@ -238,7 +276,7 @@ Resources:
     Type: AWS::EC2::Instance
     Properties:
       InstanceType: !Ref EC2InstanceType
-      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+      ImageId: !Ref EC2AmiId
       KeyName: !Ref EC2KeyPairName
       SubnetId: !Ref PublicSubnetA
       SecurityGroupIds:
@@ -286,6 +324,34 @@ Resources:
 
           # uv (Python package manager)
           curl -LsSf https://astral.sh/uv/install.sh | sudo -u scout bash
+
+          # Kamal connects as `scout` (config/deploy.yml plus the five other
+          # destinations), but the KeyName above is injected by cloud-init into the
+          # AMI's default `ubuntu` user only. Without this copy, a replaced instance
+          # is unreachable by CI -- which runs `kamal deploy` and nothing else, never
+          # `kamal setup` -- and recovery needs a human with the EC2 keypair. That is
+          # the 2026-07-06 SES/invites incident (handover kept outside this repo; ask in #scout).
+          # cloud-init writes the default user's authorized_keys during its init
+          # stage, before UserData runs in the final stage, so this file exists here.
+          if [ ! -f /home/ubuntu/.ssh/authorized_keys ]; then
+            echo "FATAL: /home/ubuntu/.ssh/authorized_keys missing -- cannot" >&2
+            echo "provision scout's deploy access. Check the EC2KeyPairName param." >&2
+            exit 1
+          fi
+          install -d -o scout -g scout -m 700 /home/scout/.ssh
+          install -o scout -g scout -m 600 /home/ubuntu/.ssh/authorized_keys \
+            /home/scout/.ssh/authorized_keys
+
+          # .kamal/hooks/pre-connect creates these too, but it reaches the host over
+          # SSH *as scout*, so it cannot bootstrap an instance that has never been
+          # deployed to. Idempotent create mirrors that hook: concurrent prod and
+          # staging deploys race, and `create` losing to an existing network is fine.
+          systemctl is-active --quiet docker || systemctl start docker
+          for net in scout_shared scout_staging_shared; do
+            docker network inspect "$net" >/dev/null 2>&1 \
+              || docker network create "$net" >/dev/null \
+              || docker network inspect "$net" >/dev/null
+          done
       Tags:
         - Key: Name
           Value: scout-web

@@ -134,6 +134,8 @@ class ThreadJob(models.Model):
     # Failure summary for the frontend error card, populated on FAILED/CANCELLED
     # from MaterializationRun.result["sources"] when available, else a generic string.
     error_summary = models.TextField(blank=True, default="")
+    # Preflight failures have no MaterializationRun; retain them for resume/recovery.
+    materialization_preflight_failures = models.JSONField(default=list, blank=True)
 
     class Meta:
         indexes = [

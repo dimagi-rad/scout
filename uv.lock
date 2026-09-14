@@ -2809,6 +2809,7 @@ dependencies = [
     { name = "redis" },
     { name = "sentry-sdk", extra = ["django"] },
     { name = "sqlalchemy" },
+    { name = "sqlglot" },
     { name = "taskbadger" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "whitenoise" },
@@ -2880,6 +2881,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.6" },
     { name = "sentry-sdk", extras = ["django"], specifier = ">=2.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "sqlglot", specifier = "==30.18.0" },
     { name = "taskbadger", specifier = ">=2.1.0a2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
     { name = "whitenoise", specifier = ">=6.12.0" },
@@ -3000,6 +3002,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/33/75/f28622ba6dde79cd545055ea7bd4062dc934e0621f7b3be2891f8563f8de/sqlalchemy-2.0.46-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:ff33c6e6ad006bbc0f34f5faf941cfc62c45841c64c0a058ac38c799f15b5ede", size = 3470008, upload-time = "2026-01-21T18:33:11.725Z" },
     { url = "https://files.pythonhosted.org/packages/a9/42/4afecbbc38d5e99b18acef446453c76eec6fbd03db0a457a12a056836e22/sqlalchemy-2.0.46-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:82ec52100ec1e6ec671563bbd02d7c7c8d0b9e71a0723c72f22ecf52d1755330", size = 3476137, upload-time = "2026-01-21T18:45:15.001Z" },
     { url = "https://files.pythonhosted.org/packages/fc/a1/9c4efa03300926601c19c18582531b45aededfb961ab3c3585f1e24f120b/sqlalchemy-2.0.46-py3-none-any.whl", hash = "sha256:f9c11766e7e7c0a2767dda5acb006a118640c9fc0a4104214b96269bfb78399e", size = 1937882, upload-time = "2026-01-21T18:22:10.456Z" },
+]
+
+[[package]]
+name = "sqlglot"
+version = "30.18.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e4/73/5b5ce3e23b3ded3ea1986c2c2991217460d5fd5161b3e00a8425f5dcb8a3/sqlglot-30.18.0.tar.gz", hash = "sha256:e57e1b205e341979d1df5b1212c1435c598a0437e4619e3f428b15d5bc3a5cc6", size = 6018496, upload-time = "2026-09-03T13:12:58.206Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/9f/3dd2ec8dd84a33e0092f1c815267bc055073f9e833b93e389c59c10f62cc/sqlglot-30.18.0-py3-none-any.whl", hash = "sha256:ee0f9a9f3e2193e763c326e52dfb377b96fdb4292f6305c3ff2d9a220e71c601", size = 748788, upload-time = "2026-09-03T13:12:56.467Z" },
 ]
 
 [[package]]

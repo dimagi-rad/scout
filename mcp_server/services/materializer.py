@@ -52,12 +52,13 @@ from psycopg import sql as psql
 
 from apps.common.error_codes import code_of
 from apps.knowledge.services.column_note_generator import sync_column_notes
-from apps.transformations.models import TransformationAsset
+from apps.transformations.models import TransformationAsset, TransformationRunStatus
 from apps.transformations.services.commcare_staging import upsert_system_assets
 from apps.transformations.services.connect_staging import upsert_connect_assets
 from apps.transformations.services.executor import run_transformation_pipeline
 from apps.workspaces.models import MaterializationRun, TenantMetadata, TenantSchema
 from apps.workspaces.services.schema_manager import SchemaManager, get_managed_db_connection
+from apps.workspaces.services.tenant_metadata import get_tenant_metadata
 from mcp_server.loaders.commcare_cases import CommCareCaseLoader
 from mcp_server.loaders.commcare_forms import CommCareFormLoader
 from mcp_server.loaders.commcare_metadata import CommCareMetadataLoader
@@ -221,9 +222,7 @@ def run_pipeline(
         # Asset generation failures are isolated — load can proceed without assets.
         if pipeline.provider == "commcare":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_system_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -231,6 +230,11 @@ def run_pipeline(
                         tenant_membership.tenant.external_id,
                         asset_result["created"],
                         asset_result["updated"],
+                    )
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
                     )
             except Exception:
                 logger.exception(
@@ -241,9 +245,7 @@ def run_pipeline(
         # Asset generation failures are isolated — the pipeline continues regardless.
         if pipeline.provider == "commcare_connect":
             try:
-                tenant_meta = TenantMetadata.objects.filter(
-                    tenant_membership=tenant_membership
-                ).first()
+                tenant_meta = get_tenant_metadata(tenant_membership.tenant_id)
                 if tenant_meta:
                     asset_result = upsert_connect_assets(tenant_membership.tenant, tenant_meta)
                     logger.info(
@@ -255,6 +257,11 @@ def run_pipeline(
                     form_defs = (tenant_meta.metadata or {}).get("form_definitions", {})
                     for ws in tenant_membership.tenant.workspaces.all():
                         async_to_sync(sync_column_notes)(ws, "stg_visits", form_defs)
+                else:
+                    logger.warning(
+                        "Skipping asset generation for %s: tenant metadata is unavailable",
+                        tenant_membership.tenant.external_id,
+                    )
             except Exception:
                 logger.exception(
                     "Failed to generate Connect assets for %s; continuing pipeline",
@@ -515,7 +522,6 @@ def run_pipeline(
             "Update total_steps if you add/remove report() calls."
         )
 
-    transform_error = transform_result.get("error")
     result: dict = {
         "status": "completed",
         "run_id": str(run.id),
@@ -524,8 +530,13 @@ def run_pipeline(
         "sources": source_results,
         "rows_loaded": total_rows,
     }
-    if transform_error:
-        result["transform_error"] = transform_error
+    # Kept on separate keys: transform_error means the tables are stale or
+    # missing, transform_test_failures means they built and are populated but
+    # their data-quality assertions did not pass (#391).
+    if transform_result.get("status") == TransformationRunStatus.TESTS_FAILED:
+        result["transform_test_failures"] = transform_result.get("error") or "dbt tests failed"
+    elif transform_result.get("error"):
+        result["transform_error"] = transform_result["error"]
     return result
 
 
@@ -558,7 +569,7 @@ def _run_discover_phase(
     metadata = loader.load()
 
     TenantMetadata.objects.update_or_create(
-        tenant_membership=tenant_membership,
+        tenant=tenant_membership.tenant,
         defaults={"metadata": metadata, "discovered_at": timezone.now()},
     )
     logger.info("Stored metadata for tenant %s", tenant_membership.tenant.external_id)
