@@ -659,3 +659,47 @@ async def test_prompt_discloses_and_clears_exclusions_within_cache_ttl(
     assert stable == stable_again
     retriever.return_value.retrieve.assert_awaited_once()
     graph_base._system_prompt_cache.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("coverage_kind", ["excluded", "included", "malformed", "legacy"])
+async def test_excluded_source_loading_does_not_block_serving_view(
+    workspace, tenant, coverage_kind
+):
+    other = await Tenant.objects.acreate(provider="commcare", external_id="still-loading")
+    await WorkspaceTenant.objects.acreate(workspace=workspace, tenant=other)
+    await TenantSchema.objects.acreate(
+        tenant=tenant, schema_name="coverage_ready", state=SchemaState.ACTIVE
+    )
+    loading = await TenantSchema.objects.acreate(
+        tenant=other, schema_name="coverage_loading", state=SchemaState.MATERIALIZING
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=loading, pipeline="sync", state="loading"
+    )
+    coverage = {
+        "included_tenants": [{"tenant_id": str(tenant.id)}],
+        "excluded_tenants": [{"tenant_id": str(other.id)}],
+    }
+    if coverage_kind == "included":
+        coverage["included_tenants"].append({"tenant_id": str(other.id)})
+    elif coverage_kind == "malformed":
+        coverage["included_tenants"] = None
+    elif coverage_kind == "legacy":
+        coverage = {}
+    await WorkspaceViewSchema.objects.acreate(
+        workspace=workspace,
+        schema_name="ws_coverage_safe",
+        state=SchemaState.ACTIVE,
+        tenant_coverage=coverage,
+    )
+    await SemanticModel.objects.acreate(
+        workspace=workspace, name="Available", status=SemanticModel.Status.ACTIVE
+    )
+    result = await _fetch_semantic_model_context(workspace)
+    if coverage_kind == "excluded":
+        assert "previously loaded data" in result
+        assert "do not call other data tools" not in result.lower()
+    else:
+        assert "do not call other data tools" in result.lower()

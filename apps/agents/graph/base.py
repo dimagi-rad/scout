@@ -49,7 +49,7 @@ from apps.workspaces.services.pipeline_resolver import (
     PipelineResolutionError,
     select_pipeline_config,
 )
-from apps.workspaces.services.tenant_coverage import coverage_warning
+from apps.workspaces.services.tenant_coverage import coverage_warning, parse_coverage
 from mcp_server.services.metadata import (
     pipeline_list_tables,
     transformation_aware_list_tables,
@@ -267,7 +267,31 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
         state__in=list(MaterializationRun.ACTIVE_STATES),
     )
     if await active_runs.aexists():
-        runs_with_serving_schema = active_runs.annotate(
+        tenant_count = await workspace.tenants.acount()
+        serving_view = (
+            await WorkspaceViewSchema.objects.filter(
+                workspace=workspace, state=SchemaState.ACTIVE
+            ).afirst()
+            if tenant_count > 1
+            else None
+        )
+        coverage = parse_coverage(serving_view.tenant_coverage) if serving_view else None
+        serving_runs = active_runs
+        if coverage is not None:
+            excluded_ids = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} - {
+                entry["tenant_id"] for entry in coverage["included_tenants"]
+            }
+            # An explicitly excluded tenant has no physical dependencies in this
+            # ACTIVE view. Use actual run IDs so malformed UUID strings cannot crash a turn.
+            excluded_run_tenants = [
+                tenant_id
+                async for tenant_id in active_runs.values_list(
+                    "tenant_schema__tenant_id", flat=True
+                )
+                if str(tenant_id) in excluded_ids
+            ]
+            serving_runs = active_runs.exclude(tenant_schema__tenant_id__in=excluded_run_tenants)
+        runs_with_serving_schema = serving_runs.annotate(
             has_serving_schema=Exists(
                 TenantSchema.objects.filter(
                     tenant_id=OuterRef("tenant_schema__tenant_id"), state=SchemaState.ACTIVE
@@ -283,15 +307,10 @@ async def _fetch_semantic_model_context(workspace, interactive: bool = True) -> 
             except SemanticCatalogUnavailable:
                 pass
             else:
-                tenant_count = await workspace.tenants.acount()
-                if (
-                    tenant_count == 1
-                    or await WorkspaceViewSchema.objects.filter(
-                        workspace=workspace, state=SchemaState.ACTIVE
-                    ).aexists()
-                ):
+                if tenant_count == 1 or serving_view is not None:
                     return (
-                        "A refresh is in progress in a separate schema. You may query the "
+                        "A refresh is in progress outside the currently serving data. "
+                        "You may query the "
                         "previously loaded data while it finishes; tell the user results do "
                         "not include this refresh yet. Do NOT trigger another materialization. "
                         "Do not promise an automatic follow-up based on this status.\n\n"
