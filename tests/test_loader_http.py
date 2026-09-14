@@ -69,7 +69,9 @@ class TestGetWithAuthRefresh:
         session = _fake_session([resp401, resp200])
         refresh = MagicMock(return_value="new-token")
 
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
 
         assert result is resp200
         refresh.assert_called_once()
@@ -79,7 +81,9 @@ class TestGetWithAuthRefresh:
     def test_no_refresh_when_none(self):
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
-        result = get_with_auth_refresh(session, "https://x/y", refresh=None, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=None, timeout=(1, 1)
+        )
         assert result is resp401
         assert session.get.call_count == 1
 
@@ -87,7 +91,9 @@ class TestGetWithAuthRefresh:
         resp403 = MagicMock(status_code=403)
         session = _fake_session([resp403])
         refresh = MagicMock(return_value="new-token")
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
         assert result is resp403
         refresh.assert_not_called()
         assert session.get.call_count == 1
@@ -96,7 +102,9 @@ class TestGetWithAuthRefresh:
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(side_effect=RuntimeError("boom"))
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
         # Original 401 returned so the caller raises its provider AuthError.
         assert result is resp401
         assert session.get.call_count == 1
@@ -105,6 +113,8 @@ class TestGetWithAuthRefresh:
         resp401 = MagicMock(status_code=401)
         session = _fake_session([resp401])
         refresh = MagicMock(return_value=None)
-        result = get_with_auth_refresh(session, "https://x/y", refresh=refresh, timeout=(1, 1))
+        result = get_with_auth_refresh(
+            session, "https://x/y", trusted_origin="https://x", refresh=refresh, timeout=(1, 1)
+        )
         assert result is resp401
         assert session.get.call_count == 1

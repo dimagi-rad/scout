@@ -59,9 +59,7 @@ class CommCareCaseLoader(CommCareBaseLoader):
                 # missing key means the envelope changed under us — fail loudly
                 # rather than silently completing the source with 0 rows
                 # (arch #252, finding 03#6).
-                raise CommCareExportError(
-                    f"CommCare Case API response missing 'cases' key for {url}"
-                )
+                raise CommCareExportError("CommCare Case API response missing 'cases' key")
             cases = [_normalize_case(c) for c in data["cases"]]
             page_total: int | None = None
             if first_page:
