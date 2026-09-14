@@ -4,6 +4,7 @@ import pytest
 
 from apps.agents.tools.materialization_tool import create_materialization_tool
 from apps.common.error_codes import ErrorCode
+from apps.workspaces.tasks import _CREDENTIAL_GUIDANCE, _credential_guidance, _summary_failures
 
 
 @pytest.mark.asyncio
@@ -75,7 +76,16 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
                 },
             ],
             "view_schema": {"ok": True, "error": None},
-            "guidance": ["not-mine: connect that account"],
+            "guidance": _credential_guidance(
+                _summary_failures(
+                    [
+                        {
+                            "tenant": "not-mine",
+                            "error_code": ErrorCode.WORKSPACE_TENANT_UNREACHABLE,
+                        }
+                    ]
+                )
+            ),
         }
 
     monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", _fake_core)
@@ -88,6 +98,10 @@ async def test_headless_tool_names_a_tenant_the_run_could_not_load(workspace, us
     assert result["tenants_not_loaded"] == ["not-mine"]
     assert "not-mine" in result["message"]
     assert "connect that account" in result["message"]
+    assert _CREDENTIAL_GUIDANCE[ErrorCode.WORKSPACE_TENANT_UNREACHABLE] in result["message"]
+    assert "none of its data is in these results" not in result["message"]
+    assert "older data may still be included" in result["message"]
+    assert "NOT in the results" not in result["message"]
 
 
 @pytest.mark.asyncio
@@ -195,4 +209,37 @@ async def test_headless_tool_partial_load_with_failed_view_stays_partial(
     assert "Do NOT retry" not in result["message"]
     assert "Run a data refresh" not in result["message"]
     assert "combined query layer" in result["message"]
+    assert "Do not query" in result["message"]
+    assert "Proceed with the available" not in result["message"]
+    assert "query only the sources" not in result["message"]
     assert "t2" in result["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_headless_materialization_discloses_confirmed_exclusions(
+    workspace, user, monkeypatch
+):
+    coverage = {
+        "included_tenants": [{"tenant_id": "ready", "external_id": "ready"}],
+        "excluded_tenants": [
+            {"tenant_id": "missing", "provider": "commcare", "external_id": "missing"}
+        ],
+    }
+
+    async def core(*args):
+        return {
+            "all_succeeded": False,
+            "tenants": [
+                {"tenant": "ready", "success": True},
+                {"tenant": "missing", "success": False},
+            ],
+            "view_schema": {"ok": True, "tenant_coverage": coverage},
+        }
+
+    monkeypatch.setattr("apps.workspaces.tasks.materialize_workspace_blocking", core)
+    result = await create_materialization_tool(workspace, user).ainvoke({})
+    assert result["status"] == "partial"
+    assert result["tenant_coverage"] == coverage
+    assert "excluded" in result["message"].lower()
+    assert "missing" in result["message"]

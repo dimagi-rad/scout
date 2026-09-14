@@ -16,7 +16,7 @@ from rest_framework.views import APIView
 
 from apps.chat.models import Thread
 from apps.users.models import Tenant, TenantMembership
-from apps.users.services.credential_resolver import aget_fresh_access_token
+from apps.users.services.credential_resolver import aiter_fresh_access_tokens
 from apps.users.services.tenant_resolution import (
     resolve_commcare_domains,
     resolve_connect_opportunities,
@@ -49,6 +49,17 @@ logger = logging.getLogger(__name__)
 # Bounded so a slow upstream export can't tie up the sync DRF worker thread.
 SHARE_REFRESH_TIMEOUT = 8  # seconds
 
+# A PARTIAL run loaded some sources but not all — the data it wrote is present
+# and queryable, so it counts as a sync. Excluding it made a workspace whose runs
+# are perpetually PARTIAL report last_synced_at=null alongside
+# schema_status="available", i.e. "never synced" about data the agent can query.
+# Every other read of the "latest data-bearing run" already uses this pair (e.g.
+# mcp_server/services/metadata.py, apps/workspaces/api/views.py).
+SYNCED_RUN_STATES = (
+    MaterializationRun.RunState.COMPLETED,
+    MaterializationRun.RunState.PARTIAL,
+)
+
 _PROVIDER_RESOLVERS = {
     "commcare": resolve_commcare_domains,
     "commcare_connect": resolve_connect_opportunities,
@@ -64,25 +75,32 @@ async def _arefresh_target_for_workspace(target, providers) -> bool:
     the target's last Scout login — without the target manually reconnecting.
     Returns True if the target had a usable token for at least one provider (used
     to distinguish "no access upstream" from "needs to reconnect" in the error).
+
+    Every identity per provider is refreshed. A target holding two OCS teams has
+    a token per team, and refreshing only one would report them as not covering a
+    tenant they can in fact reach — the false negative multi-token OAuth exists
+    to remove (#156).
     """
     tried = False
     for provider in providers:
         resolve = _PROVIDER_RESOLVERS.get(provider)
         if resolve is None:
             continue
-        token = await aget_fresh_access_token(target, provider)
-        if not token:
-            continue
-        tried = True
-        try:
-            await asyncio.wait_for(resolve(target, token), timeout=SHARE_REFRESH_TIMEOUT)
-        except Exception:
-            logger.warning(
-                "Share-time refresh failed for target=%s provider=%s",
-                target.id,
-                provider,
-                exc_info=True,
-            )
+        for account, token in await aiter_fresh_access_tokens(target, provider):
+            tried = True
+            try:
+                await asyncio.wait_for(
+                    resolve(target, token, social_account=account, allow_replace=False),
+                    timeout=SHARE_REFRESH_TIMEOUT,
+                )
+            except Exception:
+                logger.warning(
+                    "Share-time refresh failed for target=%s provider=%s account=%s",
+                    target.id,
+                    provider,
+                    account.pk,
+                    exc_info=True,
+                )
     return tried
 
 
@@ -215,9 +233,13 @@ class WorkspaceListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        # completed_at__isnull=False because Postgres sorts NULLs first under
+        # DESC — one state-bearing run without a timestamp would otherwise shadow
+        # every real one and return null.
         latest_run = (
             MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=SYNCED_RUN_STATES,
+                completed_at__isnull=False,
                 tenant_schema__tenant__workspace_tenants__workspace=OuterRef("workspace"),
             )
             .order_by("-completed_at")
@@ -232,6 +254,7 @@ class WorkspaceListView(APIView):
                 member_count=Count("workspace__memberships", distinct=True),
                 last_synced_at=Subquery(latest_run),
             )
+            .order_by("-workspace__created_at", "-workspace_id")
         )
         memberships = list(memberships)
         schema_statuses = _schema_status_for_workspaces([m.workspace for m in memberships])
@@ -374,16 +397,17 @@ class WorkspaceDetailView(APIView):
             view_schema_state=view_schema_state,
         )
 
-        latest_completed = (
+        last_run_at = (
             MaterializationRun.objects.filter(
-                state=MaterializationRun.RunState.COMPLETED,
+                state__in=SYNCED_RUN_STATES,
+                completed_at__isnull=False,
                 tenant_schema__tenant__in=tenants,
             )
             .order_by("-completed_at")
             .values_list("completed_at", flat=True)
             .first()
         )
-        last_synced_at = latest_completed.isoformat() if latest_completed else None
+        last_synced_at = last_run_at.isoformat() if last_run_at else None
 
         first_tenant = tenants[0] if tenants else None
         display_name = (

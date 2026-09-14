@@ -48,7 +48,10 @@ from apps.workspaces.models import (
     WorkspaceRole,
     WorkspaceViewSchema,
 )
-from mcp_server.pipeline_registry import get_registry
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    select_pipeline_config,
+)
 from mcp_server.services.metadata import (
     pipeline_list_tables,
     transformation_aware_list_tables,
@@ -67,6 +70,7 @@ MCP_TOOL_NAMES = frozenset(
     {
         "list_tables",
         "describe_table",
+        "query",
         "get_metadata",
         "list_workspaces",
         "list_datasets",
@@ -99,16 +103,7 @@ LOCAL_CONTEXT_TOOL_NAMES = frozenset({"artifact_manager", "canvas_manager"})
 # (schemas are re-provisioned automatically on the next materialization). It is
 # therefore filtered out before tools are bound to the LLM. The MCP server still
 # defines the tool so operator/HTTP callers are unaffected.
-AGENT_EXCLUDED_MCP_TOOLS = frozenset(
-    {
-        "teardown_schema",
-        # Semantic-model mode: keep raw table-inspection tools server-side for
-        # internal and operator callers, but do not expose them to the LLM.
-        "list_tables",
-        "describe_table",
-        "get_metadata",
-    }
-)
+AGENT_EXCLUDED_MCP_TOOLS = frozenset({"teardown_schema"})
 
 # Context params the graph injects into every MCP tool call server-side. They
 # are hidden from the LLM-facing tool schema (so the model never sets them) and
@@ -235,8 +230,11 @@ def _system_prompt_cache_key(
 ) -> str:
     """Build a cache key from workspace + user properties that affect the prompt.
 
-    Includes user.id because _fetch_schema_context scopes TenantMetadata
-    lookup to the specific user. Includes workspace.system_prompt hash
+    Includes user.id conservatively: the reason given for it — that
+    _fetch_schema_context scoped TenantMetadata per user — no longer holds
+    (TenantMetadata is per tenant, #305, and that function does not read it at
+    all), but sharing one prompt across a workspace's users needs its own audit.
+    Includes workspace.system_prompt hash
     so edits invalidate immediately. Includes ``interactive`` because the
     materialization guidance differs between interactive (fire-and-resume) and
     headless (blocking) runs. Includes ``canvas_write`` because write-capable
@@ -257,7 +255,9 @@ def _semantic_catalog_context_sync(workspace) -> str:
         "Data is loaded and ready through the workspace semantic model. "
         "Use `list_workspaces` to inspect accessible workspaces, `list_datasets` "
         "to page through dataset summaries, `describe_dataset` for one dataset's "
-        "members, and `semantic_query` for analysis. Do not write SQL."
+        "members, and `semantic_query` for analysis. When the semantic model "
+        "cannot express the question, fall back to `list_tables`, "
+        "`describe_table`, and read-only `query` SQL."
     )
 
 
@@ -353,6 +353,18 @@ _HEADLESS_MATERIALIZE_IN_PROGRESS_GUIDANCE = (
 )
 
 
+# Deliberately mode-agnostic: no "end your turn" (the headless runs have no
+# resume path) and no retry hint, because no amount of waiting or re-running
+# fixes a missing pipeline definition.
+_PIPELINE_UNRESOLVED_GUIDANCE = (
+    "This workspace's data cannot be described: Scout cannot determine which "
+    "pipeline loaded it, which is a configuration error on Scout's side. Do NOT "
+    "call data tools or `run_materialization` — they will fail the same way. "
+    "Tell the user their workspace needs an administrator to configure its "
+    "provider pipeline, and stop there."
+)
+
+
 async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
     """Fetch database schema state and build a ## Data Availability prompt section.
 
@@ -366,9 +378,6 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
         tenant=tenant,
         state__in=[SchemaState.ACTIVE, SchemaState.MATERIALIZING],
     ).afirst()
-
-    registry = get_registry()
-    pipeline_config = registry.get_by_provider(tenant.provider)
 
     if ts is None:
         if not interactive:
@@ -395,8 +404,15 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
             "when the current materialization completes."
         )
 
-    if pipeline_config is None:
-        pipeline_config = registry.get("commcare_sync")
+    try:
+        pipeline_config = select_pipeline_config(provider=tenant.provider)
+    except PipelineResolutionError:
+        # Guidance, not a raise: this builds the system prompt on every turn, so
+        # raising would take the whole chat down. The detail stays in the log —
+        # the agent only needs to know the workspace is not describable and that
+        # no tool call will change that (#155).
+        logger.exception("Pipeline resolution failed for the agent prompt")
+        return _PIPELINE_UNRESOLVED_GUIDANCE
 
     # transformation-aware listing prefers terminal models over replaced ones
     from apps.transformations.services.lineage import aget_terminal_assets
@@ -433,8 +449,11 @@ async def _fetch_schema_context(tenant, user, interactive: bool = True) -> str:
 
 
 _MULTI_TENANT_NAMESPACE_HINT = (
-    "This is a multi-tenant workspace. Use the semantic catalog rather than "
-    "raw tenant tables; semantic datasets handle the workspace scope."
+    "This is a multi-tenant workspace. Prefer the semantic catalog — semantic "
+    "datasets already handle the workspace scope. If you fall back to raw SQL, "
+    "note that tables are namespaced views prefixed with the tenant name using a "
+    "double underscore: `{tenant_name}__{table_name}`, and querying across "
+    "tenants needs explicit JOINs between namespaced tables."
 )
 
 
@@ -1041,10 +1060,13 @@ Use dataset tools by intent:
 - Discover available data: `list_workspaces` and `list_datasets`.
 - Inspect one dataset's fields, labels, descriptions, formats, and
   relationships: `describe_dataset`.
-- Answer analytical questions: `semantic_query` over semantic members only.
+- Answer analytical questions: `semantic_query` over semantic members.
+- Reach data the semantic model does not express (raw text columns, columns with
+  no semantic member): `list_tables` and `describe_table` to find them, then
+  read-only `query` SQL.
 - Change dataset definitions, labels, descriptions, fields, relationships, or
   display metadata: use the Semantic Canvas instructions below when available;
-  do not invent raw SQL or mutate datasets directly from the parent chat agent.
+  do not mutate datasets directly from the parent chat agent.
 
 Dataset editing vocabulary:
 - Create a new dataset: ask the canvas manager to create a CTE/SQL-derived

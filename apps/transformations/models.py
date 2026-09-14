@@ -119,6 +119,12 @@ class TransformationRunStatus(models.TextChoices):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    # The models built, but at least one dbt test on them did not pass (#391).
+    # Deliberately not FAILED: FAILED means the tables are stale or missing,
+    # this means they exist and are populated but their data-quality assertions
+    # are not vouching for them. Consumers must word the two differently or the
+    # agent distrusts data that is present.
+    TESTS_FAILED = "tests_failed"
 
 
 class TransformationRun(models.Model):

@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from apps.semantic.services.cube_schema import CubeSchemaBuildError
 from apps.users.models import Tenant
 from apps.workspaces.models import (
+    MaterializationRun,
     SchemaState,
     TenantSchema,
     Workspace,
@@ -119,3 +120,36 @@ async def test_rebuild_view_schema_marks_failed_on_exception(workspace):
         assert vs.state == SchemaState.FAILED
     except WorkspaceViewSchema.DoesNotExist:
         pass  # acceptable — was never created
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("excluded", [False, True])
+@pytest.mark.parametrize("latest_state", ["failed", "partial", "cancelled", "loading"])
+async def test_rebuild_does_not_promote_failed_included_snapshot(
+    workspace, tenant, excluded, latest_state
+):
+    schema = await TenantSchema.objects.aget(tenant=tenant)
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="commcare_sync", state=MaterializationRun.RunState.COMPLETED
+    )
+    await MaterializationRun.objects.acreate(
+        tenant_schema=schema, pipeline="commcare_sync", state=latest_state
+    )
+    coverage = {
+        "included_tenants": [] if excluded else [{"tenant_id": str(tenant.id)}],
+        "excluded_tenants": [{"tenant_id": str(tenant.id)}] if excluded else [],
+    }
+    with (
+        patch("apps.workspaces.tasks.SchemaManager") as manager,
+        patch("apps.workspaces.tasks.build_and_promote_cube_schema") as cube,
+        patch("apps.workspaces.tasks.record_cube_schema_build_failure") as failure,
+    ):
+        manager.return_value.build_view_schema.return_value.tenant_coverage = coverage
+        result = await rebuild_workspace_view_schema(workspace_id=str(workspace.id))
+    if excluded:
+        cube.assert_called_once()
+    else:
+        cube.assert_not_called()
+        failure.assert_called_once()
+        assert result["cube_schema"]["ok"] is False

@@ -63,8 +63,11 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         loaded = sum(1 for t in tenants if t.get("success"))
         view_schema = summary.get("view_schema")
         view_ok = view_schema is None or view_schema.get("ok")
+        coverage = (view_schema or {}).get("tenant_coverage") or {}
 
-        not_loaded = [t.get("tenant") for t in tenants if not t.get("success")]
+        not_loaded = [
+            t.get("display_name") or t.get("tenant") for t in tenants if not t.get("success")
+        ]
         # Only name sources we actually have names for — the branches below are
         # reachable with nothing to name, and a dangling "others did not: ."
         # invites the agent to invent one.
@@ -92,8 +95,10 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
         elif loaded:
             status = "partial"
             message = (
-                f"Some tenants loaded; others did not{named}. Proceed with the available "
-                "data and tell the user which data sources are NOT in the results."
+                f"Some tenants refreshed; others did not{named}. If the query layer is available, "
+                "older data may still be included for tenants that did not refresh. Verify "
+                "the sources and last successful refresh times used by any answer, disclose "
+                "stale or unknown freshness, and do not infer exclusion from refresh failure."
             )
             if not view_ok:
                 # Not relaying view_schema["error"]: build_view_schema says "run a
@@ -101,13 +106,35 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
                 # missing sources is fixed (#412). The run's own guidance, appended
                 # below, is the advice that actually applies.
                 message += (
-                    " The workspace's combined query layer could not be rebuilt while "
-                    "sources are missing, so query only the sources that loaded and do "
-                    "not present results as spanning the whole workspace."
+                    " The workspace's combined query layer is unavailable. Do not query this "
+                    "workspace until it is rebuilt. Investigate the tenant refresh failures "
+                    "and address any reported account/access problems before retrying."
                 )
         else:
             status = "failed"
             message = f"Materialization failed; no data was loaded{named}."
+
+        excluded = coverage.get("excluded_tenants") or []
+        if view_ok and excluded:
+            names = ", ".join(
+                f"{entry.get('provider', 'source')}: {entry.get('external_id') or entry['tenant_id']}"
+                for entry in excluded
+            )
+            message += (
+                f" Sources excluded from the current query layer: {names}. "
+                "Answers cover only included sources; disclose this missing data."
+            )
+
+        failure_details = [
+            f"{tenant.get('display_name') or tenant.get('tenant') or 'unknown'}: {tenant['error'].strip()}"
+            for tenant in tenants
+            if not tenant.get("success") and tenant.get("error")
+        ]
+        if failure_details:
+            details = "; ".join(failure_details)
+            message += " Failure details: " + details
+            if not details.endswith((".", "!", "?")):
+                message += "."
 
         # Advice comes from the run, keyed by error code — this tool must not
         # write its own (apps/common/errors.py: raise sites describe, one owner
@@ -129,6 +156,7 @@ def create_materialization_tool(workspace: Workspace, user: User | None, job_id:
             "tenants_loaded": loaded,
             "tenants_not_loaded": not_loaded,
             "message": message,
+            "tenant_coverage": coverage,
         }
 
     run_materialization.name = "run_materialization"

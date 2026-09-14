@@ -5,7 +5,7 @@ import { useAppStore } from "@/store/store"
 import { workspaceDataState, workspaceHasData, workspaceHasAccess } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
-import { getRecentWorkspaceIds, recordWorkspaceUse } from "@/lib/recentWorkspaces"
+import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
@@ -294,7 +294,6 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   }
 
   function select(ws: TenantMembership) {
-    recordWorkspaceUse(ws.id)
     setActiveDomain(ws.id)
     newThread()
     close()

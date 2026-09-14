@@ -126,10 +126,18 @@ class TestCredentialResolverTokenRefresh:
 
 
 class TestSyncTokenRefresh:
+    @pytest.fixture(autouse=True)
+    def _mock_connection_health_storage(self, mocker):
+        connections = mocker.patch(
+            "apps.users.services.token_refresh._token_connections"
+        ).return_value
+        connections.aupdate = AsyncMock()
+        connections.filter.return_value.aupdate = AsyncMock()
+
     def test_refresh_oauth_token_sync_updates_and_persists(self):
         from apps.users.services.token_refresh import refresh_oauth_token_sync
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         social_token.token_secret = "old-refresh"
         social_token.app.client_id = "cid"
         social_token.app.secret = "secret"
@@ -157,7 +165,7 @@ class TestSyncTokenRefresh:
             refresh_oauth_token_sync,
         )
 
-        social_token = MagicMock()
+        social_token = MagicMock(token="old-access", token_secret="refresh", app_id=1, account_id=1)
         response = MagicMock()
         response.raise_for_status.side_effect = RuntimeError("500")
         with patch("apps.users.services.token_refresh.requests.post", return_value=response):

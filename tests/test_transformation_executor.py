@@ -302,3 +302,110 @@ def test_progress_callback_called(mock_profiles, mock_dbt, tenant, system_assets
     calls = [c.args[0] for c in callback.call_args_list]
     assert "system" in calls[0]
     assert "tenant" in calls[1]
+
+
+def _dbt_test_failure(model, test_name, status="fail"):
+    return {
+        "success": False,
+        "tests": {model: [{"test": test_name, "status": status, "message": "got 3 results"}]},
+        "error": "dbt test failed",
+    }
+
+
+@pytest.fixture
+def tested_asset(tenant):
+    return TransformationAsset.objects.create(
+        name="stg_tested",
+        scope=TransformationScope.SYSTEM,
+        tenant=tenant,
+        sql_content="SELECT 1",
+        test_yaml=(
+            "models:\n  - name: stg_tested\n    columns:\n"
+            "      - name: id\n        tests:\n          - unique\n"
+        ),
+    )
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt_test")
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_failing_dbt_test_marks_run_tests_failed(
+    mock_profiles, mock_dbt, mock_test, tenant, tested_asset
+):
+    """A failed assertion must not be reported as a clean COMPLETED (#391), and
+    must stay distinguishable from FAILED — the model built, so its table is
+    populated and only its data-quality claim is in doubt."""
+    mock_dbt.return_value = _dbt_success("stg_tested")
+    mock_test.return_value = _dbt_test_failure("stg_tested", "unique_stg_tested_id")
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.TESTS_FAILED
+    assert "stg_tested" in run.error_message
+    assert "unique_stg_tested_id" in run.error_message
+    assert "1 data-quality test(s) failed" in run.error_message
+    # The model itself built, so the asset run stays SUCCESS.
+    assert run.asset_runs.get().status == AssetRunStatus.SUCCESS
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt_test")
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_dbt_test_level_error_marks_run_tests_failed(
+    mock_profiles, mock_dbt, mock_test, tenant, tested_asset
+):
+    """dbt test can fail without attributing anything to a model (compilation or
+    connection error). Recording nothing would be indistinguishable from a pass."""
+    mock_dbt.return_value = _dbt_success("stg_tested")
+    mock_test.return_value = {
+        "success": False,
+        "tests": {},
+        "error": "could not connect to server",
+    }
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.TESTS_FAILED
+    assert "could not connect to server" in run.error_message
+    assert "stg_tested" in run.error_message
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt_test")
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_warn_severity_test_does_not_fail_run(
+    mock_profiles, mock_dbt, mock_test, tenant, tested_asset
+):
+    """warn does not fail ``dbt test``, so it must not make the agent distrust
+    the data either."""
+    mock_dbt.return_value = _dbt_success("stg_tested")
+    mock_test.return_value = {
+        "success": True,
+        "tests": {"stg_tested": [{"test": "unique_stg_tested_id", "status": "warn"}]},
+        "error": None,
+    }
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.COMPLETED
+    assert run.error_message == ""
+
+
+@pytest.mark.django_db
+@patch("apps.transformations.services.executor.run_dbt_test")
+@patch("apps.transformations.services.executor.run_dbt")
+@patch("apps.transformations.services.executor.generate_profiles_yml")
+def test_dbt_run_failure_outranks_test_status(
+    mock_profiles, mock_dbt, mock_test, tenant, tested_asset
+):
+    """A build failure stays FAILED: the table is stale or missing, which is
+    worse news than an unverified assertion, and the tests never ran."""
+    mock_dbt.return_value = _dbt_failure("permission denied")
+
+    run = run_transformation_pipeline(tenant=tenant, schema_name="test_schema")
+
+    assert run.status == TransformationRunStatus.FAILED
+    mock_test.assert_not_called()

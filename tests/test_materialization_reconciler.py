@@ -17,6 +17,7 @@ from apps.workspaces.models import (
 )
 from apps.workspaces.tasks import (
     JOB_RETENTION_HOURS,
+    MATERIALIZATION_FAILED_MESSAGE,
     prune_old_procrastinate_jobs,
     reconcile_stale_materialization_runs,
     reconcile_stale_thread_job,
@@ -238,6 +239,69 @@ async def test_reconcile_thread_job_fails_on_cancelled_status():
     resume.defer_async.assert_not_called()
     await tj.arefresh_from_db()
     assert tj.state == ThreadJob.State.FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconciled_chat_message_carries_the_real_summary():
+    """The chat message and error_summary must say the same thing.
+
+    Both were computed from one summary, but only error_summary used it — the
+    chat message was always the generic "Please retry your request", which for
+    a revoked-access failure is advice the card directly contradicts.
+    """
+    _, tj = await _make_run(job_id=770010, with_threadjob=True)
+    real = "sessions failed: OCSAccessDeniedError: access removed upstream"
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="failed"),
+        ),
+        patch(
+            "apps.workspaces.tasks._build_failure_summary_for_job",
+            new=AsyncMock(return_value=real),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ) as persist,
+    ):
+        action = await reconcile_stale_thread_job(tj)
+
+    assert action == "failed"
+    await tj.arefresh_from_db()
+    assert tj.error_summary == real
+    assert persist.await_args.args[1] == real
+    assert MATERIALIZATION_FAILED_MESSAGE not in persist.await_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_reconciled_chat_message_falls_back_when_there_is_no_summary():
+    """No per-source detail (the run died before any source ran) still needs
+    *something* in the chat bubble, so the generic message remains the floor."""
+    _, tj = await _make_run(job_id=770011, with_threadjob=True)
+
+    with (
+        patch(
+            "apps.workspaces.tasks._procrastinate_job_status",
+            new=AsyncMock(return_value="failed"),
+        ),
+        patch(
+            "apps.workspaces.tasks._build_failure_summary_for_job",
+            new=AsyncMock(return_value=""),
+        ),
+        patch(
+            "apps.workspaces.tasks._persist_synthetic_failure_message",
+            new=AsyncMock(return_value=None),
+        ) as persist,
+    ):
+        await reconcile_stale_thread_job(tj)
+
+    await tj.arefresh_from_db()
+    assert tj.error_summary == MATERIALIZATION_FAILED_MESSAGE
+    assert persist.await_args.args[1] == MATERIALIZATION_FAILED_MESSAGE
 
 
 @pytest.mark.asyncio

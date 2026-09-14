@@ -3,7 +3,7 @@
 The agent graph's injecting tool node (`_make_injecting_tool_node` in
 `apps.agents.graph.base`) adds ``workspace_id``, ``user_id``, ``thread_id`` and
 ``tool_call_id`` to the args of **every** MCP tool call. The read tools
-(``semantic_catalog``, ``semantic_query``, …) declare ``workspace_id``,
+(``list_tables``, ``query``, ``semantic_query``, …) declare ``workspace_id``,
 ``user_id`` and ``thread_id`` (the last two carry the actor into the MCP audit
 trail — arch #257, finding 08#8); only the per-call ``tool_call_id`` remains
 undeclared on them.
@@ -46,7 +46,15 @@ INJECTED_ARGS = {
 # thread_id) but NOT the per-call ``tool_call_id`` — so ``tool_call_id`` is the
 # one injected arg they still rely on the libraries to silently drop.
 # ``run_materialization`` is excluded because it deliberately declares all four.
-ACTOR_DECLARED_TOOLS = ["semantic_catalog", "semantic_query", "get_schema_status"]
+# ``query`` is exercised separately: it declares the actor set too, but also a
+# required ``sql`` arg, so it cannot be validated from the injected args alone.
+ACTOR_DECLARED_TOOLS = [
+    "semantic_catalog",
+    "semantic_query",
+    "list_tables",
+    "get_metadata",
+    "get_schema_status",
+]
 
 # The args these tools declare (everything injected except ``tool_call_id``).
 DECLARED_ACTOR_ARGS = {"workspace_id", "user_id", "thread_id"}
@@ -112,6 +120,28 @@ def test_fastmcp_arg_model_accepts_and_ignores_injected_extras(tool_name):
     # FastMCP forwards only declared fields to the tool fn; the still-undeclared
     # ``tool_call_id`` must have been dropped here.
     forwarded = validated.model_dump_one_level()
+    for key in DECLARED_ACTOR_ARGS:
+        assert forwarded[key] == INJECTED_ARGS[key]
+    assert "tool_call_id" not in forwarded
+
+
+def test_raw_sql_tool_declares_actor_args_and_drops_tool_call_id():
+    """The raw SQL ``query`` tool takes a required ``sql`` arg on top of the actor
+    set, so it needs its own round-trip: the injected extras must still validate
+    and ``tool_call_id`` must still be dropped."""
+    assert "query" in MCP_TOOL_NAMES
+
+    arg_model = mcp._tool_manager.get_tool("query").fn_metadata.arg_model
+
+    declared = set(arg_model.model_fields)
+    assert DECLARED_ACTOR_ARGS.issubset(declared), f"query declares only {declared}"
+    assert "tool_call_id" not in declared
+
+    forwarded = arg_model.model_validate(
+        {"sql": "SELECT 1", **INJECTED_ARGS}
+    ).model_dump_one_level()
+
+    assert forwarded["sql"] == "SELECT 1"
     for key in DECLARED_ACTOR_ARGS:
         assert forwarded[key] == INJECTED_ARGS[key]
     assert "tool_call_id" not in forwarded

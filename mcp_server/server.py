@@ -45,19 +45,23 @@ from apps.semantic.services.catalog import (
 )
 from apps.semantic.services.query import run_semantic_query
 from apps.transformations.services.lineage import aget_lineage_chain
-from apps.users.models import Tenant, TenantMembership, User
+from apps.users.models import TenantMembership, User
 from apps.workspaces.access import aresolve_workspace_access
 from apps.workspaces.models import (
     MaterializationRun,
     SchemaState,
-    TenantMetadata,
     TenantSchema,
     Workspace,
     WorkspaceMembership,
     WorkspaceTenant,
     WorkspaceViewSchema,
 )
+from apps.workspaces.services.pipeline_resolver import (
+    PipelineResolutionError,
+    aresolve_pipeline_config,
+)
 from apps.workspaces.services.schema_manager import SchemaManager
+from apps.workspaces.services.tenant_metadata import aget_tenant_metadata
 from apps.workspaces.tasks import materialize_workspace
 from config.procrastinate import app as procrastinate_app
 from mcp_server.auth import SharedSecretMiddleware
@@ -65,6 +69,7 @@ from mcp_server.context import load_workspace_context
 from mcp_server.envelope import (
     INTERNAL_ERROR,
     NOT_FOUND,
+    PIPELINE_UNRESOLVED,
     SCHEMA_BUILD_FAILED,
     VALIDATION_ERROR,
     error_response,
@@ -78,6 +83,7 @@ from mcp_server.services.metadata import (
     pipeline_list_tables,
     workspace_list_tables,
 )
+from mcp_server.services.query import execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -95,26 +101,27 @@ async def _resolve_mcp_context(workspace_id: str):
 
 
 async def _resolve_pipeline_config(ts, last_run):
-    """Pick the right PipelineConfig for a TenantSchema.
+    """Pick the right PipelineConfig for a TenantSchema, or None if there is no tenant.
 
-    Prefers the last run's pipeline, then the tenant provider's, then
-    ``commcare_sync`` (preserves historical behavior).
-
-    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``); we
-    can't infer a tenant-specific pipeline there, so fall back to commcare_sync
-    (per-tenant routing happens at load time, not metadata-describe time).
+    ``ts`` is ``None`` for a multi-tenant workspace view schema (``ws_*``): there
+    is no tenant whose pipeline could be inferred, and per-tenant routing happens
+    at load time rather than metadata-describe time. That case returns None —
+    "no pipeline", which the metadata layer renders as no pipeline-derived
+    descriptions. For a real tenant, resolution raises rather than guessing (#155).
     """
-    registry = get_registry()
-    if last_run:
-        cfg = registry.get(last_run.pipeline)
-        if cfg:
-            return cfg
-    if ts is not None:
-        tenant = await Tenant.objects.aget(id=ts.tenant_id)
-        cfg = registry.get_by_provider(tenant.provider)
-        if cfg:
-            return cfg
-    return registry.get("commcare_sync")
+    if ts is None:
+        return None
+    return await aresolve_pipeline_config(ts, last_run)
+
+
+def _pipeline_unresolved_response(exc: PipelineResolutionError) -> dict:
+    """Report an unresolvable pipeline to the agent.
+
+    Logged, not just returned: the envelope reaches the agent but never Sentry,
+    and a supported provider with no pipeline is a deploy defect that must page.
+    """
+    logger.exception("Pipeline resolution failed")
+    return error_response(PIPELINE_UNRESOLVED, str(exc))
 
 
 @mcp.tool()
@@ -173,7 +180,11 @@ async def list_tables(workspace_id: str = "", user_id: str = "", thread_id: str 
             .order_by("-completed_at")
             .afirst()
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
         tables = await pipeline_list_tables(ts, pipeline_config)
 
@@ -230,11 +241,13 @@ async def describe_table(
                 .order_by("-completed_at")
                 .afirst()
             )
-            tenant_metadata = await TenantMetadata.objects.filter(
-                tenant_membership__tenant_id=ts.tenant_id
-            ).afirst()
+            tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
         table = await pipeline_describe_table(table_name, ctx, tenant_metadata, pipeline_config)
         if table is None:
@@ -292,11 +305,13 @@ async def get_metadata(workspace_id: str = "", user_id: str = "", thread_id: str
             .order_by("-completed_at")
             .afirst()
         )
-        pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        try:
+            pipeline_config = await _resolve_pipeline_config(ts, last_run)
+        except PipelineResolutionError as exc:
+            tc["result"] = _pipeline_unresolved_response(exc)
+            return tc["result"]
 
-        tenant_metadata = await TenantMetadata.objects.filter(
-            tenant_membership__tenant_id=ts.tenant_id
-        ).afirst()
+        tenant_metadata = await aget_tenant_metadata(ts.tenant_id)
 
         metadata = await pipeline_get_metadata(ts, ctx, tenant_metadata, pipeline_config)
 
@@ -690,6 +705,60 @@ async def list_datasets(
         return tc["result"]
 
 
+@mcp.tool()
+async def query(sql: str, workspace_id: str = "", user_id: str = "", thread_id: str = "") -> dict:
+    """Execute a read-only SQL query against the workspace's database.
+
+    Prefer `semantic_query` when the semantic model can express the question.
+    Use this tool for what it cannot: inspecting raw text columns, ad-hoc
+    exploration of columns with no semantic member, and reading rows to
+    categorise them.
+
+    The query is validated for safety (SELECT only, no system catalogs, no
+    dangerous functions), row limits are enforced, and execution uses a
+    read-only database role.
+
+    Args:
+        sql: A SQL SELECT query to execute.
+        workspace_id: Workspace UUID (injected server-side by the agent graph).
+        user_id: Acting user UUID (injected server-side; recorded in the audit trail).
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
+    """
+    async with tool_context(
+        "query", workspace_id, user_id=user_id, thread_id=thread_id, sql=sql
+    ) as tc:
+        try:
+            ctx = await _resolve_mcp_context(workspace_id)
+        except (ValueError, _ValidationError) as e:
+            tc["result"] = error_response(VALIDATION_ERROR, str(e))
+            return tc["result"]
+
+        result = await execute_query(ctx, sql)
+
+        if not result.get("success", True):
+            tc["result"] = result
+            return tc["result"]
+
+        warnings = []
+        if result.get("truncated"):
+            warnings.append(f"Results truncated to {ctx.max_rows_per_query} rows")
+
+        tc["result"] = success_response(
+            {
+                "columns": result["columns"],
+                "rows": result["rows"],
+                "row_count": result["row_count"],
+                "truncated": result.get("truncated", False),
+                "sql_executed": result.get("sql_executed", ""),
+                "tables_accessed": result.get("tables_accessed", []),
+            },
+            schema=ctx.schema_name,
+            timing_ms=tc["timer"].elapsed_ms,
+            warnings=warnings or None,
+        )
+        return tc["result"]
+
+
 def _serialized_semantic_catalog(workspace: Workspace) -> dict:
     model = get_active_semantic_model(workspace)
     return serialize_catalog(model)
@@ -889,25 +958,116 @@ async def list_pipelines() -> dict:
 
 
 @mcp.tool()
-async def get_materialization_status(run_id: str, workspace_id: str = "") -> dict:
-    """Retrieve the status of a materialization run by ID.
+async def get_materialization_status(
+    run_id: str,
+    workspace_id: str = "",
+    user_id: str = "",
+    thread_id: str = "",
+) -> dict:
+    """Retrieve materialization status by run ID or background-job ID.
 
-    Primarily a fallback for reconnection scenarios — live progress is delivered
-    via MCP progress notifications during an active run_materialization call.
+    Use each run's state and progress to describe data loading. For ThreadJob
+    responses, the top-level state tracks conversation continuation: pending
+    includes active materialization, and running means the resume agent is
+    executing after loading. Top-level started_at is the resume claim time,
+    not the start of data loading. An empty runs list does not prove that the
+    data load has started.
 
     Args:
-        run_id: UUID of the MaterializationRun to look up.
+        run_id: UUID of either a MaterializationRun or the ThreadJob returned by
+            run_materialization. A ThreadJob lookup returns the job state and
+            every associated per-tenant run.
         workspace_id: Workspace UUID (injected server-side by the agent graph).
             The run is scoped to this workspace (arch #253, 01#6) so a run in
             another workspace cannot be inspected from here.
+        user_id: User UUID (injected server-side by the agent graph). Required
+            for ThreadJob lookups so one user cannot inspect another user's job.
+        thread_id: Chat thread UUID (injected server-side; recorded in the audit trail).
     """
-    async with tool_context("get_materialization_status", run_id, workspace_id=workspace_id) as tc:
+    async with tool_context(
+        "get_materialization_status",
+        run_id,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        thread_id=thread_id,
+    ) as tc:
         try:
             run = await MaterializationRun.objects.select_related("tenant_schema__tenant").aget(
                 id=run_id
             )
         except (MaterializationRun.DoesNotExist, ValueError, _ValidationError):
-            tc["result"] = error_response(NOT_FOUND, f"Materialization run '{run_id}' not found")
+            run = None
+
+        if run is None:
+            # run_materialization acknowledges with a ThreadJob UUID before any
+            # per-tenant MaterializationRun rows necessarily exist. Scope the
+            # fallback query in the database so unauthorized callers learn
+            # nothing about whether the job exists.
+            if not workspace_id or not user_id:
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+
+            try:
+                job = await ThreadJob.objects.filter(
+                    id=run_id,
+                    job_type=ThreadJob.JobType.MATERIALIZATION,
+                    thread__workspace_id=workspace_id,
+                    thread__user_id=user_id,
+                ).afirst()
+            except (ValueError, _ValidationError):
+                job = None
+
+            if job is None:
+                tc["result"] = error_response(
+                    NOT_FOUND, f"Materialization run '{run_id}' not found"
+                )
+                return tc["result"]
+
+            runs = [
+                tenant_run
+                async for tenant_run in MaterializationRun.objects.select_related(
+                    "tenant_schema__tenant"
+                )
+                .filter(
+                    procrastinate_job_id=job.procrastinate_job_id,
+                    tenant_schema__tenant__workspace_tenants__workspace_id=workspace_id,
+                )
+                .order_by("started_at", "id")
+            ]
+            tc["result"] = success_response(
+                {
+                    "thread_job_id": str(job.id),
+                    "job_type": job.job_type,
+                    "state": job.state,
+                    "tool_call_id": job.tool_call_id,
+                    "created_at": job.created_at.isoformat(),
+                    "started_at": job.started_at.isoformat() if job.started_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                    "error_summary": job.error_summary,
+                    "runs": [
+                        {
+                            "run_id": str(tenant_run.id),
+                            "pipeline": tenant_run.pipeline,
+                            "state": tenant_run.state,
+                            "result": tenant_run.result,
+                            "progress": tenant_run.progress,
+                            "started_at": tenant_run.started_at.isoformat(),
+                            "completed_at": (
+                                tenant_run.completed_at.isoformat()
+                                if tenant_run.completed_at
+                                else None
+                            ),
+                            "tenant_id": tenant_run.tenant_schema.tenant.external_id,
+                            "schema_name": tenant_run.tenant_schema.schema_name,
+                        }
+                        for tenant_run in runs
+                    ],
+                },
+                schema="",
+                timing_ms=tc["timer"].elapsed_ms,
+            )
             return tc["result"]
 
         if not await _run_belongs_to_workspace(run, workspace_id):
@@ -925,6 +1085,7 @@ async def get_materialization_status(run_id: str, workspace_id: str = "") -> dic
                 "pipeline": run.pipeline,
                 "state": run.state,
                 "result": run.result,
+                "progress": run.progress,
                 "started_at": run.started_at.isoformat() if run.started_at else None,
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "tenant_id": tenant_id,
@@ -1274,13 +1435,17 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
             if last_run:
                 if last_run.completed_at:
                     last_materialized_at = last_run.completed_at.isoformat()
-                result_data = last_run.result or {}
-                if "tables" in result_data:
-                    tables = result_data["tables"]
-                elif "table" in result_data and "rows_loaded" in result_data:
-                    tables = [
-                        {"name": result_data["table"], "row_count": result_data["rows_loaded"]}
-                    ]
+                # Go through the catalog rather than indexing ``result`` here.
+                # The keys this used to read (``tables``, ``table``,
+                # ``rows_loaded``) are the pre-#12 single-table result shape;
+                # nothing has written them since the per-source ``sources`` map
+                # replaced it, so this always reported zero tables for a
+                # workspace full of data (03#4). ``pipeline_list_tables`` reads
+                # ``sources`` and reconciles against information_schema, and is
+                # the same call the multi-tenant branch below makes, so both
+                # branches now return identically-shaped entries.
+                pipeline_config = await _resolve_pipeline_config(ts, last_run)
+                tables = await pipeline_list_tables(ts, pipeline_config)
 
             tc["result"] = success_response(
                 {
@@ -1344,12 +1509,17 @@ async def get_schema_status(workspace_id: str = "", user_id: str = "", thread_id
         ctx = await _resolve_mcp_context(workspace_id)
         tables = await workspace_list_tables(ctx)
 
+        coverage = vs.tenant_coverage or {}
         tc["result"] = success_response(
             {
                 "exists": True,
                 "state": vs.state,
                 "last_materialized_at": last_materialized_at,
                 "tables": tables,
+                "tenant_coverage": coverage,
+                "data_complete": not coverage["excluded_tenants"]
+                if "excluded_tenants" in coverage
+                else None,
             },
             schema=vs.schema_name,
         )

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
+import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
 
 /**
@@ -60,6 +61,13 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     // for this user; otherwise leave the store for fetchDomains to default.
     if (domainsStatus === "loaded" && !domains.some((d) => d.id === urlWorkspaceId)) {
       return
+    }
+
+    // ChatRedirect can select the default workspace before this route mounts,
+    // so opening it may not require a store change. The URL still represents a
+    // real visit and should put the workspace in Recent.
+    if (domains.some((d) => d.id === urlWorkspaceId)) {
+      recordWorkspaceUse(urlWorkspaceId)
     }
 
     let adoptedUrl = false
