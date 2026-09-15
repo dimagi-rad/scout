@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import django.contrib.auth
 import pytest
 from asgiref.sync import async_to_sync
@@ -17,6 +19,7 @@ from apps.knowledge.models import TableKnowledge
 from apps.knowledge.services.column_note_generator import sync_column_notes
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.connect_staging import upsert_connect_assets
+from apps.transformations.services.staging_identity import RepeatModelMigrationRequired
 from apps.users.models import Tenant
 from apps.workspaces.models import Workspace, WorkspaceTenant
 
@@ -116,33 +119,44 @@ def test_upsert_connect_assets_updates_not_duplicates(connect_tenant):
 @pytest.mark.django_db(transaction=True)
 def test_upsert_connect_assets_sweeps_orphaned_assets(connect_tenant):
     """Assets no longer generated from current metadata are deleted."""
-    # First upsert with a form that creates stg_visits
-    tenant_meta = _FakeTenantMeta(FORM_DEFS)
-    upsert_connect_assets(connect_tenant, tenant_meta)
-
-    # Manually plant an orphan SYSTEM asset for this tenant
-    TransformationAsset.objects.create(
-        name="stg_visits__repeat_old_group",
-        description="Orphaned repeat group",
-        scope=TransformationScope.SYSTEM,
-        tenant=connect_tenant,
-        sql_content="SELECT 1",
-        created_by=None,
+    old_forms = deepcopy(FORM_DEFS)
+    old_forms["muac_visit"]["questions"].append(
+        {"value": "/data/old_group/answer", "type": "Text", "repeat": True}
     )
+    upsert_connect_assets(connect_tenant, _FakeTenantMeta(old_forms))
     assert TransformationAsset.objects.filter(
         name="stg_visits__repeat_old_group",
         scope=TransformationScope.SYSTEM,
         tenant=connect_tenant,
     ).exists()
 
-    # Re-upsert with same (no-repeat) form_defs — orphan should be swept
-    result = upsert_connect_assets(connect_tenant, tenant_meta)
+    result = upsert_connect_assets(connect_tenant, _FakeTenantMeta(FORM_DEFS))
     assert result["deleted"] == 1
     assert not TransformationAsset.objects.filter(
         name="stg_visits__repeat_old_group",
         scope=TransformationScope.SYSTEM,
         tenant=connect_tenant,
     ).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_upsert_connect_assets_preserves_unproven_repeat_until_explicit_migration(
+    connect_tenant, mocker
+):
+    tenant_meta = _FakeTenantMeta(FORM_DEFS)
+    upsert_connect_assets(connect_tenant, tenant_meta)
+    TransformationAsset.objects.create(
+        name="stg_visits__repeat_old_group",
+        scope=TransformationScope.SYSTEM,
+        tenant=connect_tenant,
+        sql_content="SELECT 1",
+    )
+    before = list(TransformationAsset.objects.filter(tenant=connect_tenant).values())
+    writes = mocker.spy(TransformationAsset.objects, "update_or_create")
+    with pytest.raises(RepeatModelMigrationRequired, match="source cannot be proven"):
+        upsert_connect_assets(connect_tenant, tenant_meta)
+    writes.assert_not_called()
+    assert list(TransformationAsset.objects.filter(tenant=connect_tenant).values()) == before
 
 
 # ── Column-note wiring loop ───────────────────────────────────────────────────
