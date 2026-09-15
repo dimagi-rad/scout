@@ -41,6 +41,7 @@ from .services.graph_manifest import (
     semantic_query_summary,
     sync_artifact_semantic_query_manifest,
 )
+from .services.versioning import latest_visible_version_ids
 
 logger = logging.getLogger(__name__)
 
@@ -1164,7 +1165,7 @@ def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:
 
 class ArtifactListView(LoginRequiredJsonMixin, View):
     """
-    GET /api/artifacts/<workspace_id>/ - List artifacts for the specified workspace.
+    GET /api/workspaces/<workspace_id>/artifacts/ - List each artifact's latest visible revision.
     """
 
     def get(self, request: HttpRequest, workspace_id) -> JsonResponse:
@@ -1176,6 +1177,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
         queryset = Artifact.objects.filter(
             workspace=workspace,
             artifact_type__in=ArtifactType.values,
+            id__in=latest_visible_version_ids(workspace.id),
         )
         if search:
             queryset = queryset.filter(
