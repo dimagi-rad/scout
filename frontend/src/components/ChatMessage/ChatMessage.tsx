@@ -60,13 +60,25 @@ function parseOutput(output: unknown): unknown {
   return output
 }
 
-function renderToolOutput(toolName: string, rawOutput: unknown): React.ReactNode | null {
+function inputSql(input: unknown): string | undefined {
+  if (input != null && typeof input === "object" && "sql" in input) {
+    const sql = (input as { sql?: unknown }).sql
+    if (typeof sql === "string" && sql) return sql
+  }
+  return undefined
+}
+
+function renderToolOutput(
+  toolName: string,
+  rawOutput: unknown,
+  input?: unknown,
+): React.ReactNode | null {
   const output = parseOutput(rawOutput)
   if (output == null || typeof output !== "object") return null
 
   switch (toolName) {
     case "query":
-      return <QueryToolOutput output={output as QueryOutput} />
+      return <QueryToolOutput output={output as QueryOutput} sql={inputSql(input)} />
     case "semantic_query":
       return <SemanticQueryToolOutput output={output as SemanticQueryOutput} />
     case "semantic_catalog":
@@ -548,7 +560,7 @@ export function ChatToolCallPart({ part, index, isLatest, isActiveMessage, works
 
   const richOutput =
     hasOutput && part.output != null && !isErrored && !isSubagentCard
-      ? renderToolOutput(toolName, part.output)
+      ? renderToolOutput(toolName, part.output, part.input)
       : null
   // Fallback text for the <pre> view: an output-error part carries its message
   // in errorText (no `output`); otherwise show the raw output when no rich card
