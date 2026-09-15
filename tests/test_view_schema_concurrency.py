@@ -21,11 +21,18 @@ from apps.workspaces.services.schema_manager import SchemaManager
 
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_builds_publish_coverage_matching_physical_views(workspace, tenant):
+@pytest.mark.parametrize("membership_change", ["activate", "add", "remove"])
+def test_concurrent_builds_publish_current_membership(workspace, tenant, membership_change):
     second = Tenant.objects.create(
         provider="commcare", external_id="concurrent-second", canonical_name="Second"
     )
-    WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    if membership_change != "add":
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+    queued_workspace = Workspace.objects.prefetch_related("tenants").get(pk=workspace.pk)
+    if membership_change != "activate":
+        TenantSchema.objects.create(
+            tenant=second, schema_name="concurrency_second", state=SchemaState.ACTIVE
+        )
     TenantSchema.objects.create(
         tenant=tenant, schema_name="concurrency_first", state=SchemaState.ACTIVE
     )
@@ -66,7 +73,10 @@ def test_concurrent_builds_publish_coverage_matching_physical_views(workspace, t
                     cursor.execute("SELECT pg_backend_pid()")
                     second_backend.append(cursor.fetchone()[0])
                 second_started.set()
-            return SchemaManager().build_view_schema(Workspace.objects.get(pk=workspace.pk))
+            current = (
+                queued_workspace if name == "second" else Workspace.objects.get(pk=workspace.pk)
+            )
+            return SchemaManager().build_view_schema(current)
         finally:
             connection.close()
 
@@ -84,9 +94,14 @@ def test_concurrent_builds_publish_coverage_matching_physical_views(workspace, t
                 WorkspaceViewSchema.objects.get(workspace=workspace).state
                 == SchemaState.PROVISIONING
             )
-            TenantSchema.objects.create(
-                tenant=second, schema_name="concurrency_second", state=SchemaState.ACTIVE
-            )
+            if membership_change == "add":
+                WorkspaceTenant.objects.create(workspace=workspace, tenant=second)
+            elif membership_change == "remove":
+                WorkspaceTenant.objects.filter(workspace=workspace, tenant=second).delete()
+            else:
+                TenantSchema.objects.create(
+                    tenant=second, schema_name="concurrency_second", state=SchemaState.ACTIVE
+                )
             other = executor.submit(build, "second")
             assert second_started.wait(10)
             deadline = time.monotonic() + 10
@@ -114,7 +129,8 @@ def test_concurrent_builds_publish_coverage_matching_physical_views(workspace, t
     assert {entry["tenant_id"] for entry in stored.tenant_coverage["included_tenants"]} == {
         source_ids[source] for source in physical_sources
     }
-    assert physical_sources == set(source_ids)
+    expected_sources = set(source_ids) if membership_change != "remove" else {"concurrency_first"}
+    assert physical_sources == expected_sources
 
 
 @pytest.mark.django_db(transaction=True)
