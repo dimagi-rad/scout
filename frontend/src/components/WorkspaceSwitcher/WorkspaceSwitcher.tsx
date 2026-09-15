@@ -7,6 +7,7 @@ import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
+import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -297,6 +298,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setActiveDomain(ws.id)
     newThread()
     close()
+    // An artifact belongs to one workspace; never carry its id into another.
+    if (isWorkspaceArtifactPath(location.pathname)) {
+      navigate("/artifacts")
+      return
+    }
     // If we're on a workspace detail/settings page, follow the selection to the
     // newly chosen workspace's page rather than staying on the previous one.
     const wsDetailPrefix = `${pathPrefix}/workspaces/`
