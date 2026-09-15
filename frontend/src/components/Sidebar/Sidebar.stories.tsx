@@ -95,6 +95,7 @@ function SeedSidebarStore({ children, threadsStatus = "loaded" }: SidebarStoryPr
       authStatus: "authenticated",
       authError: null,
     })
+    useAppStore.setState({ activeDomainId: "workspace-1" })
     const state = useAppStore.getState()
     useAppStore.setState({
       domains: workspaces,
@@ -109,7 +110,8 @@ function SeedSidebarStore({ children, threadsStatus = "loaded" }: SidebarStoryPr
         ...state.domainActions,
         fetchDomains: async () => undefined,
         setActiveDomain: (id: string) => {
-          useAppStore.setState({ activeDomainId: id, threadId: "story-thread-new" })
+          useAppStore.setState({ activeDomainId: id })
+          useAppStore.setState({ threadId: "story-thread-new" })
         },
       },
       uiActions: {

@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from collections.abc import Iterable
 
 from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
+from apps.common.localized import localized_str
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
@@ -71,19 +73,50 @@ def slugify_model_name(name: str) -> str:
     return slug
 
 
-def _slug_or_digest(name: str, *, identity: str) -> str:
+class _NameFallbacks:
+    """Digest fallbacks recorded across one generation pass.
+
+    The digest replaces the upstream name everywhere the model or column is
+    referenced, so the only surviving trace of a renamed identifier is the raw
+    name buried in the generated SQL. Collecting them lets the generator report
+    the whole set once instead of leaving operators to grep assets.
+    """
+
+    def __init__(self) -> None:
+        self._entries: list[tuple[str, object]] = []
+
+    def record(self, kind: str, name: object) -> None:
+        self._entries.append((kind, name))
+
+    def summary(self) -> str:
+        """One line naming each distinct fallback, or ``""`` when none fired."""
+        return "; ".join(dict.fromkeys(f"{kind}={name!r}" for kind, name in self._entries))
+
+
+def _slug_or_digest(
+    name: object, *, identity: str, kind: str, fallbacks: _NameFallbacks | None = None
+) -> str:
     """Slug for *name*, or a stable digest of *identity* when no ASCII survives.
 
     Upstream identifiers (labels, case types, properties, question IDs) may be
-    non-Latin or punctuation-only. The materializer catches a ValueError per
-    tenant, so one such identifier would silently drop every staging model for
-    that tenant (SCOUT-DJANGO-3D). Key the fallback on source identity rather
-    than the mutable name or enumeration order.
+    non-Latin, punctuation-only, or localized ``{"en": ...}`` dicts. The
+    materializer catches one exception per tenant, so a single such identifier
+    would silently drop every staging model for that tenant (SCOUT-DJANGO-3D).
+    Key the fallback on source identity rather than the mutable name or
+    enumeration order.
     """
     try:
-        return slugify_model_name(name)
+        return slugify_model_name(localized_str(name))
     except ValueError:
+        if fallbacks is not None:
+            fallbacks.record(kind, name)
         return fit_identifier("unnamed", unique_key=identity, always_hash=True)
+
+
+def _question_path(question: dict) -> str:
+    """The question's XForm ``value`` path, or ``""`` when it is not a usable string."""
+    value = question.get("value")
+    return value if isinstance(value, str) else ""
 
 
 def _sql_escape(value: str) -> str:
@@ -102,7 +135,7 @@ def _question_path_to_json_path(value_path: str) -> str:
     return "ARRAY[" + ",".join(parts) + "]::text[]"
 
 
-def _leaf_slug(path: str) -> str:
+def _leaf_slug(path: str, *, kind: str, fallbacks: _NameFallbacks | None = None) -> str:
     """Slug the leaf segment of a question or repeat-group path.
 
     Latin leaves name by leaf alone, so the same question ID in two groups
@@ -110,7 +143,7 @@ def _leaf_slug(path: str) -> str:
     fallback keys on the full path because that is the question's XForm
     identity; keying on the leaf would tie the digest to enumeration order.
     """
-    return _slug_or_digest(path.rsplit("/", 1)[-1], identity=path)
+    return _slug_or_digest(path.rsplit("/", 1)[-1], identity=path, kind=kind, fallbacks=fallbacks)
 
 
 def _typed_expression(expr: str, question_type: str | None) -> str:
@@ -126,57 +159,101 @@ def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
     props: set[str] = set()
     for app in metadata.get("app_definitions", []):
         for module in app.get("modules", []):
-            if module.get("case_type") != case_type_name:
+            if localized_str(module.get("case_type")) != case_type_name:
                 continue
             case_props = module.get("case_properties", [])
             for prop in case_props:
-                key = prop.get("key", "") if isinstance(prop, dict) else str(prop)
+                key = localized_str(prop.get("key") if isinstance(prop, dict) else prop)
                 if key:
                     props.add(key)
     return sorted(props)
 
 
-def _case_base_model_name(case_type: str) -> str:
-    return dbt_model_name(f"stg_case_{_slug_or_digest(case_type, identity=f'case:{case_type}')}")
+def _case_base_model_name(case_type: str, fallbacks: _NameFallbacks | None = None) -> str:
+    slug = _slug_or_digest(
+        case_type, identity=f"case:{case_type}", kind="case type", fallbacks=fallbacks
+    )
+    return dbt_model_name(f"stg_case_{slug}")
 
 
-def _case_model_names(case_types: list[dict]) -> dict[str, str]:
+def _disambiguate_model_names(names: dict[str, str], *, identity_prefix: str) -> dict[str, str]:
     """Keep unambiguous names, disambiguating collisions by source identity.
 
-    Case types are case-sensitive upstream, but PostgreSQL model slugs are not.
-    Hash every member of a collision rather than letting metadata order choose
-    which case type owns the old, ambiguous name. Reserve literal names too so
-    a generated digest cannot overwrite an unrelated case type's model.
+    Source identifiers are case-sensitive upstream, but PostgreSQL model slugs
+    are not, and unrelated paths may share a leaf. Hash every member of a
+    collision rather than letting metadata order choose which source owns the
+    old, ambiguous name. Reserve literal names too so a generated digest cannot
+    overwrite an unrelated source's model.
     """
-    names = {
-        item["name"]: _case_base_model_name(item["name"]) for item in case_types if item.get("name")
-    }
+    names = dict(names)
     counts = Counter(names.values())
     used = set(names.values())
-    for case_type, base in sorted(names.items()):
+    for key, base in sorted(names.items()):
         if counts[base] == 1:
             continue
         attempt = 0
         while True:
-            identity = f"case:{case_type}" + (f"\0{attempt}" if attempt else "")
+            identity = f"{identity_prefix}{key}" + (f"\0{attempt}" if attempt else "")
             candidate = fit_identifier(base, unique_key=identity, always_hash=True)
             if candidate not in used:
                 break
             attempt += 1
-        names[case_type] = candidate
+        names[key] = candidate
         used.add(candidate)
     return names
 
 
+def _case_model_names(
+    case_types: list[dict], fallbacks: _NameFallbacks | None = None
+) -> dict[str, str]:
+    names = {
+        name: _case_base_model_name(name, fallbacks)
+        for item in case_types
+        if (name := localized_str(item.get("name")))
+    }
+    return _disambiguate_model_names(names, identity_prefix="case:")
+
+
+def _repeat_base_model_name(
+    parent_model: str, group_path: str, fallbacks: _NameFallbacks | None = None
+) -> str:
+    return dbt_model_name(
+        f"{parent_model}__repeat_{_leaf_slug(group_path, kind='repeat group', fallbacks=fallbacks)}"
+    )
+
+
+def _repeat_model_names(
+    parent_model: str, group_paths: Iterable[str], fallbacks: _NameFallbacks | None = None
+) -> dict[str, str]:
+    """Model name per repeat group of one parent; leaves that collide get digests.
+
+    The identity carries the parent so two long form slugs that truncate to the
+    same head cannot mint the same digest for the same group path.
+    """
+    names = {path: _repeat_base_model_name(parent_model, path, fallbacks) for path in group_paths}
+    return _disambiguate_model_names(names, identity_prefix=f"repeat:{parent_model}\0")
+
+
 def _generate_case_type_asset(
-    tenant, case_type_name: str, properties: list[str], metadata: dict, *, model_name: str
+    tenant,
+    case_type_name: str,
+    properties: list[str],
+    metadata: dict,
+    *,
+    model_name: str,
+    fallbacks: _NameFallbacks | None = None,
 ) -> TransformationAsset:
     """Generate a staging asset for a single case type."""
     lines = ["SELECT"]
     select_parts: list[str] = []
     # Seed with core column names so custom properties that collide get a suffix.
     seen_aliases: dict[str, int] = {(alias or expr): 1 for expr, alias in _CASE_CORE_COLUMNS}
-    property_columns = {prop: _slug_or_digest(prop, identity=f"prop:{prop}") for prop in properties}
+    property_columns = {
+        prop: _slug_or_digest(
+            prop, identity=f"prop:{prop}", kind="case property", fallbacks=fallbacks
+        )
+        for prop in properties
+    }
     reserved_aliases = set(seen_aliases) | set(property_columns.values())
 
     for expr, alias in _CASE_CORE_COLUMNS:
@@ -204,7 +281,11 @@ def _generate_case_type_asset(
 
 
 def _generate_form_asset(
-    tenant, form_xmlns: str, form_def: dict, model_name_slug: str
+    tenant,
+    form_xmlns: str,
+    form_def: dict,
+    model_name_slug: str,
+    fallbacks: _NameFallbacks | None = None,
 ) -> TransformationAsset:
     """Generate a staging asset for a single form."""
     questions = form_def.get("questions", [])
@@ -225,13 +306,19 @@ def _generate_form_asset(
         "app_id": 1,
         "form_data": 1,
     }
-    staged_questions = [q for q in questions if not q.get("repeat") and q.get("value", "")]
-    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
+    staged_questions = [q for q in questions if not q.get("repeat") and _question_path(q)]
+    question_slugs = {
+        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
+        for q in staged_questions
+    }
+    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
 
     for q in staged_questions:
         value_path = q["value"]
         json_path = _question_path_to_json_path(value_path)
-        col_name = dbt_column_alias(_leaf_slug(value_path), seen_aliases, reserved=reserved_aliases)
+        col_name = dbt_column_alias(
+            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
+        )
         raw_expr = f"form_data #>> {json_path}"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -243,7 +330,7 @@ def _generate_form_asset(
     model_name = dbt_model_name(f"stg_form_{model_name_slug}")
     return TransformationAsset(
         name=model_name,
-        description=f"Staging model for form: {form_def.get('name', form_xmlns)}",
+        description=f"Staging model for form: {localized_str(form_def.get('name')) or form_xmlns}",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
         sql_content="\n".join(lines),
@@ -252,15 +339,17 @@ def _generate_form_asset(
 
 
 def _generate_repeat_group_asset(
-    tenant, form_name_slug: str, group_path: str, child_questions: list[dict]
+    tenant,
+    parent_model: str,
+    group_path: str,
+    child_questions: list[dict],
+    fallbacks: _NameFallbacks | None = None,
+    *,
+    model_name: str,
 ) -> TransformationAsset:
     """Generate a staging asset for a repeat group child table."""
     group_json_path = _question_path_to_json_path(group_path)
     group_leaf = group_path.rsplit("/", 1)[-1]
-    group_slug = _leaf_slug(group_path)
-    # Must match the parent form asset's (possibly hash-bounded) name so ref()
-    # resolves — both derive from the same slug via the same helper.
-    parent_model = dbt_model_name(f"stg_form_{form_name_slug}")
 
     lines = ["SELECT"]
     select_parts: list[str] = [
@@ -269,13 +358,19 @@ def _generate_repeat_group_asset(
     ]
     # Seed with fixed column names so child question aliases that collide get a suffix.
     seen_aliases: dict[str, int] = {"form_id": 1, "repeat_index": 1}
-    staged_questions = [q for q in child_questions if q.get("value", "")]
-    reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
+    staged_questions = [q for q in child_questions if _question_path(q)]
+    question_slugs = {
+        q["value"]: _leaf_slug(q["value"], kind="question", fallbacks=fallbacks)
+        for q in staged_questions
+    }
+    reserved_aliases = set(seen_aliases) | set(question_slugs.values())
 
     for q in staged_questions:
         value_path = q["value"]
         leaf_name = value_path.rsplit("/", 1)[-1]
-        col_name = dbt_column_alias(_leaf_slug(value_path), seen_aliases, reserved=reserved_aliases)
+        col_name = dbt_column_alias(
+            question_slugs[value_path], seen_aliases, reserved=reserved_aliases
+        )
         raw_expr = f"elem.value->>'{_sql_escape(leaf_name)}'"
         q_type = q.get("type")
         select_parts.append(f'    {_typed_expression(raw_expr, q_type)} AS "{col_name}"')
@@ -287,7 +382,6 @@ def _generate_repeat_group_asset(
     lines.append(") WITH ORDINALITY AS elem(value, ordinality)")
     lines.append(f"WHERE f.form_data #> {group_json_path} IS NOT NULL")
 
-    model_name = dbt_model_name(f"{parent_model}__repeat_{group_slug}")
     return TransformationAsset(
         name=model_name,
         description=f"Repeat group '{group_leaf}' from {parent_model}",
@@ -309,32 +403,39 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     Returns unsaved TransformationAsset instances with scope=SYSTEM.
     """
     assets: list[TransformationAsset] = []
+    fallbacks = _NameFallbacks()
 
-    for name, model_name in _case_model_names(metadata.get("case_types", [])).items():
+    for name, model_name in _case_model_names(metadata.get("case_types", []), fallbacks).items():
         props = _collect_case_properties(name, metadata)
         assets.append(
-            _generate_case_type_asset(tenant, name, props, metadata, model_name=model_name)
+            _generate_case_type_asset(
+                tenant, name, props, metadata, model_name=model_name, fallbacks=fallbacks
+            )
         )
 
     seen_form_slugs: dict[str, int] = {}  # slug → count for disambiguation
     form_definitions = metadata.get("form_definitions", {})
 
     for xmlns, form_def in form_definitions.items():
-        form_name = form_def.get("name", xmlns)
-        if isinstance(form_name, dict):
-            # Localized names: {"en": "Household Registration", "fr": "..."}
-            form_name = form_name.get("en") or next(iter(form_name.values()), xmlns)
-        if not isinstance(form_name, str):
-            form_name = xmlns
-        app_name = form_def.get("app_name", "")
-        base_slug = _slug_or_digest(form_name, identity=f"form:{xmlns}")
+        app_name = localized_str(form_def.get("app_name"))
+        base_slug = _slug_or_digest(
+            form_def.get("name", xmlns),
+            identity=f"form:{xmlns}",
+            kind="form name",
+            fallbacks=fallbacks,
+        )
 
         # Disambiguate duplicate form names across apps; always incorporate the
         # counter so 3+ collisions stay unique.
         if base_slug in seen_form_slugs:
             count = seen_form_slugs[base_slug]
             app_slug = (
-                _slug_or_digest(app_name, identity=f"app:{form_def.get('app_id') or app_name}")
+                _slug_or_digest(
+                    app_name,
+                    identity=f"app:{form_def.get('app_id') or app_name}",
+                    kind="app name",
+                    fallbacks=fallbacks,
+                )
                 if app_name
                 else ""
             )
@@ -344,16 +445,35 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
             slug = base_slug
         seen_form_slugs[base_slug] = seen_form_slugs.get(base_slug, 0) + 1
 
-        assets.append(_generate_form_asset(tenant, xmlns, form_def, slug))
+        assets.append(_generate_form_asset(tenant, xmlns, form_def, slug, fallbacks))
 
         repeat_groups: dict[str, list[dict]] = {}
         for q in form_def.get("questions", []):
             repeat_path = q.get("repeat")
-            if repeat_path:
+            if isinstance(repeat_path, str) and repeat_path:
                 repeat_groups.setdefault(repeat_path, []).append(q)
 
+        # Must match the form asset's (possibly hash-bounded) name so ref() resolves.
+        parent_model = dbt_model_name(f"stg_form_{slug}")
+        model_names = _repeat_model_names(parent_model, repeat_groups, fallbacks)
         for group_path, child_qs in repeat_groups.items():
-            assets.append(_generate_repeat_group_asset(tenant, slug, group_path, child_qs))
+            assets.append(
+                _generate_repeat_group_asset(
+                    tenant,
+                    parent_model,
+                    group_path,
+                    child_qs,
+                    fallbacks,
+                    model_name=model_names[group_path],
+                )
+            )
+
+    if summary := fallbacks.summary():
+        logger.info(
+            "Staging generation fell back to digest names for tenant %s: %s",
+            tenant.external_id,
+            summary,
+        )
 
     return assets
 

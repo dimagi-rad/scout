@@ -6,7 +6,8 @@ import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 describe("domainSlice.setActiveDomain — threadId leak guard (00c423d)", () => {
   beforeEach(() => {
     localStorage.clear()
-    useAppStore.setState({ activeDomainId: "ws-a", threadId: "thread-a" })
+    useAppStore.setState({ activeDomainId: "ws-a" })
+    useAppStore.setState({ threadId: "thread-a" })
   })
 
   it("resets threadId to a fresh id when switching to a different workspace", () => {

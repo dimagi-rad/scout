@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api, ApiError } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
+import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
 export interface SemanticField {
   id: string
@@ -84,80 +85,95 @@ export const createDatasetSlice: StateCreator<
   [],
   [],
   DatasetSlice
-> = (set, get) => ({
-  datasetCatalog: null,
-  datasetStatus: "idle",
-  datasetError: null,
-  selectedDataset: null,
-  selectedDatasetStatus: "idle",
-  selectedDatasetError: null,
-  datasetActions: {
-    fetchDatasets: async () => {
-      set({ datasetStatus: "loading", datasetError: null, selectedDatasetError: null })
-      try {
+> = (set, get) => {
+  const requests = createWorkspaceRequestGuard(get)
+  return {
+    datasetCatalog: null,
+    datasetStatus: "idle",
+    datasetError: null,
+    selectedDataset: null,
+    selectedDatasetStatus: "idle",
+    selectedDatasetError: null,
+    datasetActions: {
+      fetchDatasets: async () => {
+        const isCurrent = requests.start("catalog")
+        const isSelectionCurrent = requests.start("selection")
+        set({ datasetStatus: "loading", datasetError: null, selectedDatasetError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active workspace selected.")
+          const catalog = await api.get<DatasetCatalog>(
+            `/api/workspaces/${activeDomainId}/datasets/`
+          )
+          if (!isCurrent()) return
+          set({
+            datasetCatalog: catalog,
+            ...(isSelectionCurrent() ? {
+              selectedDataset: catalog.datasets[0] ?? null,
+              selectedDatasetStatus: catalog.datasets[0] ? "loaded" as const : "idle" as const,
+              selectedDatasetError: null,
+            } : {}),
+            datasetStatus: "loaded",
+            datasetError: null,
+          })
+        } catch (error) {
+          if (!isCurrent()) return
+          const status =
+            error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+          set({
+            datasetStatus: status,
+            datasetError: error instanceof Error ? error.message : "Failed to load datasets",
+            ...(isSelectionCurrent() ? {
+              selectedDatasetStatus: "idle" as const,
+              selectedDatasetError: null,
+            } : {}),
+          })
+        }
+      },
+
+      fetchDataset: async (datasetName: string) => {
+        const isCurrent = requests.start("selection")
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active workspace selected.")
-        const catalog = await api.get<DatasetCatalog>(
-          `/api/workspaces/${activeDomainId}/datasets/`
+        const cachedDataset = get().datasetCatalog?.datasets.find(
+          (dataset) => dataset.name === datasetName
         )
+        set({ selectedDatasetStatus: "loading", selectedDatasetError: null })
+        if (cachedDataset) {
+          set({ selectedDataset: cachedDataset })
+        }
+        try {
+          const raw = await api.get<DatasetDetailResponse>(
+            `/api/workspaces/${activeDomainId}/datasets/${datasetName}/`
+          )
+          if (!isCurrent()) return
+          set({
+            selectedDataset: raw.dataset,
+            selectedDatasetStatus: "loaded",
+            selectedDatasetError: null,
+          })
+        } catch (error) {
+          if (!isCurrent()) return
+          set({
+            selectedDataset: cachedDataset ?? null,
+            selectedDatasetStatus: "error",
+            selectedDatasetError:
+              error instanceof Error ? error.message : "Failed to load dataset details",
+          })
+        }
+      },
+
+      clearDatasets: () => {
+        requests.invalidate()
         set({
-          datasetCatalog: catalog,
-          selectedDataset: catalog.datasets[0] ?? null,
-          selectedDatasetStatus: catalog.datasets[0] ? "loaded" : "idle",
-          selectedDatasetError: null,
-          datasetStatus: "loaded",
+          datasetCatalog: null,
+          datasetStatus: "idle",
           datasetError: null,
-        })
-      } catch (error) {
-        const status =
-          error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
-        set({
-          datasetStatus: status,
-          datasetError: error instanceof Error ? error.message : "Failed to load datasets",
+          selectedDataset: null,
           selectedDatasetStatus: "idle",
           selectedDatasetError: null,
         })
-      }
+      },
     },
-
-    fetchDataset: async (datasetName: string) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active workspace selected.")
-      const cachedDataset = get().datasetCatalog?.datasets.find(
-        (dataset) => dataset.name === datasetName
-      )
-      set({ selectedDatasetStatus: "loading", selectedDatasetError: null })
-      if (cachedDataset) {
-        set({ selectedDataset: cachedDataset })
-      }
-      try {
-        const raw = await api.get<DatasetDetailResponse>(
-          `/api/workspaces/${activeDomainId}/datasets/${datasetName}/`
-        )
-        set({
-          selectedDataset: raw.dataset,
-          selectedDatasetStatus: "loaded",
-          selectedDatasetError: null,
-        })
-      } catch (error) {
-        set({
-          selectedDataset: cachedDataset ?? null,
-          selectedDatasetStatus: "error",
-          selectedDatasetError:
-            error instanceof Error ? error.message : "Failed to load dataset details",
-        })
-      }
-    },
-
-    clearDatasets: () => {
-      set({
-        datasetCatalog: null,
-        datasetStatus: "idle",
-        datasetError: null,
-        selectedDataset: null,
-        selectedDatasetStatus: "idle",
-        selectedDatasetError: null,
-      })
-    },
-  },
-})
+  }
+}

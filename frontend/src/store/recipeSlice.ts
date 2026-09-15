@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
+import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
 export interface RecipeVariable {
   name: string
@@ -71,100 +72,118 @@ export interface RecipeSlice {
   }
 }
 
-export const createRecipeSlice: StateCreator<RecipeSlice & DomainSlice, [], [], RecipeSlice> = (set, get) => ({
-  recipes: [],
-  recipeStatus: "idle",
-  recipeError: null,
-  currentRecipe: null,
-  recipeRuns: [],
-  recipeActions: {
-    fetchRecipes: async () => {
-      set({ recipeStatus: "loading", recipeError: null })
-      try {
+export const createRecipeSlice: StateCreator<RecipeSlice & DomainSlice, [], [], RecipeSlice> = (set, get) => {
+  const requests = createWorkspaceRequestGuard(get)
+  return {
+    recipes: [],
+    recipeStatus: "idle",
+    recipeError: null,
+    currentRecipe: null,
+    recipeRuns: [],
+    recipeActions: {
+      fetchRecipes: async () => {
+        const isCurrent = requests.start("list")
+        set({ recipeStatus: "loading", recipeError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const recipes = await api.get<Recipe[]>(`/api/workspaces/${activeDomainId}/recipes/`)
+          if (!isCurrent()) return
+          set({ recipes, recipeStatus: "loaded", recipeError: null })
+        } catch (error) {
+          if (!isCurrent()) return
+          set({
+            recipeStatus: "error",
+            recipeError: error instanceof Error ? error.message : "Failed to load recipes",
+          })
+        }
+      },
+
+      fetchRecipe: async (recipeId: string) => {
+        const isCurrent = requests.start("detail")
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const recipe = await api.get<Recipe>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`)
+          if (isCurrent()) set({ currentRecipe: recipe })
+          return recipe
+        } catch (error) {
+          if (isCurrent()) set({ currentRecipe: null })
+          throw error
+        }
+      },
+
+      updateRecipe: async (recipeId: string, data: Partial<Recipe>) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        const recipes = await api.get<Recipe[]>(`/api/workspaces/${activeDomainId}/recipes/`)
-        set({ recipes, recipeStatus: "loaded", recipeError: null })
-      } catch (error) {
+        const recipe = await api.put<Recipe>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`, data)
+        if (!isCurrent()) return recipe
+        const recipes = get().recipes.map((r) => (r.id === recipeId ? recipe : r))
         set({
-          recipeStatus: "error",
-          recipeError: error instanceof Error ? error.message : "Failed to load recipes",
+          recipes,
+          currentRecipe: get().currentRecipe?.id === recipeId ? recipe : get().currentRecipe,
         })
-      }
-    },
-
-    fetchRecipe: async (recipeId: string) => {
-      try {
-        const activeDomainId = get().activeDomainId
-        if (!activeDomainId) throw new Error("No active domain selected.")
-        const recipe = await api.get<Recipe>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`)
-        set({ currentRecipe: recipe })
         return recipe
-      } catch (error) {
-        set({ currentRecipe: null })
-        throw error
-      }
-    },
+      },
 
-    updateRecipe: async (recipeId: string, data: Partial<Recipe>) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const recipe = await api.put<Recipe>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`, data)
-      const recipes = get().recipes.map((r) => (r.id === recipeId ? recipe : r))
-      set({
-        recipes,
-        currentRecipe: get().currentRecipe?.id === recipeId ? recipe : get().currentRecipe,
-      })
-      return recipe
-    },
-
-    deleteRecipe: async (recipeId: string) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      await api.delete<void>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`)
-      const recipes = get().recipes.filter((r) => r.id !== recipeId)
-      set({
-        recipes,
-        currentRecipe: get().currentRecipe?.id === recipeId ? null : get().currentRecipe,
-      })
-    },
-
-    runRecipe: async (recipeId: string, variables: Record<string, string>) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const run = await api.post<RecipeRun>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/run/`, {
-        variable_values: variables,
-      })
-      const runs = get().recipeRuns
-      set({ recipeRuns: [run, ...runs] })
-      return run
-    },
-
-    fetchRuns: async (recipeId: string) => {
-      try {
+      deleteRecipe: async (recipeId: string) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        const runs = await api.get<RecipeRun[]>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/runs/`)
-        set({ recipeRuns: runs })
-      } catch {
-        set({ recipeRuns: [] })
-      }
-    },
+        await api.delete<void>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/`)
+        if (!isCurrent()) return
+        const recipes = get().recipes.filter((r) => r.id !== recipeId)
+        set({
+          recipes,
+          currentRecipe: get().currentRecipe?.id === recipeId ? null : get().currentRecipe,
+        })
+      },
 
-    updateRecipeRun: async (
-      recipeId: string,
-      runId: string,
-      data: { is_shared?: boolean; is_public?: boolean },
-    ) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const updated = await api.patch<RecipeRun>(
-        `/api/workspaces/${activeDomainId}/recipes/${recipeId}/runs/${runId}/`,
-        data,
-      )
-      const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))
-      set({ recipeRuns: runs })
-      return updated
+      runRecipe: async (recipeId: string, variables: Record<string, string>) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const run = await api.post<RecipeRun>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/run/`, {
+          variable_values: variables,
+        })
+        if (!isCurrent()) return run
+        const runs = get().recipeRuns
+        set({ recipeRuns: [run, ...runs] })
+        return run
+      },
+
+      fetchRuns: async (recipeId: string) => {
+        const isCurrent = requests.start("runs")
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const runs = await api.get<RecipeRun[]>(`/api/workspaces/${activeDomainId}/recipes/${recipeId}/runs/`)
+          if (!isCurrent()) return
+          set({ recipeRuns: runs })
+        } catch {
+          if (!isCurrent()) return
+          set({ recipeRuns: [] })
+        }
+      },
+
+      updateRecipeRun: async (
+        recipeId: string,
+        runId: string,
+        data: { is_shared?: boolean; is_public?: boolean },
+      ) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const updated = await api.patch<RecipeRun>(
+          `/api/workspaces/${activeDomainId}/recipes/${recipeId}/runs/${runId}/`,
+          data,
+        )
+        if (!isCurrent()) return updated
+        const runs = get().recipeRuns.map((r) => (r.id === runId ? updated : r))
+        set({ recipeRuns: runs })
+        return updated
+      },
     },
-  },
-})
+  }
+}

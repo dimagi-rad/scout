@@ -143,6 +143,24 @@ def dbt_model_name(name: str) -> str:
     return fit_identifier(name, unique_key=name)
 
 
+def view_name(prefix: str, table_name: str) -> str:
+    """Compose the ``{prefix}__{table}`` multi-tenant view name, fitted to 63 bytes.
+
+    The plain form is returned verbatim when it fits, so every existing view keeps
+    its name. On overflow (a 32-char tenant prefix leaves only 29 for the table,
+    and dbt repeat-group models like ``stg_visits__repeat_<group>`` run longer —
+    SCOUT-DJANGO-3C) the head is trimmed and a digest of the full logical name is
+    woven in, so two tables sharing a 63-byte head stay distinct instead of
+    failing the whole workspace build.
+    """
+    plain = f"{prefix}__{table_name}"
+    if len(plain.encode("utf-8")) <= PG_MAX_IDENTIFIER_BYTES:
+        return plain
+    tail = f"_{_digest(plain)}"
+    head = _truncate_to_bytes(plain, PG_MAX_IDENTIFIER_BYTES - len(tail)).rstrip("_")
+    return f"{head}{tail}"
+
+
 def dbt_column_alias(
     base: str,
     seen: dict[str, int],

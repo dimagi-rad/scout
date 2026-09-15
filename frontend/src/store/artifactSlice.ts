@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
+import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
 export type ArtifactType = "react" | "html" | "markdown" | "story" | "svg"
 
@@ -34,55 +35,65 @@ export interface ArtifactSlice {
   }
 }
 
-export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], [], ArtifactSlice> = (set, get) => ({
-  artifacts: [],
-  artifactsStatus: "idle",
-  artifactsError: null,
-  artifactSearch: "",
-  artifactActions: {
-    fetchArtifacts: async (options) => {
-      set({ artifactsStatus: "loading", artifactsError: null })
-      try {
+export const createArtifactSlice: StateCreator<ArtifactSlice & DomainSlice, [], [], ArtifactSlice> = (set, get) => {
+  const requests = createWorkspaceRequestGuard(get)
+  return {
+    artifacts: [],
+    artifactsStatus: "idle",
+    artifactsError: null,
+    artifactSearch: "",
+    artifactActions: {
+      fetchArtifacts: async (options) => {
+        const isCurrent = requests.start("list")
+        set({ artifactsStatus: "loading", artifactsError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const params = new URLSearchParams()
+          if (options?.search) params.set("search", options.search)
+          const qs = params.toString()
+          const url = `/api/workspaces/${activeDomainId}/artifacts/${qs ? `?${qs}` : ""}`
+          const response = await api.get<ArtifactListResponse>(url)
+          if (!isCurrent()) return
+          set({
+            artifacts: response.results,
+            artifactsStatus: "loaded",
+            artifactsError: null,
+          })
+        } catch (error) {
+          if (!isCurrent()) return
+          set({
+            artifactsStatus: "error",
+            artifactsError: error instanceof Error ? error.message : "Failed to load artifacts",
+          })
+        }
+      },
+      updateArtifact: async (artifactId, data) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        const params = new URLSearchParams()
-        if (options?.search) params.set("search", options.search)
-        const qs = params.toString()
-        const url = `/api/workspaces/${activeDomainId}/artifacts/${qs ? `?${qs}` : ""}`
-        const response = await api.get<ArtifactListResponse>(url)
-        set({
-          artifacts: response.results,
-          artifactsStatus: "loaded",
-          artifactsError: null,
-        })
-      } catch (error) {
-        set({
-          artifactsStatus: "error",
-          artifactsError: error instanceof Error ? error.message : "Failed to load artifacts",
-        })
-      }
+        const updated = await api.patch<{ id: string; title: string; description: string }>(
+          `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`,
+          data,
+        )
+        if (!isCurrent()) return
+        set((state) => ({
+          artifacts: state.artifacts.map((a) =>
+            a.id === artifactId ? { ...a, title: updated.title, description: updated.description } : a
+          ),
+        }))
+      },
+      deleteArtifact: async (artifactId) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        await api.delete(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`)
+        if (!isCurrent()) return
+        set((state) => ({
+          artifacts: state.artifacts.filter((a) => a.id !== artifactId),
+        }))
+      },
+      setArtifactSearch: (search) => set({ artifactSearch: search }),
     },
-    updateArtifact: async (artifactId, data) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const updated = await api.patch<{ id: string; title: string; description: string }>(
-        `/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`,
-        data,
-      )
-      set((state) => ({
-        artifacts: state.artifacts.map((a) =>
-          a.id === artifactId ? { ...a, title: updated.title, description: updated.description } : a
-        ),
-      }))
-    },
-    deleteArtifact: async (artifactId) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      await api.delete(`/api/workspaces/${activeDomainId}/artifacts/${artifactId}/`)
-      set((state) => ({
-        artifacts: state.artifacts.filter((a) => a.id !== artifactId),
-      }))
-    },
-    setArtifactSearch: (search) => set({ artifactSearch: search }),
-  },
-})
+  }
+}

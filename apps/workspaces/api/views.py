@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.common.error_codes import ErrorCode
+from apps.common.localized import localized_str
 from apps.knowledge.models import TableKnowledge
 from apps.users.models import TenantMembership
 from apps.workspaces.models import (
@@ -260,16 +261,6 @@ def _get_table_columns(schema_name: str, table_name: str) -> list[dict]:
     ]
 
 
-def _localized_str(value) -> str:
-    """Extract a plain string from a possibly-multilingual CommCare value.
-
-    CommCare returns some fields as {"en": "Name"} dicts rather than plain strings.
-    """
-    if isinstance(value, dict):
-        return value.get("en") or next(iter(value.values()), "") or ""
-    return str(value) if value is not None else ""
-
-
 def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
     """Return structured source metadata for known tables derived from TenantMetadata.
 
@@ -287,9 +278,9 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
                 "type": "case_types",
                 "items": [
                     {
-                        "name": _localized_str(ct.get("name", "")),
-                        "app_name": _localized_str(ct.get("app_name", "")),
-                        "module_name": _localized_str(ct.get("module_name", "")),
+                        "name": localized_str(ct.get("name", "")),
+                        "app_name": localized_str(ct.get("app_name", "")),
+                        "module_name": localized_str(ct.get("module_name", "")),
                     }
                     for ct in case_types
                 ],
@@ -302,10 +293,10 @@ def _build_source_metadata(table_name: str, tenant_metadata) -> dict | None:
                 "type": "form_definitions",
                 "items": [
                     {
-                        "name": _localized_str(fd.get("name", xmlns)),
-                        "app_name": _localized_str(fd.get("app_name", "")),
-                        "module_name": _localized_str(fd.get("module_name", "")),
-                        "case_type": _localized_str(fd.get("case_type", "")),
+                        "name": localized_str(fd.get("name", xmlns)),
+                        "app_name": localized_str(fd.get("app_name", "")),
+                        "module_name": localized_str(fd.get("module_name", "")),
+                        "case_type": localized_str(fd.get("case_type", "")),
                     }
                     for xmlns, fd in form_definitions.items()
                 ],

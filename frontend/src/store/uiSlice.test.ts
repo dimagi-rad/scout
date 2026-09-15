@@ -19,7 +19,7 @@ function thread(id: string, title: string): Thread {
 
 describe("uiSlice.fetchThreads — outage vs empty (07#7)", () => {
   beforeEach(() => {
-    useAppStore.setState({ threads: [], threadsStatus: "idle" })
+    useAppStore.setState({ activeDomainId: "ws-1", threads: [], threadsStatus: "idle" })
   })
 
   afterEach(() => {
