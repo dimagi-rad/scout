@@ -63,6 +63,8 @@ function renderPrettyChat(initialPath: string, pathPrefix = "") {
 describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)", () => {
   beforeEach(() => {
     localStorage.clear()
+    // Select the workspace before seeding its thread: workspace changes reset thread state.
+    useAppStore.setState({ activeDomainId: WS_A })
     useAppStore.setState({
       domains: [domain(WS_A), domain(WS_B)],
       domainsStatus: "loaded",
@@ -156,6 +158,8 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
 describe("useWorkspaceThreadSync — thread identity during slug canonicalization", () => {
   beforeEach(() => {
     localStorage.clear()
+    // Select the workspace before seeding its thread: workspace changes reset thread state.
+    useAppStore.setState({ activeDomainId: WS_A })
     useAppStore.setState({
       domains: [domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")],
       domainsStatus: "loaded",
