@@ -231,9 +231,17 @@ def repeat_upgrade(request, monkeypatch):
             tenant, metadata, parent, legacy, consumer, schema, schemas, manager, conn
         )
     finally:
-        for owned_schema in reversed(schemas):
-            manager.teardown(owned_schema)
-        conn.close()
+        cleanup_errors = []
+        try:
+            for owned_schema in reversed(schemas):
+                try:
+                    manager.teardown(owned_schema)
+                except Exception as exc:
+                    cleanup_errors.append(exc)
+        finally:
+            conn.close()
+        if cleanup_errors:
+            raise ExceptionGroup("Owned repeat schemas could not all be removed", cleanup_errors)
 
 
 @pytest.mark.parametrize("mode", ["empty_refresh_schema", "in_place_reload"])
@@ -300,3 +308,39 @@ def test_repeat_consumer_survives_real_dbt_rematerialization(repeat_upgrade, mod
     assert _answers(case.conn, target_schema, siblings[0]) == list(enumerate(LEFT_AFTER, start=1))
     if mode == "empty_refresh_schema":
         assert _answers(case.conn, initial_schema, case.consumer.name) == before
+
+
+@pytest.mark.parametrize("repeat_upgrade", ["commcare_connect"], indirect=True)
+def test_historical_connect_parent_repairs_real_dbt_without_retargeting_consumers(repeat_upgrade):
+    case = repeat_upgrade
+    case.parent.sql_content = case.parent.sql_content.replace("    username,", "    user_id,")
+    case.parent.save(update_fields=["sql_content"])
+    legacy_id, legacy_name = case.legacy.id, case.legacy.name
+    consumer_sql = case.consumer.sql_content
+
+    # The historical generator persisted assets before dbt found its bad column.
+    broken = run_transformation_pipeline(tenant=case.tenant, schema_name=case.schema.schema_name)
+    assert broken.status == TransformationRunStatus.FAILED
+    assert "user_id" in broken.error_message
+
+    _load_raw(
+        case.conn,
+        case.tenant.provider,
+        case.schema.schema_name,
+        create=False,
+        right=RIGHT_AFTER,
+        left=LEFT_AFTER,
+    )
+    upsert_connect_assets(case.tenant, case.metadata)
+    _assert_build(case.tenant, case.schema.schema_name)
+    assert _answers(case.conn, case.schema.schema_name, case.consumer.name) == list(
+        enumerate(RIGHT_AFTER, start=1)
+    )
+    case.legacy.refresh_from_db()
+    case.parent.refresh_from_db()
+    case.consumer.refresh_from_db()
+    assert (case.legacy.id, case.legacy.name) == (legacy_id, legacy_name)
+    assert case.consumer.replaces_id == legacy_id
+    assert case.consumer.sql_content == consumer_sql
+    assert "    username," in case.parent.sql_content
+    assert "    user_id," not in case.parent.sql_content

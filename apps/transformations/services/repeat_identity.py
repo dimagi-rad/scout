@@ -208,7 +208,18 @@ def _parent_source(sql: str, *, provider: str) -> str | None:
             read="postgres",
         )
         core_count, json_column = 7, "form_json"
-    if not _canonical_query(tree, expected, core_count=core_count, json_column=json_column):
+    templates = [expected]
+    if provider == "commcare_connect":
+        # Before 03771cc the generator emitted user_id instead of username.
+        # That known projection bug does not change raw_visits source identity;
+        # regeneration fixes it while preserving existing repeat consumers.
+        historical = expected.copy()
+        historical.expressions[2].set("this", exp.to_identifier("user_id"))
+        templates.append(historical)
+    if not any(
+        _canonical_query(tree, template, core_count=core_count, json_column=json_column)
+        for template in templates
+    ):
         return None
     return _without_projection(expected).sql(dialect="postgres")
 

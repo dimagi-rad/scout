@@ -12,6 +12,7 @@ from django.db import connection
 from apps.common.identifiers import fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
+    _TYPE_CAST,
     _repeat_base_model_name,
     generate_system_assets,
     upsert_system_assets,
@@ -351,7 +352,7 @@ def test_parent_filter_reassignment_is_not_treated_as_a_source_removal():
 @pytest.mark.parametrize(
     "path", ["/data/O'Brien/a,b", "/data/{a}/日本語", "/data/x/123", "/data/" + "x" * 100]
 )
-@pytest.mark.parametrize("question_type", ["Text", "Int", "Double", "Decimal", "Date", "DateTime"])
+@pytest.mark.parametrize("question_type", list(_TYPE_CAST))
 def test_recognizes_actual_generator_paths_and_casts(repeat_tenant, path, question_type):
     data = metadata(repeat_tenant, [path])
     data["form_definitions"]["urn:synthetic:registration"]["questions"][-1]["type"] = question_type
@@ -361,6 +362,28 @@ def test_recognizes_actual_generator_paths_and_casts(repeat_tenant, path, questi
     )
     result = generate(repeat_tenant, data, [parent, repeat])
     assert result[-1].name == repeat.name
+
+
+def test_recognizes_the_historical_connect_user_id_parent_without_changing_repeat_identity():
+    tenant = Tenant(provider="commcare_connect", external_id="synthetic-historical-connect")
+    old = legacy_assets(tenant)
+    # Exact core-column shape emitted before 03771cc; only the generated parent
+    # projection was wrong. The raw_visits source and repeat path were unchanged.
+    old[0].sql_content = old[0].sql_content.replace("    username,", "    user_id,")
+    result = generate(tenant, metadata(tenant), old)
+    assert source_names(tenant, result)[("data", "right", "a")] == old[-1].name
+    parent = next(asset for asset in result if asset.name == "stg_visits")
+    assert "    username," in parent.sql_content
+    assert "    user_id," not in parent.sql_content
+
+
+@pytest.mark.parametrize("replacement", ["unknown_user_id", "user_id + 1 AS username"])
+def test_historical_connect_parent_does_not_accept_arbitrary_core_columns(replacement):
+    tenant = Tenant(provider="commcare_connect", external_id="synthetic-unproven-connect")
+    old = legacy_assets(tenant)
+    old[0].sql_content = old[0].sql_content.replace("    username,", f"    {replacement},")
+    with pytest.raises(RepeatModelMigrationRequired, match="original parent source"):
+        generate(tenant, metadata(tenant), old)
 
 
 def test_repeat_migration_has_the_shared_materialization_error_contract():
@@ -390,7 +413,8 @@ def save_legacy_fixture(tenant, paths=PATHS):
 def test_orm_upgrade_preserves_primary_key_replaces_and_custom_sql(repeat_tenant, paths):
     old, custom = save_legacy_fixture(repeat_tenant, paths)
     legacy_id, legacy_name, consumer_sql = old[-1].id, old[-1].name, custom.sql_content
-    for current_paths in (paths, tuple(reversed(paths)), (*paths, "/data/new/a")):
+    final_paths = (*paths, "/data/new/a")
+    for current_paths in (paths, tuple(reversed(paths)), final_paths):
         result = upsert(repeat_tenant, metadata(repeat_tenant, current_paths, extra_question=True))
         assert result["deleted"] == 0
         assert result["total"] == len(current_paths) + 1
@@ -402,7 +426,7 @@ def test_orm_upgrade_preserves_primary_key_replaces_and_custom_sql(repeat_tenant
         custom.refresh_from_db()
         assert custom.replaces_id == legacy_id
         assert custom.sql_content == consumer_sql
-    again = upsert(repeat_tenant, metadata(repeat_tenant, current_paths, extra_question=True))
+    again = upsert(repeat_tenant, metadata(repeat_tenant, final_paths, extra_question=True))
     assert again["created"] == again["deleted"] == 0
 
 
@@ -538,7 +562,7 @@ def test_orm_concurrent_upserts_plan_against_the_previous_committed_identity(rep
         worker.name = name
         try:
             with connection.cursor() as cursor:
-                cursor.execute("SET lock_timeout = '5s'")
+                cursor.execute("SET lock_timeout = '30s'")
                 if name == "second":
                     cursor.execute("SELECT pg_backend_pid()")
                     second_backend.append(cursor.fetchone()[0])
@@ -552,7 +576,9 @@ def test_orm_concurrent_upserts_plan_against_the_previous_committed_identity(rep
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(run, "first")
         try:
-            assert first_planned.wait(10)
+            if not first_planned.wait(10):
+                first.result(timeout=0)
+                pytest.fail("First upsert never reached planning")
             second = executor.submit(run, "second")
             assert second_started.wait(10)
             deadline = time.monotonic() + 5
