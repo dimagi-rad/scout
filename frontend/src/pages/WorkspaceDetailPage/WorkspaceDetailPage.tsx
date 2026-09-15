@@ -15,6 +15,7 @@ import type {
 } from "@/api/workspaces"
 import { ApiError } from "@/api/client"
 import { useAppStore } from "@/store/store"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -878,6 +879,7 @@ function SettingsTab({
   onRename: (newName: string) => void
   onDelete: () => void
 }) {
+  const isCurrentAccount = useIsCurrentAccount()
   const [name, setName] = useState(workspace.name)
   const [systemPrompt, setSystemPrompt] = useState(workspace.system_prompt ?? "")
   const [savingName, setSavingName] = useState(false)
@@ -897,6 +899,7 @@ function SettingsTab({
     setNameError(null)
     try {
       await workspaceApi.update(workspace.id, { name: name.trim() })
+      if (!isCurrentAccount()) return
       onRename(name.trim())
     } catch (err) {
       setNameError(err instanceof ApiError ? err.message : "Failed to rename workspace")
@@ -922,6 +925,7 @@ function SettingsTab({
     setDeleting(true)
     try {
       await workspaceApi.delete(workspace.id)
+      if (!isCurrentAccount()) return
       onDelete()
     } catch (err) {
       setDeleteError(err instanceof ApiError ? err.message : "Failed to delete workspace")

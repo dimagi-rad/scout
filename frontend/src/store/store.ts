@@ -7,8 +7,9 @@ import { createDatasetSlice, type DatasetSlice } from "./datasetSlice"
 import { createKnowledgeSlice, type KnowledgeSlice } from "./knowledgeSlice"
 import { createRecipeSlice, type RecipeSlice } from "./recipeSlice"
 import { createDomainSlice, type DomainSlice } from "./domainSlice"
+import type { AccountSessionScope } from "./accountSession"
 
-export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice
+export type AppStore = ArtifactSlice & AuthSlice & UiSlice & DictionarySlice & DatasetSlice & KnowledgeSlice & RecipeSlice & DomainSlice & AccountSessionScope
 
 export function createAppStore() {
   let session: { snapshot: AppStore | null } | null = null
@@ -24,6 +25,7 @@ export function createAppStore() {
     const scopedGet = () => owner.snapshot ?? get()
     const args = [scopedSet, scopedGet, { ...api, setState: scopedSet, getState: scopedGet }] as const
     return {
+      accountSession: { isCurrent: () => session === owner },
       ...createArtifactSlice(...args),
       ...createUiSlice(...args),
       ...createDictionarySlice(...args),

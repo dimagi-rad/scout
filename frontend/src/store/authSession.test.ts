@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { api, ApiError } from "@/api/client"
 import { workspaceApi } from "@/api/workspaces"
+import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { createAppStore, type AppStore } from "./store"
 import type { User } from "./authSlice"
 import type { TableAnnotations } from "./dictionarySlice"
@@ -67,7 +68,95 @@ beforeEach(() => {
   vi.spyOn(api, "post")
   vi.spyOn(console, "error").mockImplementation(() => undefined)
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
+
+describe("account-owned browser side effects", () => {
+  function mockDownload() {
+    const createObjectURL = vi.fn(() => "blob:synthetic-export")
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal("URL", class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = revokeObjectURL
+    })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined)
+    return { createObjectURL, revokeObjectURL, click }
+  }
+
+  it.each([USER_B, USER_A])("discards A's pending export after logout → login $id", async (account) => {
+    const store = signedIn()
+    const pending = deferred<Blob>()
+    vi.spyOn(api, "getBlob").mockReturnValue(pending.promise)
+    const download = mockDownload()
+    const exporting = store.getState().knowledgeActions.exportKnowledge()
+    vi.mocked(api.post).mockResolvedValue(undefined)
+    await store.getState().authActions.logout()
+    await loginAs(store, account)
+
+    pending.resolve(new Blob(["Synthetic private knowledge from A"]))
+    await exporting
+
+    expect(download.createObjectURL).not.toHaveBeenCalled()
+    expect(download.click).not.toHaveBeenCalled()
+  })
+
+  it("discards A's pending export after a direct identity change", async () => {
+    const store = signedIn()
+    const pending = deferred<Blob>()
+    vi.spyOn(api, "getBlob").mockReturnValue(pending.promise)
+    const download = mockDownload()
+    const exporting = store.getState().knowledgeActions.exportKnowledge()
+    store.setState({ user: USER_B })
+
+    pending.resolve(new Blob(["Synthetic private knowledge from A"]))
+    await exporting
+
+    expect(download.createObjectURL).not.toHaveBeenCalled()
+    expect(download.click).not.toHaveBeenCalled()
+  })
+
+  it("does not start an export through an old account's captured action", async () => {
+    const store = signedIn()
+    const exportKnowledge = store.getState().knowledgeActions.exportKnowledge
+    const getBlob = vi.spyOn(api, "getBlob").mockResolvedValue(new Blob())
+    const download = mockDownload()
+    store.setState({ user: USER_B })
+
+    await exportKnowledge()
+
+    expect(getBlob).not.toHaveBeenCalled()
+    expect(download.click).not.toHaveBeenCalled()
+  })
+
+  it("still downloads the current account's export and releases its object URL", async () => {
+    const store = signedIn()
+    const blob = new Blob(["Synthetic current knowledge"])
+    vi.spyOn(api, "getBlob").mockResolvedValue(blob)
+    const download = mockDownload()
+
+    await store.getState().knowledgeActions.exportKnowledge()
+
+    expect(download.createObjectURL).toHaveBeenCalledWith(blob)
+    expect(download.click).toHaveBeenCalledOnce()
+    expect(download.revokeObjectURL).toHaveBeenCalledWith("blob:synthetic-export")
+    expect(document.querySelector("a[download]")).toBeNull()
+  })
+
+  it("does not record workspace use through a previous account's captured action", () => {
+    const store = signedIn()
+    const setActiveDomain = store.getState().domainActions.setActiveDomain
+    store.setState({ user: USER_B })
+    store.getState().domainActions.setActiveDomain("workspace-b")
+    const before = getRecentWorkspaceIds()
+
+    setActiveDomain("private-a-created")
+
+    expect(getRecentWorkspaceIds()).toEqual(before)
+    expect(store.getState().activeDomainId).toBe("workspace-b")
+  })
+})
 
 describe("account-owned store isolation", () => {
   it("clears all private state immediately, before logout finishes", async () => {
