@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
+import type { AccountSessionScope } from "./accountSession"
 
 export type KnowledgeType = "entry" | "learning"
 
@@ -75,7 +76,7 @@ export interface KnowledgeSlice {
   }
 }
 
-export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice, [], [], KnowledgeSlice> = (set, get) => ({
+export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & AccountSessionScope, [], [], KnowledgeSlice> = (set, get) => ({
   knowledgeItems: [],
   knowledgeStatus: "idle",
   knowledgeError: null,
@@ -138,9 +139,12 @@ export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice, []
     },
 
     exportKnowledge: async () => {
-      const activeDomainId = get().activeDomainId
+      const { activeDomainId, accountSession } = get()
+      if (!accountSession.isCurrent()) return
       if (!activeDomainId) throw new Error("No active domain selected.")
       const blob = await api.getBlob(`/api/workspaces/${activeDomainId}/knowledge/export/`)
+      // A fenced store write cannot stop an old response from downloading.
+      if (!accountSession.isCurrent()) return
       const url = URL.createObjectURL(blob)
       const a = document.createElement("a")
       a.href = url

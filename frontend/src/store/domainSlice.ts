@@ -2,6 +2,7 @@ import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import { workspaceApi, workspaceHasAccess, type WorkspaceListItem } from "@/api/workspaces"
 import { recordWorkspaceUse } from "@/lib/recentWorkspaces"
+import type { AccountSessionScope } from "./accountSession"
 
 // TenantMembership kept as alias so existing imports continue to work
 export type TenantMembership = WorkspaceListItem & {
@@ -26,7 +27,7 @@ export interface DomainSlice {
   }
 }
 
-export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> = (set, get) => ({
+export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => ({
   domains: [],
   activeDomainId: null,
   domainsStatus: "idle",
@@ -58,6 +59,7 @@ export const createDomainSlice: StateCreator<DomainSlice, [], [], DomainSlice> =
     },
 
     setActiveDomain: (id: string) => {
+      if (!get().accountSession.isCurrent()) return
       recordWorkspaceUse(id)
       // Switching workspaces must NOT carry the thread over: grafting the old
       // workspace's thread id onto the new URL produces a "Thread not found"
