@@ -400,6 +400,11 @@ class WorkspaceViewSchema(models.Model):
         default=dict,
         help_text=("Tenants included in and excluded from the most recent view-schema build."),
     )
+    view_sources = models.JSONField(
+        blank=True,
+        default=dict,
+        help_text="Versioned source identities from the last successful physical view publication.",
+    )
     last_accessed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

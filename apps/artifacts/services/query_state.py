@@ -31,6 +31,7 @@ from apps.workspaces.services.query_state import (
 )
 from apps.workspaces.services.schema_manager import SchemaManager
 from apps.workspaces.services.tenant_coverage import parse_coverage
+from apps.workspaces.services.view_sources import ViewSourcesError, parse_view_sources
 
 
 def _members(queries):
@@ -70,6 +71,23 @@ def _model_repair(surface, detail):
     }
 
 
+def _source_repair(surface, dataset, *, view_schema):
+    """Re-establish attribution without guessing a tenant or reloading providers."""
+    action = "view_rebuild" if view_schema else "semantic_rebuild"
+    return {
+        **surface,
+        "status": f"needs_{action}",
+        "queryable": False,
+        "recovery_action": action,
+        "message": "This artifact's data source cannot be identified safely.",
+        "detail": (
+            f"Source attribution for dataset '{dataset.name}' is missing or inconsistent. "
+            "Rebuild the workspace query layer to verify its source. "
+            "This repair does not reload provider data."
+        ),
+    }
+
+
 def _promoted_members(content):
     try:
         document = yaml.safe_load(content)
@@ -99,8 +117,8 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
 
     Catalog reads are deliberately not physical probes or catalog refreshes.
     A known absent source is recoverable; a renamed/hidden member is a model
-    edit, not permission to reload provider data. Legacy queryable catalogs do
-    not need new provenance to keep serving.
+    edit, not permission to reload provider data. Legacy catalogs may use known
+    tenant schemas or unambiguous names, but unknown ownership is not readiness.
     """
     surface = await workspace_query_surface(artifact.workspace)
     model = await SemanticModel.objects.filter(workspace=artifact.workspace).afirst()
@@ -183,39 +201,59 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
     schemas = [schema async for schema in TenantSchema.objects.filter(tenant_id__in=tenant_ids)]
     active_ids = {str(schema.tenant_id) for schema in schemas if schema.state == SchemaState.ACTIVE}
     schema_owners = {schema.schema_name: str(schema.tenant_id) for schema in schemas}
-    view_names = {
-        name
-        async for name in WorkspaceViewSchema.objects.filter(
-            workspace=artifact.workspace
-        ).values_list("schema_name", flat=True)
+    view_schemas = {
+        view.schema_name: view
+        async for view in WorkspaceViewSchema.objects.filter(workspace=artifact.workspace)
     }
     coverage = parse_coverage(surface.get("tenant_coverage"))
     included = {entry["tenant_id"] for entry in coverage["included_tenants"]} if coverage else None
+    excluded = {entry["tenant_id"] for entry in coverage["excluded_tenants"]} if coverage else set()
     required_ids = set()
     for dataset in physical.values():
-        provenance = (dataset.metadata or {}).get("source_tenant_ids")
-        if (
-            isinstance(provenance, list)
-            and provenance
-            and all(isinstance(item, str) for item in provenance)
-        ):
+        view = view_schemas.get(dataset.schema_name)
+        try:
+            sources = (
+                parse_view_sources(view.view_sources, tenant_ids) if view is not None else None
+            )
+        except ViewSourcesError:
+            return _source_repair(surface, dataset, view_schema=True)
+        published_source = sources.get(dataset.table_name) if sources is not None else None
+        metadata = dataset.metadata or {}
+        provenance = metadata.get("source_tenant_ids")
+        if "source_tenant_ids" in metadata:
+            if not (
+                isinstance(provenance, list)
+                and provenance
+                and all(isinstance(item, str) for item in provenance)
+            ):
+                return _source_repair(surface, dataset, view_schema=view is not None)
             owners = set(provenance)
+            if published_source is not None and owners != {published_source.tenant_id}:
+                return _source_repair(surface, dataset, view_schema=True)
+            # A partial rebuild may omit this view. Its previously validated
+            # catalog provenance survives and still identifies the absent source.
+            # A missing entry in an otherwise complete explicit publication is
+            # inconsistent, not permission to fall back around the source map.
+            if (
+                sources is not None
+                and published_source is None
+                and not (owners <= excluded and not owners.intersection(included or set()))
+            ):
+                return _source_repair(surface, dataset, view_schema=True)
+        elif published_source is not None:
+            owners = {published_source.tenant_id}
         elif dataset.schema_name in schema_owners:
             owners = {schema_owners[dataset.schema_name]}
-        elif dataset.schema_name in view_names:
+        elif view is not None and sources is None:
             owners = set(SchemaManager().tenant_ids_for_view(dataset.table_name, tenants))
-        elif len(tenants) == 1:
-            owners = tenant_ids
         else:
             owners = set()
         if owners - tenant_ids:
             return _model_repair(
                 surface, f"A source for dataset '{dataset.name}' is no longer in this workspace."
             )
-        if not owners and not dataset.is_visible:
-            return _model_repair(
-                surface, f"The source for dataset '{dataset.name}' cannot be identified safely."
-            )
+        if not owners:
+            return _source_repair(surface, dataset, view_schema=view is not None)
         required_ids.update(owners)
         if not dataset.is_visible:
             hidden.append(dataset)

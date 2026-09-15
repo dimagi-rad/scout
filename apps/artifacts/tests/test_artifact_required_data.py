@@ -314,20 +314,22 @@ async def test_legacy_ambiguous_source_is_not_guessed(required_setup):
     ).aupdate(metadata={})
     await Tenant.objects.filter(id=setup.tenants[0].id).aupdate(canonical_name="Source-B")
     state = await artifact_data_state(setup.b)
-    assert state["status"] == "model_drift"
-    assert "identified safely" in state["detail"]
-    assert state["recovery_action"] is None
+    assert state["status"] == "needs_view_rebuild"
+    assert "identified safely" in state["message"]
+    assert state["recovery_action"] == "view_rebuild"
+    assert state["queryable"] is False
 
 
 @pytest.mark.asyncio
-async def test_queryable_legacy_dataset_does_not_need_new_provenance(required_setup):
+async def test_unmapped_historical_dataset_requires_verified_catalog(required_setup):
     setup = required_setup
     await SemanticDataset.objects.filter(
         workspace=setup.workspace, name="source_a__visits"
     ).aupdate(metadata={}, schema_name="historical_schema", table_name="legacy_visits")
     state = await artifact_data_state(setup.a)
-    assert state["status"] == "ready"
-    assert state["queryable"] is True
+    assert state["status"] == "needs_semantic_rebuild"
+    assert state["queryable"] is False
+    assert state["recovery_action"] == "semantic_rebuild"
 
 
 @pytest.mark.asyncio
