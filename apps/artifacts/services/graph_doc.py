@@ -615,10 +615,11 @@ def query_diagnostics(
 def expected_result_keys(query: dict[str, Any]) -> set[str]:
     keys: set[str] = set()
     time_dimension = query.get("time_dimension")
+    # Cube projects a timeDimensions entry only when it has a granularity.
+    # Filter-only time members remain dependencies, not returned columns;
+    # an explicitly selected raw time member is handled by dimensions below.
     if time_dimension and query.get("granularity"):
         keys.add("date")
-    elif isinstance(time_dimension, str) and time_dimension:
-        keys.add(member_to_key(time_dimension))
     for member in _string_list(query.get("dimensions")) or []:
         keys.add(member_to_key(member))
     for member in _string_list(query.get("measures")) or []:
