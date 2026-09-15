@@ -152,6 +152,7 @@ def apply_operations(canvas: SemanticCanvas, operations: list, user=None) -> dic
         "applied": applied,
         "objects": projection["objects"],
         "diagnostics": projection["diagnostics"],
+        "pending_count": projection["pending_count"],
         "can_commit": projection["can_commit"],
     }
 
@@ -215,7 +216,7 @@ def _op_set(canvas, model, index, raw_op, user) -> dict[str, Any]:
     if value is None:
         value = [] if accepts_structured_value and key == "filters" else ""
 
-    draft = _find_draft(canvas, object_type, ref)
+    draft = _find_draft(canvas, index, object_type, ref)
     if draft is not None:
         _set_on_draft(index, draft, key, value)
         return {"op": "set", "target": f"{object_type}/{draft.object_uuid}/{key}"}
@@ -242,6 +243,7 @@ def _op_set(canvas, model, index, raw_op, user) -> dict[str, Any]:
         _stage_update(canvas, ObjectType.DATASET, dataset, key, value)
         return {"op": "set", "target": f"dataset/{dataset.name}/{key}"}
     if object_type == "field":
+        _require_committed_dataset(canvas, index, ref.split(".", 1)[0])
         field = _resolve(index, resolve_field, model, ref)
         allowed = FIELD_DRAFT_KEYS if is_canvas_created(field) else FIELD_CURATION_KEYS
         if key not in allowed:
@@ -315,7 +317,7 @@ def _op_create(canvas, model, index, raw_op, user) -> dict[str, Any]:
 
 def _op_delete_object(canvas, model, index, raw_op, user) -> dict[str, Any]:
     object_type, ref = _parse_object_ref(index, raw_op)
-    draft = _find_draft(canvas, object_type, ref)
+    draft = _find_draft(canvas, index, object_type, ref)
     if draft is not None:
         draft.delete()
         return {"op": "delete_object", "object": f"{object_type}/{ref}", "dropped_draft": True}
@@ -393,31 +395,60 @@ def _resolve(index: int, resolver, scope, ref: str):
         raise CanvasOperationError(index, exc.code, str(exc)) from exc
 
 
-def _find_draft(canvas, object_type: str, ref: str) -> SemanticCanvasChange | None:
+def _find_draft(canvas, index: int, object_type: str, ref: str) -> SemanticCanvasChange | None:
     """Resolve a pending create row by uuid, draft name, or dataset.name."""
     try:
         mapped = ObjectType(object_type)
     except ValueError:
         return None
+    if mapped == ObjectType.DATASET:
+        mapped = ObjectType.CUSTOM_DATASET
     drafts = canvas.changes.filter(object_type=mapped, change_type=ChangeType.CREATE)
     ref_uuid = None
     with contextlib.suppress(TypeError, ValueError):
         ref_uuid = uuid.UUID(ref)
+    matches = []
     for draft in drafts:
         if ref_uuid and draft.object_uuid == ref_uuid:
             return draft
         name = draft.fields.get("name", "")
         if not ref_uuid and name:
-            if ref == name:
-                return draft
             dataset_name = draft.fields.get("dataset_name", "")
-            if dataset_name and ref == f"{dataset_name}.{name}":
-                return draft
-    return None
+            if ref == name or (dataset_name and ref == f"{dataset_name}.{name}"):
+                matches.append(draft)
+    if matches and mapped == ObjectType.CUSTOM_DATASET:
+        saved_match = (
+            object_type == "dataset"
+            and canvas.semantic_model.datasets.filter(is_visible=True, name=ref).exists()
+        )
+        if len(matches) > 1 or saved_match:
+            raise CanvasOperationError(
+                index,
+                "AMBIGUOUS_OBJECT",
+                f"'{object_type}/{ref}' matches more than one dataset or draft. "
+                "Use dataset/<saved-dataset-uuid> for the saved dataset or "
+                "custom_dataset/<draft-uuid> for a pending draft. This atomic batch was not applied.",
+            )
+    return matches[0] if matches else None
+
+
+def _require_committed_dataset(canvas, index: int, ref: str) -> None:
+    draft = _find_draft(canvas, index, "dataset", ref)
+    if draft is not None:
+        raise CanvasOperationError(
+            index,
+            "DATASET_NOT_COMMITTED",
+            f"'{draft.fields['name']}' is a pending custom dataset. Its output dimensions "
+            "and count measure are generated on commit; field operations require the saved "
+            "dataset. This atomic batch was not applied. If this batch also creates the "
+            "dataset, retry the create without field operations. Otherwise keep the existing "
+            "draft. Commit only if authorized, then describe_dataset and curate the generated "
+            "fields or add additional measures. Without commit authorization, leave it staged.",
+        )
 
 
 def _find_change(canvas, model, index, object_type: str, ref: str) -> SemanticCanvasChange:
-    draft = _find_draft(canvas, object_type, ref)
+    draft = _find_draft(canvas, index, object_type, ref)
     if draft is not None:
         return draft
     resolver = {
@@ -525,6 +556,7 @@ def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, 
             index, "INVALID_VALUE", f"Unknown field keys: {', '.join(sorted(unknown))}."
         )
     dataset_ref = str(value.get("dataset") or "")
+    _require_committed_dataset(canvas, index, dataset_ref)
     dataset = _resolve(index, resolve_dataset, model, dataset_ref)
     name = semantic_name(str(value.get("name") or ""))
     if not name or name == "field":
