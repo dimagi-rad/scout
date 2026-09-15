@@ -109,6 +109,7 @@ export function DatasetBrowserPage() {
   }
 
   const refresh = async () => {
+    routeFetchRef.current = null
     setRefreshing(true)
     try {
       await fetchDatasets()

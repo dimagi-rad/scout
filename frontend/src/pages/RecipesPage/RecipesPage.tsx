@@ -52,11 +52,10 @@ export function RecipesPage() {
   }, [activeDomainId, fetchRecipes])
 
   useEffect(() => {
-    if (id) {
-      fetchRecipe(id)
-      fetchRuns(id)
-    }
-  }, [id, fetchRecipe, fetchRuns])
+    if (!activeDomainId || !id) return
+    void fetchRecipe(id).catch(() => undefined)
+    void fetchRuns(id)
+  }, [activeDomainId, id, fetchRecipe, fetchRuns])
 
   // Recipe execution is a background task (POST /run/ returns 202 with a PENDING
   // run), so poll the runs list until a terminal status. Depending on the status

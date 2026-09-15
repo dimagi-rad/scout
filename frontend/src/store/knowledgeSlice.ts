@@ -2,6 +2,7 @@ import type { StateCreator } from "zustand"
 import { api } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
 import type { AccountSessionScope } from "./accountSession"
+import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
 export type KnowledgeType = "entry" | "learning"
 
@@ -76,100 +77,114 @@ export interface KnowledgeSlice {
   }
 }
 
-export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & AccountSessionScope, [], [], KnowledgeSlice> = (set, get) => ({
-  knowledgeItems: [],
-  knowledgeStatus: "idle",
-  knowledgeError: null,
-  knowledgePagination: null,
-  knowledgeFilter: null,
-  knowledgeSearch: "",
-  knowledgeActions: {
-    fetchKnowledge: async (options?) => {
-      set({ knowledgeStatus: "loading", knowledgeError: null })
-      try {
+export const createKnowledgeSlice: StateCreator<KnowledgeSlice & DomainSlice & AccountSessionScope, [], [], KnowledgeSlice> = (set, get) => {
+  const requests = createWorkspaceRequestGuard(get)
+  return {
+    knowledgeItems: [],
+    knowledgeStatus: "idle",
+    knowledgeError: null,
+    knowledgePagination: null,
+    knowledgeFilter: null,
+    knowledgeSearch: "",
+    knowledgeActions: {
+      fetchKnowledge: async (options?) => {
+        const isCurrent = requests.start("list")
+        set({ knowledgeStatus: "loading", knowledgeError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const params = new URLSearchParams()
+          if (options?.type) params.set("type", options.type)
+          if (options?.search) params.set("search", options.search)
+          if (options?.page) params.set("page", String(options.page))
+          if (options?.pageSize) params.set("page_size", String(options.pageSize))
+          const queryString = params.toString()
+          const url = `/api/workspaces/${activeDomainId}/knowledge/${queryString ? `?${queryString}` : ""}`
+          const response = await api.get<PaginatedKnowledgeResponse>(url)
+          if (!isCurrent()) return
+          set({
+            knowledgeItems: response.results,
+            knowledgePagination: response.pagination,
+            knowledgeStatus: "loaded",
+            knowledgeError: null,
+          })
+        } catch (error) {
+          if (!isCurrent()) return
+          set({
+            knowledgeStatus: "error",
+            knowledgePagination: null,
+            knowledgeError: error instanceof Error ? error.message : "Failed to load knowledge items",
+          })
+        }
+      },
+
+      createKnowledge: async (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        const params = new URLSearchParams()
-        if (options?.type) params.set("type", options.type)
-        if (options?.search) params.set("search", options.search)
-        if (options?.page) params.set("page", String(options.page))
-        if (options?.pageSize) params.set("page_size", String(options.pageSize))
-        const queryString = params.toString()
-        const url = `/api/workspaces/${activeDomainId}/knowledge/${queryString ? `?${queryString}` : ""}`
-        const response = await api.get<PaginatedKnowledgeResponse>(url)
-        set({
-          knowledgeItems: response.results,
-          knowledgePagination: response.pagination,
-          knowledgeStatus: "loaded",
-          knowledgeError: null,
-        })
-      } catch (error) {
-        set({
-          knowledgeStatus: "error",
-          knowledgePagination: null,
-          knowledgeError: error instanceof Error ? error.message : "Failed to load knowledge items",
-        })
-      }
-    },
+        const item = await api.post<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/`, data)
+        if (!isCurrent()) return item
+        const items = get().knowledgeItems
+        set({ knowledgeItems: [item, ...items] })
+        return item
+      },
 
-    createKnowledge: async (data: Partial<KnowledgeItem> & { type: KnowledgeType }) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const item = await api.post<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/`, data)
-      const items = get().knowledgeItems
-      set({ knowledgeItems: [item, ...items] })
-      return item
-    },
+      updateKnowledge: async (id: string, data: Partial<KnowledgeItem>) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const item = await api.put<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`, data)
+        if (!isCurrent()) return item
+        const items = get().knowledgeItems.map((i) => (i.id === id ? item : i))
+        set({ knowledgeItems: items })
+        return item
+      },
 
-    updateKnowledge: async (id: string, data: Partial<KnowledgeItem>) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const item = await api.put<KnowledgeItem>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`, data)
-      const items = get().knowledgeItems.map((i) => (i.id === id ? item : i))
-      set({ knowledgeItems: items })
-      return item
-    },
+      deleteKnowledge: async (id: string) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        await api.delete<void>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`)
+        if (!isCurrent()) return
+        const items = get().knowledgeItems.filter((i) => i.id !== id)
+        set({ knowledgeItems: items })
+      },
 
-    deleteKnowledge: async (id: string) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      await api.delete<void>(`/api/workspaces/${activeDomainId}/knowledge/${id}/`)
-      const items = get().knowledgeItems.filter((i) => i.id !== id)
-      set({ knowledgeItems: items })
-    },
+      exportKnowledge: async () => {
+        const { activeDomainId, accountSession } = get()
+        if (!accountSession.isCurrent()) return
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const blob = await api.getBlob(`/api/workspaces/${activeDomainId}/knowledge/export/`)
+        // A fenced store write cannot stop an old response from downloading.
+        if (!accountSession.isCurrent()) return
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement("a")
+        a.href = url
+        a.download = `knowledge-export.zip`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+      },
 
-    exportKnowledge: async () => {
-      const { activeDomainId, accountSession } = get()
-      if (!accountSession.isCurrent()) return
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const blob = await api.getBlob(`/api/workspaces/${activeDomainId}/knowledge/export/`)
-      // A fenced store write cannot stop an old response from downloading.
-      if (!accountSession.isCurrent()) return
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement("a")
-      a.href = url
-      a.download = `knowledge-export.zip`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-    },
+      importKnowledge: async (file: File) => {
+        const isCurrent = requests.start()
+        const activeDomainId = get().activeDomainId
+        if (!activeDomainId) throw new Error("No active domain selected.")
+        const formData = new FormData()
+        formData.append("file", file)
+        await api.upload(`/api/workspaces/${activeDomainId}/knowledge/import/`, formData)
+        if (!isCurrent()) return
+        await get().knowledgeActions.fetchKnowledge()
+      },
 
-    importKnowledge: async (file: File) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const formData = new FormData()
-      formData.append("file", file)
-      await api.upload(`/api/workspaces/${activeDomainId}/knowledge/import/`, formData)
-      await get().knowledgeActions.fetchKnowledge()
-    },
+      setFilter: (type: KnowledgeType | null) => {
+        set({ knowledgeFilter: type })
+      },
 
-    setFilter: (type: KnowledgeType | null) => {
-      set({ knowledgeFilter: type })
+      setSearch: (search: string) => {
+        set({ knowledgeSearch: search })
+      },
     },
-
-    setSearch: (search: string) => {
-      set({ knowledgeSearch: search })
-    },
-  },
-})
+  }
+}

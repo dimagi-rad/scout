@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand"
 import { api, ApiError } from "@/api/client"
 import type { DomainSlice } from "./domainSlice"
+import { createWorkspaceRequestGuard } from "./workspaceRequest"
 
 export interface Column {
   name: string
@@ -163,109 +164,124 @@ export const createDictionarySlice: StateCreator<
   [],
   [],
   DictionarySlice
-> = (set, get) => ({
-  dataDictionary: null,
-  dictionaryStatus: "idle",
-  dictionaryError: null,
-  selectedTable: null,
-  dictionaryActions: {
-    fetchDictionary: async () => {
-      set({ dictionaryStatus: "loading", dictionaryError: null })
-      try {
+> = (set, get) => {
+  const requests = createWorkspaceRequestGuard(get)
+  return {
+    dataDictionary: null,
+    dictionaryStatus: "idle",
+    dictionaryError: null,
+    selectedTable: null,
+    dictionaryActions: {
+      fetchDictionary: async () => {
+        const isCurrent = requests.start("dictionary")
+        set({ dictionaryStatus: "loading", dictionaryError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          const raw = await api.get<BackendDictionaryResponse>(
+            `/api/workspaces/${activeDomainId}/data-dictionary/`
+          )
+          if (!isCurrent()) return
+          const data = transformBackendResponse(raw)
+          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
+        } catch (error) {
+          if (!isCurrent()) return
+          const status =
+            error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+          set({
+            dictionaryStatus: status,
+            dictionaryError: error instanceof Error ? error.message : "Failed to load data dictionary",
+          })
+        }
+      },
+
+      refreshSchema: async () => {
+        const isCurrent = requests.start("dictionary")
+        set({ dictionaryStatus: "loading", dictionaryError: null })
+        try {
+          const activeDomainId = get().activeDomainId
+          if (!activeDomainId) throw new Error("No active domain selected.")
+          await api.post(`/api/workspaces/${activeDomainId}/refresh/`)
+          if (!isCurrent()) return
+          // Materialization runs in the background — re-fetch to pick up any already-available data
+          const raw = await api.get<BackendDictionaryResponse>(
+            `/api/workspaces/${activeDomainId}/data-dictionary/`
+          )
+          if (!isCurrent()) return
+          const data = transformBackendResponse(raw)
+          set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
+        } catch (error) {
+          if (!isCurrent()) return
+          const status =
+            error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
+          set({
+            dictionaryStatus: status,
+            dictionaryError: error instanceof Error ? error.message : "Failed to refresh schema",
+          })
+        }
+      },
+
+      fetchTable: async (schema: string, table: string) => {
+        const isCurrent = requests.start("table")
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        const raw = await api.get<BackendDictionaryResponse>(
-          `/api/workspaces/${activeDomainId}/data-dictionary/`
+        const raw = await api.get<BackendTableDetailResponse>(
+          `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`
         )
-        const data = transformBackendResponse(raw)
-        set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
-      } catch (error) {
-        const status =
-          error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
-        set({
-          dictionaryStatus: status,
-          dictionaryError: error instanceof Error ? error.message : "Failed to load data dictionary",
-        })
-      }
-    },
+        if (!isCurrent()) return
+        const data: TableDetail = {
+          schema: raw.schema,
+          table: raw.name,
+          columns: (raw.columns || []).map((col) => ({
+            name: col.name,
+            type: col.data_type,
+            nullable: col.nullable,
+            default: col.default ?? null,
+          })),
+          annotations: raw.annotation
+            ? {
+                description: raw.annotation.description,
+                use_cases: raw.annotation.use_cases,
+                data_quality_notes: raw.annotation.data_quality_notes,
+                refresh_frequency: raw.annotation.refresh_frequency,
+                owner: raw.annotation.owner,
+                related_tables: raw.annotation.related_tables,
+                column_notes: raw.annotation.column_notes,
+              }
+            : null,
+          sourceMetadata: raw.source_metadata ?? null,
+        }
+        set({ selectedTable: data })
+      },
 
-    refreshSchema: async () => {
-      set({ dictionaryStatus: "loading", dictionaryError: null })
-      try {
+      updateAnnotations: async (
+        schema: string,
+        table: string,
+        annotations: Partial<TableAnnotations>
+      ) => {
+        const isCurrent = requests.start()
         const activeDomainId = get().activeDomainId
         if (!activeDomainId) throw new Error("No active domain selected.")
-        await api.post(`/api/workspaces/${activeDomainId}/refresh/`)
-        // Materialization runs in the background — re-fetch to pick up any already-available data
-        const raw = await api.get<BackendDictionaryResponse>(
-          `/api/workspaces/${activeDomainId}/data-dictionary/`
+        const updated = await api.put<TableAnnotations>(
+          `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`,
+          annotations
         )
-        const data = transformBackendResponse(raw)
-        set({ dataDictionary: data, dictionaryStatus: "loaded", dictionaryError: null })
-      } catch (error) {
-        const status =
-          error instanceof ApiError && error.status === 503 ? "not_materialized" : "error"
-        set({
-          dictionaryStatus: status,
-          dictionaryError: error instanceof Error ? error.message : "Failed to refresh schema",
-        })
-      }
-    },
+        if (!isCurrent()) return
+        const current = get().selectedTable
+        if (current && current.schema === schema && current.table === table) {
+          set({ selectedTable: { ...current, annotations: updated } })
+        }
+        const dict = get().dataDictionary
+        if (dict?.schemas?.[schema]?.[table]) {
+          dict.schemas[schema][table].annotations = updated
+          set({ dataDictionary: { ...dict } })
+        }
+      },
 
-    fetchTable: async (schema: string, table: string) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const raw = await api.get<BackendTableDetailResponse>(
-        `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`
-      )
-      const data: TableDetail = {
-        schema: raw.schema,
-        table: raw.name,
-        columns: (raw.columns || []).map((col) => ({
-          name: col.name,
-          type: col.data_type,
-          nullable: col.nullable,
-          default: col.default ?? null,
-        })),
-        annotations: raw.annotation
-          ? {
-              description: raw.annotation.description,
-              use_cases: raw.annotation.use_cases,
-              data_quality_notes: raw.annotation.data_quality_notes,
-              refresh_frequency: raw.annotation.refresh_frequency,
-              owner: raw.annotation.owner,
-              related_tables: raw.annotation.related_tables,
-              column_notes: raw.annotation.column_notes,
-            }
-          : null,
-        sourceMetadata: raw.source_metadata ?? null,
-      }
-      set({ selectedTable: data })
+      clearDictionary: () => {
+        requests.invalidate()
+        set({ dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null })
+      },
     },
-
-    updateAnnotations: async (
-      schema: string,
-      table: string,
-      annotations: Partial<TableAnnotations>
-    ) => {
-      const activeDomainId = get().activeDomainId
-      if (!activeDomainId) throw new Error("No active domain selected.")
-      const updated = await api.put<TableAnnotations>(
-        `/api/workspaces/${activeDomainId}/data-dictionary/tables/${schema}.${table}/`,
-        annotations
-      )
-      const current = get().selectedTable
-      if (current && current.schema === schema && current.table === table) {
-        set({ selectedTable: { ...current, annotations: updated } })
-      }
-      const dict = get().dataDictionary
-      if (dict?.schemas?.[schema]?.[table]) {
-        dict.schemas[schema][table].annotations = updated
-        set({ dataDictionary: { ...dict } })
-      }
-    },
-
-    clearDictionary: () => {
-      set({ dataDictionary: null, dictionaryStatus: "idle", selectedTable: null })
-    },
-  },
-})
+  }
+}
