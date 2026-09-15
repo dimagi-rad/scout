@@ -1,6 +1,6 @@
 import { StrictMode } from "react"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { api } from "@/api/client"
 
@@ -151,6 +151,160 @@ describe("ArtifactGraphRenderer", () => {
     fireEvent.change(preset, { target: { value: "last_30_days" } })
     expect(preset).toHaveDisplayValue("Last 30 days")
     await waitFor(() => expect(mockedPost).toHaveBeenCalled())
+  })
+
+  describe("date filter drafts", () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] })
+      vi.setSystemTime(new Date("2026-06-30T12:00:00"))
+    })
+
+    afterEach(() => vi.useRealTimers())
+
+    function result(count: number) {
+      return { columns: ["date", "visits__count"], rows: [["2026-06-24", count]], row_count: 1 }
+    }
+
+    function expectRange(start: string, end: string) {
+      expect(mockedPost).toHaveBeenLastCalledWith(
+        "/api/workspaces/workspace-1/semantic-query/",
+        expect.objectContaining({ filters: [expect.objectContaining({ values: [start, end] })] }),
+      )
+    }
+
+    async function renderRange() {
+      mockedPost.mockResolvedValue(result(12))
+      const graph = artifact()
+      const view = render(<ArtifactGraphRenderer artifact={graph} workspaceId="workspace-1" dataRevision="old" />)
+      await waitFor(() => expect(screen.getAllByText("12").length).toBeGreaterThan(0))
+      expect(mockedPost).toHaveBeenCalledTimes(1)
+      mockedPost.mockClear()
+      return {
+        ...view,
+        graph,
+        start: screen.getByLabelText<HTMLInputElement>("Start date"),
+        end: screen.getByLabelText<HTMLInputElement>("End date"),
+        preset: screen.getByRole("combobox", { name: "Date range" }),
+      }
+    }
+
+    it.each(["start", "end"] as const)("keeps the last valid range through clearing %s and a recovery refresh", async (field) => {
+      const view = await renderRange()
+      const input = view[field]
+      const appliedStart = view.start.value
+      const appliedEnd = view.end.value
+      fireEvent.change(input, { target: { value: "" } })
+
+      expect(input).toHaveValue("")
+      expect(input).toHaveAttribute("aria-invalid", "true")
+      expect(input).toHaveAccessibleDescription(new RegExp(`complete, valid ${field} date.*Still showing`))
+      expect(view.preset).toHaveDisplayValue("Custom dates")
+      expect(mockedPost).not.toHaveBeenCalled()
+      expect(screen.getAllByText("12").length).toBeGreaterThan(0)
+      expect(screen.queryByText(/Waiting on .*failed/)).not.toBeInTheDocument()
+
+      mockedPost.mockResolvedValue(result(27))
+      view.rerender(<ArtifactGraphRenderer artifact={view.graph} workspaceId="workspace-1" dataRevision="repaired" />)
+      await waitFor(() => expect(screen.getAllByText("27").length).toBeGreaterThan(0))
+      expect(mockedPost).toHaveBeenCalledTimes(1)
+      expectRange(appliedStart, appliedEnd)
+      expect(input).toHaveValue("")
+      expect(screen.getByLabelText(field === "start" ? "Start date" : "End date")).toBe(input)
+
+      mockedPost.mockClear()
+      const repaired = field === "start" ? "2026-06-01" : "2026-06-29"
+      fireEvent.change(input, { target: { value: repaired } })
+      await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(1))
+      expectRange(field === "start" ? repaired : appliedStart, field === "end" ? repaired : appliedEnd)
+      expect(input).not.toHaveAttribute("aria-invalid")
+      expect(screen.getByRole("status")).toHaveTextContent("Dates apply automatically")
+      fireEvent.change(input, { target: { value: repaired } })
+      expect(mockedPost).toHaveBeenCalledTimes(1)
+    })
+
+    it("holds native badInput drafts even while the other endpoint changes", async () => {
+      const { start, end } = await renderRange()
+      // Browsers serialize a partially entered date as an empty value while
+      // retaining the partial segments internally. jsdom needs explicit validity.
+      Object.defineProperty(end, "validity", { configurable: true, value: { valid: false, badInput: true } })
+      fireEvent.change(end, { target: { value: "" } })
+      fireEvent.change(start, { target: { value: "2026-06-01" } })
+      expect(mockedPost).not.toHaveBeenCalled()
+      expect(end).toHaveAttribute("aria-invalid", "true")
+      expect(start).not.toHaveAttribute("aria-invalid")
+      expect(screen.getByRole("status")).toHaveTextContent("complete, valid end date")
+
+      // Native invalidity must also win over a seemingly well-formed value.
+      fireEvent.change(end, { target: { value: "2026-06-29" } })
+      expect(mockedPost).not.toHaveBeenCalled()
+      Object.defineProperty(end, "validity", { configurable: true, value: { valid: true, badInput: false } })
+      fireEvent.change(end, { target: { value: "2026-06-28" } })
+      await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(1))
+      expectRange("2026-06-01", "2026-06-28")
+      expect(end).not.toHaveAttribute("aria-invalid")
+    })
+
+    it.each(["2026-02-30", "2026-06-", "0000-06-29"])("never queries a malformed or impossible date: %s", async (date) => {
+      const { end } = await renderRange()
+      fireEvent.change(end, { target: { value: date } })
+      expect(mockedPost).not.toHaveBeenCalled()
+      expect(end).toHaveAttribute("aria-invalid", "true")
+      expect(screen.getByRole("status")).toHaveTextContent("complete, valid end date")
+    })
+
+    it("holds a reversed range until both dates are ordered, then publishes once", async () => {
+      const { start, end } = await renderRange()
+      fireEvent.change(start, { target: { value: "2026-07-01" } })
+      expect(mockedPost).not.toHaveBeenCalled()
+      expect(start).toHaveAttribute("aria-invalid", "true")
+      expect(end).toHaveAttribute("aria-invalid", "true")
+      expect(screen.getByRole("status")).toHaveTextContent("end date on or after the start date")
+
+      fireEvent.change(end, { target: { value: "2026-07-01" } })
+      await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(1))
+      expectRange("2026-07-01", "2026-07-01")
+      expect(start).not.toHaveAttribute("aria-invalid")
+      expect(end).not.toHaveAttribute("aria-invalid")
+    })
+
+    it("presets discard invalid drafts and restoring an unchanged range adds no query", async () => {
+      const { start, end, preset } = await renderRange()
+      const appliedEnd = end.value
+      fireEvent.change(end, { target: { value: "" } })
+      fireEvent.change(end, { target: { value: appliedEnd } })
+      expect(mockedPost).not.toHaveBeenCalled()
+      expect(preset).toHaveDisplayValue("Last 7 days")
+
+      fireEvent.change(start, { target: { value: "" } })
+      fireEvent.change(end, { target: { value: "" } })
+      expect(screen.getByRole("status")).toHaveTextContent("complete start and end dates")
+      fireEvent.change(preset, { target: { value: "last_30_days" } })
+      await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(1))
+      expectRange("2026-06-01", "2026-06-30")
+      expect(start).toHaveValue("2026-06-01")
+      expect(end).toHaveValue("2026-06-30")
+      expect(preset).toHaveDisplayValue("Last 30 days")
+      expect(start).not.toHaveAttribute("aria-invalid")
+      expect(end).not.toHaveAttribute("aria-invalid")
+      fireEvent.change(preset, { target: { value: "last_30_days" } })
+      expect(mockedPost).toHaveBeenCalledTimes(1)
+    })
+
+    it("keeps newer valid results when an earlier valid date query finishes late", async () => {
+      const { start, end } = await renderRange()
+      let finishEarlier!: (value: ReturnType<typeof result>) => void
+      mockedPost.mockImplementationOnce(() => new Promise((resolve) => { finishEarlier = resolve }))
+      mockedPost.mockResolvedValueOnce(result(27))
+      fireEvent.change(start, { target: { value: "2026-06-01" } })
+      fireEvent.change(end, { target: { value: "2026-06-29" } })
+      await waitFor(() => expect(screen.getAllByText("27").length).toBeGreaterThan(0))
+      expect(mockedPost).toHaveBeenCalledTimes(2)
+      expectRange("2026-06-01", "2026-06-29")
+      await act(async () => finishEarlier(result(999)))
+      expect(screen.queryByText("999")).not.toBeInTheDocument()
+      expect(screen.getAllByText("27").length).toBeGreaterThan(0)
+      expect(mockedPost).toHaveBeenCalledTimes(2)
+    })
   })
 
   it("rejects Recharts props.data refs instead of falling back to block rows", async () => {
