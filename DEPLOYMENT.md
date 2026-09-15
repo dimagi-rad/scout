@@ -359,12 +359,30 @@ starts. Logs: `kamal app logs -d staging`.
 ### Migration-safe backend handoff
 
 Run only one deployment on the shared host at a time, including manual commands.
+The current production and staging workflows share the `scout-deploy-host`
+concurrency group with `cancel-in-progress: false` and `queue: max`. This
+serializes both destinations without replacing the other destination's pending
+run; GitHub supports up to 100 pending runs. Manual shell commands and workflows
+dispatched from older branch revisions are outside this updated group: check
+both destinations before starting those, and do not overlap them with Actions.
+See [GitHub's concurrency queue contract](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
 Backend images are built and pushed before drain, using Kamal's role-specific
 service labels. Post-drain commands pull/validate those exact images without
 rebuilding them. Remote pulls, boot or health checks can still fail; the
 interrupted-handoff notice and recovery procedure remain necessary.
+Each post-drain API/MCP/worker/frontend deploy step has a 10-minute timeout so
+a stuck remote operation does not silently pause the handoff for the runner's
+six-hour default. The API's own migration/readiness deadline remains 180 seconds.
+Step timeouts do not prove that a remote operation stopped; inspect the host
+before retrying an interrupted handoff.
 The workflow drains **all active old worker versions** for the selected
-destination before starting the new API. Procrastinate's first `SIGTERM` stops
+destination before starting the new API. It also validates active containers
+across the `scout-worker` service before any signal and while waiting: missing
+or unsupported role/destination labels block the handoff rather than producing
+a misleading empty inventory. Valid workers belonging to the other destination
+are observed only and never signalled or given drain receipts.
+Procrastinate's first `SIGTERM` stops
 claiming jobs and lets running jobs finish. The drain helper sends that signal
 once per container/process start and waits up to 10 minutes for clean exit.
 It does not force-kill workers, restart them, or modify queued jobs. Jobs deferred
@@ -386,6 +404,10 @@ check with the configured allowed Host. The readiness check verifies the platfor
 database and queue; Kamal allows 180 seconds for migration/startup. Only after it
 succeeds do MCP and the new worker deploy. Additive migrations must still be
 compatible with old API/MCP readers and writers during this interval.
+Docker can report `unhealthy` during that window; the pinned
+[Kamal health poller](https://github.com/basecamp/kamal/blob/v2.12.0/lib/kamal/cli/healthcheck/poller.rb#L3-L29)
+retries until the configured deadline rather than immediately failing on that
+status. The 120-second Docker start period does not shorten Kamal's deadline.
 
 If drain times out, **stop the deployment**. Existing jobs may still finish, but
 queued jobs wait. Inspect the worker's logs and state, then retry the same
@@ -415,7 +437,16 @@ abandon them, loosen permissions, or blindly remove a blocker. The helper does
 not automatically migrate metadata through a potentially writable ancestor.
 
 Worker startup uses `kamal redeploy --skip-push` after API/MCP have provisioned
-the host. Workers have no accessories or proxy to bootstrap. Unlike `deploy`,
+the host. Workers have no accessories or proxy to bootstrap. In the pinned
+Kamal 2.12.0 implementation, `redeploy` calls `app:boot`, which uploads this
+worker role's current secret file with mode `0600` before starting a container
+with fresh clear environment values (including `SENTRY_RELEASE`). It does not
+reuse a stale worker environment or depend on API/MCP to update it. Kamal 2 has
+no `kamal env push` command; do not add the old Kamal 1 command to this sequence.
+See [the pinned redeploy entry point](https://github.com/basecamp/kamal/blob/v2.12.0/lib/kamal/cli/main.rb#L50-L75)
+and [per-role boot environment upload](https://github.com/basecamp/kamal/blob/v2.12.0/lib/kamal/cli/app/boot.rb#L42-L55).
+
+Unlike `deploy`,
 this omits Kamal 2.12's **service-wide** pruning, which could erase a stopped
 worker referenced by the other destination's pending receipts. Stopped worker
 containers and their referenced images therefore accumulate on the host.

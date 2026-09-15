@@ -6,8 +6,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-production
+  # Both destinations share a host. Preserve pending deployments as well as
+  # the active handoff instead of letting one destination cancel the other.
+  group: scout-deploy-host
   cancel-in-progress: false
+  queue: max
 
 permissions:
   id-token: write
@@ -118,20 +121,26 @@ jobs:
       - name: Deploy API
         # The API applies migrations before its health gate opens. Schema-
         # dependent MCP/worker code must not start before that succeeds.
+        timeout-minutes: 10
         run: kamal deploy --skip-push --version="$API_TAG"
 
       - name: Deploy MCP
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-mcp.yml --skip-push --version="$MCP_TAG"
 
       - name: Deploy Worker
         id: deploy_worker
         # Kamal's automatic prune is service-wide, not destination-scoped.
         # Preserve stopped workers referenced by either destination's receipts.
+        # Pinned Kamal's app:boot refreshes this role's secret file and clear
+        # env on every redeploy; there is no separate env push in Kamal 2.
+        timeout-minutes: 10
         run: kamal redeploy -c config/deploy-worker.yml --skip-push --version="$WORKER_TAG"
 
       - name: Deploy Frontend
         # Preserve the image built above, including its Sentry settings and maps.
         # A default Kamal deploy rebuilds this tag without those build inputs.
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-frontend.yml --skip-push --version="$IMAGE_TAG"
 
       - name: Report interrupted backend handoff

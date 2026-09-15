@@ -8,8 +8,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-staging
+  # Must match production: both destinations deploy to the same host.
+  group: scout-deploy-host
   cancel-in-progress: false
+  queue: max
 
 permissions:
   id-token: write
@@ -135,18 +137,23 @@ jobs:
       - name: Deploy API
         # Migrate and pass the API's container health check before starting
         # new MCP/worker code that can select newly added columns.
+        timeout-minutes: 10
         run: kamal deploy -d staging --skip-push --version="$API_TAG"
 
       - name: Deploy MCP
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-mcp.yml -d staging --skip-push --version="$MCP_TAG"
 
       - name: Deploy Worker
         id: deploy_worker
         # Never service-prune another destination's pending-drain evidence.
+        # app:boot refreshes this role's secret file and clear env each time.
+        timeout-minutes: 10
         run: kamal redeploy -c config/deploy-worker.yml -d staging --skip-push --version="$WORKER_TAG"
 
       - name: Deploy Frontend
         # Preserve the staging image's baked-in nginx, environment, and release.
+        timeout-minutes: 10
         run: kamal deploy -c config/deploy-frontend.yml -d staging --skip-push --version="$FRONTEND_TAG"
 
       - name: Report interrupted backend handoff

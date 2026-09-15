@@ -25,6 +25,11 @@ state = json.loads(path.read_text())
 args = sys.argv[1:]
 state.setdefault("commands", []).append(args)
 containers = state["containers"]
+# A completed synthetic process is exited for ps as well as inspect; inventory
+# must not report a stale state merely because inspect has not run yet.
+for container in containers.values():
+    if container.get("signals") and not container.get("held"):
+        container["status"] = "exited"
 # An assertion must not erase evidence that the helper attempted a command.
 path.write_text(json.dumps(state))
 atexit.register(lambda: path.write_text(json.dumps(state)))
@@ -37,24 +42,28 @@ def done(code=0, output=""):
 if args[0] == "ps":
     if state.get("fail_inventory"):
         done(1)
-    if state.get("new_worker_after_signal") and any(c.get("signals") for c in containers.values()):
-        containers["c" * 64] = {"status": "running", "destination": "staging"}
+    after_signal = state.get("new_worker_after_signal") and any(c.get("signals") for c in containers.values())
+    after_marker = state.get("new_worker_after_marker") and list(Path(".scout-worker-drains-v1").glob("*/*"))
+    if after_signal or after_marker:
+        containers.setdefault("c" * 64, state.get("arriving_worker", {"status": "running", "destination": "staging"}).copy())
     filters = [args[i + 1] for i, value in enumerate(args) if value == "--filter"]
-    assert "label=service=scout-worker" in filters and "label=role=web" in filters
+    assert "label=service=scout-worker" in filters
     assert {"--all", "--no-trunc", "--quiet"} <= set(args)
     statuses = {value.split("=", 1)[1] for value in filters if value.startswith("status=")}
     assert statuses == {"running", "restarting", "paused"}
-    destination = next(value.split("=", 2)[2] for value in filters if value.startswith("label=destination="))
+    labels = dict(value.removeprefix("label=").split("=", 1) for value in filters if value.startswith("label="))
+    assert labels.keys() <= {"service", "role", "destination"}
     selected = []
     for ident, container in containers.items():
         if container.get("status", "running") not in statuses:
             continue
-        if not state.get("ignore_filters") and (
-            container.get("absent_destination") or
-            container.get("destination", "") != destination or
-            container.get("service", "scout-worker") != "scout-worker" or
-            container.get("role", "web") != "web"
-        ):
+        actual_labels = {"service": container.get("service", "scout-worker"),
+                         "role": container.get("role", "web"),
+                         "destination": container.get("destination", "")}
+        for key in tuple(actual_labels):
+            if container.get("absent_" + key):
+                del actual_labels[key]
+        if not state.get("ignore_filters") and any(actual_labels.get(key) != value for key, value in labels.items()):
             continue
         selected.append(ident)
     done(output="\n".join(selected) + ("\n" if selected else ""))
@@ -65,14 +74,13 @@ if ident not in containers:
 container = containers[ident]
 if args[0] == "inspect":
     assert args[1] == "--format" and ".Config.Env" not in args[2]
-    if container.get("signals") and not container.get("held"):
-        container["status"] = "exited"
     if container.get("signals") and container.get("restart_after_signal"):
         container["started"] = "2026-09-15T10:21:30.123456789Z"
     if list(Path(".scout-worker-drains-v1").glob("*/*")) and container.get("restart_after_marker"):
         container["started"] = "2026-09-15T10:21:30.123456789Z"
     done(output="|".join([
-        ident, container.get("service", "scout-worker"), container.get("role", "web"),
+        ident, container.get("service", "scout-worker"),
+        "" if container.get("absent_role") else container.get("role", "web"),
         container.get("destination", ""), container.get("status", "running"),
         container.get("started", "2026-09-15T10:20:30.123456789Z"),
         str(container.get("exit", 0)), str(container.get("oom", False)).lower(),
@@ -219,6 +227,89 @@ def test_all_old_versions_are_signalled_once_without_touching_other_destination(
     assert not list((tmp_path / RECEIPT_ROOT / destination).iterdir())
     assert "signals" not in state["containers"]["c" * 64]
     assert {command[0] for command in state["commands"]} <= {"ps", "inspect", "kill"}
+
+
+@pytest.mark.parametrize("destination", ["production", "staging"])
+@pytest.mark.parametrize("status", ["running", "restarting", "paused"])
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        {"absent_destination": True},
+        {"destination": "production"},
+        {"absent_role": True},
+        {"role": "worker"},
+    ],
+)
+def test_sole_active_worker_with_unknown_labels_blocks_drain(
+    drain_cli, tmp_path, destination, status, unknown
+):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging", "status": status, **unknown}},
+        destination=destination,
+    )
+    assert result.returncode != 0
+    assert "missing or unknown role/destination labels" in result.stderr
+    assert not any(command[0] == "kill" for command in state["commands"])
+    assert not list((tmp_path / RECEIPT_ROOT / destination).iterdir())
+
+
+def test_unknown_labels_block_before_any_known_worker_is_signalled(drain_cli):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging"}, OTHER: {"absent_destination": True}}
+    )
+    assert result.returncode != 0
+    assert "missing or unknown role/destination labels" in result.stderr
+    assert not any(command[0] == "kill" for command in state["commands"])
+
+
+@pytest.mark.parametrize("arrival", ["new_worker_after_marker", "new_worker_after_signal"])
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        {"absent_destination": True},
+        {"destination": "qa"},
+        {"absent_role": True},
+        {"role": "worker"},
+    ],
+)
+def test_late_unknown_worker_blocks_without_signalling_guessed_ownership(
+    drain_cli, tmp_path, arrival, unknown
+):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging"}},
+        options={arrival: True, "arriving_worker": {"destination": "staging", **unknown}},
+    )
+    assert result.returncode != 0
+    assert "missing or unknown role/destination labels" in result.stderr
+    assert state["containers"][WORKER].get("signal_calls", 0) == (
+        arrival == "new_worker_after_signal"
+    )
+    assert not state["containers"]["c" * 64].get("signal_calls")
+    assert (tmp_path / RECEIPT_ROOT / "staging" / f"{WORKER}-{STARTED}").is_dir()
+
+
+@pytest.mark.parametrize("destination,label", [("production", "staging"), ("staging", "")])
+@pytest.mark.parametrize("status", ["running", "restarting", "paused"])
+def test_valid_other_destination_worker_is_not_signalled_or_marked(
+    drain_cli, tmp_path, destination, label, status
+):
+    result, state = drain_cli(
+        {OTHER: {"destination": label, "status": status}}, destination=destination
+    )
+    assert result.returncode == 0, result.stderr
+    assert not any(command[0] == "kill" for command in state["commands"])
+    assert not list((tmp_path / RECEIPT_ROOT / destination).iterdir())
+    assert not (tmp_path / RECEIPT_ROOT / ("staging" if label else "production")).exists()
+
+
+def test_valid_other_destination_worker_arriving_during_drain_is_unaffected(drain_cli):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging"}},
+        options={"new_worker_after_signal": True, "arriving_worker": {"destination": ""}},
+    )
+    assert result.returncode == 0, result.stderr
+    assert state["containers"][WORKER]["signal_calls"] == 1
+    assert not state["containers"]["c" * 64].get("signal_calls")
 
 
 def test_timeout_and_retry_do_not_signal_twice_or_abort_running_jobs(drain_cli, tmp_path):

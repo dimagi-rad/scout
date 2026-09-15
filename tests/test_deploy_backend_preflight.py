@@ -12,11 +12,60 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ROLES = ("API", "MCP", "Worker")
 
 
+def _workflow(destination):
+    filename = "deploy-staging.yml" if destination == "staging" else "deploy.yml"
+    return yaml.safe_load((REPO_ROOT / ".github/workflows" / filename).read_text())
+
+
+def _assert_default_success_gating(steps):
+    """The executable model below only represents default bash/success gating."""
+    for step in steps:
+        assert not step.get("continue-on-error", False), step["name"]
+        assert step.get("if", "success()") == "success()", step["name"]
+        assert step.get("shell", "bash") == "bash", step["name"]
+        assert not step.get("env"), step["name"]
+
+
+def test_both_destinations_share_a_non_cancelling_host_queue():
+    production = _workflow("production")["concurrency"]
+    staging = _workflow("staging")["concurrency"]
+    assert production == staging, "Both workflows deploy to the same host"
+    assert isinstance(production["group"], str) and production["group"]
+    assert "${{" not in production["group"], "The host lock must not vary by workflow/ref"
+    assert production["cancel-in-progress"] is False
+    # The default single pending slot can silently cancel the other destination.
+    assert production["queue"] == "max"
+
+
+@pytest.mark.parametrize("destination", ["production", "staging"])
+@pytest.mark.parametrize("role", [*ROLES, "Frontend"])
+def test_post_drain_deployments_have_an_explicit_bounded_step_timeout(destination, role):
+    steps = _workflow(destination)["jobs"]["deploy"]["steps"]
+    step = next(step for step in steps if step.get("name") == f"Deploy {role}")
+    timeout = step.get("timeout-minutes")
+    assert type(timeout) is int and 1 <= timeout <= 15, step["name"]
+    assert not step.get("continue-on-error", False), step["name"]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"continue-on-error": True},
+        {"if": "always()"},
+        {"shell": "sh"},
+        {"env": {"API_TAG": "unexpected-version"}},
+    ],
+)
+def test_preflight_model_rejects_unmodelled_workflow_step_semantics(override):
+    step = {"name": "Build and push API image", "run": "kamal build push", **override}
+    with pytest.raises(AssertionError, match="Build and push API image"):
+        _assert_default_success_gating([step])
+
+
 @pytest.mark.parametrize("destination", ["production", "staging"])
 @pytest.mark.parametrize("failed_role", [None, *ROLES])
 def test_backend_build_failure_never_drains_workers(destination, failed_role, tmp_path):
-    filename = "deploy-staging.yml" if destination == "staging" else "deploy.yml"
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows" / filename).read_text())
+    workflow = _workflow(destination)
     steps = workflow["jobs"]["deploy"]["steps"]
     selected_names = {
         *(f"Build and push {role} image" for role in ROLES),
@@ -25,6 +74,9 @@ def test_backend_build_failure_never_drains_workers(destination, failed_role, tm
     }
     selected = [step for step in steps if step.get("name") in selected_names]
     assert len(selected) == 7, "All three role prebuilds must be present in the real workflow"
+    assert not workflow.get("defaults"), "The model assumes GitHub's workflow defaults"
+    assert not workflow["jobs"]["deploy"].get("defaults"), "The model assumes job defaults"
+    _assert_default_success_gating(selected)
     events = tmp_path / "events"
     fake = f"""#!{sys.executable}
 import os

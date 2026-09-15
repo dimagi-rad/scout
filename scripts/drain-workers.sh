@@ -33,7 +33,7 @@ active_workers() {
 }
 
 inspect_worker() {
-  local expected_id=$1 details
+  local expected_id=$1 validation_scope=${2:-selected} details
   [[ "$expected_id" =~ ^[0-9a-f]{64}$ ]] || fail "Invalid worker container identity."
   details=$(run_docker inspect --format \
     '{{.Id}}|{{index .Config.Labels "service"}}|{{index .Config.Labels "role"}}|{{if index .Config.Labels "destination"}}{{index .Config.Labels "destination"}}{{end}}|{{.State.Status}}|{{.State.StartedAt}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{range $key, $value := .Config.Labels}}{{if eq $key "destination"}}present{{end}}{{end}}' \
@@ -41,15 +41,36 @@ inspect_worker() {
   [[ "$details" != *$'\n'* ]] || fail "Ambiguous worker inspection."
   IFS='|' read -r container_id container_service container_role container_destination \
     container_state container_start container_exit container_oom destination_presence <<< "$details"
-  [[ "$container_id" == "$expected_id" && "$container_service" == "scout-worker" && \
-     "$container_role" == "web" && "$container_destination" == "$destination_label" && \
-     "$destination_presence" == "present" ]] \
+  [[ "$container_id" == "$expected_id" && "$container_service" == "scout-worker" ]] \
     || fail "Worker labels do not match the selected destination."
+  if [[ "$validation_scope" == any_destination ]]; then
+    [[ "$container_role" == web && "$destination_presence" == present && \
+       ( "$container_destination" == "" || "$container_destination" == staging ) ]] \
+      || fail "Worker labels do not match a supported deployment: missing or unknown role/destination labels."
+  else
+    [[ "$container_role" == web && "$container_destination" == "$destination_label" && \
+       "$destination_presence" == present ]] \
+      || fail "Worker labels do not match the selected destination."
+  fi
   [[ "$container_start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$ ]] \
     || fail "Invalid worker process start time."
   [[ "$container_exit" =~ ^[0-9]+$ && "$container_oom" =~ ^(true|false)$ ]] \
     || fail "Invalid worker exit state."
 }
+
+# A filtered destination inventory can hide an old publisher with broken labels.
+# Validate the whole service first, but never infer a destination or signal it.
+# The subshell keeps inspection globals from replacing the selected signal target.
+validate_service_inventory() (
+  local service_snapshot candidate
+  service_snapshot=$(run_docker ps --all --no-trunc --quiet \
+    --filter label=service=scout-worker \
+    --filter status=running --filter status=restarting --filter status=paused) || return 1
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    inspect_worker "$candidate" any_destination
+  done <<< "$service_snapshot"
+)
 
 # Receipts live on the deployment host, not inside containers: a failed/stopped
 # container must remain a blocker on the next invocation. Resolve the deployment
@@ -158,6 +179,7 @@ done
 
 # Resolve every active old version as well as the persisted pending versions.
 # Inspect only state/identity, never container environment or application logs.
+validate_service_inventory || fail "Could not inventory old workers."
 snapshot=$(active_workers) || fail "Could not inventory old workers."
 while IFS= read -r candidate; do
   [[ -n "$candidate" ]] || continue
@@ -183,6 +205,7 @@ for index in "${!targets[@]}"; do
     echo "Already draining worker ${container_id:0:12}; waiting without another signal."
   elif mkdir -- "$receipt" 2>/dev/null; then
     validate_receipt "$receipt"
+    validate_service_inventory || fail "Could not verify worker inventory before signaling."
     inspect_worker "${targets[$index]}"
     validate_process "${starts[$index]}"
     # A worker may have exited cleanly before the receipt was created.
@@ -205,6 +228,7 @@ for index in "${!targets[@]}"; do
 done
 
 while :; do
+  validate_service_inventory || fail "Could not verify the final worker inventory."
   remaining=0
   for index in "${!targets[@]}"; do
     inspect_worker "${targets[$index]}"
