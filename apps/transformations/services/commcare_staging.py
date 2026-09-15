@@ -11,10 +11,18 @@ import logging
 import re
 from collections import Counter
 
+from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
+
+
+class CaseModelMigrationRequired(ValueError):
+    """Existing ambiguous models cannot be regenerated without a reviewed migration."""
+
+    code = ErrorCode.SCHEMA_BUILD_FAILED
+
 
 # CommCare question type → PostgreSQL cast suffix (None means TEXT / no cast).
 _TYPE_CAST: dict[str, str | None] = {
@@ -377,7 +385,7 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
             ).values_list("name", flat=True)
         )
         if existing:
-            raise ValueError(
+            raise CaseModelMigrationRequired(
                 "An explicit migration is required for existing ambiguous case-type models: "
                 f"{', '.join(sorted(existing))}. Review SQL/artifact references and replaces "
                 "links before rebuilding; no assets were changed."
