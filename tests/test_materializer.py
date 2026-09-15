@@ -450,6 +450,50 @@ class TestRunPipeline:
         connect_assets.assert_not_called()
         assert "Skipping asset generation for 123: tenant metadata is unavailable" in caplog.text
 
+    def test_case_model_migration_guard_stops_before_load_and_records_failure(self):
+        from apps.transformations.services.commcare_staging import CaseModelMigrationRequired
+        from mcp_server.pipeline_registry import PipelineConfig, SourceConfig
+        from mcp_server.services.materializer import run_pipeline
+
+        pipeline = PipelineConfig(
+            name="commcare_sync",
+            description="",
+            version="1.0",
+            provider="commcare",
+            sources=[SourceConfig(name="cases")],
+        )
+        message = "An explicit migration is required for existing ambiguous case-type models"
+        with (
+            patch("mcp_server.services.materializer.SchemaManager") as mock_mgr,
+            patch("mcp_server.services.materializer.MaterializationRun") as mock_run_cls,
+            patch("mcp_server.services.materializer._run_discover_phase"),
+            patch("mcp_server.services.materializer.get_tenant_metadata"),
+            patch(
+                "mcp_server.services.materializer.upsert_system_assets",
+                side_effect=CaseModelMigrationRequired(message),
+            ),
+            patch("mcp_server.services.materializer._load_and_commit_source") as mock_load,
+            patch("mcp_server.services.materializer._run_transform_phase") as mock_transform,
+        ):
+            schema = self._make_schema()
+            mock_mgr.return_value.provision.return_value = schema
+            run = self._setup_run_mock(mock_run_cls)
+            run.completed_at = None
+
+            with pytest.raises(CaseModelMigrationRequired, match="explicit migration"):
+                run_pipeline(self._make_tm(), {}, pipeline)
+
+        mock_load.assert_not_called()
+        mock_transform.assert_not_called()
+        schema.save.assert_not_called()
+        mock_run_cls.objects.filter.return_value.update.assert_called_once()
+        terminal_write = mock_run_cls.objects.filter.return_value.update.call_args.kwargs
+        assert terminal_write["state"] == "failed"
+        assert terminal_write["completed_at"] is not None
+        assert terminal_write["result"]["error"] == f"CaseModelMigrationRequired: {message}"
+        assert terminal_write["result"]["error_code"] == "SCHEMA_BUILD_FAILED"
+        assert terminal_write["result"]["sources"] == {}
+
     def test_transform_failure_does_not_mark_run_failed(self):
         """A DBT transform failure should NOT change state to FAILED."""
         from mcp_server.pipeline_registry import PipelineConfig
@@ -1803,7 +1847,7 @@ class TestSummarizeError:
             ),
             (
                 CommCareBaseLoader("a-long-lived-project-space-name", _CREDENTIAL),
-                "https://hq.test/a/x/api/case/v2/",
+                "https://www.commcarehq.org/a/x/api/case/v2/",
             ),
             (
                 ConnectBaseLoader(999999999, _CREDENTIAL, base_url="https://connect.test"),

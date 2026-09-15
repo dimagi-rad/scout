@@ -17,6 +17,7 @@ from uuid import UUID
 
 from asgiref.sync import sync_to_async
 from django.core.cache import cache
+from django.db import IntegrityError
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
@@ -25,6 +26,13 @@ from django.views import View
 from apps.common.utils import creator_display_name
 from apps.semantic.services.query import run_semantic_query
 from apps.users.decorators import LoginRequiredJsonMixin
+from apps.workspaces.models import WorkspaceDataRecovery
+from apps.workspaces.services.data_recovery import artifact_data_state
+from apps.workspaces.tasks import (
+    STALE_JOB_THRESHOLD,
+    reconcile_workspace_data_recovery,
+    recover_workspace_data,
+)
 from apps.workspaces.workspace_resolver import aresolve_workspace, resolve_workspace
 
 from .models import Artifact, ArtifactSemanticQuery, ArtifactType
@@ -33,6 +41,7 @@ from .services.graph_manifest import (
     semantic_query_summary,
     sync_artifact_semantic_query_manifest,
 )
+from .services.versioning import latest_visible_version_ids
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +55,38 @@ logger = logging.getLogger(__name__)
 ARTIFACT_QUERY_CACHE_TTL = 60  # seconds
 
 
-def _artifact_query_cache_key(artifact: Artifact) -> str:
+def _artifact_query_cache_key(artifact: Artifact, data_revision: str = "") -> str:
     payload = json.dumps(
         {
             "semantic_queries": artifact.semantic_queries,
             "source_queries": artifact.source_queries,
+            "data_revision": data_revision,
         },
         sort_keys=True,
         default=str,
     )
     digest = hashlib.md5(payload.encode(), usedforsecurity=False).hexdigest()[:12]
     return f"artifact_qdata:{artifact.id}:{artifact.version}:{digest}"
+
+
+async def _current_artifact_data_state(artifact: Artifact) -> dict[str, Any]:
+    """Reconcile a stranded background job before reporting artifact state."""
+    active_recovery = await (
+        WorkspaceDataRecovery.objects.select_related("workspace")
+        .filter(
+            workspace=artifact.workspace,
+            state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+        )
+        .order_by("-created_at")
+        .afirst()
+    )
+    if active_recovery is not None:
+        age = datetime.now(active_recovery.created_at.tzinfo) - active_recovery.created_at
+        await reconcile_workspace_data_recovery(
+            active_recovery,
+            check_stalled=age >= STALE_JOB_THRESHOLD,
+        )
+    return await artifact_data_state(artifact)
 
 
 def generate_csp_with_nonce(nonce: str) -> str:
@@ -813,6 +843,12 @@ class ArtifactDataView(LoginRequiredJsonMixin, View):
         if err:
             return err
         artifact = get_object_or_404(Artifact, pk=artifact_id, workspace=workspace)
+        if (
+            artifact.artifact_type == ArtifactType.STORY
+            and not artifact.semantic_queries
+            and not artifact.semantic_query_manifest
+        ):
+            sync_artifact_semantic_query_manifest(artifact)
         return JsonResponse(self._serialize_artifact(artifact))
 
     def _serialize_artifact(self, artifact: Artifact) -> dict[str, Any]:
@@ -868,7 +904,11 @@ class ArtifactQueryDataView(View):
         except Artifact.DoesNotExist:
             raise Http404 from None
 
-        if artifact.artifact_type == ArtifactType.STORY:
+        if (
+            artifact.artifact_type == ArtifactType.STORY
+            and not artifact.semantic_queries
+            and not artifact.semantic_query_manifest
+        ):
             await sync_to_async(
                 sync_artifact_semantic_query_manifest,
                 thread_sensitive=True,
@@ -886,11 +926,23 @@ class ArtifactQueryDataView(View):
         if artifact.workspace is None:
             return JsonResponse({"error": "Artifact has no associated workspace"}, status=400)
 
+        data_state = {}
+        if artifact.semantic_queries:
+            data_state = await _current_artifact_data_state(artifact)
+            if not data_state["queryable"]:
+                return JsonResponse(
+                    {
+                        "error": data_state["message"],
+                        "data_recovery": data_state,
+                    },
+                    status=409,
+                )
+
         static_data = artifact.data or {}
 
         # Serve repeat opens of the same artifact version from a short-lived
         # cache so we don't re-run every source query on every open (09#9).
-        cache_key = _artifact_query_cache_key(artifact)
+        cache_key = _artifact_query_cache_key(artifact, data_state.get("data_revision", ""))
         cached = await cache.aget(cache_key)
         if cached is not None:
             return JsonResponse(
@@ -965,6 +1017,98 @@ class ArtifactQueryDataView(View):
         )
 
 
+class ArtifactDataRecoveryView(View):
+    """Inspect or start repair of the data surface behind an artifact."""
+
+    async def _resolve(self, request: HttpRequest, workspace_id, artifact_id):
+        user = await request.auser()
+        if not user.is_authenticated:
+            return None, None, JsonResponse({"error": "Authentication required"}, status=401)
+        workspace, err = await aresolve_workspace(user, workspace_id)
+        if err:
+            return None, None, err
+        try:
+            artifact = await Artifact.objects.select_related("workspace").aget(
+                pk=artifact_id,
+                workspace=workspace,
+            )
+        except Artifact.DoesNotExist:
+            return None, None, JsonResponse({"error": "Artifact not found"}, status=404)
+        if (
+            artifact.artifact_type == ArtifactType.STORY
+            and not artifact.semantic_queries
+            and not artifact.semantic_query_manifest
+        ):
+            await sync_to_async(
+                sync_artifact_semantic_query_manifest,
+                thread_sensitive=True,
+            )(artifact)
+        return user, artifact, None
+
+    async def get(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
+        _user, artifact, err = await self._resolve(request, workspace_id, artifact_id)
+        if err:
+            return err
+        return JsonResponse(await _current_artifact_data_state(artifact))
+
+    async def post(self, request: HttpRequest, workspace_id, artifact_id) -> JsonResponse:
+        user, artifact, err = await self._resolve(request, workspace_id, artifact_id)
+        if err:
+            return err
+
+        state = await _current_artifact_data_state(artifact)
+        if state["status"] in {"ready", "not_required"} and not state.get("recovery_action"):
+            return JsonResponse(state)
+        if state["status"] == "recovering":
+            return JsonResponse(state)
+
+        recovery_type = state.get("recovery_action")
+        if recovery_type not in WorkspaceDataRecovery.RecoveryType.values:
+            return JsonResponse(
+                {
+                    "error": state["message"],
+                    "data_recovery": state,
+                },
+                status=409,
+            )
+
+        try:
+            recovery = await WorkspaceDataRecovery.objects.acreate(
+                workspace=artifact.workspace,
+                requested_by=user,
+                recovery_type=recovery_type,
+                source_type="artifact",
+                source_id=artifact.id,
+            )
+        except IntegrityError:
+            # The partial unique constraint is the cross-process dedupe guard.
+            # If two artifact pages race, bind both to the one active recovery.
+            recovery = await WorkspaceDataRecovery.objects.filter(
+                workspace=artifact.workspace,
+                state__in=list(WorkspaceDataRecovery.ACTIVE_STATES),
+            ).afirst()
+            if recovery is None:
+                logger.exception("Artifact recovery dedupe failed without an active row")
+                return JsonResponse({"error": "Failed to start data recovery"}, status=500)
+            return JsonResponse(await _current_artifact_data_state(artifact))
+
+        try:
+            job = await recover_workspace_data.defer_async(recovery_id=str(recovery.id))
+            job_id = getattr(job, "id", job) if not isinstance(job, int) else job
+            await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+                procrastinate_job_id=job_id
+            )
+        except Exception as exc:
+            logger.exception("Failed to dispatch artifact data recovery %s", recovery.id)
+            await WorkspaceDataRecovery.objects.filter(id=recovery.id).aupdate(
+                state=WorkspaceDataRecovery.State.FAILED,
+                error=str(exc)[:1000] or "Failed to start data recovery",
+            )
+            return JsonResponse({"error": "Failed to start data recovery"}, status=500)
+
+        return JsonResponse(await _current_artifact_data_state(artifact), status=202)
+
+
 class ArtifactSemanticQueryView(LoginRequiredJsonMixin, View):
     """
     GET /api/workspaces/<workspace_id>/artifacts/<artifact_id>/semantic-queries/
@@ -1023,7 +1167,7 @@ def _bounded_int(value: Any, *, default: int, lower: int, upper: int) -> int:
 
 class ArtifactListView(LoginRequiredJsonMixin, View):
     """
-    GET /api/artifacts/<workspace_id>/ - List artifacts for the specified workspace.
+    GET /api/workspaces/<workspace_id>/artifacts/ - List each artifact's latest visible revision.
     """
 
     def get(self, request: HttpRequest, workspace_id) -> JsonResponse:
@@ -1035,6 +1179,7 @@ class ArtifactListView(LoginRequiredJsonMixin, View):
         queryset = Artifact.objects.filter(
             workspace=workspace,
             artifact_type__in=ArtifactType.values,
+            id__in=latest_visible_version_ids(workspace.id),
         )
         if search:
             queryset = queryset.filter(

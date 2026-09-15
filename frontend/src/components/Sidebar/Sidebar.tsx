@@ -14,6 +14,7 @@ import {
 import { useAppStore } from "@/store/store"
 import { useWorkspaceJobs } from "@/contexts/WorkspaceJobsContext"
 import { workspacePath } from "@/lib/workspacePath"
+import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { NavItem } from "./NavItem"
 import { Button } from "@/components/ui/button"
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher"
@@ -211,6 +212,7 @@ export function Sidebar() {
             icon={LayoutDashboard}
             label="Artifacts"
             onNavigate={collapseSidebar}
+            isActivePath={isWorkspaceArtifactPath}
           />
           <NavItem
             to={`${pathPrefix}/knowledge`}

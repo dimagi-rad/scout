@@ -4,6 +4,7 @@ import {
   DescribeTableOutput,
   GetMetadataOutput,
   ListTablesOutput,
+  QueryToolOutput,
   SemanticQueryToolOutput,
 } from "@/components/ChatMessage/ToolOutput"
 
@@ -17,6 +18,49 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
+
+export const QueryResult: Story = {
+  render: () => (
+    <div className="w-[720px] rounded-lg border p-4">
+      <QueryToolOutput
+        output={{
+          success: true,
+          schema: "workspace_global_operations",
+          timing_ms: 92,
+          data: {
+            columns: ["owner_name", "open_cases"],
+            rows: [
+              ["Asha Patel", 148],
+              ["Jordan Lee", 116],
+            ],
+            row_count: 2,
+            sql_executed:
+              "select owner_name, count(*) as open_cases from cases where closed = false group by owner_name order by open_cases desc limit 500",
+            tables_accessed: ["cases"],
+          },
+        }}
+      />
+    </div>
+  ),
+}
+
+export const QueryFailure: Story = {
+  render: () => (
+    <div className="w-[720px] rounded-lg border p-4">
+      <QueryToolOutput
+        sql="select * from pg_catalog.pg_tables"
+        output={{
+          success: false,
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "Query failed",
+            detail: "System catalogs are not accessible.",
+          },
+        }}
+      />
+    </div>
+  ),
+}
 
 export const SemanticQueryResult: Story = {
   render: () => (

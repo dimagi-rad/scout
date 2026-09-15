@@ -67,7 +67,7 @@ CASES = [
     (
         "commcare._get",
         _commcare,
-        lambda ldr: ldr._get("https://hq.test/a/dom-1/api/case/v2/"),
+        lambda ldr: ldr._get("https://www.commcarehq.org/a/dom-1/api/case/v2/"),
         CommCareTokenExpiredError,
         CommCareAccessDeniedError,
         "dom-1",

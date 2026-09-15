@@ -46,6 +46,40 @@ The agent has access to:
 
 The more knowledge you add to a project, the better the agent's answers become.
 
+## Topics in Open Chat Studio transcripts
+
+Topic analysis has two separate steps: inspect the message text, then save a
+queryable topic definition before building a reusable dashboard. Empty session
+tags do not mean the text is unavailable. Scout can inspect raw message content
+using read-only SQL when a semantic query cannot express the analysis.
+
+Start with a request such as:
+
+> Inspect the user messages for July and propose topics from the actual text.
+> Include message IDs, state how many eligible messages you examined, and tell
+> me if the results are sampled or truncated. Do not save a data model yet.
+
+After reviewing the classification method and coverage, explicitly request the
+model change and the chart:
+
+> Create and save a `message_topics` dataset using the reviewed rules. Keep one
+> row per nonblank user message, its source message ID as the primary key, and
+> its timestamp for date filters. Keep unmatched messages as unclassified.
+> Then build a dashboard of message count by topic, clearly labeled with the
+> classification method and date range.
+
+The actual source table and column names must be discovered in your workspace;
+multi-chatbot workspaces may use prefixed names. Saving a dataset requires a
+read-write or manage workspace role. The Data Model canvas owns this change;
+the Artifact Manager uses the saved semantic fields to create and validate the
+chart. A request for a chart alone does not authorize a model change.
+
+Keyword matching is not NLP clustering. Reviewed message-ID labels are a
+snapshot, so refreshes do not automatically label new messages. Do not treat
+topics observed in a sample as verified totals for all messages. A live
+dashboard re-runs its saved semantic queries; it does not re-run free-text
+topic extraction on every refresh.
+
 ## Slash commands
 
 Type `/` at the start of the chat input to see available slash commands. An autocomplete menu appears as you type -- use arrow keys to navigate and Tab or Enter to select.

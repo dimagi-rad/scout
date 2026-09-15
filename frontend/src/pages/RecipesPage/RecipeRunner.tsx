@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react"
 import { Loader2, Play } from "lucide-react"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import {
   Dialog,
   DialogContent,
@@ -46,6 +47,7 @@ function getDefaultValue(variable: RecipeVariable): string {
 }
 
 export function RecipeRunner({ open, onOpenChange, recipe, onRun, onRunComplete }: RecipeRunnerProps) {
+  const isCurrentAccount = useIsCurrentAccount()
   const [variables, setVariables] = useState<Record<string, string>>({})
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -73,12 +75,14 @@ export function RecipeRunner({ open, onOpenChange, recipe, onRun, onRunComplete 
 
     try {
       const run = await onRun(variables)
+      if (!isCurrentAccount()) return
       onOpenChange(false)
       onRunComplete(recipe.id, run.id)
     } catch (err) {
+      if (!isCurrentAccount()) return
       setError(err instanceof Error ? err.message : "Failed to run recipe")
     } finally {
-      setRunning(false)
+      if (isCurrentAccount()) setRunning(false)
     }
   }
 

@@ -312,6 +312,20 @@ class SchemaManager:
         with _serialize_view_build(workspace.id):
             return self._build_view_schema(workspace)
 
+    def tenant_ids_for_view(self, view_name: str, tenants) -> tuple[str, ...]:
+        """Recover a legacy view's owner only when the canonical plan is unambiguous.
+
+        Use the same bounded prefix as publication, never labels guessed from a
+        semantic member. New catalogs persist the result before names can change.
+        """
+        candidates = [
+            str(tenant.id)
+            for tenant in tenants
+            if view_name.startswith(f"{self._view_prefix(tenant)}__")
+            and len(view_name) > len(self._view_prefix(tenant)) + 2
+        ]
+        return tuple(candidates) if len(candidates) == 1 else ()
+
     def _build_view_schema(self, workspace) -> WorkspaceViewSchema:
         """(Re)build the PostgreSQL view schema for a multi-tenant workspace.
 

@@ -25,6 +25,7 @@ from mcp_server.loaders._http import (
     build_retry,
     get_with_auth_refresh,
 )
+from mcp_server.loaders._urls import ProviderURLPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -145,10 +146,18 @@ class ConnectBaseLoader:
     def _get(self, url: str, params: dict | None = None) -> requests.Response:
         """GET a URL, raising on 401/403 via ``_raise_for_auth``."""
         resp = get_with_auth_refresh(
-            self._session, url, refresh=self._refresh, params=params, timeout=HTTP_TIMEOUT
+            self._session,
+            url,
+            trusted_origin=self.base_url,
+            refresh=self._refresh,
+            params=params,
+            timeout=HTTP_TIMEOUT,
         )
         self._raise_for_auth(resp.status_code)
-        resp.raise_for_status()
+        if not resp.ok:
+            raise requests.HTTPError(
+                f"Connect request failed: HTTP {resp.status_code}", response=resp
+            )
         return resp
 
     def _opp_url(self, suffix: str) -> str:
@@ -196,17 +205,10 @@ class ConnectBaseLoader:
         first_page = True
 
         while url is not None:
-            # NOTE: relies on requests' default ``allow_redirects=True``.
-            # Production CommCare Connect has been observed returning
-            # ``next`` URLs with the ``http://`` scheme even when the
-            # caller used HTTPS — see dimagi/commcare-connect#1109. The
-            # edge layer 301-redirects http→https; ``requests`` follows
-            # the redirect and preserves the Authorization header on
-            # same-host upgrades. See test_follows_http_to_https_redirect
-            # _on_next_url for the regression pin.
             resp = get_with_auth_refresh(
                 self._session,
                 url,
+                trusted_origin=self.base_url,
                 refresh=self._refresh,
                 params=request_params,
                 headers=headers,
@@ -220,7 +222,7 @@ class ConnectBaseLoader:
                 attempts = RETRY_TOTAL + 1 if resp.status_code in RETRY_STATUS_FORCELIST else 1
                 raise ConnectExportError(
                     f"Connect export request failed for opportunity "
-                    f"{self.opportunity_id}: HTTP {resp.status_code} for {url}",
+                    f"{self.opportunity_id}: HTTP {resp.status_code}",
                     status=resp.status_code,
                     sentry_trace=resp.headers.get("sentry-trace"),
                     attempts=attempts,
@@ -230,10 +232,10 @@ class ConnectBaseLoader:
             try:
                 payload = resp.json()
             except ValueError as e:
-                raise ConnectExportError(f"Export API returned invalid JSON for {url}: {e}") from e
+                raise ConnectExportError(f"Export API returned invalid JSON: {e}") from e
 
             if "results" not in payload:
-                raise ConnectExportError(f"Export API response missing 'results' key for {url}")
+                raise ConnectExportError("Export API response missing 'results' key")
 
             if first_page:
                 total = payload.get("count")
@@ -244,7 +246,14 @@ class ConnectBaseLoader:
             else:
                 yield payload["results"], None
 
-            url = payload.get("next")
+            next_url = payload.get("next")
+            url = (
+                ProviderURLPolicy(self.base_url).resolve(
+                    next_url, relative_to=resp.url if isinstance(resp.url, str) else url
+                )
+                if next_url
+                else None
+            )
             # The server's `next` URL already preserves all original params
             # (last_id, page_size, order, plus any caller-supplied filters).
             request_params = None

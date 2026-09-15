@@ -2,13 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactNode } from "react"
 import { useLocation, useNavigate, useParams } from "react-router-dom"
 import { Check, ChevronDown, Code2, Database, RefreshCw, Search, Sigma, Table2, X } from "lucide-react"
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter"
-import { oneLight } from "react-syntax-highlighter/dist/esm/styles/prism"
-import { format as formatSql } from "sql-formatter"
 import { useAppStore } from "@/store/store"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { SqlBlock } from "@/components/SqlBlock"
 import {
   Popover,
   PopoverContent,
@@ -527,61 +525,15 @@ function DatasetDetail({
 }
 
 function CustomSqlSection({ sql }: { sql: string }) {
-  const formattedSql = useMemo(() => formatDatasetSql(sql), [sql])
-
   return (
     <section className="min-w-0">
       <div className="mb-3 flex items-center gap-2">
         <Code2 className="h-4 w-4" />
         <h3 className="text-sm font-semibold">SQL</h3>
       </div>
-      <div
-        className="overflow-hidden rounded-md border bg-background"
-        data-testid="custom-dataset-sql"
-      >
-        <SyntaxHighlighter
-          language="sql"
-          style={oneLight}
-          showLineNumbers
-          wrapLongLines
-          customStyle={{
-            margin: 0,
-            maxHeight: "26rem",
-            overflow: "auto",
-            background: "transparent",
-            fontSize: "0.75rem",
-            lineHeight: "1.25rem",
-          }}
-          codeTagProps={{
-            style: {
-              fontFamily:
-                'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-            },
-          }}
-          lineNumberStyle={{
-            minWidth: "2.75em",
-            paddingRight: "1em",
-            color: "var(--muted-foreground)",
-            textAlign: "right",
-            userSelect: "none",
-          }}
-        >
-          {formattedSql}
-        </SyntaxHighlighter>
-      </div>
+      <SqlBlock sql={sql} showLineNumbers data-testid="custom-dataset-sql" />
     </section>
   )
-}
-
-function formatDatasetSql(sql: string): string {
-  try {
-    return formatSql(sql, {
-      language: "postgresql",
-      keywordCase: "upper",
-    })
-  } catch {
-    return sql
-  }
 }
 
 function RelationshipsSection({

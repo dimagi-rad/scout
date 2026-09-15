@@ -1536,7 +1536,8 @@ async def test_headless_preflight_failure_preserves_real_core_reason(
         assert summaries[0]["tenants"][0]["error_code"] == ErrorCode.PIPELINE_UNRESOLVED
     else:
         assert "No usable credential could be resolved" in result["message"]
-        assert "error_code" not in summaries[0]["tenants"][0]
+        assert summaries[0]["tenants"][0]["error_code"] == ErrorCode.AUTH_CREDENTIAL_MISSING
+        assert "Connected Accounts" in result["message"]
     assert "expired" not in result["message"]
 
 
@@ -1623,6 +1624,8 @@ async def test_preflight_reason_survives_core_wrapper_and_resume(
     assert expected in body
     assert expected in tj.error_summary
     if reason == "credential":
+        assert failure["error_code"] == ErrorCode.AUTH_CREDENTIAL_MISSING
+        assert "Connected Accounts" in body
         assert "resolved." in tj.error_summary
         assert "resolved This" not in tj.error_summary
     assert "preflight_recorded" not in body

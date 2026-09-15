@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useLocation } from "react-router-dom"
-import { Check, ChevronDown, Loader2, Plus, Search, Settings } from "lucide-react"
+import { CircleAlert, Check, ChevronDown, History, Loader2, Plus, Search, Settings } from "lucide-react"
 import { useAppStore } from "@/store/store"
-import { workspaceDataState, workspaceHasData, workspaceHasAccess } from "@/api/workspaces"
+import { workspaceLoadState, workspaceHasRecordedLoad, workspaceHasAccess } from "@/api/workspaces"
 import type { TenantMembership } from "@/store/domainSlice"
 import { getProviderMeta } from "@/components/WorkspaceBadge/providerMeta"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
 import { workspacePath } from "@/lib/workspacePath"
+import { isWorkspaceArtifactPath } from "@/lib/artifactPath"
 import { formatRelativeTime } from "@/lib/relativeTime"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -47,20 +48,27 @@ interface RowProps {
 }
 
 /**
- * Live, three-state data indicator. Reflects the workspace's current
- * `schema_status` (not the historical `last_synced_at`):
- *   - loading → spinner ("Loading data…")
- *   - ready   → emerald dot ("Has data" + relative sync time when known)
- *   - empty   → hollow dot ("No data")
+ * Load history is not a green query-readiness signal. Preserve recorded setup
+ * progress/problems, and leave current availability checks to artifact open.
  */
 function DataIndicator({ ws }: { ws: TenantMembership }) {
-  const state = workspaceDataState(ws)
-  const label =
+  const state = workspaceLoadState(ws)
+  const setupLabel =
     state === "loading"
       ? "Loading data…"
-      : state === "ready"
-        ? `Has data${ws.last_synced_at ? ` — synced ${formatRelativeTime(ws.last_synced_at)}` : ""}`
-        : "No data"
+      : state === "failed"
+        ? "Data setup failed."
+        : state === "unavailable"
+          ? "Data setup unavailable."
+          : ""
+  const loadLabel = ws.last_synced_at
+    ? `Last recorded load: ${formatRelativeTime(ws.last_synced_at)}.`
+    : "No load time recorded."
+  const label = [
+    setupLabel,
+    loadLabel,
+    "Current availability is checked when opening an artifact.",
+  ].filter(Boolean).join(" ")
 
   return (
     <span
@@ -73,12 +81,14 @@ function DataIndicator({ ws }: { ws: TenantMembership }) {
     >
       {state === "loading" ? (
         <Loader2 className="h-3 w-3 animate-spin text-primary" aria-hidden />
+      ) : state === "failed" ? (
+        <CircleAlert className="h-3 w-3 text-destructive" aria-hidden />
       ) : (
         <span
           className={cn(
             "h-2 w-2 rounded-full",
-            state === "ready"
-              ? "bg-emerald-500"
+            state === "recorded"
+              ? "bg-muted-foreground"
               : "border border-muted-foreground/40 bg-transparent",
           )}
           aria-hidden
@@ -90,7 +100,7 @@ function DataIndicator({ ws }: { ws: TenantMembership }) {
 
 function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }: RowProps) {
   const { Icon } = getProviderMeta(firstProvider(ws))
-  const dataState = workspaceDataState(ws)
+  const dataState = workspaceLoadState(ws)
 
   // The gear lives inside the row button, so it can't itself be a <button>
   // (no nested interactive elements). A role="button" span with keyboard
@@ -104,7 +114,7 @@ function WorkspaceRow({ ws, active, highlighted, onSelect, onHover, onSettings }
   return (
     <button
       data-testid={`domain-item-${ws.id}`}
-      data-has-data={dataState === "ready"}
+      data-has-recorded-load={workspaceHasRecordedLoad(ws)}
       data-data-state={dataState}
       onClick={onSelect}
       onMouseMove={onHover}
@@ -184,7 +194,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
   const [open, setOpen] = useState(false)
   const [search, setSearch] = useState("")
   const [segment, setSegment] = useState<SegmentKey>("recent")
-  const [hasDataOnly, setHasDataOnly] = useState(false)
+  const [recordedLoadsOnly, setRecordedLoadsOnly] = useState(false)
   const [highlight, setHighlight] = useState(0)
   const [showCreateModal, setShowCreateModal] = useState(false)
   // Snapshot of recent ids taken when the popover opens, so selecting a
@@ -244,14 +254,14 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     }
 
     let list = base.filter(matchesSearch)
-    if (hasDataOnly) list = list.filter(workspaceHasData)
+    if (recordedLoadsOnly) list = list.filter(workspaceHasRecordedLoad)
 
     // Recent is intentionally insertion-ordered; everything else alphabetical.
     if (q || segment !== "recent") {
       list = [...list].sort((a, b) => a.display_name.localeCompare(b.display_name))
     }
     return list
-  }, [accessible, recent, search, segment, hasDataOnly])
+  }, [accessible, recent, search, segment, recordedLoadsOnly])
 
   // Lost-access workspaces matching the current search, shown disabled below.
   const lostVisible = useMemo(() => {
@@ -283,8 +293,8 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     resetView()
   }
 
-  function toggleHasData() {
-    setHasDataOnly((v) => !v)
+  function toggleRecordedLoads() {
+    setRecordedLoadsOnly((v) => !v)
     resetView()
   }
 
@@ -297,6 +307,11 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
     setActiveDomain(ws.id)
     newThread()
     close()
+    // An artifact belongs to one workspace; never carry its id into another.
+    if (isWorkspaceArtifactPath(location.pathname)) {
+      navigate("/artifacts")
+      return
+    }
     // If we're on a workspace detail/settings page, follow the selection to the
     // newly chosen workspace's page rather than staying on the previous one.
     const wsDetailPrefix = `${pathPrefix}/workspaces/`
@@ -459,7 +474,7 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           </div>
 
           {/* Filter controls. Pills wrap instead of scrolling sideways, so no
-              provider is ever clipped; "Has data" is a compact icon toggle
+              provider is ever clipped; load history is a compact icon toggle
               pinned to the right so it never competes for horizontal space. */}
           {showSegments && (
             <div className="flex items-start gap-2 border-b px-2 py-1.5">
@@ -486,26 +501,23 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
                 })}
               </div>
               <button
-                data-testid="workspace-filter-hasdata"
-                aria-pressed={hasDataOnly}
+                data-testid="workspace-filter-recorded-loads"
+                aria-pressed={recordedLoadsOnly}
                 aria-label={
-                  hasDataOnly ? "Showing only workspaces with data" : "Show only workspaces with data"
+                  recordedLoadsOnly
+                    ? "Showing only workspaces with recorded loads"
+                    : "Show only workspaces with recorded loads"
                 }
-                onClick={toggleHasData}
-                title="Show only workspaces with data"
+                onClick={toggleRecordedLoads}
+                title="Show only workspaces with recorded loads"
                 className={cn(
                   "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border transition-colors",
-                  hasDataOnly
-                    ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                  recordedLoadsOnly
+                    ? "border-primary/50 bg-primary/15 text-primary"
                     : "border-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                 )}
               >
-                <span
-                  className={cn(
-                    "h-2 w-2 rounded-full",
-                    hasDataOnly ? "bg-emerald-500" : "border border-current bg-transparent",
-                  )}
-                />
+                <History className="h-3.5 w-3.5" aria-hidden />
               </button>
             </div>
           )}
@@ -519,8 +531,8 @@ export function WorkspaceSwitcher({ variant = "sidebar" }: WorkspaceSwitcherProp
           >
             {visible.length === 0 && lostVisible.length === 0 ? (
               <p className="px-2 py-6 text-center text-sm text-muted-foreground">
-                {hasDataOnly
-                  ? "No workspaces with data yet."
+                {recordedLoadsOnly
+                  ? "No recorded loads match these filters."
                   : !search && segment === "recent"
                     ? "No recent workspaces — pick one to get started."
                     : "No workspaces match."}

@@ -178,6 +178,19 @@ export class StoryEngine implements StoryEngineApi {
     return this.diagnostics
   }
 
+  refreshData(): void {
+    if (this.destroyed) return
+    // Keep source outputs (selected periods) and displayed rows while replacing
+    // evaluated results. Old in-flight completions must not overwrite the repair.
+    const evaluated = [...this.nodes.values()].filter((node) => node.spec.evaluate)
+    for (const node of evaluated) {
+      this.cancelEval(node)
+      node.lastSnapshot = null
+      node.lastOk = false
+    }
+    for (const node of evaluated) this.reconcile(node.id)
+  }
+
   destroy(): void {
     this.destroyed = true
     for (const node of this.nodes.values()) {
@@ -380,7 +393,12 @@ export class StoryEngine implements StoryEngineApi {
     }
 
     const snapshot = JSON.stringify(values)
-    if (snapshot === node.lastSnapshot && node.lastOk) return
+    // Upstream work can demote cached outputs without changing their values.
+    // Only reuse published ready results, never a pending or blocked snapshot.
+    if (
+      snapshot === node.lastSnapshot && node.lastOk &&
+      node.ports.outputs.every(port => this.getOutput(outputKey(node.id, port.name)).status === "ready")
+    ) return
     this.scheduleEval(node, values, snapshot)
   }
 

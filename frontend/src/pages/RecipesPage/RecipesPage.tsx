@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react"
 import { useNavigate, useParams } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import { useNetworkStatus } from "@/hooks/useNetworkStatus"
+import { useIsCurrentAccount } from "@/hooks/useIsCurrentAccount"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -21,6 +22,7 @@ import type { Recipe } from "@/store/recipeSlice"
 export function RecipesPage() {
   const { id, runId } = useParams<{ id: string; runId: string }>()
   const navigate = useNavigate()
+  const isCurrentAccount = useIsCurrentAccount()
 
   const activeDomainId = useAppStore((s) => s.activeDomainId)
   const recipes = useAppStore((s) => s.recipes)
@@ -142,12 +144,13 @@ export function RecipesPage() {
     if (!deleteDialogRecipe) return
 
     await deleteRecipe(deleteDialogRecipe.id)
+    if (!isCurrentAccount()) return
     setDeleteDialogRecipe(null)
 
     if (id === deleteDialogRecipe.id) {
       navigate("/recipes")
     }
-  }, [deleteDialogRecipe, deleteRecipe, id, navigate])
+  }, [deleteDialogRecipe, deleteRecipe, id, navigate, isCurrentAccount])
 
   const handleSave = useCallback(
     async (data: Partial<Recipe>) => {

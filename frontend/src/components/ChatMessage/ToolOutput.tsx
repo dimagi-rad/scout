@@ -1,4 +1,6 @@
 import { AlertTriangle, CheckCircle, XCircle, Clock, Database, Hash } from "lucide-react"
+import { SqlBlock } from "@/components/SqlBlock"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 function Badge({
   children,
@@ -65,6 +67,8 @@ export interface QueryOutput {
     rows: unknown[][]
     row_count: number
     truncated?: boolean
+    sql_executed?: string
+    tables_accessed?: string[]
   }
   error?: ToolError
   warnings?: string[]
@@ -72,12 +76,71 @@ export interface QueryOutput {
   schema?: string
 }
 
-export function QueryToolOutput({ output }: { output: QueryOutput }) {
+// `sql` is the tool-call input; the error envelope carries no sql_executed,
+// so it is the only way to show what was attempted when the query fails.
+export function QueryToolOutput({ output, sql }: { output: QueryOutput; sql?: string }) {
   if (!output.success || !output.data) {
-    return <ToolErrorRow error={output.error} fallback="Query failed" />
+    return (
+      <div className="space-y-3">
+        <ToolErrorRow error={output.error} fallback="Query failed" />
+        {sql && <SqlBlock sql={sql} data-testid="query-sql" />}
+      </div>
+    )
   }
 
-  const { columns, rows, row_count, truncated } = output.data
+  const { columns, rows, row_count, truncated, sql_executed, tables_accessed } = output.data
+  const displaySql = sql_executed || sql
+
+  const resultsTable = rows.length > 0 && (
+    <div className="overflow-x-auto rounded border border-border/50">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="border-b border-border/50 bg-muted/40">
+            {columns.map((col) => (
+              <th
+                key={col}
+                className="px-2.5 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap"
+              >
+                {col}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, ri) => (
+            <tr
+              key={ri}
+              className="border-b border-border/30 last:border-0 hover:bg-muted/20 transition-colors"
+            >
+              {row.map((cell, ci) => (
+                <td key={ci} className="px-2.5 py-1.5 text-foreground/80 whitespace-nowrap">
+                  {cell === null || cell === undefined ? (
+                    <span className="text-muted-foreground/50 italic text-[10px]">null</span>
+                  ) : (
+                    formatCell(cell)
+                  )}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+
+  const tablesFooter = tables_accessed && tables_accessed.length > 0 && (
+    <div className="flex items-center gap-1.5 flex-wrap">
+      <span className="text-[10px] text-muted-foreground/60">Tables:</span>
+      {tables_accessed.map((t) => (
+        <span
+          key={t}
+          className="text-[10px] font-mono text-muted-foreground/60 bg-muted/40 rounded px-1"
+        >
+          {t}
+        </span>
+      ))}
+    </div>
+  )
 
   return (
     <div className="space-y-3">
@@ -108,7 +171,6 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
         )}
       </div>
 
-      {/* Warnings */}
       {output.warnings?.map((w, i) => (
         <div key={i} className="flex items-start gap-1.5 text-xs text-amber-600 dark:text-amber-400">
           <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
@@ -116,41 +178,33 @@ export function QueryToolOutput({ output }: { output: QueryOutput }) {
         </div>
       ))}
 
-      {rows.length > 0 && (
-        <div className="overflow-x-auto rounded border border-border/50">
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b border-border/50 bg-muted/40">
-                {columns.map((col) => (
-                  <th
-                    key={col}
-                    className="px-2.5 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap"
-                  >
-                    {col}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, ri) => (
-                <tr
-                  key={ri}
-                  className="border-b border-border/30 last:border-0 hover:bg-muted/20 transition-colors"
-                >
-                  {row.map((cell, ci) => (
-                    <td key={ci} className="px-2.5 py-1.5 text-foreground/80 whitespace-nowrap">
-                      {cell === null || cell === undefined ? (
-                        <span className="text-muted-foreground/50 italic text-[10px]">null</span>
-                      ) : (
-                        formatCell(cell)
-                      )}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+      {displaySql ? (
+        <Tabs defaultValue="results">
+          <TabsList className="h-7">
+            <TabsTrigger
+              value="results"
+              className="px-2.5 py-1 text-xs"
+              data-testid="query-tab-results"
+            >
+              Results
+            </TabsTrigger>
+            <TabsTrigger value="sql" className="px-2.5 py-1 text-xs" data-testid="query-tab-sql">
+              SQL
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="results" className="mt-2 space-y-2">
+            {resultsTable}
+            {tablesFooter}
+          </TabsContent>
+          <TabsContent value="sql" className="mt-2">
+            <SqlBlock sql={displaySql} data-testid="query-sql" />
+          </TabsContent>
+        </Tabs>
+      ) : (
+        <>
+          {resultsTable}
+          {tablesFooter}
+        </>
       )}
     </div>
   )

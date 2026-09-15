@@ -3,8 +3,10 @@ import { useNavigate } from "react-router-dom"
 import { ArtifactCard } from "@/components/ArtifactCard"
 import { Input } from "@/components/ui/input"
 import type { ArtifactSummary } from "@/store/artifactSlice"
+import { artifactPath } from "@/lib/artifactPath"
 
 interface ArtifactListProps {
+  workspace: Parameters<typeof artifactPath>[0]
   items: ArtifactSummary[]
   search: string
   onSearchChange: (search: string) => void
@@ -12,11 +14,11 @@ interface ArtifactListProps {
   onDelete: (item: ArtifactSummary) => void | Promise<void>
 }
 
-export function ArtifactList({ items, search, onSearchChange, onUpdate, onDelete }: ArtifactListProps) {
+export function ArtifactList({ workspace, items, search, onSearchChange, onUpdate, onDelete }: ArtifactListProps) {
   const navigate = useNavigate()
 
   function handleOpen(artifact: ArtifactSummary) {
-    navigate(`/artifacts/${artifact.id}`)
+    navigate(artifactPath(workspace, artifact.id))
   }
 
   if (items.length === 0 && !search) {

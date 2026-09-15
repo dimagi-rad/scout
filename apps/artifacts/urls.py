@@ -7,6 +7,7 @@ Nested under /api/workspaces/<workspace_id>/artifacts/
 from django.urls import path
 
 from .views import (
+    ArtifactDataRecoveryView,
     ArtifactDataView,
     ArtifactDetailView,
     ArtifactExportView,
@@ -41,6 +42,11 @@ urlpatterns = [
         "<uuid:artifact_id>/query-data/",
         ArtifactQueryDataView.as_view(),
         name="query_data",
+    ),
+    path(
+        "<uuid:artifact_id>/recovery/",
+        ArtifactDataRecoveryView.as_view(),
+        name="data_recovery",
     ),
     path(
         "<uuid:artifact_id>/semantic-queries/",

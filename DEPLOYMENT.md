@@ -62,9 +62,18 @@ it — see [Second environment (staging)](#second-environment-staging).
 The GitHub Actions workflow (`.github/workflows/deploy.yml`) runs on every push to `main`:
 
 1. Authenticates to AWS via OIDC (no access keys)
-2. Builds and pushes the API/frontend images to ECR; Kamal builds Cube from `cube_config/Dockerfile`
-3. Deploys Cube → MCP → API → worker → frontend with Kamal
-4. Runs migrations in a pre-deploy hook (API service only)
+2. Builds and pushes the frontend once, including its Sentry build inputs
+3. Deploys Cube → MCP → API → worker → frontend with Kamal. Kamal builds Cube and
+   each backend service; the frontend uses the prebuilt image with `--skip-push`.
+4. Runs migrations during API container startup
+
+API, MCP, and worker share the `scout/api` repository and code layers, but Kamal
+adds a different `service` label to each image. Their exact versions must therefore
+be distinct: `production-api-<sha>`, `production-mcp-<sha>`, and
+`production-worker-<sha>` (with `staging-` in place of `production-` for staging).
+This prevents one role or destination from replacing the image another is pulling.
+`IMAGE_TAG` remains the plain commit SHA for Sentry releases; it is not the backend
+image version. Deploy and rollback by the exact version, not a shared `latest` alias.
 
 ### Required GitHub Configuration
 
@@ -248,9 +257,10 @@ driver so `kamal app logs` works directly.
 ### Deploying from GitHub Actions
 
 Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from the
-ref dropdown. It builds and pushes the API and frontend images, then Kamal builds
-Cube from `cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository
-and deploys Cube → MCP → API → worker → frontend. In addition to the production
+ref dropdown. It builds and pushes the frontend once, then Kamal builds Cube
+from `cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository
+and each backend role into `scout/api` with its own version. It deploys
+Cube → MCP → API → worker → frontend. In addition to the production
 deploy secrets, the GitHub `staging` environment must contain the two
 Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
@@ -270,7 +280,8 @@ perform sts:AssumeRoleWithWebIdentity".
 Frontend images are tagged `staging-<sha>` rather than `<sha>`: the image bakes in
 `nginx.staging-kamal.conf` and `SENTRY_ENVIRONMENT` at build time, so sharing a tag
 with production would mean whichever environment deployed a given commit last wins.
-The API image carries no environment-specific build args and reuses the plain `<sha>`.
+Backend versions are `staging-api-<sha>`, `staging-mcp-<sha>`, and
+`staging-worker-<sha>` so each role's service label stays attached to its own image.
 Staging frontend builds skip the Sentry sourcemap upload, so a staging deploy can't
 overwrite the artifacts of a production release with the same SHA — errors still
 report to Sentry under the `staging` environment.
@@ -280,20 +291,21 @@ report to Sentry under the `staging` environment.
 ```bash
 git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
+export IMAGE_TAG=$(git rev-parse HEAD)
 
 # First time
-kamal setup -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
-kamal setup -c config/deploy-mcp.yml -d staging
-kamal setup -d staging
-kamal setup -c config/deploy-worker.yml -d staging
-kamal setup -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
+kamal setup -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
+kamal setup -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
+kamal setup -d staging --version="staging-api-$IMAGE_TAG"
+kamal setup -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
+kamal setup -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
 
 # Subsequent deploys
-kamal deploy -c config/deploy-cube.yml -d staging --version=cube-$(git rev-parse HEAD)
-kamal deploy -c config/deploy-mcp.yml -d staging
-kamal deploy -d staging
-kamal deploy -c config/deploy-worker.yml -d staging
-kamal deploy -c config/deploy-frontend.yml -d staging --version=staging-$(git rev-parse HEAD)
+kamal deploy -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
+kamal deploy -d staging --version="staging-api-$IMAGE_TAG"
+kamal deploy -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
+kamal deploy -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
 ```
 
 Omitting `-d staging` deploys **production** — the base configs are the production
@@ -304,7 +316,11 @@ build as the bare git SHA and pushes it as `scout/frontend:<sha>` — the same t
 production uses — but with `nginx.staging-kamal.conf` baked in. A later production
 `kamal rollback`, host reboot, or re-pull of that version would then serve a
 frontend proxying to `scout-staging-web`, putting production traffic on the staging
-API. The API/MCP/worker image is environment-agnostic, so those need no override.
+API. Backend commands also need explicit role/destination versions: their code is
+environment-agnostic, but Kamal's image service labels differ by role.
+
+Use GitHub Actions for normal deployments. These manual frontend builds do not
+provide the workflow's Sentry build inputs or source-map upload configuration.
 
 Migrations run automatically against the staging database when the API container
 starts. Logs: `kamal app logs -d staging`.
@@ -313,10 +329,10 @@ starts. Logs: `kamal app logs -d staging`.
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
 > would deploy staging containers against the **production** database.
 >
-> And `unset SCOUT_DB_NAME` before running any **production** kamal command in
-> that shell. The export survives a re-`source` of `.env.deploy` (which never
-> sets it), so a prod deploy from the same session resolves `DATABASE_URL` to
-> `agent_platform_staging` and points production at the staging database.
+> Use a fresh terminal session with no staging overrides for **production**
+> commands. Re-sourcing `.env.deploy` does not clear staging's exported database,
+> Cube signing secret, or OAuth overrides. Clearing only `SCOUT_DB_NAME` is not
+> sufficient to make a reused staging session safe for production.
 
 ## Manual Deployment
 
@@ -350,30 +366,40 @@ For deploying from your local machine (e.g., debugging or first-time setup):
 
 ### Steps
 
+Start in a fresh terminal session with no staging environment overrides; do not
+reuse the session used for staging commands above.
+
 ```bash
 # 1. Generate .env.deploy from CloudFormation outputs
 ./scripts/fetch-deploy-env.sh        # use -q/--quiet to suppress output
+source .env.deploy
+export IMAGE_TAG=$(git rev-parse HEAD)
 
 # 2. Deploy (first time, in dependency order)
-kamal setup -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal setup -c config/deploy-mcp.yml
-kamal setup
-kamal setup -c config/deploy-worker.yml
-kamal setup -c config/deploy-frontend.yml
+kamal setup -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
+kamal setup -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+kamal setup --version="production-api-$IMAGE_TAG"
+kamal setup -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
+kamal setup -c config/deploy-frontend.yml --version="$IMAGE_TAG"
 
 # 3. Deploy (subsequent, in dependency order)
-kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal deploy -c config/deploy-mcp.yml
-kamal deploy
-kamal deploy -c config/deploy-worker.yml
-kamal deploy -c config/deploy-frontend.yml
+kamal deploy -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+kamal deploy --version="production-api-$IMAGE_TAG"
+kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
+kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
 
 # Or deploy a specific service
-kamal deploy -c config/deploy-cube.yml --version=cube-$(git rev-parse HEAD)
-kamal deploy -c config/deploy-mcp.yml
-kamal deploy -c config/deploy-frontend.yml
-kamal deploy -c config/deploy-worker.yml
+kamal deploy -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
+kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
 ```
+
+Prefer the production GitHub Actions workflow for routine deploys, including the
+frontend's required Sentry build configuration. For rollback, use the exact stored
+version for the selected service and destination. Existing unqualified versions
+are not renamed, and this change does not alter ECR or host retention policies.
 
 ## Useful Commands
 
@@ -430,8 +456,9 @@ If you need to revert a service to Docker's default `json-file` log driver (e.g.
 1. Remove the `logging:` block from the relevant `config/deploy*.yml`.
 2. Redeploy the affected service(s):
    ```bash
-   kamal deploy -c config/deploy.yml
-   kamal deploy -c config/deploy-worker.yml
+   export IMAGE_TAG=$(git rev-parse HEAD)
+   kamal deploy -c config/deploy.yml --version="production-api-$IMAGE_TAG"
+   kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
    # repeat for any other affected service
    ```
 3. Containers restart under the `json-file` driver; `kamal app logs` and

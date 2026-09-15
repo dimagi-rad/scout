@@ -205,43 +205,21 @@ class TestPaginateExportPages:
             # Caller's dict must NOT be mutated.
             assert "last_id" not in original_params
 
-    def test_follows_http_to_https_redirect_on_next_url(self, loader):
-        """Regression test for dimagi/commcare-connect#1109.
-
-        The production CommCare Connect server has been observed to return
-        ``next`` URLs with the ``http://`` scheme even when the original
-        request came in over HTTPS. This is a server-side bug (gunicorn
-        strips ``X-Forwarded-Proto: https`` because ``--forwarded-allow-ips``
-        defaults to 127.0.0.1, so Django's ``request.build_absolute_uri()``
-        falls back to ``http``).
-
-        The mitigation: scout uses ``requests`` whose ``allow_redirects``
-        default is ``True``, so following the upstream 301 → HTTPS happens
-        for free, and ``Session.should_strip_auth`` has a special case for
-        same-host HTTP→HTTPS upgrades on default ports that preserves the
-        ``Authorization`` header. This test pins both behaviors so a future
-        regression can't silently re-introduce the bug.
-        """
-        first_https = "https://connect.example.com/export/opportunity/814/user_visits/"
-        # Server returns http://... in `next` (the bug).
-        next_http = "http://connect.example.com/export/opportunity/814/user_visits/?last_id=1"
-        next_https = "https://connect.example.com/export/opportunity/814/user_visits/?last_id=1"
-
+    def test_upgrades_http_next_without_plaintext_request(self, loader):
+        """Connect #1109 links must be upgraded before sending credentials."""
+        first = "https://connect.example.com/export/opportunity/814/user_visits/"
+        next_https = first + "?last_id=1"
         with rm.Mocker() as m:
-            m.get(first_https, json={"next": next_http, "results": [{"id": 1}]})
-            # Edge layer 301-redirects http -> https.
-            m.get(next_http, status_code=301, headers={"Location": next_https})
+            m.get(
+                first, json={"next": next_https.replace("https:", "http:"), "results": [{"id": 1}]}
+            )
             m.get(next_https, json={"next": None, "results": [{"id": 2}]})
-
-            all_records = [
-                r for page, _ in loader._paginate_export_pages("user_visits/") for r in page
-            ]
-            assert [r["id"] for r in all_records] == [1, 2]
-
-            # The redirected request must still carry the bearer token —
-            # requests preserves Authorization on same-host http→https upgrades.
-            redirected_request = next(req for req in m.request_history if req.url == next_https)
-            assert redirected_request.headers["Authorization"] == "Bearer test-token-123"
+            rows = [r for page, _ in loader._paginate_export_pages("user_visits/") for r in page]
+            assert [r["id"] for r in rows] == [1, 2]
+            assert [r.url for r in m.request_history] == [first, next_https]
+            assert all(
+                r.headers["Authorization"] == "Bearer test-token-123" for r in m.request_history
+            )
 
 
 def _make_urllib3_response(status, body=b"", headers=None):

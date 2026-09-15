@@ -67,7 +67,7 @@ export default function App() {
   }
 
   return (
-    <NetworkStatusProvider>
+    <NetworkStatusProvider key={user?.id}>
       <RouterProvider router={router} />
     </NetworkStatusProvider>
   )

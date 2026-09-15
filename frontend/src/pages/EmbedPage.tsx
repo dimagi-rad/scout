@@ -63,6 +63,7 @@ export function EmbedPage() {
 
 function EmbedApp() {
   const authStatus = useAppStore((s) => s.authStatus)
+  const userId = useAppStore((s) => s.user?.id)
   const fetchMe = useAppStore((s) => s.authActions.fetchMe)
   const ensureTenant = useAppStore((s) => s.domainActions.ensureTenant)
   const { tenant, provider } = useEmbedParams()
@@ -140,5 +141,5 @@ function EmbedApp() {
     return <LoginForm />
   }
 
-  return <RouterProvider router={embedRouter} />
+  return <RouterProvider key={userId} router={embedRouter} />
 }
