@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from apps.semantic.models import SemanticField, SemanticModel, SemanticRelationship
+from apps.semantic.services.field_sql import compile_dimension_sql, dataset_column_names
 
 
 def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
@@ -89,13 +90,20 @@ def generate_cube_schema_yaml(model: SemanticModel) -> str:
 
 
 def _is_primary_key_field(dataset, field: SemanticField) -> bool:
-    return bool(dataset.primary_key) and field.expression == dataset.primary_key
+    return (
+        bool(dataset.primary_key)
+        and field.expression == dataset.primary_key
+        and not (field.metadata or {}).get("cube_sql")
+    )
 
 
 def _cube_dimension(field: SemanticField, *, is_primary_key: bool = False) -> dict[str, Any]:
+    cube_sql = (field.metadata or {}).get("cube_sql")
     payload = {
         "name": field.name,
-        "sql": _cube_sql(field.expression),
+        "sql": compile_dimension_sql(cube_sql, columns=dataset_column_names(field.dataset))
+        if cube_sql
+        else _cube_sql(field.expression),
         "type": "time"
         if field.field_type == SemanticField.FieldType.TIME_DIMENSION
         else _cube_type(field.data_type),

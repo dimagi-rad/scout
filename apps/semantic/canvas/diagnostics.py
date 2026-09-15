@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from apps.semantic.canvas.objects import dataset_column_names
+from apps.semantic.canvas.objects import FIELD_CURATION_KEYS, FIELD_TYPES, MEASURE_TYPES
 from apps.semantic.canvas.service import (
     ChangeType,
     ObjectType,
@@ -20,6 +20,11 @@ from apps.semantic.canvas.service import (
     validate_custom_dataset_draft,
 )
 from apps.semantic.models import CustomDataset, SemanticCanvasChange, SemanticField
+from apps.semantic.services.field_sql import (
+    DimensionSQLValidationError,
+    compile_dimension_sql,
+    dataset_column_names,
+)
 
 _DIRECT_MEMBER_DIVISION_RE = re.compile(
     r"\{[A-Za-z_][A-Za-z0-9_.]*\}\s*/\s*"
@@ -64,7 +69,10 @@ def compute_diagnostics(canvas, changes: list[SemanticCanvasChange] | None = Non
         base, _state, serialized = base_and_state(canvas, change)
         if change.change_type != ChangeType.CREATE and base is None:
             continue
-        diagnostics.extend(_calculated_measure_diagnostics(change, {**serialized, **change.fields}))
+        fields = {**serialized, **change.fields}
+        if change.change_type != ChangeType.CREATE and set(change.fields) - FIELD_CURATION_KEYS:
+            diagnostics.extend(_field_expression_diagnostics(base.dataset, change, fields))
+        diagnostics.extend(_calculated_measure_diagnostics(change, fields))
     for change in relationship_drafts:
         diagnostics.extend(
             _relationship_draft_diagnostics(
@@ -119,20 +127,69 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
             )
         )
 
-    expression = fields.get("expression", "")
+    out.extend(_field_expression_diagnostics(dataset, change, fields))
+    return out
+
+
+def _field_expression_diagnostics(dataset, change, fields: dict[str, Any]) -> list[dict]:
+    """Apply the same field contract to creates and the merged state of edits."""
+    out: list[dict[str, Any]] = []
+    field_type = fields.get("field_type", "")
     measure_type = fields.get("measure_type", "")
-    if measure_type == "count":
-        return out
-    if fields.get("cube_sql"):
-        return out
+    if field_type not in FIELD_TYPES:
+        return [
+            _diagnostic(
+                "INVALID_FIELD_TYPE",
+                change,
+                "field_type",
+                "Choose dimension, time_dimension, or measure.",
+            )
+        ]
+    if field_type == "measure":
+        if measure_type not in MEASURE_TYPES:
+            out.append(
+                _diagnostic(
+                    "INVALID_MEASURE_TYPE",
+                    change,
+                    "measure_type",
+                    "A measure needs a supported measure_type.",
+                )
+            )
+    else:
+        if measure_type:
+            out.append(
+                _diagnostic(
+                    "INVALID_MEASURE_TYPE",
+                    change,
+                    "measure_type",
+                    "measure_type only applies to measures.",
+                )
+            )
+        if fields.get("filters"):
+            out.append(
+                _diagnostic(
+                    "INVALID_FIELD_OPTION", change, "filters", "filters only applies to measures."
+                )
+            )
+    cube_sql = fields.get("cube_sql")
     columns = dataset_column_names(dataset)
+    if cube_sql:
+        if field_type != "measure":
+            try:
+                compile_dimension_sql(cube_sql, columns=columns)
+            except DimensionSQLValidationError as exc:
+                out.append(_diagnostic("INVALID_DIMENSION_SQL", change, "cube_sql", str(exc)))
+        return out
+    if field_type == "measure" and measure_type == "count":
+        return out
+    expression = fields.get("expression", "")
     if not expression:
         out.append(
             _diagnostic(
                 "MISSING_EXPRESSION",
                 change,
                 "expression",
-                "Set expression to one of the dataset's columns"
+                "Set expression to one of the dataset's columns, or use sql/cube_sql for a calculation"
                 + (f" (e.g. {', '.join(sorted(columns)[:5])})." if columns else "."),
             )
         )
@@ -143,9 +200,9 @@ def _field_draft_diagnostics(model, change, siblings) -> list[dict]:
                 change,
                 "expression",
                 f"'{expression}' is not a column on {dataset.name}. Expressions must "
-                "name an existing column. For a calculated measure use measure_type "
-                "'number' with sql/cube_sql; use a CTE dataset when the calculation "
-                "changes row grain.",
+                "name an existing column. Use sql/cube_sql for a row-level calculated "
+                "dimension or a calculated measure (measure_type 'number'). Use a "
+                "CTE dataset when the calculation changes row grain.",
             )
         )
     return out
