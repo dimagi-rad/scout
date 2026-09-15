@@ -41,6 +41,7 @@ export function ChatPanel() {
   const [threadArtifactsStatus, setThreadArtifactsStatus] =
     useState<"idle" | "loading" | "loaded" | "error">("idle")
   const [threadArtifactsError, setThreadArtifactsError] = useState<string | null>(null)
+  const threadArtifactsRequestRef = useRef(0)
   const prevStatusRef = useRef<string>("")
   // Transient-overload auto-retry bookkeeping; see ./overloadRetry.
   const hitRetryableRef = useRef(false)
@@ -92,15 +93,22 @@ export function ChatPanel() {
 
   const loadThreadArtifacts = useCallback(async () => {
     if (!activeDomainId || !threadId) return
+    const requestId = ++threadArtifactsRequestRef.current
+    const isCurrentRequest = () =>
+      requestId === threadArtifactsRequestRef.current
+      && contextRef.current.workspaceId === activeDomainId
+      && contextRef.current.threadId === threadId
     setThreadArtifactsStatus("loading")
     setThreadArtifactsError(null)
     try {
       const response = await api.get<{ results: ThreadArtifactSummary[] }>(
         `/api/workspaces/${activeDomainId}/threads/${threadId}/artifacts/`,
       )
+      if (!isCurrentRequest()) return
       setThreadArtifacts(response.results)
       setThreadArtifactsStatus("loaded")
     } catch (loadError) {
+      if (!isCurrentRequest()) return
       setThreadArtifactsStatus("error")
       setThreadArtifactsError(
         loadError instanceof Error ? loadError.message : "Failed to load artifacts",
@@ -163,12 +171,16 @@ export function ChatPanel() {
   }, [threadId, activeDomainId, messageReloadKey])
 
   useEffect(() => {
+    threadArtifactsRequestRef.current += 1
     setThreadPanelOpen(false)
     setThreadArtifacts([])
     setThreadArtifactsStatus("idle")
     setThreadArtifactsError(null)
     setStoppedNotice(false)
-  }, [threadId])
+    return () => {
+      threadArtifactsRequestRef.current += 1
+    }
+  }, [activeDomainId, threadId])
 
   useEffect(() => {
     if (messages.length === 0) {
