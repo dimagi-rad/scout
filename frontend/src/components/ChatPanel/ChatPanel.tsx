@@ -355,7 +355,9 @@ export function ChatPanel() {
         onClose={() => setThreadPanelOpen(false)}
         onOpenArtifact={openArtifact}
         onRefreshFiles={loadThreadArtifacts}
-        canvas={<ChatCanvasPanel workspaceId={activeDomainId} />}
+        canvas={threadPanelOpen ? (
+          <ChatCanvasPanel workspaceId={activeDomainId} threadId={threadId} />
+        ) : null}
       />
     </div>
   )

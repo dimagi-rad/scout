@@ -45,7 +45,6 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     workspaceId: null,
     threadId: null,
   })
-  const adoptedUrlRef = useRef(false)
 
   // Direction 1: URL → store
   useEffect(() => {
@@ -70,17 +69,13 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
       recordWorkspaceUse(urlWorkspaceId)
     }
 
-    let adoptedUrl = false
     if (urlWorkspaceId !== activeDomainId) {
       setActiveDomain(urlWorkspaceId)
-      adoptedUrl = true
     }
     if (urlThreadId && urlThreadId !== threadId) {
       void selectThread(urlThreadId)
-      adoptedUrl = true
     }
 
-    adoptedUrlRef.current = adoptedUrl
     syncedRef.current = { workspaceId: urlWorkspaceId, threadId: urlThreadId ?? null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [urlWorkspaceId, urlThreadId, domainsStatus, domains])
@@ -88,10 +83,10 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
   // Direction 2: store → URL
   useEffect(() => {
     if (!activeDomainId) return
-    if (adoptedUrlRef.current) {
-      adoptedUrlRef.current = false
-      return
-    }
+    // URL adoption above updates Zustand synchronously. Skip only the old
+    // render, not the next render that carries the adopted workspace/thread.
+    const current = useAppStore.getState()
+    if (current.activeDomainId !== activeDomainId || current.threadId !== threadId) return
     if (
       syncedRef.current.workspaceId === activeDomainId &&
       syncedRef.current.threadId === (threadId || null)
@@ -102,9 +97,13 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     const target = chatUrl(activeDomainId, threadId || null)
 
     syncedRef.current = { workspaceId: activeDomainId, threadId: threadId || null }
-    navigate(target, { replace: false })
+    // Filling a bare URL normalizes that entry; pushing would trap Back on
+    // the bare entry, which would immediately forward to this thread again.
+    navigate(target, { replace: urlWorkspaceId === activeDomainId && !urlThreadId })
+    // A bare URL or newly loaded workspace can need reconciliation even when
+    // the store identity did not change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDomainId, threadId])
+  }, [activeDomainId, threadId, urlWorkspaceId, urlThreadId, domainsStatus, domains])
 
   // Canonicalize the address bar: rewrite a bare/non-pretty chat URL to the slug
   // form once the workspace resolves. Loop guard: only rewrite when on a chat
@@ -118,6 +117,12 @@ export function useWorkspaceThreadSync(pathPrefix: string) {
     const onChatRoute = urlWorkspaceId === activeDomainId
     if (!onChatRoute) return
     if (!domains.some((d) => d.id === activeDomainId)) return
+    // Store → URL may already have queued a navigation in this effect pass.
+    // Do not replace its thread-bearing target with the still-old URL params.
+    if (
+      syncedRef.current.workspaceId !== urlWorkspaceId ||
+      syncedRef.current.threadId !== (urlThreadId ?? null)
+    ) return
 
     const canonical = chatUrl(activeDomainId, urlThreadId ?? null)
     if (canonical !== location.pathname) {
