@@ -25,9 +25,35 @@ def test_dimension_sql_normalizes_unquoted_identifiers():
         compile_dimension_sql('"CONTENT"', columns={"content"})
 
 
-def test_dimension_sql_does_not_rewrite_cube_text_inside_sql_literals():
-    assert compile_dimension_sql("'{CUBE}'", columns=set()) == "'{CUBE}'"
-    assert compile_dimension_sql("$txt${CUBE}$txt$", columns=set()) == "'{CUBE}'"
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("'{CUBE}'", r"'\u007bCUBE\u007d'"),
+        ("$txt${CUBE}$txt$", r"'\u007bCUBE\u007d'"),
+        ("'{does_not_exist}'", r"'\u007bdoes_not_exist\u007d'"),
+        ("'{{already_doubled}}'", r"'\u007b\u007balready_doubled\u007d\u007d'"),
+        ("'{'", r"'\u007b'"),
+        ("'}'", r"'\u007d'"),
+        ('\'{"topic": "Account"}\'', '\'\\u007b"topic": "Account"\\u007d\''),
+        ('{CUBE}."content" /* {does_not_exist} */', '{CUBE}."content"'),
+        ("content -- {does_not_exist}", '{CUBE}."content"'),
+        ("/* {does_not_exist} */ content", '{CUBE}."content"'),
+        ('{CUBE}."column{CUBE}"', r'{CUBE}."column\u007bCUBE\u007d"'),
+        ('"column{does_not_exist}"', r'{CUBE}."column\u007bdoes_not_exist\u007d"'),
+        (
+            "concat(content, '{CUBE}')",
+            "pg_catalog.CONCAT({CUBE}.\"content\", '\\u007bCUBE\\u007d')",
+        ),
+        (r"'\u007b'", r"'\\u007b'"),
+        ("'line\nbreak {CUBE}'", r"'line\nbreak \u007bCUBE\u007d'"),
+        ("'{% invalid_jinja %}'", r"'\u007b% invalid_jinja %\u007d'"),
+    ],
+)
+def test_dimension_sql_escapes_cube_literal_braces_and_removes_comments(source, expected):
+    assert (
+        compile_dimension_sql(source, columns={"content", "column{CUBE}", "column{does_not_exist}"})
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
