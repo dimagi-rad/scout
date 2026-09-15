@@ -12,18 +12,20 @@ import re
 from collections import Counter
 from collections.abc import Iterable
 
-from apps.common.error_codes import ErrorCode
+from django.db import transaction
+
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
 from apps.common.localized import localized_str
 from apps.transformations.models import TransformationAsset, TransformationScope
+from apps.transformations.services.repeat_identity import GeneratedRepeat, preserve_repeat_names
+from apps.transformations.services.staging_identity import StagingModelMigrationRequired
+from apps.users.models import Tenant
 
 logger = logging.getLogger(__name__)
 
 
-class CaseModelMigrationRequired(ValueError):
+class CaseModelMigrationRequired(StagingModelMigrationRequired):
     """Existing ambiguous models cannot be regenerated without a reviewed migration."""
-
-    code = ErrorCode.SCHEMA_BUILD_FAILED
 
 
 # CommCare question type → PostgreSQL cast suffix (None means TEXT / no cast).
@@ -392,7 +394,9 @@ def _generate_repeat_group_asset(
     )
 
 
-def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
+def generate_system_assets(
+    tenant, metadata: dict, *, existing_assets: list[TransformationAsset] | None = None
+) -> list[TransformationAsset]:
     """Generate unsaved TransformationAsset instances for all system staging models.
 
     Reads the metadata dict (from TenantMetadata.metadata) which has:
@@ -403,6 +407,7 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     Returns unsaved TransformationAsset instances with scope=SYSTEM.
     """
     assets: list[TransformationAsset] = []
+    repeats: list[GeneratedRepeat] = []
     fallbacks = _NameFallbacks()
 
     for name, model_name in _case_model_names(metadata.get("case_types", []), fallbacks).items():
@@ -457,16 +462,16 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
         parent_model = dbt_model_name(f"stg_form_{slug}")
         model_names = _repeat_model_names(parent_model, repeat_groups, fallbacks)
         for group_path, child_qs in repeat_groups.items():
-            assets.append(
-                _generate_repeat_group_asset(
-                    tenant,
-                    parent_model,
-                    group_path,
-                    child_qs,
-                    fallbacks,
-                    model_name=model_names[group_path],
-                )
+            asset = _generate_repeat_group_asset(
+                tenant,
+                parent_model,
+                group_path,
+                child_qs,
+                fallbacks,
+                model_name=model_names[group_path],
             )
+            assets.append(asset)
+            repeats.append(GeneratedRepeat(asset, parent_model, group_path))
 
     if summary := fallbacks.summary():
         logger.info(
@@ -475,9 +480,12 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
             summary,
         )
 
+    if existing_assets is not None:
+        preserve_repeat_names(assets, repeats, existing_assets, provider="commcare")
     return assets
 
 
+@transaction.atomic
 def upsert_system_assets(tenant, tenant_metadata) -> dict:
     """Generate and upsert system staging TransformationAssets for a tenant.
 
@@ -492,8 +500,14 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
 
     Returns {"created": int, "updated": int, "deleted": int, "total": int}.
     """
+    # Workspaces can share a tenant; plan names against one locked snapshot and
+    # commit the upserts and orphan sweep together, or change no assets at all.
+    Tenant.objects.select_for_update().get(pk=tenant.pk)
+    existing_assets = list(
+        TransformationAsset.objects.filter(tenant=tenant, scope=TransformationScope.SYSTEM)
+    )
     metadata = tenant_metadata.metadata
-    assets = generate_system_assets(tenant, metadata)
+    assets = generate_system_assets(tenant, metadata, existing_assets=existing_assets)
 
     # A legacy collision may already have SQL/artifact references or `replaces`
     # links whose intended source case type cannot be inferred safely. The
@@ -505,13 +519,7 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
         if (old_name := _case_base_model_name(name)) != model_name
     }
     if renamed_case_models:
-        existing = list(
-            TransformationAsset.objects.filter(
-                tenant=tenant,
-                scope=TransformationScope.SYSTEM,
-                name__in=renamed_case_models,
-            ).values_list("name", flat=True)
-        )
+        existing = [asset.name for asset in existing_assets if asset.name in renamed_case_models]
         if existing:
             raise CaseModelMigrationRequired(
                 "An explicit migration is required for existing ambiguous case-type models: "
