@@ -66,6 +66,11 @@ if args[0] == "ps":
         if not state.get("ignore_filters") and any(actual_labels.get(key) != value for key, value in labels.items()):
             continue
         selected.append(ident)
+    if state.get("exit_after_discovery") and "role" in labels:
+        # Return the running snapshot, then let those exact processes finish
+        # before the helper's discovery inspect. Other destinations stay live.
+        for ident in selected:
+            containers[ident].update(status="exited", **state["exit_after_discovery"])
     done(output="\n".join(selected) + ("\n" if selected else ""))
 
 ident = args[-1] if args[0] in {"inspect", "kill"} else args[1]
@@ -207,6 +212,32 @@ def test_empty_destination_is_a_successful_first_deploy(drain_cli):
     assert "No active or pending staging workers were found" in result.stdout
     assert "exited cleanly" not in result.stdout
     assert all(command[0] == "ps" for command in state["commands"])
+
+
+@pytest.mark.parametrize("destination,label", [("production", ""), ("staging", "staging")])
+def test_clean_exit_between_discovery_and_inspection_needs_no_signal(
+    drain_cli, tmp_path, destination, label
+):
+    result, state = drain_cli(
+        {WORKER: {"destination": label}, OTHER: {"destination": "staging" if not label else ""}},
+        destination=destination,
+        options={"exit_after_discovery": {"exit": 0, "oom": False}},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "All 1 selected" in result.stdout
+    assert not any(command[0] == "kill" for command in state["commands"])
+    assert state["containers"][OTHER].get("status", "running") == "running"
+    assert list((tmp_path / RECEIPT_ROOT / destination).iterdir()) == []
+
+
+@pytest.mark.parametrize("exit_state", [{"exit": 1}, {"exit": 0, "oom": True}])
+def test_failed_discovery_exit_still_blocks_without_signalling(drain_cli, exit_state):
+    result, state = drain_cli(
+        {WORKER: {"destination": "staging"}},
+        options={"exit_after_discovery": exit_state},
+    )
+    assert result.returncode != 0
+    assert not any(command[0] == "kill" for command in state["commands"])
 
 
 @pytest.mark.parametrize("destination,label", [("production", ""), ("staging", "staging")])
@@ -596,7 +627,7 @@ def test_labels_are_revalidated_before_any_mutation(drain_cli, wrong):
 def test_ambiguous_initial_worker_state_fails_without_mutation(drain_cli, status):
     result, state = drain_cli({WORKER: {"destination": "staging", "status": status}})
     assert result.returncode != 0
-    assert "An old worker is paused or restarting; inspect it before deploying." in result.stderr
+    assert "An old worker is paused, restarting, or did not exit cleanly." in result.stderr
     assert not any(command[0] in {"exec", "kill"} for command in state["commands"])
 
 

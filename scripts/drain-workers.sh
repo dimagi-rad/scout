@@ -184,8 +184,9 @@ snapshot=$(active_workers) || fail "Could not inventory old workers."
 while IFS= read -r candidate; do
   [[ -n "$candidate" ]] || continue
   inspect_worker "$candidate"
-  [[ "$container_state" == "running" ]] \
-    || fail "An old worker is paused or restarting; inspect it before deploying."
+  # The exact listed process can finish between ps and inspect. Keep it in the
+  # checked target set, accepting only running or verified clean/non-OOM exit.
+  validate_process "$container_start"
   add_target "$container_id" "$container_start"
 done <<< "$snapshot"
 

@@ -10,6 +10,8 @@ concurrency:
   # the active handoff instead of letting one destination cancel the other.
   group: scout-deploy-host
   cancel-in-progress: false
+  # GitHub supports up to 100 pending runs with this optional queue property:
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
   queue: max
 
 permissions:
@@ -23,6 +25,8 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
+    # Bound setup/prebuild hangs too; post-drain steps have tighter limits.
+    timeout-minutes: 90
     env:
       IMAGE_TAG: ${{ github.sha }}
       # Kamal adds a different service label to each backend image. Never let

@@ -11,6 +11,8 @@ concurrency:
   # Must match production: both destinations deploy to the same host.
   group: scout-deploy-host
   cancel-in-progress: false
+  # GitHub supports up to 100 pending runs with this optional queue property:
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
   queue: max
 
 permissions:
@@ -20,6 +22,8 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Bound setup/prebuild hangs too; post-drain steps have tighter limits.
+    timeout-minutes: 90
     # Load-bearing for auth, not just bookkeeping: it switches the OIDC token's
     # sub claim from `ref:refs/heads/<branch>` to `environment:staging`, which is
     # the subject scout-github-deploy trusts for non-main refs. Remove it and

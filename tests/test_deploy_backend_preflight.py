@@ -24,6 +24,29 @@ def _assert_default_success_gating(steps):
         assert step.get("if", "success()") == "success()", step["name"]
         assert step.get("shell", "bash") == "bash", step["name"]
         assert not step.get("env"), step["name"]
+        assert not step.get("working-directory"), step["name"]
+
+
+def _run_workflow_steps(steps, *, cwd, env):
+    """Run each shell step independently, stopping on the first failed step."""
+    _assert_default_success_gating(steps)
+    assert steps
+    for step in steps:
+        # GitHub distinguishes omitted shell (bash -e) from explicit bash
+        # (--noprofile --norc -eo pipefail); neither adds nounset (-u).
+        flags = ["--noprofile", "--norc", "-eo", "pipefail"] if "shell" in step else ["-e"]
+        result = subprocess.run(  # noqa: S603 - checked-in steps with owned command doubles
+            ["/bin/bash", *flags, "-c", step["run"]],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode:
+            return result
+    return result
 
 
 def test_both_destinations_share_a_non_cancelling_host_queue():
@@ -33,8 +56,15 @@ def test_both_destinations_share_a_non_cancelling_host_queue():
     assert isinstance(production["group"], str) and production["group"]
     assert "${{" not in production["group"], "The host lock must not vary by workflow/ref"
     assert production["cancel-in-progress"] is False
-    # The default single pending slot can silently cancel the other destination.
+    # Current GitHub concurrency.queue supports max=100 pending runs; its
+    # default single slot can silently cancel the other destination.
     assert production["queue"] == "max"
+
+
+@pytest.mark.parametrize("destination", ["production", "staging"])
+def test_deploy_job_bounds_prebuild_and_setup_hangs_in_the_shared_queue(destination):
+    timeout = _workflow(destination)["jobs"]["deploy"].get("timeout-minutes")
+    assert type(timeout) is int and 1 <= timeout <= 90
 
 
 @pytest.mark.parametrize("destination", ["production", "staging"])
@@ -54,12 +84,42 @@ def test_post_drain_deployments_have_an_explicit_bounded_step_timeout(destinatio
         {"if": "always()"},
         {"shell": "sh"},
         {"env": {"API_TAG": "unexpected-version"}},
+        {"working-directory": "elsewhere"},
     ],
 )
 def test_preflight_model_rejects_unmodelled_workflow_step_semantics(override):
     step = {"name": "Build and push API image", "run": "kamal build push", **override}
     with pytest.raises(AssertionError, match="Build and push API image"):
         _assert_default_success_gating([step])
+
+
+@pytest.mark.parametrize("shell", [None, "bash"])
+def test_workflow_step_model_does_not_leak_shell_state_or_add_nounset(tmp_path, shell):
+    shell_option = {"shell": shell} if shell else {}
+    result = _run_workflow_steps(
+        [
+            {"name": "first", "run": "export SCOUT_STEP_LOCAL=leaked; cd /", **shell_option},
+            {
+                "name": "second",
+                "run": 'test -z "$SCOUT_STEP_LOCAL"; test "$PWD" = "$SCOUT_EXPECTED_CWD"',
+                **shell_option,
+            },
+        ],
+        cwd=tmp_path,
+        env={"SCOUT_EXPECTED_CWD": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("shell,expected", [(None, 0), ("bash", 1)])
+def test_workflow_step_model_matches_default_and_explicit_pipeline_failure(
+    tmp_path, shell, expected
+):
+    step = {"name": "pipeline", "run": "false | true"}
+    if shell:
+        step["shell"] = shell
+    result = _run_workflow_steps([step], cwd=tmp_path, env={})
+    assert result.returncode == expected
 
 
 @pytest.mark.parametrize("destination", ["production", "staging"])
@@ -105,8 +165,8 @@ if event == 'build:' + os.environ.get('SCOUT_PREFLIGHT_FAIL_ROLE', ''):
         executable = tmp_path / name
         executable.write_text(fake)
         executable.chmod(0o700)
-    result = subprocess.run(  # noqa: S603 - checked-in workflow with only owned fake commands in PATH
-        ["/bin/bash", "-euo", "pipefail", "-c", "\n".join(step["run"] for step in selected)],
+    result = _run_workflow_steps(
+        selected,
         cwd=REPO_ROOT,
         env={
             "PATH": os.fspath(tmp_path),
@@ -115,10 +175,6 @@ if event == 'build:' + os.environ.get('SCOUT_PREFLIGHT_FAIL_ROLE', ''):
             "SCOUT_EC2_IP": "example.invalid",
             **{f"{role.upper()}_TAG": f"{destination}-{role.lower()}-test" for role in ROLES},
         },
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
     )
     observed = events.read_text().splitlines() if events.exists() else []
     if failed_role is not None:

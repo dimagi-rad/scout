@@ -1,5 +1,6 @@
 """Migrations must finish before a rolling deploy starts schema-dependent roles."""
 
+import json
 import os
 import re
 import signal
@@ -53,13 +54,12 @@ def test_api_has_an_actual_container_health_gate_before_other_backend_roles(dest
     assert drain["timeout-minutes"] == 12
 
 
-@pytest.fixture
-def entrypoint_commands(tmp_path):
+def _entrypoint_commands(tmp_path):
     """Run the real entrypoint; fake only commands it would start externally."""
     log = tmp_path / "commands.log"
     script = (
         f"#!{sys.executable}\n"
-        "import os, sys, time\n"
+        "import json, os, sys, time\n"
         "from pathlib import Path\n"
         "name = Path(sys.argv[0]).name\n"
         "with Path(os.environ['CALL_LOG']).open('a') as output:\n"
@@ -73,7 +73,12 @@ def entrypoint_commands(tmp_path):
         "if name == 'uvicorn':\n"
         "    sys.exit(17)\n"
         "if name == 'curl':\n"
-        "    sys.exit(int(os.environ.get('CURL_EXIT_CODE', '0')))\n"
+        "    Path(os.environ['CURL_ARGV_LOG']).write_text(json.dumps(sys.argv[1:]))\n"
+        "    status = os.environ.get('CURL_HTTP_STATUS', '200')\n"
+        "    if '--write-out' in sys.argv:\n"
+        "        print(status, end='')\n"
+        "    default_exit = '22' if '--fail' in sys.argv and status.isdigit() and int(status) >= 400 else '0'\n"
+        "    sys.exit(int(os.environ.get('CURL_EXIT_CODE', default_exit)))\n"
     )
     for name in ("python", "uvicorn", "curl"):
         command = tmp_path / name
@@ -84,13 +89,19 @@ def entrypoint_commands(tmp_path):
             (str(tmp_path), *(part for part in os.defpath.split(os.pathsep) if part))
         ),
         "CALL_LOG": str(log),
+        "CURL_ARGV_LOG": str(tmp_path / "curl-argv.json"),
         "DJANGO_ALLOWED_HOSTS": "scout-staging.example.invalid,other.example.invalid",
     }
 
 
+@pytest.fixture
+def entrypoint_commands(tmp_path):
+    return _entrypoint_commands(tmp_path)
+
+
 def test_fake_command_path_never_includes_current_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "defpath", ":/bin::/usr/bin:")
-    _, env = entrypoint_commands.__wrapped__(tmp_path)
+    _, env = _entrypoint_commands(tmp_path)
     assert env["PATH"].split(os.pathsep) == [str(tmp_path), "/bin", "/usr/bin"]
 
 
@@ -208,7 +219,7 @@ def test_non_api_roles_do_not_race_the_api_by_running_migrations(entrypoint_comm
 def test_health_gate_uses_container_local_url_correct_host_and_preserves_failure(
     entrypoint_commands, destination, curl_exit
 ):
-    log, env = entrypoint_commands
+    _, env = entrypoint_commands
     config = load_config("deploy.yml", destination=destination)
     allowlist = config["env"]["clear"]["DJANGO_ALLOWED_HOSTS"]
     host = allowlist.split(",")[0].strip()
@@ -221,10 +232,38 @@ def test_health_gate_uses_container_local_url_correct_host_and_preserves_failure
         check=False,
     )
     assert result.returncode == curl_exit
-    assert log.read_text().splitlines() == [
-        "curl --fail --silent --show-error --max-time 4 --noproxy * "
-        f"--header Host: {host} --output /dev/null http://127.0.0.1:8000/health/"
+    assert json.loads(Path(env["CURL_ARGV_LOG"]).read_text()) == [
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "4",
+        "--noproxy",
+        "*",
+        "--header",
+        f"Host: {host}",
+        "--output",
+        "/dev/null",
+        "--write-out",
+        "%{http_code}",
+        "http://127.0.0.1:8000/health/",
     ]
+
+
+@pytest.mark.parametrize(
+    "status", ["200", "204", "301", "302", "307", "308", "400", "503", "", "200\n200", "invalid"]
+)
+def test_health_gate_accepts_only_an_exact_readiness_200(entrypoint_commands, status):
+    _, env = entrypoint_commands
+    result = subprocess.run(  # noqa: S603 - real script; synthetic curl status only
+        ["/bin/sh", str(REPO_ROOT / "scripts" / "api-healthcheck.sh")],
+        env={**env, "CURL_HTTP_STATUS": status},
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    assert (result.returncode == 0) is (status == "200"), result.stderr
 
 
 @pytest.mark.parametrize("allowed_hosts", [None, "", " \t ", ",other.example.invalid"])

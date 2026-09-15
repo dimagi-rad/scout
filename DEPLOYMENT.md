@@ -374,6 +374,11 @@ interrupted-handoff notice and recovery procedure remain necessary.
 Each post-drain API/MCP/worker/frontend deploy step has a 10-minute timeout so
 a stuck remote operation does not silently pause the handoff for the runner's
 six-hour default. The API's own migration/readiness deadline remains 180 seconds.
+The deployment job also has a 90-minute cap for setup/prebuild hangs while it
+holds the shared queue. Production's preceding reusable CI job remains a
+separate gate with its existing timeout; the deployment cap is not a workflow-wide
+deadline. The readiness script requires an exact HTTP 200, not a redirect or
+another curl-success status.
 Step timeouts do not prove that a remote operation stopped; inspect the host
 before retrying an interrupted handoff.
 The workflow drains **all active old worker versions** for the selected
