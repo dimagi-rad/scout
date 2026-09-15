@@ -16,6 +16,7 @@ from apps.common.identifiers import dbt_column_alias, dbt_model_name
 from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     _leaf_slug,
+    _question_path,
     _question_path_to_json_path,
     _sql_escape,
     _typed_expression,
@@ -51,10 +52,7 @@ def visit_column_map(form_definitions: dict) -> list[tuple[dict, str]]:
     questions: list[dict] = []
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
-            if q.get("repeat"):
-                continue
-            value_path = q.get("value", "")
-            if not value_path:
+            if q.get("repeat") or not _question_path(q):
                 continue
             questions.append(q)
 
@@ -122,7 +120,7 @@ def _generate_connect_repeat_group_asset(
         '    row_number() OVER (PARTITION BY f.visit_id ORDER BY elem.ordinality) AS "repeat_index"',
     ]
     seen_aliases: dict[str, int] = {"visit_id": 1, "repeat_index": 1}
-    staged_questions = [q for q in child_questions if q.get("value", "")]
+    staged_questions = [q for q in child_questions if _question_path(q)]
     reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
 
     for q in staged_questions:
@@ -223,10 +221,8 @@ def generate_connect_assets(form_definitions: dict, tenant) -> list[Transformati
     repeat_groups: dict[str, list[dict]] = {}
     for _deliver_unit, form_def in form_definitions.items():
         for q in form_def.get("questions", []):
-            if not q.get("repeat"):
-                continue
-            value_path = q.get("value", "")
-            if not value_path:
+            value_path = _question_path(q)
+            if not q.get("repeat") or not value_path:
                 continue
             # Group path is everything up to (but not including) the leaf segment.
             group_path = value_path.rsplit("/", 1)[0]

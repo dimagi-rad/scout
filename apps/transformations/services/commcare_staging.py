@@ -13,6 +13,7 @@ from collections import Counter
 
 from apps.common.error_codes import ErrorCode
 from apps.common.identifiers import dbt_column_alias, dbt_model_name, fit_identifier
+from apps.common.localized import localized_str
 from apps.transformations.models import TransformationAsset, TransformationScope
 
 logger = logging.getLogger(__name__)
@@ -71,19 +72,26 @@ def slugify_model_name(name: str) -> str:
     return slug
 
 
-def _slug_or_digest(name: str, *, identity: str) -> str:
+def _slug_or_digest(name: object, *, identity: str) -> str:
     """Slug for *name*, or a stable digest of *identity* when no ASCII survives.
 
     Upstream identifiers (labels, case types, properties, question IDs) may be
-    non-Latin or punctuation-only. The materializer catches a ValueError per
-    tenant, so one such identifier would silently drop every staging model for
-    that tenant (SCOUT-DJANGO-3D). Key the fallback on source identity rather
-    than the mutable name or enumeration order.
+    non-Latin, punctuation-only, or localized ``{"en": ...}`` dicts. The
+    materializer catches one exception per tenant, so a single such identifier
+    would silently drop every staging model for that tenant (SCOUT-DJANGO-3D).
+    Key the fallback on source identity rather than the mutable name or
+    enumeration order.
     """
     try:
-        return slugify_model_name(name)
+        return slugify_model_name(localized_str(name))
     except ValueError:
         return fit_identifier("unnamed", unique_key=identity, always_hash=True)
+
+
+def _question_path(question: dict) -> str:
+    """The question's XForm ``value`` path, or ``""`` when it is not a usable string."""
+    value = question.get("value")
+    return value if isinstance(value, str) else ""
 
 
 def _sql_escape(value: str) -> str:
@@ -126,11 +134,11 @@ def _collect_case_properties(case_type_name: str, metadata: dict) -> list[str]:
     props: set[str] = set()
     for app in metadata.get("app_definitions", []):
         for module in app.get("modules", []):
-            if module.get("case_type") != case_type_name:
+            if localized_str(module.get("case_type")) != case_type_name:
                 continue
             case_props = module.get("case_properties", [])
             for prop in case_props:
-                key = prop.get("key", "") if isinstance(prop, dict) else str(prop)
+                key = localized_str(prop.get("key") if isinstance(prop, dict) else prop)
                 if key:
                     props.add(key)
     return sorted(props)
@@ -149,7 +157,9 @@ def _case_model_names(case_types: list[dict]) -> dict[str, str]:
     a generated digest cannot overwrite an unrelated case type's model.
     """
     names = {
-        item["name"]: _case_base_model_name(item["name"]) for item in case_types if item.get("name")
+        name: _case_base_model_name(name)
+        for item in case_types
+        if (name := localized_str(item.get("name")))
     }
     counts = Counter(names.values())
     used = set(names.values())
@@ -225,7 +235,7 @@ def _generate_form_asset(
         "app_id": 1,
         "form_data": 1,
     }
-    staged_questions = [q for q in questions if not q.get("repeat") and q.get("value", "")]
+    staged_questions = [q for q in questions if not q.get("repeat") and _question_path(q)]
     reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
 
     for q in staged_questions:
@@ -243,7 +253,7 @@ def _generate_form_asset(
     model_name = dbt_model_name(f"stg_form_{model_name_slug}")
     return TransformationAsset(
         name=model_name,
-        description=f"Staging model for form: {form_def.get('name', form_xmlns)}",
+        description=f"Staging model for form: {localized_str(form_def.get('name')) or form_xmlns}",
         scope=TransformationScope.SYSTEM,
         tenant=tenant,
         sql_content="\n".join(lines),
@@ -269,7 +279,7 @@ def _generate_repeat_group_asset(
     ]
     # Seed with fixed column names so child question aliases that collide get a suffix.
     seen_aliases: dict[str, int] = {"form_id": 1, "repeat_index": 1}
-    staged_questions = [q for q in child_questions if q.get("value", "")]
+    staged_questions = [q for q in child_questions if _question_path(q)]
     reserved_aliases = set(seen_aliases) | {_leaf_slug(q["value"]) for q in staged_questions}
 
     for q in staged_questions:
@@ -320,14 +330,8 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
     form_definitions = metadata.get("form_definitions", {})
 
     for xmlns, form_def in form_definitions.items():
-        form_name = form_def.get("name", xmlns)
-        if isinstance(form_name, dict):
-            # Localized names: {"en": "Household Registration", "fr": "..."}
-            form_name = form_name.get("en") or next(iter(form_name.values()), xmlns)
-        if not isinstance(form_name, str):
-            form_name = xmlns
-        app_name = form_def.get("app_name", "")
-        base_slug = _slug_or_digest(form_name, identity=f"form:{xmlns}")
+        app_name = localized_str(form_def.get("app_name"))
+        base_slug = _slug_or_digest(form_def.get("name", xmlns), identity=f"form:{xmlns}")
 
         # Disambiguate duplicate form names across apps; always incorporate the
         # counter so 3+ collisions stay unique.
@@ -349,7 +353,7 @@ def generate_system_assets(tenant, metadata: dict) -> list[TransformationAsset]:
         repeat_groups: dict[str, list[dict]] = {}
         for q in form_def.get("questions", []):
             repeat_path = q.get("repeat")
-            if repeat_path:
+            if isinstance(repeat_path, str) and repeat_path:
                 repeat_groups.setdefault(repeat_path, []).append(q)
 
         for group_path, child_qs in repeat_groups.items():
