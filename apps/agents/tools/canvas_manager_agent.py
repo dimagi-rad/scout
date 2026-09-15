@@ -509,7 +509,10 @@ def _summarize_result(messages: list[Any]) -> dict[str, Any]:
         last_state.get("blocked")
         or last_state.get("blocking_diagnostics")
         or last_state.get("conflicts")
-        or last_state.get("can_commit") is False
+        or any(
+            diagnostic.get("severity") == "error"
+            for diagnostic in last_state.get("diagnostics") or []
+        )
     )
     if blocked:
         result["status"] = "blocked"

@@ -1,9 +1,13 @@
 """Tests for the thread-bound semantic canvas changeset."""
 
+import asyncio
+import json
 from unittest.mock import Mock
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
+from apps.agents.tools.canvas_manager_agent import create_canvas_manager_tool
 from apps.agents.tools.canvas_tool import create_canvas_tools
 from apps.chat.models import Thread
 from apps.semantic.canvas import (
@@ -826,6 +830,74 @@ async def test_canvas_apply_tool_exposes_inferred_columns_and_pending_count(
     assert result["pending_count"] == 1
     assert "Inferred output columns: username" in result["text"]
     assert result["can_commit"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("operation", ["add_existing", "revert_object"])
+async def test_canvas_manager_reports_clean_canvas_only_operations_as_completed(
+    canvas, workspace, user, monkeypatch, operation
+):
+    tools = {
+        item.name: item for item in create_canvas_tools(workspace, user, str(canvas.thread_id))
+    }
+    if operation == "revert_object":
+        await tools["canvas_apply"].ainvoke(
+            {
+                "operations": [
+                    {"op": "set", "target": "dataset/raw_visits/description", "value": "Pending"}
+                ]
+            }
+        )
+        operations = [{"op": "revert_object", "object": "dataset/raw_visits"}]
+    else:
+        operations = [{"op": "add_existing", "object_type": "dataset", "ref": "raw_visits"}]
+    report = await tools["canvas_apply"].ainvoke({"operations": operations})
+    assert report["pending_count"] == 0
+    assert report["can_commit"] is False
+    assert report["diagnostics"] == []
+
+    class CleanGraph:
+        async def astream_events(self, *_args, **_kwargs):
+            yield {
+                "event": "on_tool_end",
+                "name": "canvas_apply",
+                "run_id": "apply-clean",
+                "data": {
+                    "output": ToolMessage(
+                        name="canvas_apply", tool_call_id="apply-clean", content=json.dumps(report)
+                    )
+                },
+            }
+            yield {
+                "event": "on_chain_end",
+                "name": "agent",
+                "data": {
+                    "output": {
+                        "messages": [
+                            AIMessage(content=json.dumps({"status": "done", "message": "Done."}))
+                        ]
+                    }
+                },
+            }
+
+    monkeypatch.setattr(
+        "apps.agents.tools.canvas_manager_agent._build_canvas_manager_graph",
+        lambda *_args: CleanGraph(),
+    )
+    queue = asyncio.Queue()
+    manager = create_canvas_manager_tool(workspace, user, [], str(canvas.thread_id))
+
+    result = await manager.ainvoke({"task": operation, "subagent_event_queue": queue})
+
+    assert result["status"] == "done"
+    assert result["pending_count"] == 0
+    assert result["committed"] is False
+    assert result["diagnostics"] == []
+    assert result["message"] == "Done."
+    events = [queue.get_nowait()["event"] for _ in range(queue.qsize())]
+    assert events[-1]["data"]["phase"] == "completed"
+    assert result["subagent_trace"]["events"][0]["data"]["phase"] == "completed"
 
 
 def test_custom_dataset_fields_can_be_deleted_and_stay_hidden(
