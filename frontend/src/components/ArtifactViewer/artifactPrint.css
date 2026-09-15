@@ -11,8 +11,10 @@
   }
 
   /* Every ancestor matters: the application shell and modal have independent
-     viewport heights, scrolling, transforms, and fixed positioning. */
-  [data-scout-print="ancestor"],
+     viewport heights, scrolling, transforms, and fixed positioning. The html
+     prefix also beats Radix's later body[data-scroll-locked] !important rules. */
+  html[data-scout-print="ancestor"],
+  html[data-scout-print="ancestor"] [data-scout-print="ancestor"],
   [data-scout-print="target"] {
     display: block !important;
     position: static !important;
@@ -31,7 +33,8 @@
     transition: none !important;
   }
 
-  [data-scout-print="ancestor"] {
+  html[data-scout-print="ancestor"],
+  html[data-scout-print="ancestor"] [data-scout-print="ancestor"] {
     margin: 0 !important;
     padding: 0 !important;
     border: 0 !important;
@@ -98,6 +101,14 @@
 
   [data-scout-print="target"] pre {
     white-space: pre-wrap;
+  }
+
+  /* Recharts 3's percentage-sized ResponsiveContainer uses a zero-sized inner
+     div with visible overflow. Give it the printable chart's dimensions before
+     constraining its SVG descendants, or their percentage max-width is zero. */
+  [data-scout-print="target"] .recharts-responsive-container > div {
+    width: 100% !important;
+    height: 100% !important;
   }
 
   /* Preserve the current SVG/viewBox when the printable page is narrower than
