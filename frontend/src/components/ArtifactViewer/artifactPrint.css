@@ -1,0 +1,124 @@
+@page scout-artifact {
+  size: auto;
+  margin: 12mm;
+}
+
+@media print {
+  /* Hide sibling branches, not every element on the page. This also isolates a
+     selected preview in a portal from the chat and other artifacts beneath it. */
+  [data-scout-print="ancestor"] > :not([data-scout-print]) {
+    display: none !important;
+  }
+
+  /* Every ancestor matters: the application shell and modal have independent
+     viewport heights, scrolling, transforms, and fixed positioning. The html
+     prefix also beats Radix's later body[data-scroll-locked] !important rules. */
+  html[data-scout-print="ancestor"],
+  html[data-scout-print="ancestor"] [data-scout-print="ancestor"],
+  [data-scout-print="target"] {
+    display: block !important;
+    position: static !important;
+    inset: auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    transform: none !important;
+    translate: none !important;
+    contain: none !important;
+    animation: none !important;
+    transition: none !important;
+  }
+
+  html[data-scout-print="ancestor"],
+  html[data-scout-print="ancestor"] [data-scout-print="ancestor"] {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+  }
+
+  [data-scout-print="target"] {
+    page: scout-artifact;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+
+  [data-scout-print="target"] > [data-artifact-story-content] {
+    max-width: none;
+    padding: 0;
+  }
+
+  /* Keep compact charts and metrics together. Long narrative and table blocks
+     remain fragmentable so they can continue onto subsequent printed pages. */
+  [data-scout-print="target"] [data-block-type="graph"],
+  [data-scout-print="target"] [data-stat-group],
+  [data-scout-print="target"] [data-block-type="stat"],
+  [data-scout-print="target"] [data-block-type="date_filter"],
+  [data-scout-print="target"] [data-block-type="period_selector"] {
+    break-inside: avoid;
+  }
+
+  [data-scout-print="target"] h1,
+  [data-scout-print="target"] h2,
+  [data-scout-print="target"] h3,
+  [data-scout-print="target"] header {
+    break-after: avoid;
+  }
+
+  [data-scout-print="target"] [data-block-type="table"],
+  [data-scout-print="target"] [data-block-type="tldr"],
+  [data-scout-print="target"] [data-stat-group],
+  [data-scout-print="target"] pre {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  [data-scout-print="target"] table {
+    width: 100%;
+    table-layout: fixed;
+  }
+
+  [data-scout-print="target"] thead {
+    position: static;
+    display: table-header-group;
+  }
+
+  [data-scout-print="target"] tr {
+    break-inside: avoid;
+  }
+
+  [data-scout-print="target"] th,
+  [data-scout-print="target"] td,
+  [data-scout-print="target"] pre {
+    overflow-wrap: anywhere;
+  }
+
+  [data-scout-print="target"] pre {
+    white-space: pre-wrap;
+  }
+
+  /* Recharts 3's percentage-sized ResponsiveContainer uses a zero-sized inner
+     div with visible overflow. Give it the printable chart's dimensions before
+     constraining its SVG descendants, or their percentage max-width is zero. */
+  [data-scout-print="target"] .recharts-responsive-container > div {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* Preserve the current SVG/viewBox when the printable page is narrower than
+     the screen, including before Recharts' ResizeObserver has recalculated. */
+  [data-scout-print="target"] .recharts-wrapper,
+  [data-scout-print="target"] .recharts-surface {
+    max-width: 100% !important;
+  }
+
+  [data-scout-print="target"] .recharts-tooltip-wrapper {
+    display: none !important;
+  }
+}

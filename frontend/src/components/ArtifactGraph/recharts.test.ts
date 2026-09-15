@@ -1,8 +1,42 @@
+import React from "react"
 import { describe, expect, it } from "vitest"
 
 import { buildRechartsTree, CHART_PALETTES, compileCompactGraphConfig, formatAxisTick } from "./recharts"
 
 describe("compact Recharts visualization grammar", () => {
+  it.each([
+    ["LineChart", "Line"],
+    ["AreaChart", "Area"],
+    ["BarChart", "Bar"],
+    ["PieChart", "Pie"],
+    ["ScatterChart", "Scatter"],
+  ])("renders %s series completely without data-reveal or resize animations", (chartType, seriesType) => {
+    const rendered = buildRechartsTree({
+      type: chartType,
+      children: [{ type: seriesType }],
+    }, [{ count: 4 }])
+    const series = React.Children.toArray((rendered.props as { children: React.ReactNode }).children)[0]
+    expect(React.isValidElement(series)).toBe(true)
+    expect((series as React.ReactElement<{ isAnimationActive: boolean }>).props.isAnimationActive).toBe(false)
+  })
+
+  it.each(["line", "area", "bar", "pie", "donut"])("uses the same non-animated policy for compact %s charts", (chartType) => {
+    const rendered = buildRechartsTree(compileCompactGraphConfig({ chart_type: chartType, y_key: "count" }), [{ count: 4 }])
+    const series = React.Children.toArray((rendered.props as { children: React.ReactNode }).children)
+      .filter((child): child is React.ReactElement<{ isAnimationActive?: boolean }> => (
+        React.isValidElement(child) && "isAnimationActive" in (child.props as object)
+      ))
+    expect(series).toHaveLength(1)
+    expect(series[0].props.isAnimationActive).toBe(false)
+  })
+
+  it.each(["Line", "Area", "Bar", "Pie", "Scatter"])("does not let raw %s configuration re-enable series animation", (seriesType) => {
+    expect(() => buildRechartsTree({
+      type: "ComposedChart",
+      children: [{ type: seriesType, props: { isAnimationActive: true } }],
+    }, [])).toThrow(`Recharts ${seriesType} prop "isAnimationActive" is not supported`)
+  })
+
   it("compiles a horizontal value-labeled bar with a bounded style", () => {
     const tree = compileCompactGraphConfig({
       chart_type: "bar",
