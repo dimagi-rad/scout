@@ -58,12 +58,13 @@ def generate_cube_schema(model: SemanticModel) -> dict[str, Any]:
             cube_sql = dataset.metadata.get("cube_sql") or dataset.metadata.get("sql")
             if not cube_sql:
                 continue
-            cube["sql"] = cube_sql
+            source_sql = cube_sql
         else:
             # Deliberately unqualified: the physical schema is resolved per query
             # via the search_path that cube.js sets from the security context, so
             # a blue-green tenant-schema swap does not invalidate this YAML.
-            cube["sql_table"] = _quote_identifier(dataset.table_name)
+            source_sql = f"SELECT * FROM {_quote_identifier(dataset.table_name)}"  # noqa: S608
+        cube["sql"] = _publication_scoped_sql(source_sql)
         joins = joins_by_dataset.get(dataset.name)
         if joins:
             cube["joins"] = joins
@@ -86,6 +87,15 @@ def generate_cube_schema_yaml(model: SemanticModel) -> str:
         {"cubes": schema["cubes"]},
         sort_keys=False,
         allow_unicode=False,
+    )
+
+
+def _publication_scoped_sql(source_sql: str) -> str:
+    # The bound revision fences Cube's SQL result cache AND queue without a
+    # driver pool per publication. An empty legacy-context array is also true.
+    return (
+        f"SELECT * FROM (\n{source_sql}\n) AS scout_source\n"  # noqa: S608
+        "WHERE ARRAY[{SECURITY_CONTEXT.cubeDataRevision}]::text[] IS NOT NULL"
     )
 
 
