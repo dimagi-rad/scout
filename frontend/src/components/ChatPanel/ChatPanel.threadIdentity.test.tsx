@@ -1,9 +1,12 @@
 import { createUIMessageStream, createUIMessageStreamResponse, type UIMessage } from "ai"
+import { StrictMode } from "react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
+import { createMemoryRouter, MemoryRouter, Outlet, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
 import { useAppStore } from "@/store/store"
 import type { TenantMembership } from "@/store/domainSlice"
+import { workspaceApi } from "@/api/workspaces"
+import { Sidebar } from "@/components/Sidebar/Sidebar"
 import { ChatPanel } from "./ChatPanel"
 import { ChatRoute } from "./ChatRoute"
 import type { CanvasProjection } from "./canvasApi"
@@ -110,16 +113,24 @@ function RouteContent({ sync }: { sync: boolean }) {
   </>
 }
 
-function renderChat(initialPath: string, sync = true) {
+function renderChat(initialPath: string, sync = true, coldStart = false) {
+  const paths = [
+    "/workspaces/:workspaceId/chat",
+    "/workspaces/:workspaceId/chat/:threadId",
+    "/workspaces/:slug/:workspaceId/chat",
+    "/workspaces/:slug/:workspaceId/chat/:threadId",
+  ]
+  if (coldStart) {
+    const router = createMemoryRouter([{
+      element: <><Sidebar /><Outlet /></>,
+      children: paths.map((path) => ({ path, element: <RouteContent sync={sync} /> })),
+    }], { initialEntries: [initialPath] })
+    return render(<StrictMode><RouterProvider router={router} /></StrictMode>)
+  }
   return render(
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
-        {[
-          "/workspaces/:workspaceId/chat",
-          "/workspaces/:workspaceId/chat/:threadId",
-          "/workspaces/:slug/:workspaceId/chat",
-          "/workspaces/:slug/:workspaceId/chat/:threadId",
-        ].map((path) => <Route key={path} path={path} element={<RouteContent sync={sync} />} />)}
+        {paths.map((path) => <Route key={path} path={path} element={<RouteContent sync={sync} />} />)}
       </Routes>
     </MemoryRouter>,
   )
@@ -154,6 +165,36 @@ afterEach(() => {
 })
 
 describe("chat thread identity", () => {
+  it("opens a cold chat with Sidebar's deferred workspace fetch under StrictMode", async () => {
+    useAppStore.setState({
+      domains: [], domainsStatus: "idle", activeDomainId: null, threadId: crypto.randomUUID(),
+    })
+    const api = mockChatApi()
+    let finishLoading!: (domains: TenantMembership[]) => void
+    vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
+      finishLoading = resolve
+    }))
+    renderChat(`/workspaces/${WS_A}/chat`, true, true)
+    await screen.findByTestId("chat-input-prominent")
+    const freshThread = useAppStore.getState().threadId
+    expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+    expect(useAppStore.getState().domainsStatus).toBe("loading")
+    expect(screen.getByTestId("chat-path").textContent).toBe(
+      `/workspaces/${WS_A}/chat/${freshThread}`,
+    )
+
+    await act(async () => {
+      finishLoading([workspace(WS_B, "Workspace B"), workspace(WS_A, "Workspace A")])
+    })
+    const savedUrl = `/workspaces/workspace-a/${WS_A}/chat/${freshThread}`
+    await waitFor(() => expect(screen.getByTestId("chat-path").textContent).toBe(savedUrl))
+    await send("Say hello without tools or changes")
+    await screen.findByText(REPLY)
+    expect(api.sentContexts).toEqual([{ workspaceId: WS_A, threadId: freshThread }])
+    expect(screen.getByTestId("chat-path").textContent).toBe(savedUrl)
+    await expectCanvas(api, WS_A, freshThread)
+  })
+
   it("keeps the same thread through an initialization failure, retry, Canvas, and reload", async () => {
     const api = mockChatApi({ failFirst: true })
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})

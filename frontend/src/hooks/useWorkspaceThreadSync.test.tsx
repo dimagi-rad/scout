@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, render, screen, waitFor } from "@testing-library/react"
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes, useLocation } from "react-router-dom"
 import { api } from "@/api/client"
+import { workspaceApi } from "@/api/workspaces"
 import { useAppStore } from "@/store/store"
 import { useWorkspaceThreadSync } from "@/hooks/useWorkspaceThreadSync"
 import { getRecentWorkspaceIds } from "@/lib/recentWorkspaces"
@@ -204,6 +205,30 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     ))
   })
 
+  it.each(["", "/embed"])("synchronizes a cold %s entry before and after deferred workspace loading", async (prefix) => {
+    useAppStore.setState({
+      domains: [], domainsStatus: "idle", activeDomainId: null, threadId: crypto.randomUUID(),
+    })
+    let finishLoading!: (domains: TenantMembership[]) => void
+    vi.spyOn(workspaceApi, "list").mockReturnValue(new Promise((resolve) => {
+      finishLoading = resolve
+    }))
+    let loading!: Promise<void>
+    act(() => { loading = useAppStore.getState().domainActions.fetchDomains() })
+    renderPrettyChat(`${prefix}/workspaces/${WS_A}/chat`, prefix)
+
+    const freshThread = useAppStore.getState().threadId
+    expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+    await act(async () => {
+      finishLoading([domain(WS_B, "Workspace B"), domain(WS_A, "Workspace A")])
+      await loading
+    })
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+      `${prefix}/workspaces/workspace-a/${WS_A}/chat/${freshThread}`,
+    ))
+    expect(useAppStore.getState().threadId).toBe(freshThread)
+  })
+
   it("keeps new-thread navigation and back/forward in sync after canonicalization", async () => {
     const router = renderPrettyChat(`/workspaces/${WS_A}/chat`)
     await waitFor(() => expect(screen.getByTestId("path")).toHaveTextContent(
@@ -225,5 +250,29 @@ describe("useWorkspaceThreadSync — thread identity during slug canonicalizatio
     expect(screen.getByTestId("path")).toHaveTextContent(
       `/workspaces/workspace-a/${WS_A}/chat/${freshThread}`,
     )
+  })
+
+  it("adds a fresh thread when navigation adopts a different bare workspace URL", async () => {
+    const router = renderPrettyChat(`/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`)
+    await act(() => router.navigate(`/workspaces/${WS_B}/chat`))
+    const freshThread = useAppStore.getState().threadId
+    expect(freshThread).not.toBe(THREAD_A)
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+      `/workspaces/workspace-b/${WS_B}/chat/${freshThread}`,
+    ))
+    await act(() => router.navigate(-1))
+    expect(screen.getByTestId("path").textContent).toBe(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    )
+    expect(useAppStore.getState().threadId).toBe(THREAD_A)
+  })
+
+  it("restores the current thread when navigation removes only the URL thread", async () => {
+    const router = renderPrettyChat(`/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`)
+    await act(() => router.navigate(`/workspaces/workspace-a/${WS_A}/chat`))
+    await waitFor(() => expect(screen.getByTestId("path").textContent).toBe(
+      `/workspaces/workspace-a/${WS_A}/chat/${THREAD_A}`,
+    ))
+    expect(useAppStore.getState().threadId).toBe(THREAD_A)
   })
 })
