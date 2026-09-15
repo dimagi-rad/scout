@@ -403,6 +403,16 @@ destination-specific workflow once the worker/job state is safe. The notice
 does not restart old workers or remove drain receipts. A runner that is abruptly
 lost may not emit the notice, so inspect the handoff whenever a run ends there.
 
+A timeout, cancellation or lost runner can leave a Kamal deployment lock behind.
+Inspect it with `kamal lock status`, using the same `-c` config and `-d` destination
+as the interrupted step (production omits `-d`). Kamal 2.12 scopes these locks by
+service and destination; the Actions concurrency group is a separate lock.
+Before using `kamal lock release` with those same arguments, confirm that no
+deployment or remote operation is still active and that the lock is genuinely
+stale. Never release a live or uncertain lock, and never automate lock release
+in a failure handler. Releasing a verified stale lock does not establish that
+worker drains or migrations succeeded; those gates must still pass on retry.
+
 The API runs migrations and OAuth setup before starting uvicorn. Because this
 service has no Kamal proxy, its container has an explicit loopback `/health/`
 check with the configured allowed Host. The readiness check verifies the platform

@@ -89,7 +89,7 @@ def test_notice_emits_annotation_and_summary_without_running_remote_commands(des
     notice = _notice(destination)
     summary = tmp_path / "summary.md"
     result = subprocess.run(  # noqa: S603 - checked-in notice, no credentials and no external commands in PATH
-        ["/bin/bash", "-euo", "pipefail", "-c", notice["run"]],
+        ["/bin/bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", notice["run"]],
         env={"PATH": str(tmp_path), "GITHUB_STEP_SUMMARY": os.fspath(summary)},
         capture_output=True,
         text=True,
@@ -105,5 +105,9 @@ def test_notice_emits_annotation_and_summary_without_running_remote_commands(des
     assert f".scout-worker-drains-v1/{destination}/" in guidance
     assert "Inspect worker state, in-flight jobs, and pending receipts" in guidance
     assert "roll forward" in guidance
+    assert "kamal lock status" in guidance
+    assert "same config and destination as the failed step" in guidance
+    assert "only a verified stale lock" in guidance
+    assert "no deployment or remote operation is active" in guidance
     assert "Do not blindly reboot old workers" in guidance
     assert "delete receipts" in guidance
