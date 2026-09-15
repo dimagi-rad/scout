@@ -12,6 +12,7 @@ vi.mock("@/api/userTenantsCache", () => ({ getUserTenantsCached: vi.fn() }))
 vi.mock("@/store/store", () => {
   const state = {
     user: { id: "user" }, domains: [], domainsStatus: "loaded",
+    accountSession: { isCurrent: () => true },
     domainActions: { fetchDomains: vi.fn(), setActiveDomain: vi.fn() },
   }
   return { useAppStore: (selector: (value: typeof state) => unknown) => selector(state) }

@@ -17,6 +17,7 @@ export type DomainsStatus = "idle" | "loading" | "loaded" | "error"
 export interface DomainSlice {
   domains: TenantMembership[]
   activeDomainId: string | null
+  workspaceGeneration: number
   domainsStatus: DomainsStatus
   domainsError: string | null
   domainActions: {
@@ -30,6 +31,7 @@ export interface DomainSlice {
 export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, [], [], DomainSlice> = (set, get) => ({
   domains: [],
   activeDomainId: null,
+  workspaceGeneration: 0,
   domainsStatus: "idle",
   domainsError: null,
   domainActions: {
@@ -61,20 +63,7 @@ export const createDomainSlice: StateCreator<DomainSlice & AccountSessionScope, 
     setActiveDomain: (id: string) => {
       if (!get().accountSession.isCurrent()) return
       recordWorkspaceUse(id)
-      // Switching workspaces must NOT carry the thread over: grafting the old
-      // workspace's thread id onto the new URL produces a "Thread not found"
-      // chat. Reset to a fresh id. Deep links (URL → store) overwrite this via
-      // the sync hook's selectThread(urlThreadId) immediately after.
-      if (id !== get().activeDomainId) {
-        // `threadId` lives in the UI slice; cast so this cross-slice write
-        // typechecks (the slices share one store).
-        ;(set as (partial: { activeDomainId: string; threadId: string }) => void)({
-          activeDomainId: id,
-          threadId: crypto.randomUUID(),
-        })
-      } else {
-        set({ activeDomainId: id })
-      }
+      set({ activeDomainId: id })
     },
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars

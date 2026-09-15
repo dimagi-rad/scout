@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react"
+import { act, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom"
@@ -161,6 +161,32 @@ describe("DatasetBrowserPage routing", () => {
     expect(await screen.findByText("Fetched payment detail")).toBeInTheDocument()
     expect(screen.getByTestId("location")).toHaveTextContent("/datasets/raw_payments")
     expect(getSpy).toHaveBeenCalledWith(`/api/workspaces/${WORKSPACE_ID}/datasets/raw_payments/`)
+  })
+
+  it("restores the routed dataset after refreshing while its old detail is pending", async () => {
+    let resolveOld!: (value: unknown) => void
+    const oldDetail = new Promise((resolve) => { resolveOld = resolve })
+    let detailRequests = 0
+    vi.spyOn(api, "get").mockImplementation(async (url: string) => {
+      if (url === `/api/workspaces/${WORKSPACE_ID}/datasets/`) return catalog() as never
+      if (url === `/api/workspaces/${WORKSPACE_ID}/datasets/raw_payments/`) {
+        detailRequests += 1
+        if (detailRequests === 1) return oldDetail as never
+        return { model: catalog().model, dataset: { ...rawPayments, description: "Refreshed payment detail" } } as never
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    renderDatasetPage("/datasets/raw_payments")
+    await waitFor(() => expect(detailRequests).toBe(1))
+    await userEvent.click(screen.getByTestId("refresh-datasets-btn"))
+    expect(await screen.findByText("Refreshed payment detail")).toBeInTheDocument()
+    await act(async () => {
+      resolveOld({ model: catalog().model, dataset: { ...rawPayments, description: "Obsolete payment detail" } })
+      await oldDetail
+    })
+    expect(screen.getByTestId("location")).toHaveTextContent("/datasets/raw_payments")
+    expect(screen.getByText("Refreshed payment detail")).toBeInTheDocument()
+    expect(screen.queryByText("Obsolete payment detail")).not.toBeInTheDocument()
   })
 
   it("shows SQL for custom datasets from the catalog response", async () => {

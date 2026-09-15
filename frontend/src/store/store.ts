@@ -47,6 +47,23 @@ export function createAppStore() {
     // Seed account-owned fields only after setting the identity.
     store.setState(accountState(store.setState, store.getState, store))
   })
+  store.subscribe((state, previous) => {
+    if (state.activeDomainId === previous.activeDomainId) return
+    // Clear before UI subscribers run; seed workspace-owned state after selecting a workspace.
+    store.setState({
+      workspaceGeneration: state.workspaceGeneration + 1,
+      threadId: crypto.randomUUID(),
+      artifacts: [], artifactsStatus: "idle", artifactsError: null, artifactSearch: "",
+      activeArtifactId: null,
+      dataDictionary: null, dictionaryStatus: "idle", dictionaryError: null, selectedTable: null,
+      threads: [], threadsStatus: "idle", threadsAccessLostMessage: null,
+      datasetCatalog: null, datasetStatus: "idle", datasetError: null,
+      selectedDataset: null, selectedDatasetStatus: "idle", selectedDatasetError: null,
+      recipes: [], recipeStatus: "idle", recipeError: null, currentRecipe: null, recipeRuns: [],
+      knowledgeItems: [], knowledgeStatus: "idle", knowledgeError: null, knowledgePagination: null,
+      knowledgeFilter: null, knowledgeSearch: "",
+    })
+  })
   return store
 }
 

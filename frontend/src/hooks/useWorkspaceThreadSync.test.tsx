@@ -63,6 +63,8 @@ function renderPrettyChat(initialPath: string, pathPrefix = "") {
 describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)", () => {
   beforeEach(() => {
     localStorage.clear()
+    // Select the workspace before seeding its thread: workspace changes reset thread state.
+    useAppStore.setState({ activeDomainId: WS_A })
     useAppStore.setState({
       domains: [domain(WS_A), domain(WS_B)],
       domainsStatus: "loaded",
@@ -124,6 +126,22 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
     })
   })
 
+  it("preserves a deep-linked thread while changing workspaces", async () => {
+    useAppStore.setState({ activeDomainId: WS_B })
+    render(
+      <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>
+        <Routes>
+          <Route path="/workspaces/:workspaceId/chat/:threadId" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    await waitFor(() => {
+      expect(useAppStore.getState().activeDomainId).toBe(WS_A)
+      expect(useAppStore.getState().threadId).toBe(THREAD_A)
+      expect(screen.getByTestId("path").textContent).toBe(`/workspaces/${WS_A}/chat/${THREAD_A}`)
+    })
+  })
+
   it("records an opened workspace even when it is already active", async () => {
     render(
       <MemoryRouter initialEntries={[`/workspaces/${WS_A}/chat/${THREAD_A}`]}>
@@ -140,6 +158,8 @@ describe("useWorkspaceThreadSync — no cross-workspace thread carry (00c423d)",
 describe("useWorkspaceThreadSync — thread identity during slug canonicalization", () => {
   beforeEach(() => {
     localStorage.clear()
+    // Select the workspace before seeding its thread: workspace changes reset thread state.
+    useAppStore.setState({ activeDomainId: WS_A })
     useAppStore.setState({
       domains: [domain(WS_A, "Workspace A"), domain(WS_B, "Workspace B")],
       domainsStatus: "loaded",

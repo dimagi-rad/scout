@@ -135,6 +135,30 @@ describe("workspace switch resets per-workspace state", () => {
     expect(screen.queryByTestId("recipe-card-recipe-a1")).not.toBeInTheDocument()
   })
 
+  it("reloads recipe detail and runs after A→B→A on the same recipe URL", async () => {
+    const item = recipe("recipe-a", "Alpha Detail")
+    const get = vi.spyOn(api, "get").mockImplementation(async (url: string) => {
+      if (url.endsWith("/recipes/")) return [] as never
+      if (url.endsWith("/runs/")) return [] as never
+      if (url === `/api/workspaces/${WS_A}/recipes/recipe-a/`) return item as never
+      throw new ApiError(404, "Recipe not found")
+    })
+    useAppStore.getState().domainActions.setActiveDomain(WS_A)
+    render(createElement(MemoryRouter, { initialEntries: ["/recipes/recipe-a"] },
+      createElement(Routes, null,
+        createElement(Route, { path: "/recipes/:id", element: createElement(RecipesPage) }),
+      ),
+    ))
+    expect(await screen.findByRole("heading", { name: "Alpha Detail" })).toBeInTheDocument()
+    act(() => useAppStore.getState().domainActions.setActiveDomain(WS_B))
+    await waitFor(() => expect(get).toHaveBeenCalledWith(`/api/workspaces/${WS_B}/recipes/recipe-a/`))
+    expect(useAppStore.getState().currentRecipe).toBeNull()
+    act(() => useAppStore.getState().domainActions.setActiveDomain(WS_A))
+    expect(await screen.findByRole("heading", { name: "Alpha Detail" })).toBeInTheDocument()
+    expect(get.mock.calls.filter(([url]) => url === `/api/workspaces/${WS_A}/recipes/recipe-a/`)).toHaveLength(2)
+    expect(get.mock.calls.filter(([url]) => url === `/api/workspaces/${WS_A}/recipes/recipe-a/runs/`)).toHaveLength(2)
+  })
+
   it("refetches the artifacts list on workspace switch (#247, 04#9)", async () => {
     const artifactsByWs: Record<string, ArtifactSummary[]> = {
       [WS_A]: [artifact("artifact-a1", "Alpha Dashboard")],
