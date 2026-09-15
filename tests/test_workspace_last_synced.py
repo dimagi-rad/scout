@@ -321,20 +321,14 @@ def _extra_workspaces(user, count, *, offset):
 
 
 @pytest.mark.django_db
-def test_list_query_count_does_not_scale_with_workspaces(client, user, workspace, tenant_schema):
-    """last_synced_at and schema_status must stay bulk-derived.
-
-    The list endpoint costs a fixed set of queries plus exactly one per
-    workspace, from the ``Workspace.display_name`` -> ``tenant`` property (which
-    the prefetch does not cover). last_synced_at is a Subquery annotation and
-    schema_status comes from ``_schema_status_for_workspaces``; deriving either
-    per workspace pushes the slope to ~5, i.e. ~4,000 queries for the 800+
-    workspaces in issue #410, against a shared RDS that has already hit
-    connection exhaustion.
-    """
+@pytest.mark.parametrize("large_n", [16, 64])
+def test_list_query_count_does_not_scale_with_workspaces(
+    client, user, workspace, tenant_schema, large_n
+):
+    """Names, sync timestamps, schema status, and access must all stay bulk-derived."""
     client.force_login(user)
 
-    small_n, large_n = 4, 16
+    small_n = 4
     _extra_workspaces(user, small_n - 1, offset=0)
     with CaptureQueriesContext(connection) as small:
         assert len(client.get("/api/workspaces/").json()) == small_n
@@ -344,8 +338,29 @@ def test_list_query_count_does_not_scale_with_workspaces(client, user, workspace
         assert len(client.get("/api/workspaces/").json()) == large_n
 
     per_workspace = (len(large) - len(small)) / (large_n - small_n)
-    assert per_workspace <= 1, (
+    assert per_workspace == 0, (
         f"list endpoint costs {per_workspace} queries per workspace "
         f"({len(small)} for {small_n}, {len(large)} for {large_n}) — "
         "something per-workspace was added where a bulk query is required"
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tenant_count", [0, 1, 2])
+def test_list_display_name_uses_default_tenant_order(client, user, tenant_count):
+    workspace = Workspace.objects.create(name="Analysis", created_by=user)
+    WorkspaceMembership.objects.create(workspace=workspace, user=user, role=WorkspaceRole.MANAGE)
+    tenants = [
+        Tenant.objects.create(
+            provider="commcare_connect", external_id="42", canonical_name="Alpha"
+        ),
+        Tenant.objects.create(provider="commcare", external_id="z", canonical_name="Zulu"),
+    ][:tenant_count]
+    for tenant in reversed(tenants):
+        WorkspaceTenant.objects.create(workspace=workspace, tenant=tenant)
+    expected_name = workspace.display_name
+    entry = _list_entry(client, user, workspace)
+    assert entry["display_name"] == expected_name
+    assert entry["display_name"] == ("Analysis (Opp 42)" if tenants else "Analysis")
+    assert {t["id"] for t in entry["tenants"]} == {str(t.pk) for t in tenants}
+    assert entry["has_access"] == (not tenants)

@@ -249,7 +249,8 @@ class WorkspaceListView(APIView):
         memberships = (
             WorkspaceMembership.objects.filter(user=request.user)
             .select_related("workspace")
-            .prefetch_related("workspace__workspace_tenants__tenant")
+            # display_name uses tenants.first(); Tenant's default ordering keeps it cached.
+            .prefetch_related("workspace__workspace_tenants__tenant", "workspace__tenants")
             .annotate(
                 member_count=Count("workspace__memberships", distinct=True),
                 last_synced_at=Subquery(latest_run),
