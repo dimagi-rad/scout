@@ -104,7 +104,9 @@ async function openArtifacts(api: ReturnType<typeof mockThreadApi>) {
 
 async function selectContext(workspaceId: string, threadId: string) {
   await act(async () => {
-    useAppStore.setState({ activeDomainId: workspaceId, threadId })
+    // Selecting a workspace resets its thread; select the target thread afterward.
+    useAppStore.setState({ activeDomainId: workspaceId })
+    useAppStore.setState({ threadId })
   })
   await screen.findByText(historyText(workspaceId, threadId))
 }
@@ -135,9 +137,11 @@ function expectCurrentArtifacts() {
 
 beforeEach(() => {
   localStorage.clear()
+  // Seed workspace-owned state only after the workspace-change reset has run.
+  useAppStore.setState({ activeDomainId: WS_A })
   useAppStore.setState({
     domains: [workspace(WS_A, "Workspace A"), workspace(WS_B, "Workspace B")],
-    domainsStatus: "loaded", activeDomainId: WS_A, threadId: THREAD_A,
+    domainsStatus: "loaded", threadId: THREAD_A,
     threads: [], threadsStatus: "loaded", threadsAccessLostMessage: null,
   })
 })
