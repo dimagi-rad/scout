@@ -562,7 +562,7 @@ def _validated_field_draft(canvas, model, index: int, value: dict) -> dict[str, 
         "format": _normalize_field_edit(index, "format", str(value.get("format") or "")),
         "currency": _normalize_field_edit(index, "currency", str(value.get("currency") or "")),
         "filters": _normalize_field_edit(index, "filters", value.get("filters") or []),
-        "cube_sql": _normalize_field_edit(index, "cube_sql", str(value.get("cube_sql") or "")),
+        "cube_sql": _normalize_field_edit(index, "cube_sql", value.get("cube_sql")),
     }
 
 
@@ -662,6 +662,10 @@ def _normalize_measure_filters(index: int, value: Any) -> list[dict[str, str]]:
 
 
 def _normalize_cube_sql(index: int, value: str) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CanvasOperationError(index, "INVALID_CUBE_SQL", "cube_sql must be a string.")
     value = value.strip()
     if not value:
         return ""
