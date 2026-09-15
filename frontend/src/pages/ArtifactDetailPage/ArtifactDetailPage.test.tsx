@@ -86,7 +86,7 @@ describe("workspace-qualified artifact links", () => {
 
     await waitFor(() => expect(screen.getByTestId("artifact-detail-title")).toHaveTextContent(detail.title))
     expect(get).toHaveBeenCalledExactlyOnceWith(DATA_URL)
-    expect(useAppStore.getState().activeDomainId).toBe(OWNER)
+    await waitFor(() => expect(useAppStore.getState().activeDomainId).toBe(OWNER))
     await waitFor(() => expect(screen.getByTestId("location")).toHaveTextContent(PATH))
     expect(screen.getByTestId(`artifact-frame-${ARTIFACT}`)).toHaveAttribute(
       "src", `/api/workspaces/${OWNER}/artifacts/${ARTIFACT}/sandbox/`,
