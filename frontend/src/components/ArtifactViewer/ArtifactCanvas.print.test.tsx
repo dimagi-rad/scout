@@ -70,4 +70,38 @@ describe("ArtifactCanvas PDF export", () => {
     expect(print).not.toHaveBeenCalled()
     expect(document.querySelector("[data-scout-print]")).toBeNull()
   })
+
+  it("prints readable stale-data context with the existing chart without additional queries", async () => {
+    const get = vi.spyOn(api, "get").mockResolvedValue({
+      status: "failed", queryable: true, recovery_action: "semantic_rebuild",
+      message: "Showing the last available data. The latest rebuild did not finish.",
+      detail: "Synthetic publication failure", data_revision: "published-one",
+    })
+    const post = vi.spyOn(api, "post").mockResolvedValue({ columns: ["test__count"], rows: [[42]], row_count: 1 })
+    const print = vi.spyOn(window, "print").mockImplementation(() => {})
+    const ref = createRef<ArtifactCanvasHandle>()
+    render(<ArtifactCanvas ref={ref} artifactId={artifact.id} workspaceId="workspace" artifact={artifact} isLoading={false} error={null} />)
+    const value = await screen.findByText("42")
+    const warning = screen.getByTestId("artifact-data-warning")
+    const title = screen.getByRole("heading", { name: "Synthetic print test" })
+    const story = title.closest("[data-artifact-story]")
+
+    act(() => ref.current?.exportPdf())
+
+    const target = document.querySelector('[data-scout-print="target"]')
+    expect(target).toContainElement(warning)
+    expect(target).toContainElement(story as HTMLElement)
+    expect(target).toContainElement(value)
+    expect(warning).toHaveTextContent("Synthetic publication failure")
+    expect(screen.getByTestId("artifact-data-recover")).toHaveAttribute("data-artifact-recovery-control")
+    expect(print).toHaveBeenCalledTimes(1)
+
+    act(() => window.dispatchEvent(new Event("afterprint")))
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId("artifact-data-warning")).toBe(warning)
+    expect(screen.getByRole("heading", { name: "Synthetic print test" })).toBe(title)
+    expect(screen.getByText("42")).toBe(value)
+    expect(document.querySelector("[data-scout-print]")).toBeNull()
+  })
 })

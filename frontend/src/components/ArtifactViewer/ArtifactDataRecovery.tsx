@@ -40,7 +40,7 @@ export function ArtifactDataRecovery({
     return (
       <RecoveryShell readable={readable} icon={<AlertTriangle className="h-5 w-5" />} title="Data check failed">
         <p>{error}</p>
-        <Button variant="outline" size="sm" onClick={onRetryCheck} data-testid="artifact-data-check-retry">
+        <Button variant="outline" size="sm" onClick={onRetryCheck} data-testid="artifact-data-check-retry" data-artifact-recovery-control>
           <RefreshCw />
           Try again
         </Button>
@@ -110,7 +110,7 @@ export function ArtifactDataRecovery({
       <p>{state.message}</p>
       {state.detail && <p className="break-words text-xs text-muted-foreground">{state.detail}</p>}
       {state.recovery_action && (
-        <Button variant={readable ? "outline" : "default"} size={readable ? "sm" : "default"} onClick={onRecover} disabled={isStarting} data-testid="artifact-data-recover">
+        <Button variant={readable ? "outline" : "default"} size={readable ? "sm" : "default"} onClick={onRecover} disabled={isStarting} data-testid="artifact-data-recover" data-artifact-recovery-control>
           {isStarting ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           {isStarting
             ? "Starting…"

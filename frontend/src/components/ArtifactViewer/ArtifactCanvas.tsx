@@ -85,35 +85,42 @@ export const ArtifactCanvas = forwardRef<ArtifactCanvasHandle, ArtifactCanvasPro
             {error}
           </div>
         )}
-        {!isLoading && !error && artifact && hasLiveQueries && showRecovery && (
-          <ArtifactDataRecovery
-            readable={dataIsReady}
-            state={recovery.state}
-            error={recovery.error}
-            isChecking={recovery.isChecking}
-            isStarting={recovery.isStarting}
-            onRecover={() => void recovery.startRecovery()}
-            onRetryCheck={() => void recovery.refetch()}
-          />
-        )}
-        {!isLoading && !error && dataIsReady && isGraphArtifact && artifact && (
-          <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} containerRef={printRef} dataRevision={recovery.state?.data_revision} />
-        )}
-        {!isLoading && !error && dataIsReady && artifact && !isGraphArtifact && (
-          <iframe
-            ref={iframeRef}
-            key={dataKey}
-            src={withBasePath(`/api/workspaces/${workspaceId}/artifacts/${artifactId}/sandbox/`)}
-            className="flex-1 w-full"
-            // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
-            // served same-origin and session-authenticated, and it executes
-            // agent-generated code. With allow-same-origin, that code could read
-            // cookies/CSRF token, issue credentialed /api/ requests, and reach
-            // window.parent. Omitting it gives the frame an opaque origin.
-            sandbox="allow-scripts allow-modals"
-            title={artifact.title || "Artifact"}
-            data-testid={`artifact-frame-${artifactId}`}
-          />
+        {!isLoading && !error && artifact && (
+          <div
+            ref={dataIsReady && isGraphArtifact ? printRef : undefined}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            {hasLiveQueries && showRecovery && (
+              <ArtifactDataRecovery
+                readable={dataIsReady}
+                state={recovery.state}
+                error={recovery.error}
+                isChecking={recovery.isChecking}
+                isStarting={recovery.isStarting}
+                onRecover={() => void recovery.startRecovery()}
+                onRetryCheck={() => void recovery.refetch()}
+              />
+            )}
+            {dataIsReady && isGraphArtifact && (
+              <ArtifactGraphRenderer artifact={artifact} workspaceId={workspaceId} dataRevision={recovery.state?.data_revision} />
+            )}
+            {dataIsReady && !isGraphArtifact && (
+              <iframe
+                ref={iframeRef}
+                key={dataKey}
+                src={withBasePath(`/api/workspaces/${workspaceId}/artifacts/${artifactId}/sandbox/`)}
+                className="flex-1 w-full"
+                // SECURITY: deliberately NO allow-same-origin. The sandbox doc is
+                // served same-origin and session-authenticated, and it executes
+                // agent-generated code. With allow-same-origin, that code could read
+                // cookies/CSRF token, issue credentialed /api/ requests, and reach
+                // window.parent. Omitting it gives the frame an opaque origin.
+                sandbox="allow-scripts allow-modals"
+                title={artifact.title || "Artifact"}
+                data-testid={`artifact-frame-${artifactId}`}
+              />
+            )}
+          </div>
         )}
       </div>
     )

@@ -684,3 +684,49 @@ async def test_new_publication_invalidates_cached_iframe_query_rows(required_set
         refreshed = await setup.client.get(query_url(setup.a))
         assert query.await_count == 2
         assert refreshed.json()["queries"][0]["rows"] == [[9]]
+
+
+@pytest.mark.asyncio
+async def test_restored_source_with_rolled_back_catalog_retries_only_semantic_promotion(
+    required_setup,
+):
+    setup = required_setup
+    await TenantSchema.objects.filter(id=setup.schema_b.id).aupdate(state=SchemaState.ACTIVE)
+    await WorkspaceViewSchema.objects.filter(id=setup.view.id).aupdate(
+        tenant_coverage={
+            "included_tenants": [
+                SchemaManager._tenant_coverage_entry(tenant) for tenant in setup.tenants
+            ],
+            "excluded_tenants": [],
+        }
+    )
+    await SemanticModel.objects.filter(id=setup.model.id).aupdate(
+        metadata={
+            "last_build": {"ok": False, "error": "Synthetic promotion failed after restoring B"}
+        }
+    )
+    # The failed Cube build rolled catalog updates back: B is still hidden and
+    # the active Cube has only A, despite the now-restored source and view.
+    assert not await SemanticDataset.objects.filter(
+        workspace=setup.workspace, name="source_b__visits", is_visible=True
+    ).aexists()
+    state = await artifact_data_state(setup.b)
+    assert state["queryable"] is False
+    assert state["recovery_action"] == "semantic_rebuild"
+    recovery = await make_recovery(setup)
+
+    async def rebuild(_workspace_id):
+        await restore_b(setup)
+        return {"cube_schema": {"ok": True}}
+
+    with (
+        patch(
+            "apps.workspaces.tasks.rebuild_workspace_semantic_model_core",
+            new=AsyncMock(side_effect=rebuild),
+        ) as build,
+        patch("apps.workspaces.tasks.materialize_workspace_core", new=AsyncMock()) as load,
+    ):
+        result = await recover_workspace_data.func(task_context(), str(recovery.id))
+    assert result["status"] == "completed"
+    build.assert_awaited_once()
+    load.assert_not_awaited()

@@ -41,7 +41,7 @@ export function ArtifactGraphRenderer({ artifact, workspaceId, containerRef, dat
   }
 
   return (
-    <div ref={containerRef} className="h-full overflow-y-auto bg-background">
+    <div ref={containerRef} data-artifact-story className="h-full overflow-y-auto bg-background">
       <div data-artifact-story-content className="mx-auto max-w-5xl px-6 py-6">
         <Diagnostics engine={engine} />
         {doc.prd && (

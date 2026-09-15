@@ -237,11 +237,6 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
                 else "A data source required by this artifact is missing from the workspace query layer. Rebuild that layer."
             ),
         }
-    if hidden and surface["status"] == "ready":
-        return _model_repair(
-            surface, f"Dataset '{hidden[0].name}' is not available in the current data model."
-        )
-
     if surface["queryable"]:
         cube = await CubeSchema.objects.filter(
             workspace=artifact.workspace, semantic_model=model, status=CubeSchema.Status.ACTIVE
@@ -261,6 +256,11 @@ async def artifact_query_surface(artifact) -> dict[str, Any]:
                 "recovery_action": None if snapshot == "in_progress" else action,
                 "message": "The serving data model does not yet include fields required by this artifact.",
             }
+
+    if hidden and surface["status"] == "ready":
+        return _model_repair(
+            surface, f"Dataset '{hidden[0].name}' is not available in the current data model."
+        )
 
     if surface["queryable"] and surface["semantic_status"] in {"stale", "deferred"}:
         snapshot = await included_tenant_snapshot_state(
