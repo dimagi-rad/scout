@@ -260,7 +260,8 @@ Run the **Deploy Scout (Staging)** workflow and pick the branch to deploy from t
 ref dropdown. It builds and pushes the frontend once, then Kamal builds Cube
 from `cube_config/Dockerfile` into the otherwise-unused `scout/mcp` repository
 and each backend role into `scout/api` with its own version. It deploys
-Cube → MCP → API → worker → frontend. In addition to the production
+Cube → graceful old-worker drain → API migration/health gate → MCP → worker →
+frontend. In addition to the production
 deploy secrets, the GitHub `staging` environment must contain the two
 Connect-staging OAuth secrets and `SCOUT_STAGING_CUBEJS_API_SECRET` documented above.
 
@@ -292,20 +293,37 @@ report to Sentry under the `staging` environment.
 git checkout codex/semantic-model-work
 source .env.deploy && source config/staging.env
 export IMAGE_TAG=$(git rev-parse HEAD)
+```
 
-# First time
+Choose **one** sequence below. Each runs in a fail-fast subshell: a failed drain,
+migration, or health gate stops that sequence before later services deploy.
+
+First-time setup:
+
+```bash
+(
+set -e
 kamal setup -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
-kamal setup -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
+ssh -T "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
 kamal setup -d staging --version="staging-api-$IMAGE_TAG"
+kamal setup -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
 kamal setup -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
 kamal setup -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
+)
+```
 
-# Subsequent deploys
+Subsequent deploys:
+
+```bash
+(
+set -e
 kamal deploy -c config/deploy-cube.yml -d staging --version="cube-$IMAGE_TAG"
-kamal deploy -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
+ssh -T "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
 kamal deploy -d staging --version="staging-api-$IMAGE_TAG"
+kamal deploy -c config/deploy-mcp.yml -d staging --version="staging-mcp-$IMAGE_TAG"
 kamal deploy -c config/deploy-worker.yml -d staging --version="staging-worker-$IMAGE_TAG"
 kamal deploy -c config/deploy-frontend.yml -d staging --version="staging-$IMAGE_TAG"
+)
 ```
 
 Omitting `-d staging` deploys **production** — the base configs are the production
@@ -324,6 +342,50 @@ provide the workflow's Sentry build inputs or source-map upload configuration.
 
 Migrations run automatically against the staging database when the API container
 starts. Logs: `kamal app logs -d staging`.
+
+### Migration-safe backend handoff
+
+Run only one deployment per destination at a time, including manual commands.
+The workflow drains **all active old worker versions** for the selected
+destination before starting the new API. Procrastinate's first `SIGTERM` stops
+claiming jobs and lets running jobs finish. The drain helper sends that signal
+once per container/process start and waits up to 10 minutes for clean exit.
+It does not force-kill workers, restart them, or modify queued jobs. Jobs deferred
+during the handoff wait until the new worker starts; interactive background work
+can therefore pause for the duration of the rollout.
+
+The API runs migrations and OAuth setup before starting uvicorn. Because this
+service has no Kamal proxy, its container has an explicit loopback `/health/`
+check with the configured allowed Host. The readiness check verifies the platform
+database and queue; Kamal allows 180 seconds for migration/startup. Only after it
+succeeds do MCP and the new worker deploy. Additive migrations must still be
+compatible with old API/MCP readers and writers during this interval.
+
+If drain times out, **stop the deployment**. Existing jobs may still finish, but
+queued jobs wait. Inspect the worker's logs and state, then retry the same
+workflow after it finishes. A private pending receipt on the deployment host at
+`.kamal/scout-worker-drains-v1/<destination>/<container-id>-<process-start>` is
+created **before** the signal. SSH uses the deployment user's home directory;
+manual invocations on that host must use the same working directory. Retries
+revalidate these receipts even when a worker is no longer running and never send
+a second signal. The helper removes only the exact receipt after confirming the
+same process exited zero, was not OOM-killed, and no selected workers remain.
+
+A failed, missing, restarted, or uncertain worker keeps its receipt and blocks
+later retries. Inspect its jobs and process state before deciding on a manual
+recovery; do not delete receipts, force-stop workers, prune failed containers, or
+automatically restart an old publisher to bypass the gate. A receipt left before
+an unconfirmed signal is deliberately observation-only and may require operator
+recovery. Unexpected or malformed metadata also fails closed. The helper never
+edits queue state, and successful cleanup does not assert that previously failed
+jobs have been repaired.
+
+Once a provenance-aware worker has published `view_sources`, do not roll back or
+restart a worker version that predates that field: an old publisher can change
+physical views without updating their recorded source identities. Prefer rolling
+forward, or choose a rollback version with the same publication contract and use
+the full drain/migrate/health sequence. Keep the additive database column in
+place; a bare `kamal rollback` of old workers is not a safe rollback procedure.
 
 > Always `source config/staging.env` before staging commands — it points
 > `DATABASE_URL` at the staging database. A plain `source .env.deploy` (prod)
@@ -374,31 +436,54 @@ reuse the session used for staging commands above.
 ./scripts/fetch-deploy-env.sh        # use -q/--quiet to suppress output
 source .env.deploy
 export IMAGE_TAG=$(git rev-parse HEAD)
+```
 
-# 2. Deploy (first time, in dependency order)
+Choose **one** fail-fast sequence below; do not combine first-time setup and
+subsequent deployment in the same invocation.
+
+First-time setup:
+
+```bash
+(
+set -e
 kamal setup -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
-kamal setup -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+ssh -T "scout@$SCOUT_EC2_IP" bash -s -- production 600 < scripts/drain-workers.sh
 kamal setup --version="production-api-$IMAGE_TAG"
+kamal setup -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
 kamal setup -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
 kamal setup -c config/deploy-frontend.yml --version="$IMAGE_TAG"
+)
+```
 
-# 3. Deploy (subsequent, in dependency order)
+Subsequent deploys:
+
+```bash
+(
+set -e
 kamal deploy -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
-kamal deploy -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
+ssh -T "scout@$SCOUT_EC2_IP" bash -s -- production 600 < scripts/drain-workers.sh
 kamal deploy --version="production-api-$IMAGE_TAG"
-kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
-kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
-
-# Or deploy a specific service
-kamal deploy -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
 kamal deploy -c config/deploy-mcp.yml --version="production-mcp-$IMAGE_TAG"
-kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
 kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
+kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
+)
+```
+
+Frontend/Cube-only changes may deploy separately. Backend/model changes must use
+the full migration-safe handoff above, including the worker drain.
+
+```bash
+(
+set -e
+kamal deploy -c config/deploy-cube.yml --version="cube-$IMAGE_TAG"
+kamal deploy -c config/deploy-frontend.yml --version="$IMAGE_TAG"
+)
 ```
 
 Prefer the production GitHub Actions workflow for routine deploys, including the
-frontend's required Sentry build configuration. For rollback, use the exact stored
-version for the selected service and destination. Existing unqualified versions
+frontend's required Sentry build configuration. For compatible rollback, use the
+exact stored version for the selected service and destination and the publisher
+restrictions above. Existing unqualified versions
 are not renamed, and this change does not alter ECR or host retention policies.
 
 ## Useful Commands
@@ -454,13 +539,9 @@ If you need to revert a service to Docker's default `json-file` log driver (e.g.
 `awslogs` driver is preventing containers from starting):
 
 1. Remove the `logging:` block from the relevant `config/deploy*.yml`.
-2. Redeploy the affected service(s):
-   ```bash
-   export IMAGE_TAG=$(git rev-parse HEAD)
-   kamal deploy -c config/deploy.yml --version="production-api-$IMAGE_TAG"
-   kamal deploy -c config/deploy-worker.yml --version="production-worker-$IMAGE_TAG"
-   # repeat for any other affected service
-   ```
+2. Redeploy the affected service(s). For API/MCP/worker changes, use the full
+   migration-safe handoff above, including the graceful worker drain; do not
+   bypass it for a logging-only rebuild.
 3. Containers restart under the `json-file` driver; `kamal app logs` and
    `docker logs` work again immediately.
 

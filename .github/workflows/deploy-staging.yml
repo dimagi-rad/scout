@@ -113,11 +113,19 @@ jobs:
       - name: Deploy Cube
         run: kamal deploy -c config/deploy-cube.yml -d staging --version="$CUBE_TAG"
 
-      - name: Deploy MCP
-        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
+      - name: Drain old workers
+        timeout-minutes: 12
+        run: |
+          ssh -T -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new \
+            "scout@$SCOUT_EC2_IP" bash -s -- staging 600 < scripts/drain-workers.sh
 
       - name: Deploy API
+        # Migrate and pass the API's container health check before starting
+        # new MCP/worker code that can select newly added columns.
         run: kamal deploy -d staging --version="$API_TAG"
+
+      - name: Deploy MCP
+        run: kamal deploy -c config/deploy-mcp.yml -d staging --version="$MCP_TAG"
 
       - name: Deploy Worker
         run: kamal deploy -c config/deploy-worker.yml -d staging --version="$WORKER_TAG"

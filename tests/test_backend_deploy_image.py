@@ -68,8 +68,8 @@ def test_no_unlabeled_backend_prebuild_and_dependency_order_is_preserved(name, e
     assert not any("scout/api:" in step.get("run", "") for step in steps)
     assert [step["name"] for step in steps if step.get("name", "").startswith("Deploy ")] == [
         "Deploy Cube",
-        "Deploy MCP",
         "Deploy API",
+        "Deploy MCP",
         "Deploy Worker",
         "Deploy Frontend",
     ]
@@ -106,3 +106,24 @@ def test_manual_backend_commands_also_use_role_and_destination_qualified_version
     assert checked == {
         (environment, role.lower()) for _, environment in WORKFLOWS for role, _, _ in BACKENDS
     }
+
+
+def test_manual_worker_sequences_stop_on_failed_drain_or_api_gate():
+    blocks = re.findall(r"```bash\n(.*?)```", (REPO_ROOT / "DEPLOYMENT.md").read_text(), re.DOTALL)
+    sequences = [
+        block for block in blocks if "kamal " in block and "config/deploy-worker.yml" in block
+    ]
+    assert len(sequences) == 4  # Setup/deploy, separately for production/staging.
+    for block in sequences:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        assert lines[:2] == ["(", "set -e"]
+        assert lines[-1] == ")"
+        drain = next(
+            index for index, line in enumerate(lines) if "scripts/drain-workers.sh" in line
+        )
+        api = next(index for index, line in enumerate(lines) if '-api-$IMAGE_TAG"' in line)
+        mcp = next(index for index, line in enumerate(lines) if "config/deploy-mcp.yml" in line)
+        worker = next(
+            index for index, line in enumerate(lines) if "config/deploy-worker.yml" in line
+        )
+        assert drain < api < mcp < worker
