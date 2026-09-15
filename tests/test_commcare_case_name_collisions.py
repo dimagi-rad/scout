@@ -6,6 +6,7 @@ import pytest
 from django.db import connection
 
 from apps.common.identifiers import fit_identifier
+from apps.transformations.models import TransformationAsset, TransformationScope
 from apps.transformations.services.commcare_staging import (
     generate_system_assets,
     upsert_system_assets,
@@ -100,3 +101,41 @@ def test_upsert_keeps_both_case_types_and_does_not_overwrite_one():
     second = upsert_system_assets(tenant, tenant_metadata)
     assert second["created"] == 0
     assert second["updated"] == second["total"] == 2
+
+
+@pytest.mark.django_db
+def test_existing_ambiguous_model_requires_migration_without_modifying_assets():
+    tenant = Tenant.objects.create(provider="commcare", external_id="synthetic-migration-guard")
+    tenant_metadata = TenantMetadata.objects.create(tenant=tenant, metadata=metadata("Household"))
+    upsert_system_assets(tenant, tenant_metadata)
+    legacy = TransformationAsset.objects.get(tenant=tenant, name="stg_case_household")
+    override = TransformationAsset.objects.create(
+        tenant=tenant,
+        scope=TransformationScope.TENANT,
+        name="reviewed_households",
+        sql_content="SELECT * FROM {{ ref('stg_case_household') }}",
+        replaces=legacy,
+    )
+    before = list(TransformationAsset.objects.filter(tenant=tenant).values())
+    tenant_metadata.metadata = metadata("Household", "household", "new_type")
+    with pytest.raises(ValueError, match="explicit migration.*stg_case_household"):
+        upsert_system_assets(tenant, tenant_metadata)
+    assert list(TransformationAsset.objects.filter(tenant=tenant).values()) == before
+    override.refresh_from_db()
+    assert override.replaces_id == legacy.id
+
+
+@pytest.mark.django_db
+def test_ambiguous_model_guard_is_scoped_to_its_own_tenant():
+    other = Tenant.objects.create(provider="commcare", external_id="synthetic-other-tenant")
+    TransformationAsset.objects.create(
+        tenant=other,
+        scope=TransformationScope.SYSTEM,
+        name="stg_case_household",
+        sql_content="SELECT 1",
+    )
+    tenant = Tenant.objects.create(provider="commcare", external_id="synthetic-safe-new-tenant")
+    tenant_metadata = TenantMetadata.objects.create(
+        tenant=tenant, metadata=metadata("Household", "household")
+    )
+    assert upsert_system_assets(tenant, tenant_metadata)["created"] == 2

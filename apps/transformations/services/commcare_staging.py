@@ -359,6 +359,30 @@ def upsert_system_assets(tenant, tenant_metadata) -> dict:
     metadata = tenant_metadata.metadata
     assets = generate_system_assets(tenant, metadata)
 
+    # A legacy collision may already have SQL/artifact references or `replaces`
+    # links whose intended source case type cannot be inferred safely. The
+    # ordinary orphan sweep below would delete it and SET_NULL those links.
+    # Require an explicit migration before any writes; never guess an alias.
+    renamed_case_models = {
+        old_name
+        for name, model_name in _case_model_names(metadata.get("case_types", [])).items()
+        if (old_name := dbt_model_name(f"stg_case_{slugify_model_name(name)}")) != model_name
+    }
+    if renamed_case_models:
+        existing = list(
+            TransformationAsset.objects.filter(
+                tenant=tenant,
+                scope=TransformationScope.SYSTEM,
+                name__in=renamed_case_models,
+            ).values_list("name", flat=True)
+        )
+        if existing:
+            raise ValueError(
+                "An explicit migration is required for existing ambiguous case-type models: "
+                f"{', '.join(sorted(existing))}. Review SQL/artifact references and replaces "
+                "links before rebuilding; no assets were changed."
+            )
+
     created = 0
     updated = 0
 
